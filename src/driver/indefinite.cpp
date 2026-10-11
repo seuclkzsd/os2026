@@ -323,7 +323,8 @@ bool projected_pairs(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const DenseMa
 
 /// The factorization is idle while the union is refined (and usually for good: a later run sits at
 /// another shift, or a refactorization at a rerun's shift is cheap next to that rerun's solves):
-/// free its factors so that the refinement's n-sized buffers do not stack on top of them.
+/// every caller of refine_union frees its factors first, so that the refinement's n-sized buffers
+/// do not stack on top of them. The next ks_run refactorizes (factorize_near).
 template <class T>
 void release_factorization(Ctx& c, SparseFactorization<T>& fac) {
   if (fac.release_factors()) c.held = FactorHeld{};
@@ -336,13 +337,12 @@ void release_factorization(Ctx& c, SparseFactorization<T>& fac) {
 // (sum of the runs' m columns), the batch buffers (6 kBatch n-vectors) and 9 n-vectors of
 // per-candidate work - no n x m images A W, B W or vector sets (DESIGN §3.6-3).
 template <class T>
-Refined<T> refine_union(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil,
-                        const std::vector<KsRun<T>>& runs, double n2a, double n2b, double scale) {
+Refined<T> refine_union(Ctx& c, const ShiftedPencil<T>& pencil, const std::vector<KsRun<T>>& runs, double n2a,
+                        double n2b, double scale) {
   const SolverConfig& cfg = c.cfg;
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
   const index_t n = pencil.order();
-  release_factorization(c, fac);
   index_t mr = 0;
   for (const auto& r : runs) mr += r.res.schur_basis.cols();
   auto concatenate = [&](DenseMatrix<T>& out) {
@@ -684,7 +684,8 @@ bool recover_strip(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T
       c.rep.slices.push_back(sr);
       runs.push_back(std::move(run));
       ran = true;
-      ref = refine_union(c, fac, pencil, runs, n2a, n2b, scale);
+      release_factorization(c, fac);
+      ref = refine_union(c, pencil, runs, n2a, n2b, scale);
       got = found(l);
       absent = absent && !got;
     }
@@ -738,7 +739,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     runs.push_back(ks_run(c, fac, pencil, scale, t.sigma, Which::LargestMagnitude, k, cfg.max_restarts));
     rep.sigma_used = runs.back().sigma;
     if (!runs.back().res.converged) warn(c, "Krylov-Schur did not converge all requested pairs within max_restarts");
-    ref = refine_union(c, fac, pencil, runs, n2a, n2b, scale);
+    release_factorization(c, fac);
+    ref = refine_union(c, pencil, runs, n2a, n2b, scale);
     sel = select_nearest(ref.cands, t.sigma, k, band_user, cfg.tol, good, in_band);
     // Does the band interfere: a selected pair in it, or the selection disk reaching it?
     double r = 0.0;
@@ -897,7 +899,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
         ran = true;
       }
       if (!ran && attempt > 0) break;
-      ref = refine_union(c, fac, pencil, runs, n2a, n2b, scale);
+      release_factorization(c, fac);
+      ref = refine_union(c, pencil, runs, n2a, n2b, scale);
       sel = select_nearest(ref.cands, t.sigma, k, band, cfg.tol, good, in_band);
       // Coverage: a side's converged range (from its shift outward) must reach the final radius,
       // unless the side ran out of eigenvalues.
