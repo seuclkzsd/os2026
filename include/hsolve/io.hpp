@@ -79,9 +79,9 @@ void write_npy_matrix(const std::filesystem::path& path, const DenseMatrix<T>& m
 /// is honoured. Allowed conversions are numpy's "safe" casts (np.can_cast(src, T, 'safe'); e.g.
 /// f4->f8, c8->c16, i4->i8, b1/u1/u2/u4->int64, any integer->double, i1/i2/u1/u2->float), plus
 /// value-checked narrowings that throw InvalidInput when a value does not fit exactly: complex ->
-/// real (every imaginary part must be exactly 0), i8/u4/u8 -> int32 and u8 -> int64 (range).
-/// Everything else (float -> int, f8 -> float, i4/i8 -> float, float16, strings, dates, ...)
-/// throws InvalidInput. O(size).
+/// real of no lower precision (c8 -> float/double, c16 -> double; every imaginary part must be
+/// exactly 0), i8/u4/u8 -> int32 and u8 -> int64 (range). Everything else (float -> int,
+/// f8/c16 -> float, i4/i8 -> float, float16, strings, dates, ...) throws InvalidInput. O(size).
 template <class T>
 std::vector<T> npy_to_vector(const NpyArray& a);
 

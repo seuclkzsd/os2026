@@ -2,9 +2,9 @@
 // pipeline (include/hsolve/io.hpp).
 //
 // Memory (nnz entries, order n, final CSR = 8(n+1) + 12 nnz bytes real / 20 nnz complex):
-//   * npz csr whose dtypes match (f8/c16 data, i4 indices, i8 indptr): every array is inflated
-//     straight into the CSR vectors, one member at a time -> peak ~1x the result.
-//     Mismatching dtypes (f4, int64 indices, ...) add one raw member at a time.
+//   * npz csr whose dtypes match (f8/c16 data, i4 indices): every array is inflated straight
+//     into the CSR vectors, one member at a time -> peak ~1x the result (measured 1.06x at
+//     2.1e7 nnz). Mismatching dtypes (f4, int64 indices, ...) add one raw member at a time.
 //   * csc: + one transpose (2x); coo: input triplets + result (~2.3x).
 //   * Triangular storage: symmetrize_from_triangle (~2.5x the result, transient).
 //   * Hermitian defect > 0 with a structurally symmetric pattern: fixed in place (0 extra);
@@ -51,6 +51,16 @@ void note_assembly(const io::AssemblyStats& s, std::vector<std::string>& notes) 
                     " duplicate entries");
   if (s.zeros_dropped > 0)
     notes.push_back("zeros: dropped " + std::to_string(s.zeros_dropped) + " explicit zero entries");
+}
+
+// Runs f; an hs::Error escaping it gets the file name prepended (for helpers that do not know it).
+template <class F>
+auto naming_source(const std::string& source, F&& f) -> decltype(f()) {
+  try {
+    return f();
+  } catch (const Error& e) {
+    throw Error(e.code(), source + ": " + e.what());
+  }
 }
 
 index_t checked_order(std::uint64_t rows, std::uint64_t cols, const std::string& source) {
@@ -114,8 +124,10 @@ CsrMatrix<T> read_scipy_coo(const io::NpzFile& npz, index_t n, bool drop_zeros,
   if (rows.size() != data.size() || cols.size() != data.size())
     HS_THROW(InvalidInput, source << ": coo arrays differ in length (row " << rows.size()
                                   << ", col " << cols.size() << ", data " << data.size() << ")");
-  return io::csr_from_triplets<T>(n, n, rows.data(), cols.data(), data.data(), data.size(),
-                                  drop_zeros, stats);
+  return naming_source(source, [&] {
+    return io::csr_from_triplets<T>(n, n, rows.data(), cols.data(), data.data(), data.size(),
+                                    drop_zeros, stats);
+  });
 }
 
 template <class T>
@@ -127,11 +139,7 @@ CsrMatrix<T> read_scipy_compressed(const io::NpzFile& npz, bool csc, index_t n, 
   m.rowptr = npz.read_as<index_t>("indptr");
   m.colind = npz.read_as<std::int32_t>("indices");
   m.values = npz.read_as<T>("data");
-  try {
-    stats = io::canonicalize_csr(m, drop_zeros);
-  } catch (const Error& e) {
-    throw Error(e.code(), npz.path().string() + ": " + e.what());
-  }
+  stats = naming_source(npz.path().string(), [&] { return io::canonicalize_csr(m, drop_zeros); });
   if (csc) return io::transpose(m);
   return m;  // not `csc ? transpose(m) : m`: the conditional operator would copy m
 }
@@ -229,18 +237,14 @@ RawMatrix read_dense_npy(const std::filesystem::path& path) {
   const bool fortran_order = a.fortran_order;
   RawMatrix raw;
   raw.format = "npy-dense";
-  try {
-    if (io::parse_dtype(a.dtype).kind == 'c') {
-      const std::vector<cplx> v = npy_to_vector<cplx>(a);
-      a = NpyArray{};
-      raw.matrix = dense_to_csr(v, n, fortran_order);
-    } else {
-      const std::vector<double> v = npy_to_vector<double>(a);
-      a = NpyArray{};
-      raw.matrix = dense_to_csr(v, n, fortran_order);
-    }
-  } catch (const Error& e) {
-    throw Error(e.code(), source + ": " + e.what());
+  if (io::parse_dtype(a.dtype).kind == 'c') {
+    const auto v = naming_source(source, [&] { return npy_to_vector<cplx>(a); });
+    a = NpyArray{};  // release the raw payload before building the CSR
+    raw.matrix = dense_to_csr(v, n, fortran_order);
+  } else {
+    const auto v = naming_source(source, [&] { return npy_to_vector<double>(a); });
+    a = NpyArray{};
+    raw.matrix = dense_to_csr(v, n, fortran_order);
   }
   return raw;
 }

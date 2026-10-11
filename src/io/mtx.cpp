@@ -1,7 +1,6 @@
 // MatrixMarket reader (see mtx.hpp).
 #include "io/mtx.hpp"
 
-#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cstring>
