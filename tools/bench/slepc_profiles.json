@@ -27,6 +27,7 @@
     "default_valid": true,
     "speedup_vs_default": 1.9374845884698664,
     "reps": 5,
+    "flaky": false,
     "phases": {
      "analysis_s": 0.051388,
      "numeric_s": 0.077247,
@@ -66,6 +67,7 @@
     "default_valid": true,
     "speedup_vs_default": 1.1982844881232984,
     "reps": 5,
+    "flaky": false,
     "phases": {
      "analysis_s": 0.55603,
      "numeric_s": 0.66144,
@@ -104,6 +106,7 @@
     "default_valid": true,
     "speedup_vs_default": 1.1305517753587275,
     "reps": 5,
+    "flaky": false,
     "phases": {
      "analysis_s": 0.49822,
      "numeric_s": 1.8221,
@@ -124,36 +127,36 @@
    "cores": 2,
    "target": null,
    "config": {
-    "ranks": 2,
-    "threads": 1,
-    "bind": "core",
+    "ranks": 1,
+    "threads": 2,
+    "bind": "none",
     "options": {
      "st_mat_mumps_cntl_7": "1e-12",
-     "st_mat_mumps_icntl_13": "1",
      "st_mat_mumps_icntl_35": "2",
      "st_mat_mumps_icntl_7": "6"
     }
    },
    "tuned": {
-    "tag": "tune-p2-ext",
-    "date": "2026-10-11T20:50:38",
+    "tag": "tune-p2-fix2",
+    "date": "2026-10-11T22:21:38",
     "host": "CISL-NF5468M6",
     "valid": true,
-    "solver_s": 2.28977,
-    "default_solver_s": 2.82624,
+    "solver_s": 2.51309825,
+    "default_solver_s": 2.70021,
     "default_valid": false,
-    "speedup_vs_default": 1.2342899068465392,
-    "reps": 5,
+    "speedup_vs_default": 1.074454609962026,
+    "reps": 20,
+    "flaky": true,
     "phases": {
-     "analysis_s": 0.11324,
-     "numeric_s": 0.13178,
-     "solve_s": 1.5074,
-     "solves": 80,
-     "ortho_s": 0.35692,
-     "setup_s": 0.29164,
-     "eps_solve_s": 1.4843,
-     "vectors_s": 0.40773,
-     "factorizations": 1
+     "analysis_s": 0.0757625,
+     "numeric_s": 0.175065,
+     "solve_s": 1.669055,
+     "solves": 74.5,
+     "ortho_s": 0.38863000000000003,
+     "setup_s": 0.296495,
+     "eps_solve_s": 1.7344499999999998,
+     "vectors_s": 0.462115,
+     "factorizations": 1.0
     }
    }
   },
@@ -185,6 +188,7 @@
     "default_valid": true,
     "speedup_vs_default": 1.0326615938848307,
     "reps": 5,
+    "flaky": false,
     "phases": {
      "analysis_s": 1.2865,
      "numeric_s": 4.038,
@@ -223,6 +227,7 @@
     "default_valid": false,
     "speedup_vs_default": 0.9803953636641916,
     "reps": 5,
+    "flaky": false,
     "phases": {
      "analysis_s": 1.2414,
      "numeric_s": 1.8565,
@@ -249,6 +254,7 @@
      "eps_krylovschur_nev": "60"
     }
    },
+   "validated": false,
    "from_cases": [
     "yee-pec-box-1e5"
    ]
@@ -263,9 +269,11 @@
     "threads": 2,
     "bind": "none",
     "options": {
+     "eps_nev": "k+4",
      "eps_purify": "0"
     }
    },
+   "validated": false,
    "from_cases": [
     "yee-pec-box-1e5",
     "ss-qa8fk-qa8fm",
@@ -278,16 +286,16 @@
    "mode": "nearest",
    "cores": 2,
    "config": {
-    "ranks": 2,
-    "threads": 1,
-    "bind": "core",
+    "ranks": 1,
+    "threads": 2,
+    "bind": "none",
     "options": {
      "st_mat_mumps_cntl_7": "1e-12",
-     "st_mat_mumps_icntl_13": "1",
      "st_mat_mumps_icntl_35": "2",
      "st_mat_mumps_icntl_7": "6"
     }
    },
+   "validated": false,
    "from_cases": [
     "wg-square-1e5"
    ]
@@ -306,6 +314,7 @@
      "st_mat_mumps_icntl_7": "4"
     }
    },
+   "validated": false,
    "from_cases": [
     "syn-mem27-46"
    ]
