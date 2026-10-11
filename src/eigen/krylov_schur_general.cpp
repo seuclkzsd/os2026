@@ -40,18 +40,31 @@
 // about 1e+-154. The iteration therefore runs on Op / 2^e, with e fixed by the largest entry of
 // the first nonzero operator output. Scaling by a power of two is exact, so the iteration is
 // bitwise the same for every e, and the results are multiplied back exactly.
+//
+// Block mode (block_size = p > 1). The same cycle on a block Krylov-Schur decomposition
+// Op V = V H + U C (block_general.hpp: p new vectors per operator application, block Gram-Schmidt
+// + Cholesky-QR, random replacement of dependent columns): every test above uses the coupling block
+// C in place of the row b^T (estimate ||C y||, subspace test ||C Q1||_F), and the selection,
+// certification and output code is shared, so both modes follow one contract. Differences: the
+// basis grows by whole blocks, so a cycle ends at the largest size <= ncv reachable from the kept
+// count; and Rayleigh-Ritz probes at block boundaries end a cycle early once all nev wanted values
+// are certified (from the single-vector basis size on in the first cycle, from the first new block
+// in later ones), which keeps the larger block basis cheap. With p = 1 the single-vector code runs
+// unchanged.
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "eigen/block_general.hpp"
 #include "eigen/general_krylov_schur.hpp"
 #include "eigen/general_schur.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/error.hpp"
+#include "linalg/blas_lapack.hpp"
 #include "linalg/dense_ops.hpp"
 
 namespace hs {
@@ -73,54 +86,6 @@ constexpr index_t kRowBlock = 2048;
 // A random vector orthogonalized against a proper subspace keeps a fraction ~sqrt((n-j)/n) of its
 // norm; needing more than one attempt already means numerical trouble.
 constexpr int kRandomAttempts = 8;
-// Bound of the binary exponent of the operator scale: 2^e and 2^-e stay normal numbers.
-constexpr int kMaxScaleExponent = 1000;
-
-/// Adds the lifetime of a scope to *acc; no-op (no clock reads) when acc == nullptr.
-class PhaseClock {
- public:
-  explicit PhaseClock(double* acc) : acc_(acc) {
-    if (acc_) t0_ = std::chrono::steady_clock::now();
-  }
-  ~PhaseClock() {
-    if (acc_)
-      *acc_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
-  }
-  PhaseClock(const PhaseClock&) = delete;
-  PhaseClock& operator=(const PhaseClock&) = delete;
-
- private:
-  double* acc_;
-  std::chrono::steady_clock::time_point t0_;
-};
-
-double* phase(GeneralPhaseTimes* times, double GeneralPhaseTimes::* member) {
-  return times ? &(times->*member) : nullptr;
-}
-
-/// max_i max(|Re x_i|, |Im x_i|), or +infinity when an entry is NaN or infinite. Serial O(n): it
-/// runs at most twice per solve (initial vector, first nonzero operator output).
-template <class T>
-double max_abs_component(index_t n, const T* x) {
-  double amax = 0.0;
-  for (index_t i = 0; i < n; ++i) {
-    double a = 0.0;
-    if constexpr (is_complex_v<T>) {
-      a = std::max(std::abs(x[i].real()), std::abs(x[i].imag()));
-    } else {
-      a = std::abs(x[i]);
-    }
-    if (!(a <= std::numeric_limits<double>::max())) return kInf;
-    amax = std::max(amax, a);
-  }
-  return amax;
-}
-
-/// e with 2^e <= amax < 2^(e+1) for finite amax > 0, clamped to +-kMaxScaleExponent.
-int binary_exponent(double amax) {
-  return std::clamp(std::ilogb(amax), -kMaxScaleExponent, kMaxScaleExponent);
-}
-
 struct Dimensions {
   index_t n = 0;
   index_t nev = 0;
@@ -135,9 +100,8 @@ Dimensions validate(index_t n, const KrylovSchurOptions<T>& o) {
              "invariant subspace of a non-normal operator is not invariant); rerun with a larger "
              "nev/ncv instead");
   }
-  if (o.block_size != 1)
-    HS_THROW(InvalidInput,
-             "krylov_schur_general: block_size=" << o.block_size << " (only 1 is supported)");
+  if (o.block_size < 1)
+    HS_THROW(InvalidInput, "krylov_schur_general: block_size=" << o.block_size << " < 1");
   if (n < 1) HS_THROW(InvalidInput, "krylov_schur_general: empty operator");
   if (o.nev < 1 || o.nev > n) {
     HS_THROW(InvalidInput, "krylov_schur_general: nev=" << o.nev << " outside [1, " << n << "]");
@@ -167,6 +131,14 @@ Dimensions validate(index_t n, const KrylovSchurOptions<T>& o) {
     if (!(amax > 0.0) || !std::isfinite(amax)) {
       HS_THROW(InvalidInput, "krylov_schur_general: initial vector must be nonzero and finite");
     }
+    // Block mode starts from the first min(p, cols) columns: all of them must be finite.
+    const index_t used = std::min(o.block_size, o.initial->cols());
+    for (index_t c = 1; c < used; ++c) {
+      if (!std::isfinite(max_abs_component(n, o.initial->col(c)))) {
+        HS_THROW(InvalidInput,
+                 "krylov_schur_general: initial block column " << c << " is not finite");
+      }
+    }
   }
   // Larger requests are clamped: a basis of the whole space is exact.
   return {n, o.nev, std::min(requested, n)};
@@ -183,6 +155,8 @@ class KrylovSchurBasis {
 
   index_t n() const noexcept { return n_; }
   index_t ncv() const noexcept { return ncv_; }
+  /// Basis size of the projected matrix after an expansion (always ncv).
+  index_t size() const noexcept { return ncv_; }
   const T* h() const noexcept { return h_.data(); }
   index_t ldh() const noexcept { return h_.rows(); }
   /// True once the basis spans the whole space (only with ncv == n): then b = 0 and the
@@ -244,10 +218,10 @@ class KrylovSchurBasis {
     }
   }
 
-  /// b^T = H(ncv, 0:ncv).
-  std::vector<T> coupling() const {
-    std::vector<T> b(static_cast<std::size_t>(ncv_));
-    for (index_t j = 0; j < ncv_; ++j) b[j] = h_(ncv_, j);
+  /// b^T = H(ncv, 0:ncv), as a 1 x ncv coupling block.
+  DenseMatrix<T> coupling() const {
+    DenseMatrix<T> b(1, ncv_);
+    for (index_t j = 0; j < ncv_; ++j) b(0, j) = h_(ncv_, j);
     return b;
   }
 
@@ -255,7 +229,7 @@ class KrylovSchurBasis {
   ///   V(:, 0:k) <- V(:, 0:ncv) Q(:, 0:k),  V(:, k) <- v_{ncv+1},
   ///   H(0:k, 0:k) <- S(0:k, 0:k),          H(k, 0:k) <- b^T Q(:, 0:k).
   /// Requires k to be a block boundary of S, so that S(0:k, 0:k) is itself a Schur form.
-  void compress(const ProjectedSchur<T>& ps, const std::vector<T>& b, index_t k,
+  void compress(const ProjectedSchur<T>& ps, const DenseMatrix<T>& b, index_t k,
                 GeneralPhaseTimes* times) {
     const index_t m = ncv_;
     HS_ASSERT(ps.order() == m && k >= 1 && k < m && ps.is_boundary(k),
@@ -288,17 +262,10 @@ class KrylovSchurBasis {
     linalg::multiply(n_, ncv_, cols, v_.data(), n_, c, ldc, y, ldy);
   }
 
-  /// The same product handed over by row blocks: consume(r0, rb, block) receives rows
-  /// [r0, r0 + rb) of V C as an rb x cols block (ld rb), so callers can convert it without an
-  /// n x cols buffer.
-  template <class Consume>
-  void combine_by_rows(const T* c, index_t ldc, index_t cols, Consume&& consume) const {
-    aligned_vector<T> block(static_cast<std::size_t>(std::min(kRowBlock, n_) * cols));
-    for (index_t r0 = 0; r0 < n_; r0 += kRowBlock) {
-      const index_t rb = std::min(kRowBlock, n_ - r0);
-      linalg::multiply(rb, ncv_, cols, v_.data() + r0, n_, c, ldc, block.data(), rb);
-      consume(r0, rb, static_cast<const T*>(block.data()));
-    }
+  /// Frees the basis storage (after the result has been formed); the object is unusable after.
+  void release() {
+    v_ = DenseMatrix<T>();
+    h_ = DenseMatrix<T>();
   }
 
  private:
@@ -384,6 +351,38 @@ double relative(double value, double scale) {
   return value > 0.0 ? kInf : 0.0;
 }
 
+/// ||C y||_2^2 for the coupling block C (p x m) of a Krylov-Schur relation. For one row b^T this
+/// is exactly abs2(b^T y), as the single-vector solver has always computed it.
+template <class T>
+double coupling_norm2(const DenseMatrix<T>& c, const T* y) {
+  const index_t m = c.cols();
+  if (c.rows() == 1) return abs2(row_times_column(m, c.data(), y));
+  double s = 0.0;
+  for (index_t r = 0; r < c.rows(); ++r) {
+    T acc = T(0);
+    for (index_t i = 0; i < m; ++i) acc += c(r, i) * y[i];
+    s += abs2(acc);
+  }
+  return s;
+}
+
+/// Ritz vectors of the projected matrix with the estimates ||C y||_2 (block_general.hpp); one
+/// coupling row is handed to ProjectedSchur::ritz_vectors as it is.
+template <class T>
+RitzVectors<T> ritz_of(const ProjectedSchur<T>& ps, const DenseMatrix<T>& c) {
+  if (c.rows() == 1) return ps.ritz_vectors(c.data());
+  const std::vector<T> none(static_cast<std::size_t>(ps.order()), T(0));
+  RitzVectors<T> r = ps.ritz_vectors(none.data());
+  for (const SchurBlock& blk : ps.blocks()) {
+    // A real pair: y = Re + i Im with real C, so ||C y||^2 = ||C Re||^2 + ||C Im||^2.
+    double e2 = coupling_norm2(c, r.y.col(blk.start));
+    if (blk.size == 2) e2 += coupling_norm2(c, r.y.col(blk.start + 1));
+    const double est = std::sqrt(e2);
+    for (index_t i = 0; i < blk.size; ++i) r.estimate[blk.start + i] = est;
+  }
+  return r;
+}
+
 /// One Rayleigh-Ritz step. S is reordered so that positions [0, m_out) hold the wanted values and
 /// [0, nconv) the certified converged prefix; ritz belongs to S as reordered.
 template <class T>
@@ -404,10 +403,9 @@ struct Cycle {
 /// relative coupling ||b^T Q1||_2 / ||scale(theta_P)||_2 of the rejected candidates. Leaves P on
 /// top of S and cyc.ritz up to date. Returns |P| (number of values).
 template <class T>
-index_t certified_prefix(Cycle<T>& cyc, const std::vector<T>& b, Which which, double tol,
+index_t certified_prefix(Cycle<T>& cyc, const DenseMatrix<T>& b, Which which, double tol,
                          double* rejected) {
   ProjectedSchur<T>& ps = cyc.ps;
-  const index_t m = ps.order();
   bool moved = false;  // P was moved to the top since `cap` last changed
   for (index_t cap = cyc.m_out; cap > 0;) {
     const ConvergenceScale scale = convergence_scale(ps);
@@ -441,14 +439,14 @@ index_t certified_prefix(Cycle<T>& cyc, const std::vector<T>& b, Which which, do
       // refused swap (nearly equal eigenvalues, real T) leaves P scattered: certify nothing. The
       // Ritz data must follow the (possibly partial) reordering either way.
       const bool reordered = ps.reorder_to_front(prefix);
-      cyc.ritz = ps.ritz_vectors(b.data());
+      cyc.ritz = ritz_of(ps, b);
       if (!reordered) return 0;
       moved = true;
       continue;  // re-evaluate on the reordered form, whose estimates are recomputed
     }
     double coupling2 = 0.0;
     for (index_t j = 0; j < held; ++j) {
-      coupling2 += abs2(row_times_column(m, b.data(), ps.vectors().col(j)));
+      coupling2 += coupling_norm2(b, ps.vectors().col(j));
     }
     if (coupling2 <= tol * tol * scale2) return held;
     *rejected = std::max(*rejected, relative(std::sqrt(coupling2), std::sqrt(scale2)));
@@ -458,10 +456,10 @@ index_t certified_prefix(Cycle<T>& cyc, const std::vector<T>& b, Which which, do
   return 0;
 }
 
-template <class T>
-Cycle<T> analyze(const KrylovSchurBasis<T>& basis, const std::vector<T>& b, Which which,
-                 index_t nev, double tol) {
-  Cycle<T> cyc{ProjectedSchur<T>(basis.ncv(), basis.h(), basis.ldh()), {}, 0, 0, 0.0};
+template <class Basis, class T>
+Cycle<T> analyze(const Basis& basis, const DenseMatrix<T>& b, Which which, index_t nev,
+                 double tol) {
+  Cycle<T> cyc{ProjectedSchur<T>(basis.size(), basis.h(), basis.ldh()), {}, 0, 0, 0.0};
   ProjectedSchur<T>& ps = cyc.ps;
   const std::vector<index_t> ranked = ps.ranking(which);
   index_t count = 0;
@@ -476,7 +474,7 @@ Cycle<T> analyze(const KrylovSchurBasis<T>& basis, const std::vector<T>& b, Whic
   cyc.m_out = count;
   if (!ps.is_boundary(cyc.m_out)) cyc.m_out += cyc.m_out == nev ? 1 : -1;
   HS_ASSERT(ps.is_boundary(cyc.m_out), "no block boundary near " << count);
-  cyc.ritz = ps.ritz_vectors(b.data());
+  cyc.ritz = ritz_of(ps, b);
   double rejected = 0.0;
   // After a refused swap the leading block may hold values other than the wanted ones, so
   // nothing is certified in this cycle (only possible for real T with nearly equal eigenvalues).
@@ -495,9 +493,10 @@ Cycle<T> analyze(const KrylovSchurBasis<T>& basis, const std::vector<T>& b, Whic
 
 /// Reorder S so that the wanted values (positions [0, m_out)) and then the best-ranked others,
 /// `keep` values in all, lead; returns how many Schur vectors to retain (keep, keep + 1 when a
-/// pair straddles and fits below ncv, otherwise keep - 1).
+/// pair straddles and fits within max_keep, otherwise keep - 1). max_keep leaves room for at least
+/// one new basis vector (block) per cycle: ncv - 1 for a single vector, m - p in block mode.
 template <class T>
-index_t select_retained(Cycle<T>& cyc, index_t keep, index_t ncv, Which which) {
+index_t select_retained(Cycle<T>& cyc, index_t keep, index_t max_keep, Which which) {
   ProjectedSchur<T>& ps = cyc.ps;
   const std::vector<SchurBlock>& blocks = ps.blocks();
   std::vector<char> selected(blocks.size(), 0);
@@ -516,26 +515,28 @@ index_t select_retained(Cycle<T>& cyc, index_t keep, index_t ncv, Which which) {
     held += blocks[blk].size;
     last = blk;
   }
-  if (held > ncv - 1) {
+  if (held > max_keep) {
     // The last block added is a pair straddling `keep` whose second member does not fit
-    // (keep == ncv - 1): drop it. The wanted set itself fits, m_out <= nev + 1 <= ncv - 1.
-    HS_ASSERT(last >= 0 && blocks[last].size == 2, "retained " << held << " of ncv=" << ncv);
+    // (keep == max_keep): drop it. The wanted set itself fits, m_out <= nev + 1 <= max_keep.
+    HS_ASSERT(last >= 0 && blocks[last].size == 2,
+              "retained " << held << " of at most " << max_keep);
     selected[last] = 0;
     held -= 2;
   }
   index_t k = held;
   if (!ps.reorder_to_front(selected) && !ps.is_boundary(k)) {
     // A refused swap (nearly equal eigenvalues) left a pair across k: keep it whole if possible.
-    k = k + 1 <= ncv - 1 ? k + 1 : k - 1;
+    k = k + 1 <= max_keep ? k + 1 : k - 1;
   }
   return k;
 }
 
-/// The result from the cycle that ends the run: Ritz vectors x = V y (unit 2-norm), the Schur
-/// basis, and the values scaled back to Op.
-template <class T>
-GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>& cyc,
-                                Which which) {
+/// The result from the cycle that ends the run: the Schur basis Q1 = V Q(:, 0:m_out), Ritz
+/// vectors x = V y = Q1 z (unit 2-norm) and the values scaled back to Op. Releases the basis.
+/// Memory: Q1 is formed while V is alive, the n x m_out complex vectors only after V is freed, so
+/// the peak is max(V + Q1, Q1 + vectors) rather than V + Q1 + vectors (DESIGN §3.6-3).
+template <class Basis, class T>
+GeneralEigResult<T> materialize(Basis& basis, const Cycle<T>& cyc, Which which) {
   const ProjectedSchur<T>& ps = cyc.ps;
   const std::vector<SchurBlock>& blocks = ps.blocks();
   const index_t m = ps.order();
@@ -579,12 +580,28 @@ GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>
     }
     c += blk.size;
   }
-  // x = V y, converted to complex columns block by block: no n x m buffer of T besides the
-  // outputs (memory budget, DESIGN §3.6-3).
+  // Q1 = V Q(:, 0:m_out), then V is no longer needed.
+  res.schur_basis.resize(n, m_out);
+  basis.combine(ps.vectors().data(), m, m_out, res.schur_basis.data(), n);
+  basis.release();
+  // The output values lead S, so each eigenvector of H is y = Q z with z supported on
+  // [0, m_out) (back substitution in the quasi-triangular S): x = V y = Q1 z, z = Q(:, 0:m_out)^H y.
+  DenseMatrix<T> z(m_out, m_out);
+  {
+    const auto mo = static_cast<lapack::fint>(m_out), mm = static_cast<lapack::fint>(m);
+    lapack::gemm('C', 'N', mo, mo, mm, T(1), ps.vectors().data(), mm, coef.data(), mm, T(0),
+                 z.data(), mo);
+  }
+  // x = Q1 z, converted to complex columns block by block: no n x m_out buffer of T besides the
+  // outputs.
   res.vectors.resize(n, m_out);
-  basis.combine_by_rows(coef.data(), m, m_out, [&](index_t r0, index_t rb, const T* xb) {
+  aligned_vector<T> block(static_cast<std::size_t>(std::min(kRowBlock, n) * m_out));
+  for (index_t r0 = 0; r0 < n; r0 += kRowBlock) {
+    const index_t rb = std::min(kRowBlock, n - r0);
+    linalg::multiply(rb, m_out, m_out, res.schur_basis.data() + r0, n, z.data(), m_out,
+                     block.data(), rb);
     for (index_t col = 0; col < m_out; ++col) {
-      const T* x0 = xb + col * rb;
+      const T* x0 = block.data() + col * rb;
       cplx* out0 = res.vectors.col(col) + r0;
       if constexpr (!is_complex_v<T>) {
         if (pair_at[col]) {
@@ -600,16 +617,13 @@ GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>
       }
       for (index_t i = 0; i < rb; ++i) out0[i] = cplx(x0[i]);
     }
-  });
+  }
   for (index_t col = 0; col < m_out; ++col) {
     // One factor for both members of a pair keeps them exact conjugates.
     const cplx inv(1.0 / linalg::norm2(n, res.vectors.col(col)));
     linalg::scal(n, inv, res.vectors.col(col));
     if (pair_at[col]) linalg::scal(n, inv, res.vectors.col(++col));
   }
-
-  res.schur_basis.resize(n, m_out);
-  basis.combine(ps.vectors().data(), m, m_out, res.schur_basis.data(), n);
   res.schur_form.resize(m_out, m_out);
   for (index_t j = 0; j < m_out; ++j) {
     for (index_t i = 0; i < m_out; ++i) res.schur_form(i, j) = T(s) * ps.form()(i, j);
@@ -618,14 +632,12 @@ GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>
   return res;
 }
 
-}  // namespace
-
+/// The single-vector solver (block_size == 1), or one exact cycle over the whole space when
+/// dim.ncv == n.
 template <class T>
-GeneralEigResult<T> krylov_schur_general_timed(LinearOperator<T>& op, Which which,
-                                               const KrylovSchurOptions<T>& options,
-                                               GeneralPhaseTimes* times) {
-  PhaseClock total(phase(times, &GeneralPhaseTimes::total_s));
-  const Dimensions dim = validate(op.size(), options);
+GeneralEigResult<T> run_single(LinearOperator<T>& op, Which which,
+                               const KrylovSchurOptions<T>& options, const Dimensions& dim,
+                               GeneralPhaseTimes* times) {
   const index_t applies_before = op.applications();
   // Retained Schur vectors per restart: nev plus half of the remaining room, the usual balance
   // between restart frequency and the information kept (adjusted per cycle for pairs).
@@ -637,7 +649,7 @@ GeneralEigResult<T> krylov_schur_general_timed(LinearOperator<T>& op, Which whic
   index_t k = 0;
   for (index_t restart = 0;; ++restart) {
     basis.expand(op, k, times);
-    const std::vector<T> b = basis.coupling();
+    const DenseMatrix<T> b = basis.coupling();
     Cycle<T> cyc = [&] {
       PhaseClock clock(phase(times, &GeneralPhaseTimes::projected_s));
       return analyze(basis, b, which, dim.nev, options.tol);
@@ -658,10 +670,100 @@ GeneralEigResult<T> krylov_schur_general_timed(LinearOperator<T>& op, Which whic
     }
     {
       PhaseClock clock(phase(times, &GeneralPhaseTimes::projected_s));
-      k = select_retained(cyc, keep, dim.ncv, which);
+      k = select_retained(cyc, keep, dim.ncv - 1, which);
     }
     basis.compress(cyc.ps, b, k, times);
   }
+}
+
+/// Block mode (block_size = p > 1, see eigen.hpp): block Arnoldi expansion by whole blocks up to
+/// the layout's capacity, Rayleigh-Ritz probes at block boundaries (early stop), thick restart
+/// with the shared selection logic. Falls back to one exact single-vector cycle over the whole
+/// space when the layout does not fit (block_general_layout).
+template <class T>
+GeneralEigResult<T> run_block(LinearOperator<T>& op, Which which,
+                              const KrylovSchurOptions<T>& options, const Dimensions& dim,
+                              GeneralPhaseTimes* times) {
+  const index_t p = options.block_size;
+  const BlockGeneralLayout lay =
+      block_general_layout(dim.n, dim.nev, dim.ncv, options.ncv == 0, p, is_complex_v<T>);
+  if (!lay.feasible) {
+    // The space is below twice a block basis plus its residual block: one single-vector cycle
+    // over all of it is exact (every copy of a multiple eigenvalue included) and costs n
+    // applications, about what a restarted block run of that size takes.
+    Dimensions whole = dim;
+    whole.ncv = dim.n;
+    return run_single(op, which, options, whole, times);
+  }
+  const index_t applies_before = op.applications();
+  BlockKrylovSchurBasis<T> basis(dim.n, lay.ncv, p, options.seed);
+  {
+    PhaseClock clock(phase(times, &GeneralPhaseTimes::orthogonalize_s));
+    basis.start(options.initial);
+  }
+  std::vector<RestartRecord> history;
+  // Smallest basis size probed: the single-vector basis size in the first cycle (a smaller block
+  // Krylov space can hold nev converged values that are not the nev wanted ones, see
+  // block_lanczos.cpp "Early stop"), the first block after the kept vectors later on.
+  index_t probe_from = lay.first_probe;
+  for (index_t restart = 0;; ++restart) {
+    const index_t m_end = basis.size() + p * ((lay.ncv - basis.size()) / p);
+    std::optional<Cycle<T>> cyc;
+    DenseMatrix<T> c;
+    while (basis.size() < m_end) {
+      basis.add_block(op, times);
+      if (basis.size() < m_end && basis.size() >= probe_from) {
+        c = basis.coupling();
+        Cycle<T> probe = [&] {
+          PhaseClock clock(phase(times, &GeneralPhaseTimes::projected_s));
+          return analyze(basis, c, which, dim.nev, options.tol);
+        }();
+        if (probe.nconv >= dim.nev) {
+          cyc = std::move(probe);
+          break;
+        }
+      }
+    }
+    if (!cyc) {
+      c = basis.coupling();
+      PhaseClock clock(phase(times, &GeneralPhaseTimes::projected_s));
+      cyc = analyze(basis, c, which, dim.nev, options.tol);
+    }
+    history.push_back(
+        {restart, cyc->nconv, cyc->max_estimate, op.applications() - applies_before});
+    if (restart == options.max_restarts || cyc->nconv >= dim.nev) {
+      GeneralEigResult<T> result = [&] {
+        PhaseClock clock(phase(times, &GeneralPhaseTimes::update_s));
+        return materialize(basis, *cyc, which);
+      }();
+      result.converged = result.nconv >= dim.nev;
+      result.restarts = restart;
+      result.op_applies = op.applications() - applies_before;
+      result.history = std::move(history);
+      return result;
+    }
+    // The cycle ran to m_end > ncv - p; keep at most m - p vectors so a whole block follows.
+    const index_t max_keep = basis.size() - p;
+    index_t k = 0;
+    {
+      PhaseClock clock(phase(times, &GeneralPhaseTimes::projected_s));
+      k = select_retained(*cyc, std::min(lay.keep, max_keep), max_keep, which);
+    }
+    basis.compress(cyc->ps, c, k, times);
+    probe_from = k + p;
+  }
+}
+
+}  // namespace
+
+template <class T>
+GeneralEigResult<T> krylov_schur_general_timed(LinearOperator<T>& op, Which which,
+                                               const KrylovSchurOptions<T>& options,
+                                               GeneralPhaseTimes* times) {
+  PhaseClock total(phase(times, &GeneralPhaseTimes::total_s));
+  const Dimensions dim = validate(op.size(), options);
+  if (options.block_size > 1) return run_block(op, which, options, dim, times);
+  return run_single(op, which, options, dim, times);
 }
 
 }  // namespace eigen_detail
@@ -672,9 +774,25 @@ GeneralEigResult<T> krylov_schur_general(LinearOperator<T>& op, Which which,
   return eigen_detail::krylov_schur_general_timed(op, which, options, nullptr);
 }
 
+template <class T>
+index_t krylov_schur_general_peak_columns(index_t n, const KrylovSchurOptions<T>& options) {
+  const eigen_detail::Dimensions dim = eigen_detail::validate(n, options);
+  // m_out (materialize): nev, or nev + 1 for real T when a conjugate pair straddles the cut.
+  const index_t m = std::min(dim.n, dim.nev + (is_complex_v<T> ? 0 : 1));
+  index_t basis = dim.ncv + 1;  // run_single: V is n x (ncv + 1)
+  if (options.block_size > 1) {
+    const eigen_detail::BlockGeneralLayout lay = eigen_detail::block_general_layout(
+        dim.n, dim.nev, dim.ncv, options.ncv == 0, options.block_size, is_complex_v<T>);
+    basis = lay.feasible ? lay.ncv + options.block_size : dim.n + 1;  // else the whole-space cycle
+  }
+  return std::max(basis + m, m + (is_complex_v<T> ? 1 : 2) * m);
+}
+
 #define HS_INSTANTIATE_KRYLOV_SCHUR_GENERAL(T)                                        \
   template GeneralEigResult<T> krylov_schur_general<T>(LinearOperator<T>&, Which,     \
                                                        const KrylovSchurOptions<T>&); \
+  template index_t krylov_schur_general_peak_columns<T>(index_t,                      \
+                                                        const KrylovSchurOptions<T>&); \
   template GeneralEigResult<T> eigen_detail::krylov_schur_general_timed<T>(           \
       LinearOperator<T>&, Which, const KrylovSchurOptions<T>&, eigen_detail::GeneralPhaseTimes*);
 

@@ -29,10 +29,23 @@
 //      wanted Ritz values have the wrong sign).
 // GHIEP supports target mode 'nearest' only: interval / smallest / largest need eigenvalue counts,
 // which Sylvester inertia does not give for indefinite B.
+//
+// Block runs. Every Krylov-Schur run uses krylov_schur_general's block mode with the block size of
+// ghiep_block_size (multi-RHS solves are much cheaper per vector than single ones); the one-sided
+// runs keep the cluster at their unwanted end whatever the block size (p cluster directions enter
+// a block Krylov space, none is wanted).
+//
+// Memory (DESIGN §3.6-3). A run keeps only its Schur basis (its Ritz vectors span the same space
+// and are dropped at once); the factorization is released before every refinement (idle there; a
+// later run sits at another shift, or is a rerun whose own solves outweigh one refactorization);
+// the projected pencil is formed in column blocks, without n x m images A W, B W; candidates are
+// refined in batches, kept as coefficients in the refinement basis, and vectors are formed only
+// for the selected pairs, after the runs' bases are freed.
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "driver/internal.hpp"
@@ -41,6 +54,7 @@
 #include "hsolve/error.hpp"
 #include "hsolve/operator.hpp"
 #include "hsolve/util.hpp"
+#include "linalg/blas_lapack.hpp"
 #include "linalg/dense_ops.hpp"
 
 namespace hs::driver {
@@ -69,11 +83,112 @@ constexpr double kStripMatch = 1e-3;
 /// Estimates of the same eigenvalue from two Krylov spaces agree to this relative distance.
 constexpr double kStripConfirm = 1e-2;
 
+/// Candidates refined per batch (refine_union): their vectors and A, B images are formed together,
+/// so spmm streams A and B once per batch (real T: 2 * kBatch real columns, the width spmm
+/// streams at once). Batch memory: 6 kBatch n-vectors of T.
+constexpr index_t kBatch = 4;
+/// Basis columns per block when the projected pencil W^H A W, W^H B W is formed (the width spmm
+/// streams A and B for at once); memory: n x kProjectBatch of T.
+constexpr index_t kProjectBatch = 8;
+/// Block-size rule of the GHIEP runs (ghiep_block_size): p = kAutoBlock for orders from
+/// kBlockMinOrder on (below, the solves are cheap next to the basis work: totals of ~0.1 s at
+/// n = 1e4, where p = 2 saves at most a few 10 ms) and runs with at least kBlockMinNev wanted pairs
+/// (a block needs pairs to fill it; the probes, nev = 2, stay single-vector).
+constexpr index_t kAutoBlock = 2;
+constexpr index_t kBlockMinOrder = 20000;
+constexpr index_t kBlockMinNev = 4;
+
+// SolverConfig::block_size once the field exists (interface request of module ghiep: index_t, 0 =
+// auto, 1 = single-vector), detected at compile time; until then every run uses the automatic
+// rule.
+template <class C>
+auto configured_block_size(const C& cfg, int) -> decltype(static_cast<index_t>(cfg.block_size)) {
+  return static_cast<index_t>(cfg.block_size);
+}
+template <class C>
+index_t configured_block_size(const C&, long) {
+  return 0;
+}
+
+/// Largest configured block size used: wider blocks only add basis work, and a block too wide for
+/// the space makes krylov_schur_general fall back to one exact cycle over all of it.
+constexpr index_t kMaxConfiguredBlock = 64;
+/// Runs with at most this many wanted pairs (the side probes, nev = 2) stay single-vector whatever
+/// is configured: they only locate a shift, and a block would multiply their basis for nothing.
+constexpr index_t kMaxProbeNev = 2;
+/// Share of the memory left in the budget (memory_budget_gb - current RSS) a run's block basis may
+/// take (fit_block_size); the rest is headroom for the solves' own workspace.
+constexpr double kBlockMemoryShare = 0.9;
+
+/// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil, before
+/// the memory fit (fit_block_size): the configured value if positive - capped at nev (a block
+/// wider than the wanted set only adds basis work), kMaxConfiguredBlock and n / 16, and 1 for the
+/// probes (nev <= kMaxProbeNev) - else the measured rule above.
+///
+/// Measurements (2 threads, cores 28-29, medians of interleaved repetitions). One multi-RHS solve
+/// of p columns costs much less than p single solves (bench/ghiep_block.cpp --mode ks:
+/// wg-square-1e5 20.8 / 11.5 / 7.9 / 5.5 ms per vector for p = 1 / 2 / 4 / 8, wg-square-1e6
+/// 277 / 150 / 105 / 65 ms), while a block Krylov space needs more vectors for distinct
+/// eigenvalues (wg-square-1e5, k = 18: 57 / 62 / 84 / 128 applications) - and many more in the
+/// one-sided runs next to the zero cluster, where every block brings p cluster directions back
+/// (wg-square-1e5 at sigma = 0, whole solve: 284 / 400 / 620 / 855). End to end, seconds for
+/// p = 1 / 2 / 4 / 8 (3 repetitions; bench/ghiep_fix_e2e.cpp on the data cases, with --sigma 0 for
+/// the one-sided rows, bench/ghiep_block.cpp --mode e2e on the synthetic ones; forcing p needs
+/// SolverConfig::block_size - interface request 2 of module ghiep - so these were measured on this
+/// code plus that one field):
+///   wg-square-1e5     2.09 / 1.56 / 1.57 / 1.69    wg-square-1e5, sigma 0    9.9 / 8.6 / 14.6 / 10.1
+///   wg-halfslab-1e5   3.89 / 2.46 / 3.10 / 3.40    wg-halfslab-1e5, sigma 0  14.5 / 11.4 / 10.6 / 12.7
+/// and on the five synthetic pencils (syn-ghiep-{wg,wg0}-{20480,102400}, syn-ghiep-cplx-102400:
+/// banded, cheap solves, zero cluster, complex pairs) p = 2 was 1.06 - 1.14x, p = 4 0.97 - 1.12x
+/// and p = 8 0.79 - 1.12x as fast as p = 1. p = 2 never lost against p = 1 (1.06 - 1.58x over the
+/// nine cases); p = 4 lost up to 1.5x (0.68x). Every solve succeeded (eta <= 3e-12), with the same
+/// eigenvalues for every p (relative differences <= 3e-10, as between repetitions of p = 1: the
+/// L0-OpenMP solves are not bitwise reproducible). n ~ 1e4 (wg-square-pert-1e4, wg-halfslab-1e4):
+/// p = 2 1.03 - 1.19x, but on totals of 0.11 - 0.16 s (10 - 20 ms, the noise level of these
+/// runs), so the rule keeps p = 1 below kBlockMinOrder.
+index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev) {
+  const index_t configured = configured_block_size(cfg, 0);
+  if (configured > 0) {
+    if (nev <= kMaxProbeNev) return 1;
+    return std::max<index_t>(1, std::min({configured, nev, kMaxConfiguredBlock, n / 16}));
+  }
+  return n >= kBlockMinOrder && nev >= kBlockMinNev ? kAutoBlock : 1;
+}
+
+/// ko.block_size, halved while the run's peak - krylov_schur_general_peak_columns n-vectors, plus
+/// the operator's refinement workspace (2 n p, with refinement only) - exceeds kBlockMemoryShare of
+/// the memory the budget leaves beside everything the solve holds now (current RSS: the live
+/// factorization, earlier runs' Schur bases), DESIGN §3.6-3. A configured p = 64 at n = 1e6 would
+/// otherwise hold a 512-column basis (4.1 GB, real) that the solver's memory plan never reserved.
+/// Warns (once per distinct reduction) when p is reduced.
+template <class T>
+index_t fit_block_size(Ctx& c, index_t n, KrylovSchurOptions<T> ko, bool refinement) {
+  const index_t wanted = ko.block_size;
+  if (wanted <= 1) return wanted;
+  const double vec = static_cast<double>(n) * static_cast<double>(sizeof(T));
+  const double avail = c.cfg.memory_budget_gb * 1073741824.0 -
+                       static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  auto bytes = [&](index_t q) {
+    ko.block_size = q;
+    return vec * static_cast<double>(krylov_schur_general_peak_columns<T>(n, ko) + (refinement ? 2 * q : 0));
+  };
+  index_t p = wanted;
+  while (p > 1 && bytes(p) > kBlockMemoryShare * avail) p /= 2;
+  if (p < wanted) {
+    const std::string msg = "GHIEP Krylov block size reduced from " + std::to_string(wanted) + " to " +
+                            std::to_string(p) + " by the memory budget";
+    if (std::find(c.rep.warnings.begin(), c.rep.warnings.end(), msg) == c.rep.warnings.end()) warn(c, msg);
+  }
+  return p;
+}
+
 template <class T>
 struct KsRun {
   double sigma = 0.0;
   Which which = Which::LargestMagnitude;
   index_t nev = 0;
+  /// The Krylov-Schur result without its Ritz vectors: the refinement works on the Schur basis
+  /// (same span, orthonormal), so ks_run drops the n x m complex vectors right away.
   GeneralEigResult<T> res;
   bool exhausted = false;  ///< one-sided: fewer eigenvalues on the side than requested
 };
@@ -100,11 +215,15 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   ko.max_restarts = max_restarts;
   ko.tol = tol > 0 ? tol : cfg.tol * cfg.inner_tol_factor;
   ko.seed = cfg.seed;
+  ko.block_size = ghiep_block_size(cfg, pencil.order(), ko.nev);
+  ko.block_size = fit_block_size(c, pencil.order(), ko, refine.max_steps > 0);
   {
     PhaseScope phase(c.clock, Phase::Iterate);
     run.res = krylov_schur_general<T>(op, which, ko);
   }
+  run.res.vectors = DenseMatrix<cplx>();
   event(c, "krylov_schur", {{"sigma", run.sigma}, {"nev", static_cast<std::int64_t>(ko.nev)},
+                            {"block_size", static_cast<std::int64_t>(ko.block_size)},
                             {"nconv", static_cast<std::int64_t>(run.res.nconv)},
                             {"restarts", static_cast<std::int64_t>(run.res.restarts)},
                             {"op_applies", static_cast<std::int64_t>(run.res.op_applies)}});
@@ -130,18 +249,103 @@ struct Cand {
   cplx lambda;
   bool real = false;
   PairMetrics pm;
-  index_t col = 0;
+  index_t col = 0;  ///< column of Refined::coef
 };
 
+/// Refined candidate pairs: the vector of candidate c is basis * coef(:, c.col), unit 2-norm (real
+/// for a real-classified candidate of real T).
 template <class T>
 struct Refined {
   std::vector<Cand> cands;
-  DenseMatrix<T> xr;     ///< real-classified vectors, column = Cand::col
-  DenseMatrix<cplx> xc;  ///< (complex) refined vectors, column = Cand::col
+  DenseMatrix<T> basis;    ///< n x mb
+  DenseMatrix<cplx> coef;  ///< mb x (candidates)
 };
 
-// Refinement on the projected pencil over the union of the runs' Ritz vectors, then real/complex
-// classification (DESIGN §3.6-10) with metrics for every candidate.
+/// (c + c^H) / 2 in place for a small square matrix (diagonal made real).
+template <class T>
+void make_hermitian_small(DenseMatrix<T>& c) {
+  const index_t m = c.rows();
+  for (index_t j = 0; j < m; ++j) {
+    c(j, j) = T(std::real(c(j, j)));
+    for (index_t i = j + 1; i < m; ++i) {
+      const T h = 0.5 * (c(i, j) + conj_if(c(j, i)));
+      c(i, j) = h;
+      c(j, i) = conj_if(h);
+    }
+  }
+}
+
+/// Eigenvalues w and eigenvectors y of a small square matrix: complex Schur form (zgees) and the
+/// back-transformed triangular eigenvectors (ztrevc).
+template <class T>
+void small_eig(const DenseMatrix<T>& a, std::vector<cplx>& w, DenseMatrix<cplx>& y) {
+  const index_t m = a.rows();
+  const auto fm = static_cast<lapack::fint>(m);
+  DenseMatrix<cplx> t(m, m);
+  for (index_t j = 0; j < m; ++j)
+    for (index_t i = 0; i < m; ++i) t(i, j) = cplx(a(i, j));
+  y.resize(m, m);
+  w.assign(static_cast<std::size_t>(m), cplx(0.0));
+  lapack::gees(fm, t.data(), fm, w.data(), y.data(), fm);
+  lapack::trevc_backtransform(fm, t.data(), fm, y.data(), fm);
+}
+
+/// Rayleigh-Ritz for the indefinite pencil on span(W), W (n x m) Euclidean orthonormal: the
+/// eigenpairs (mu, y) of the small pencil (W^H A W, W^H B W), computed as eig(H^{-1} G) via LU and
+/// a complex Schur form (projection.cpp's rayleigh_ritz_indefinite), with G and H formed in column
+/// blocks of kProjectBatch: no n x m image A W or B W is materialized (DESIGN §3.6-3). Ritz vectors
+/// are W y. Returns false when H is numerically singular (pivot ratio < 1e-12).
+template <class T>
+bool projected_pairs(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const DenseMatrix<T>& w,
+                     std::vector<cplx>& mu, DenseMatrix<cplx>& y) {
+  const index_t n = w.rows(), m = w.cols();
+  mu.clear();
+  y.resize(m, m);
+  if (m == 0) return true;
+  const auto fn = static_cast<lapack::fint>(n), fm = static_cast<lapack::fint>(m);
+  DenseMatrix<T> g(m, m), h(m, m), img(n, std::min(kProjectBatch, m));
+  for (index_t c0 = 0; c0 < m; c0 += kProjectBatch) {
+    const index_t nb = std::min(kProjectBatch, m - c0);
+    const auto fb = static_cast<lapack::fint>(nb);
+    spmm(a, w.col(c0), n, img.data(), n, nb);
+    lapack::gemm('C', 'N', fm, fb, fn, T(1), w.data(), fn, img.data(), fn, T(0), g.col(c0), fm);
+    if (b) {
+      spmm(*b, w.col(c0), n, img.data(), n, nb);
+      lapack::gemm('C', 'N', fm, fb, fn, T(1), w.data(), fn, img.data(), fn, T(0), h.col(c0), fm);
+    } else {
+      lapack::gemm('C', 'N', fm, fb, fn, T(1), w.data(), fn, w.col(c0), fn, T(0), h.col(c0), fm);
+    }
+  }
+  make_hermitian_small(g);
+  make_hermitian_small(h);
+  std::vector<lapack::fint> ipiv(static_cast<std::size_t>(m));
+  if (lapack::getrf(fm, h.data(), fm, ipiv.data()) != 0) return false;
+  double umax = 0.0, umin = kInf;
+  for (index_t i = 0; i < m; ++i) {
+    umax = std::max(umax, std::abs(h(i, i)));
+    umin = std::min(umin, std::abs(h(i, i)));
+  }
+  if (!(umin > 1e-12 * umax)) return false;
+  lapack::getrs(fm, fm, h.data(), fm, ipiv.data(), g.data(), fm);
+  small_eig(g, mu, y);
+  return true;
+}
+
+/// The factorization is idle while the union is refined (and usually for good: a later run sits at
+/// another shift, or a refactorization at a rerun's shift is cheap next to that rerun's solves):
+/// every caller of refine_union frees its factors first, so that the refinement's n-sized buffers
+/// do not stack on top of them. The next ks_run refactorizes (factorize_near).
+template <class T>
+void release_factorization(Ctx& c, SparseFactorization<T>& fac) {
+  if (fac.release_factors()) c.held = FactorHeld{};
+}
+
+// Refinement on the projected pencil over the union of the runs' computed invariant subspaces,
+// then real/complex classification (DESIGN §3.6-10) with metrics for every candidate. The basis is
+// the union of the runs' Schur bases (each spans the same space as its run's Ritz vectors, Re/Im
+// parts included for real T), orthonormalized with dependent columns dropped. Memory: the basis
+// (sum of the runs' m columns), the batch buffers (6 kBatch n-vectors) and 9 n-vectors of
+// per-candidate work - no n x m images A W, B W or vector sets (DESIGN §3.6-3).
 template <class T>
 Refined<T> refine_union(Ctx& c, const ShiftedPencil<T>& pencil, const std::vector<KsRun<T>>& runs, double n2a,
                         double n2b, double scale) {
@@ -149,106 +353,167 @@ Refined<T> refine_union(Ctx& c, const ShiftedPencil<T>& pencil, const std::vecto
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
   const index_t n = pencil.order();
-  // Real basis of the computed invariant subspaces: Re/Im parts of every vector (for real T a real
-  // eigenvalue's vector is real up to a phase; a near-real conjugate pair - e.g. the zero cluster -
-  // spans the same space as its real and imaginary parts). Dependent columns are dropped.
-  index_t m = 0;
-  for (const auto& r : runs) m += static_cast<index_t>(r.res.theta.size());
-  DenseMatrix<T> w(n, is_complex_v<T> ? m : 2 * m);
-  index_t col0 = 0;
-  for (const auto& r : runs) {
-    const index_t mr = static_cast<index_t>(r.res.theta.size());
-    for (index_t j = 0; j < mr; ++j)
-      for (index_t i = 0; i < n; ++i) {
-        if constexpr (is_complex_v<T>) {
-          w(i, col0 + j) = r.res.vectors(i, j);
-        } else {
-          w(i, 2 * (col0 + j)) = r.res.vectors(i, j).real();
-          w(i, 2 * (col0 + j) + 1) = r.res.vectors(i, j).imag();
-        }
-      }
-    col0 += mr;
-  }
-  driver::orthonormalize_columns(w, 1e-8);
-  DenseMatrix<T> aw, bw;
-  driver::apply_block(&a, w, aw);
-  driver::apply_block(b, w, bw);
-  std::vector<cplx> mu;
+  index_t mr = 0;
+  for (const auto& r : runs) mr += r.res.schur_basis.cols();
+  auto concatenate = [&](DenseMatrix<T>& out) {
+    out.resize(n, mr);
+    index_t col0 = 0;
+    for (const auto& r : runs) {
+      const DenseMatrix<T>& q = r.res.schur_basis;
+      std::copy(q.data(), q.data() + n * q.cols(), out.col(col0));
+      col0 += q.cols();
+    }
+  };
   Refined<T> out;
-  if (!driver::rayleigh_ritz_indefinite(w, aw, bw, mu, out.xc)) {
+  concatenate(out.basis);
+  driver::orthonormalize_columns(out.basis, 1e-8);
+  std::vector<cplx> mu;
+  DenseMatrix<cplx> y;
+  if (!projected_pairs(a, b, out.basis, mu, y)) {
     warn(c, "projected pencil singular; using the Krylov-Schur pairs without refinement");
+    // The Krylov-Schur pairs: eigenpairs (theta, z) of each run's Schur form S, x = Q1 z.
+    concatenate(out.basis);
     mu.clear();
-    out.xc.resize(n, m);
-    index_t q = 0;
-    for (const auto& r : runs)
-      for (index_t j = 0; j < static_cast<index_t>(r.res.theta.size()); ++j, ++q) {
-        mu.push_back(cplx(r.sigma) + 1.0 / r.res.theta[j]);
-        std::copy(r.res.vectors.col(j), r.res.vectors.col(j) + n, out.xc.col(q));
+    y.resize(mr, mr);
+    index_t col0 = 0;
+    for (const auto& r : runs) {
+      std::vector<cplx> th;
+      DenseMatrix<cplx> z;
+      small_eig(r.res.schur_form, th, z);
+      for (index_t i = 0; i < static_cast<index_t>(th.size()); ++i) {
+        mu.push_back(cplx(r.sigma) + 1.0 / th[i]);
+        std::copy(z.col(i), z.col(i) + z.rows(), y.col(col0 + i) + col0);
       }
+      col0 += static_cast<index_t>(th.size());
+    }
   }
 
-  out.xr.resize(n, static_cast<index_t>(mu.size()));
-  DenseMatrix<cplx> col(n, 1), acol, bcol;
-  for (index_t j = 0; j < static_cast<index_t>(mu.size()); ++j) {
-    if (!std::isfinite(std::abs(mu[j]))) continue;
-    std::copy(out.xc.col(j), out.xc.col(j) + n, col.col(0));
-    // Complex metrics need complex products; for real T apply A, B to real and imaginary parts.
-    DenseMatrix<T> re(n, 1), im(n, 1), are, aim, bre, bim;
-    for (index_t i = 0; i < n; ++i) {
-      if constexpr (is_complex_v<T>) {
-        re(i, 0) = col(i, 0);
-      } else {
-        re(i, 0) = col(i, 0).real();
-        im(i, 0) = col(i, 0).imag();
+  const index_t mb = out.basis.cols(), mc = static_cast<index_t>(mu.size());
+  out.coef.resize(mb, mc);
+  // Batch buffers: real T holds the real and imaginary parts of kBatch vectors side by side.
+  constexpr index_t kParts = is_complex_v<T> ? 1 : 2;
+  DenseMatrix<T> ys(mb, kParts * kBatch), xs(n, kParts * kBatch), axs(n, kParts * kBatch),
+      bxs(n, kParts * kBatch);
+  std::vector<cplx> x(static_cast<std::size_t>(n)), ax(x.size()), bx(x.size());
+  std::vector<T> xr(x.size()), axr(x.size()), bxr(x.size());
+  for (index_t j0 = 0; j0 < mc; j0 += kBatch) {
+    const index_t nb = std::min(kBatch, mc - j0), cols = kParts * nb;
+    for (index_t q = 0; q < nb; ++q)
+      for (index_t i = 0; i < mb; ++i) {
+        if constexpr (is_complex_v<T>) {
+          ys(i, q) = y(i, j0 + q);
+        } else {
+          ys(i, q) = y(i, j0 + q).real();
+          ys(i, nb + q) = y(i, j0 + q).imag();
+        }
       }
-    }
-    driver::apply_block(&a, re, are);
-    driver::apply_block(b, re, bre);
-    acol.resize(n, 1);
-    bcol.resize(n, 1);
-    if constexpr (is_complex_v<T>) {
-      for (index_t i = 0; i < n; ++i) {
-        acol(i, 0) = are(i, 0);
-        bcol(i, 0) = bre(i, 0);
-      }
+    linalg::multiply(n, mb, cols, out.basis.data(), n, ys.data(), mb, xs.data(), n);
+    spmm(a, xs.data(), n, axs.data(), n, cols);
+    if (b) {
+      spmm(*b, xs.data(), n, bxs.data(), n, cols);
     } else {
-      driver::apply_block(&a, im, aim);
-      driver::apply_block(b, im, bim);
+      std::copy(xs.data(), xs.data() + n * cols, bxs.data());
+    }
+    for (index_t q = 0; q < nb; ++q) {
+      const index_t j = j0 + q;
+      if (!std::isfinite(std::abs(mu[j]))) continue;
+      // The candidate vector x = basis y_j (and its images), scaled to unit 2-norm. (The loops
+      // over n are element-wise, so OpenMP keeps the results independent of the thread count;
+      // the norms are linalg's deterministic reductions.)
+      double xn = linalg::norm2(n, xs.col(q));
+      if constexpr (!is_complex_v<T>) xn = std::hypot(xn, linalg::norm2(n, xs.col(nb + q)));
+      if (!(xn > 0.0)) continue;
+      const double inv_xn = 1.0 / xn;
+#pragma omp parallel for schedule(static)
       for (index_t i = 0; i < n; ++i) {
-        acol(i, 0) = cplx(are(i, 0), aim(i, 0));
-        bcol(i, 0) = cplx(bre(i, 0), bim(i, 0));
+        if constexpr (is_complex_v<T>) {
+          x[i] = xs(i, q) * inv_xn, ax[i] = axs(i, q) * inv_xn, bx[i] = bxs(i, q) * inv_xn;
+        } else {
+          x[i] = cplx(xs(i, q), xs(i, nb + q)) * inv_xn;
+          ax[i] = cplx(axs(i, q), axs(i, nb + q)) * inv_xn;
+          bx[i] = cplx(bxs(i, q), bxs(i, nb + q)) * inv_xn;
+        }
       }
-    }
-    const auto pm_c = driver::pair_metrics(acol.col(0), bcol.col(0), col.col(0), n, mu[j], n2a, n2b);
-    const bool small_imag = std::abs(mu[j].imag()) <= cfg.complex_tol * std::max(std::abs(mu[j]), scale);
-    Cand cd{mu[j], false, pm_c, j};
-    // Real candidate: phase-normalised vector, its real part (real T) and lambda = Re(mu).
-    index_t imax = 0;
-    for (index_t i = 1; i < n; ++i)
-      if (std::abs(col(i, 0)) > std::abs(col(imax, 0))) imax = i;
-    const cplx phase = std::abs(col(imax, 0)) > 0 ? std::conj(col(imax, 0)) / std::abs(col(imax, 0)) : cplx(1);
-    DenseMatrix<T> xreal(n, 1), axr, bxr;
-    for (index_t i = 0; i < n; ++i) {
-      if constexpr (is_complex_v<T>) {
-        xreal(i, 0) = col(i, 0) * phase;
+      const auto pm_c = driver::pair_metrics(ax.data(), bx.data(), x.data(), n, mu[j], n2a, n2b);
+      const bool small_imag = std::abs(mu[j].imag()) <= cfg.complex_tol * std::max(std::abs(mu[j]), scale);
+      Cand cd{mu[j], false, pm_c, j};
+      // Real candidate: the phase-normalised vector's real part (real T; complex T: the vector
+      // itself) and lambda = Re(mu). A and B are applied linearly: A Re(phase x) = Re(phase A x).
+      // The phase comes from the largest entry (first one of equal magnitude).
+      index_t imax = 0;
+      double vmax = std::norm(x[0]);
+      for (index_t i = 1; i < n; ++i) {
+        const double v = std::norm(x[i]);
+        if (v > vmax) vmax = v, imax = i;
+      }
+      const cplx phase = vmax > 0 ? std::conj(x[imax]) / std::abs(x[imax]) : cplx(1);
+#pragma omp parallel for schedule(static)
+      for (index_t i = 0; i < n; ++i) {
+        if constexpr (is_complex_v<T>) {
+          xr[i] = phase * x[i], axr[i] = phase * ax[i], bxr[i] = phase * bx[i];
+        } else {
+          xr[i] = (phase * x[i]).real(), axr[i] = (phase * ax[i]).real(), bxr[i] = (phase * bx[i]).real();
+        }
+      }
+      const double rn = linalg::norm2(n, xr.data());
+      const double lam_r = mu[j].real();
+      PairMetrics pm_r;
+      pm_r.backward_error = kInf;
+      if (rn > 0.0) {
+        const double inv_rn = 1.0 / rn;
+#pragma omp parallel for schedule(static)
+        for (index_t i = 0; i < n; ++i) xr[i] *= inv_rn, axr[i] *= inv_rn, bxr[i] *= inv_rn;
+        pm_r = driver::pair_metrics(axr.data(), bxr.data(), xr.data(), n, lam_r, n2a, n2b);
+      }
+      // Real unless the imaginary part is significant AND the real projection fails while the complex pair passes.
+      const bool complex_genuine = !small_imag && pm_r.backward_error > cfg.tol && pm_c.backward_error <= pm_r.backward_error;
+      cplx* cj = out.coef.col(j);
+      if (!complex_genuine) {
+        cd.real = true;
+        cd.lambda = cplx(lam_r, 0.0);
+        cd.pm = pm_r;
+        // x_real = basis Re(phase y_j) / (xn rn) (real T; complex T: phase y_j / (xn rn)).
+        for (index_t i = 0; i < mb; ++i) {
+          const cplx v = phase * y(i, j) / (xn * rn);
+          cj[i] = is_complex_v<T> ? v : cplx(v.real());
+        }
       } else {
-        xreal(i, 0) = (col(i, 0) * phase).real();
+        for (index_t i = 0; i < mb; ++i) cj[i] = y(i, j) / xn;
+      }
+      out.cands.push_back(cd);
+    }
+  }
+  return out;
+}
+
+/// The vectors basis * coef(:, cols) of refined candidates, n x cols.size() (n = the pencil order,
+/// also for an empty selection): of T for real candidates (the coefficients' imaginary parts are
+/// zero for real T), or complex.
+template <class T, class V>
+DenseMatrix<V> candidate_vectors(const Refined<T>& ref, const std::vector<index_t>& cols, index_t n) {
+  const index_t mb = ref.basis.cols(), k = static_cast<index_t>(cols.size());
+  DenseMatrix<V> out(n, k);
+  if (k == 0 || mb == 0) return out;
+  constexpr index_t kParts = is_complex_v<V> && !is_complex_v<T> ? 2 : 1;
+  DenseMatrix<T> c(mb, kParts * k), x(kParts == 2 ? n : 0, kParts == 2 ? 2 * k : 0);
+  for (index_t q = 0; q < k; ++q)
+    for (index_t i = 0; i < mb; ++i) {
+      const cplx v = ref.coef(i, cols[q]);
+      if constexpr (is_complex_v<T>) {
+        c(i, q) = v;
+      } else {
+        c(i, q) = v.real();
+        if (kParts == 2) c(i, k + q) = v.imag();
       }
     }
-    driver::apply_block(&a, xreal, axr);
-    driver::apply_block(b, xreal, bxr);
-    const double lam_r = mu[j].real();
-    const auto pm_r = driver::pair_metrics(axr.col(0), bxr.col(0), xreal.col(0), n, lam_r, n2a, n2b);
-    // Real unless the imaginary part is significant AND the real projection fails while the complex pair passes.
-    const bool complex_genuine = !small_imag && pm_r.backward_error > cfg.tol && pm_c.backward_error <= pm_r.backward_error;
-    if (!complex_genuine) {
-      cd.real = true;
-      cd.lambda = cplx(lam_r, 0.0);
-      cd.pm = pm_r;
-      const double nrm = linalg::norm2(n, xreal.col(0));
-      for (index_t i = 0; i < n; ++i) out.xr(i, j) = xreal(i, 0) / nrm;
+  if constexpr (kParts == 2) {
+    linalg::multiply(n, mb, 2 * k, ref.basis.data(), n, c.data(), mb, x.data(), n);
+    for (index_t q = 0; q < k; ++q)
+      for (index_t i = 0; i < n; ++i) out(i, q) = V(x(i, q), x(i, k + q));
+  } else {
+    if constexpr (std::is_same_v<V, T>) {
+      linalg::multiply(n, mb, k, ref.basis.data(), n, c.data(), mb, out.data(), n);
     }
-    out.cands.push_back(cd);
   }
   return out;
 }
@@ -429,6 +694,7 @@ bool recover_strip(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T
       c.rep.slices.push_back(sr);
       runs.push_back(std::move(run));
       ran = true;
+      release_factorization(c, fac);
       ref = refine_union(c, pencil, runs, n2a, n2b, scale);
       got = found(l);
       absent = absent && !got;
@@ -483,6 +749,7 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     runs.push_back(ks_run(c, fac, pencil, scale, t.sigma, Which::LargestMagnitude, k, cfg.max_restarts));
     rep.sigma_used = runs.back().sigma;
     if (!runs.back().res.converged) warn(c, "Krylov-Schur did not converge all requested pairs within max_restarts");
+    release_factorization(c, fac);
     ref = refine_union(c, pencil, runs, n2a, n2b, scale);
     sel = select_nearest(ref.cands, t.sigma, k, band_user, cfg.tol, good, in_band);
     // Does the band interfere: a selected pair in it, or the selection disk reaching it?
@@ -642,6 +909,7 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
         ran = true;
       }
       if (!ran && attempt > 0) break;
+      release_factorization(c, fac);
       ref = refine_union(c, pencil, runs, n2a, n2b, scale);
       sel = select_nearest(ref.cands, t.sigma, k, band, cfg.tol, good, in_band);
       // Coverage: a side's converged range (from its shift outward) must reach the final radius,
@@ -688,11 +956,15 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
   }
 
   Solution<T> sol;
-  index_t nreal = 0, ncomplex = 0;
-  for (const auto& cd : sel) (cd.real ? nreal : ncomplex)++;
-  sol.eigenvectors.resize(n, nreal);
-  sol.complex_eigenvectors.resize(n, ncomplex);
-  index_t jr = 0, jc = 0;
+  // The runs' Schur bases are no longer needed: free them before the outputs are formed from the
+  // refinement basis (the factorization was released before the last refinement).
+  for (auto& r : runs) r.res.schur_basis = DenseMatrix<T>();
+  std::vector<index_t> real_cols, complex_cols;
+  for (const auto& cd : sel) (cd.real ? real_cols : complex_cols).push_back(cd.col);
+  sol.eigenvectors = candidate_vectors<T, T>(ref, real_cols, n);
+  sol.complex_eigenvectors = candidate_vectors<T, cplx>(ref, complex_cols, n);
+  ref.basis = DenseMatrix<T>();
+  const auto ncomplex = static_cast<index_t>(complex_cols.size());
   bool all_ok = static_cast<index_t>(sel.size()) == k;
   std::vector<PairReport> complex_reports;
   for (const auto& cd : sel) {
@@ -706,11 +978,9 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     all_ok = all_ok && p.accepted;
     if (cd.real) {
       sol.eigenvalues.push_back(cd.lambda.real());
-      std::copy(ref.xr.col(cd.col), ref.xr.col(cd.col) + n, sol.eigenvectors.col(jr++));
       rep.pairs.push_back(p);
     } else {
       sol.complex_eigenvalues.push_back(cd.lambda);
-      std::copy(ref.xc.col(cd.col), ref.xc.col(cd.col) + n, sol.complex_eigenvectors.col(jc++));
       complex_reports.push_back(p);
     }
   }

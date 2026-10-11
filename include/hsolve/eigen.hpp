@@ -38,8 +38,8 @@ struct KrylovSchurOptions {
   double tol = 1e-12;        ///< relative residual-estimate tolerance (see contract above)
   std::uint64_t seed = 2026; ///< deterministic random start vector (linalg::fill_random)
   /// Optional start vector (column 0 is used; must be nonzero). Overrides the random start.
-  /// Hermitian solver with block_size = p > 1: the first min(p, cols) columns form the start
-  /// block (see lanczos_krylov_schur).
+  /// Block mode (block_size = p > 1, both solvers): the first min(p, cols) columns form the start
+  /// block, the others are random (see lanczos_krylov_schur / krylov_schur_general).
   const DenseMatrix<T>* initial = nullptr;
   /// Hermitian solver only: block D (n x d), orthonormal in the solver inner product. The Krylov
   /// basis is kept orthogonal to span(D) ("deflated restart": find further eigenpairs after the
@@ -49,9 +49,9 @@ struct KrylovSchurOptions {
   /// Hermitian solver with b_inner only: keep B*V next to V. Saves two B applications per step
   /// but doubles basis memory; default recomputes B*w on demand.
   bool store_bv = false;
-  /// Hermitian solver only: number p >= 1 of vectors per Krylov block (block Krylov-Schur, see
-  /// lanczos_krylov_schur). 1 = single-vector thick-restart Lanczos (bitwise the behaviour
-  /// without this option). krylov_schur_general rejects p != 1 (InvalidInput).
+  /// Number p >= 1 of vectors per Krylov block (block Krylov-Schur, see lanczos_krylov_schur and
+  /// krylov_schur_general; p < 1 throws InvalidInput). 1 = the single-vector solvers (bitwise the
+  /// behaviour without this option).
   index_t block_size = 1;
 };
 
@@ -148,7 +148,8 @@ struct GeneralEigResult {
   /// the true residual up to the rounding drift described at krylov_schur_general.
   std::vector<double> estimate;
   std::vector<cplx> ritz_all;  ///< all ncv Ritz values of the final basis, in `which` ranking
-                               ///< order (real T: conjugate partners adjacent, as in theta)
+                               ///< order (real T: conjugate partners adjacent, as in theta);
+                               ///< block mode: the final basis may be shorter (early stop)
   index_t nconv = 0;           ///< certified converged prefix of theta; never splits a pair
   index_t restarts = 0;
   index_t op_applies = 0;
@@ -196,11 +197,59 @@ struct GeneralEigResult {
 /// For a fixed seed the result is bitwise reproducible whenever linalg::dot/norm2 are.
 /// Cost per restart: about ncv/2 operator applications, O(n ncv^2) flops for CGS2 and the basis
 /// update, O(ncv^3) dense work (Schur form, a few reorderings and eigenvector sets).
-/// Memory: the basis, n (ncv + 1) scalars of T, plus the outputs (vectors: n x m complex,
-/// schur_basis: n x m of T) and O(ncv^2 + 2048 ncv) workspace; no other n-sized buffers.
+/// Memory: the basis, n (ncv + 1) scalars of T, and O(ncv^2 + 2048 ncv) workspace; no other
+/// n-sized buffers. The outputs (schur_basis: n x m of T, vectors: n x m complex) are formed in
+/// that order with the basis freed in between, so the peak is the larger of basis + schur_basis
+/// and schur_basis + vectors (the vectors are x = Q1 z with Q1 the Schur basis and z from the
+/// projected eigenvectors, equal to V y up to rounding).
 /// Not thread-safe for a shared `op`; otherwise reentrant.
+///
+/// Block mode (options.block_size = p > 1; block Arnoldi Krylov-Schur). The Krylov space grows by
+/// blocks of p vectors: one op.apply of p columns per step (multi-RHS solves are much cheaper per
+/// vector than single ones), block classical Gram-Schmidt against the basis (DGKS second pass)
+/// and Cholesky-QR inside the new block, with the two-pass block kernel as fallback for
+/// ill-conditioned or dependent blocks (BLAS3; block_general.cpp), so that Op V = V H + U C with
+/// a p x m coupling block C. A pair's estimate is ||C y||_2 and the invariant-subspace test uses
+/// ||C Q1||_F; everything else (result contract, real Schur form with whole conjugate pairs, the
+/// certified ranking prefix, soft locking, magnitude scaling, InvalidInput rules) is that of
+/// p = 1. Columns of a new block that are linearly dependent on the basis and the block's earlier
+/// columns to working precision (the block analogue of an Arnoldi breakdown) are replaced by
+/// deterministic random vectors. A random start block has generic components in every
+/// eigenvector of an eigenvalue of multiplicity <= p, so all its copies are found in one run
+/// (beyond p only through rounding).
+///   * Start block: the first min(p, initial->cols()) columns of `initial` (column 0 nonzero, all
+///     of them finite, else InvalidInput), the remaining ones random; dependent columns other
+///     than column 0 are replaced.
+///   * Layout (eigen_detail::block_general_layout): base = the single-vector ncv (auto or
+///     requested) rounded up to a multiple of p, at least s + 2p with s = nev + 2 (real T) or
+///     nev + 1 (complex T) rounded up to a multiple of p; ncv = base for a requested ncv, base + 4p
+///     for the automatic one (as far as n >= 2 (ncv + p)). A restart keeps about
+///     nev + (ncv - nev) / 2 Schur vectors (a multiple of p, at least s, adjusted by one for a
+///     conjugate pair) and a cycle grows by whole blocks to at most ncv.
+///   * Early stop: Rayleigh-Ritz probes at block boundaries, from base on in the first cycle and
+///     from the first new block in later ones, end a cycle once all nev wanted values are
+///     certified (one Schur form of the projected matrix per probe; probes are not recorded in
+///     history). The result then just meets tol, whereas p = 1 tests only at cycle ends and
+///     usually overshoots it: compare the two at matched residuals, not at equal tol.
+///   * A space below twice the basis plus its residual block (n < 2 (ncv + p)), and any
+///     block_size too large for one (up to INT64_MAX), is solved exactly by one single-vector
+///     cycle over the whole space (n applications).
+///   * Per step: p operator applications, O(n m p) BLAS3 flops (m = current basis size).
+///     Memory: the basis holds n (ncv + p) scalars of T; note the larger auto ncv (e.g. nev = 18,
+///     p = 8, real T: ncv = 72 against 37 for p = 1). krylov_schur_general_peak_columns gives the
+///     peak for given options.
 template <class T>
 GeneralEigResult<T> krylov_schur_general(LinearOperator<T>& op, Which which,
                                          const KrylovSchurOptions<T>& options);
+
+/// Memory planning for krylov_schur_general: the peak number of n-vectors of T it holds for an
+/// operator of order n with these options, without the operator's own workspace. That is the
+/// larger of (Krylov basis + Schur basis), the two being alive together while the result is
+/// formed, and (Schur basis + vectors): the basis is ncv + 1 columns for p = 1, the block layout's
+/// ncv + p in block mode, n + 1 for the exact whole-space cycle; the Schur basis m <= nev + 1
+/// columns (nev for complex T); the vectors m complex columns (2m n-vectors for real T).
+/// Validates the options as krylov_schur_general does (InvalidInput). O(1); thread-safe.
+template <class T>
+index_t krylov_schur_general_peak_columns(index_t n, const KrylovSchurOptions<T>& options);
 
 }  // namespace hs
