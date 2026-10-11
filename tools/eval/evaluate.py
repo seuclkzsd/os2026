@@ -11,7 +11,12 @@ Norms: exact (dense eigvalsh, max |eigenvalue|) for n <= DENSE_MAX. Above that, 
 Ritz value of ARPACK eigsh(which='LM'): for a Hermitian matrix every Ritz value lies inside the
 spectrum, so it is a LOWER bound of ||.||_2 and eta is over-estimated (conservative), never
 optimistic. Only if ARPACK fails do we fall back to the 1-norm, an upper bound (optimistic eta) -
-reported in norm_method.
+reported in norm_method. ARPACK runs with tol=NORM_TOL, ncv=NORM_NCV: measured on five 1e5 cases
+(A and B of syn-zero-cluster-real-1e5, wg-square-1e5, wg-halfslab-1e5, ss-qa8fk-qa8fm,
+yee-pec-box-1e5) it agrees with scipy's default ncv at tol=1e-8 to <= 1.4e-10 relative and needs up
+to 4.4x fewer products (4901 -> 1121, 23.8 s -> 7.0 s on the zero-cluster Laplacian, whose dense
+upper spectrum made the norm estimate the dominant cost of an evaluation); the one increase is a
+diagonal B converging at once (21 -> 41 products: ncv is the minimum).
 
 Comparison with the reference (data/refs/<case>). Continuum-model references (kind partial-analytic,
 common.CONTINUUM_KINDS) are O(h^2) away from the matrix eigenvalues: they are reported with
@@ -26,7 +31,9 @@ comparable=false and not used below; build a discrete one with tools/eval/refere
     smallest/largest: the k extreme ones; interval: all inside). Reference eigenvalues whose target
     key (distance to sigma, value, interval end) ties with the k-th one within
     tie_rtol * (|mu| + scale) are interchangeable: any of them may complete the set, so a
-    multiplicity cluster cut by k accepts any subset of its eigenspace. tie_rtol defaults to
+    multiplicity cluster cut by k accepts any subset of its eigenspace; a reference eigenvalue the
+    set needs and the result lacks is 'missing', a shortfall among tied ones is the
+    'boundary_deficit' (with 'boundary_candidates' that could fill it). tie_rtol defaults to
     TIE_FACTOR * tol, the resolution an accepted pair guarantees: for a Hermitian matrix
     |lambda - mu| <= ||r||_2/||x||_2 = eta (||A||_2 + |lambda|), so eigenvalues closer than about
     tol * (|mu| + scale) cannot be told apart by the acceptance test, while farther ones can (a
@@ -50,6 +57,23 @@ Verdict 'pass' iff pairs were returned, every eta <= tol, no duplicates, complet
 incomplete/inconsistent and no computed eigenvalue is spurious (unmatched where a complete reference
 lists every eigenvalue). Disagreement with an uncertified reference fails too: it means either the
 solver or the reference is wrong and needs a look.
+
+Pooled references: a case without a comparable stored reference can be checked against the accepted,
+distinct pairs of several solvers (pooled_reference; tools/eval/sweep.py does this per case). It is
+uncertified (consistent / inconsistent), but sound in the direction that matters: every accepted pair
+is backed by a true eigenvalue, so a solver that lacks a pooled eigenvalue nearer than its own k-th
+one, or fewer copies of a multiple one than another solver proved to exist, missed it. Eigenvalue
+errors are not reported against it (it holds the solvers' own values).
+
+Bookkeeping that is reported but not part of the verdict:
+  * format (docs/FORMATS.md §3): eigenvalues.npy ordered for the target (inversions within the tie
+    band are ties), HEP/GHEP vectors B-normalized, GHIEP vectors of unit 2-norm (FORMAT_NORM_TOL).
+  * solver_claim: the solver's own report.json 'success' against the verdict - 'agrees',
+    'overclaim' (success claimed, evaluation fails: the dangerous case) or 'underclaim'.
+  * time and peak memory as reported by the solver (peak_rss_bytes, or the SLEPc baseline's
+    peak_rss_bytes_sum over its MPI ranks) and, when the caller passes the tools/run/guard.py summary
+    of the run, as measured by the guard ('measured': wall time and peak RSS of the process tree, the
+    same yardstick for every solver).
 """
 from __future__ import annotations
 
@@ -68,11 +92,14 @@ from scipy.optimize import linear_sum_assignment
 from tools import case as cio
 from tools.eval import common
 
-NORM_TOL = 1e-8        # ARPACK relative accuracy of the ||.||_2 estimate
+NORM_TOL = 1e-6        # ARPACK relative accuracy of the ||.||_2 estimate (module docstring)
+NORM_NCV = 40          # ARPACK subspace size of the ||.||_2 estimate
 MATCH_RTOL = 1e-6
 CLUSTER_RTOL = 1e-6
 TIE_FACTOR = 10.0      # default tie_rtol = TIE_FACTOR * tol (module docstring, completeness)
 DUP_TOL = 1e-4
+FORMAT_NORM_TOL = 1e-6  # vector normalization deviation reported as a format issue
+POOLED_KIND = "pooled"  # in-memory reference kind of pooled_reference (never written to data/refs)
 EVAL_FILE = "evaluation.json"
 
 
@@ -98,8 +125,8 @@ def hermitian_norm2(m: sp.spmatrix, dense_max: int = common.DENSE_MAX) -> tuple[
         w = la.eigvalsh(common.to_dense(m, dense_max))
         return (float(np.max(np.abs(w))) if n else 0.0), "dense"
     try:
-        w = sla.eigsh(m, k=1, which="LM", tol=NORM_TOL, v0=common.start_vector(n, m.dtype, 0),
-                      return_eigenvectors=False)
+        w = sla.eigsh(m, k=1, which="LM", tol=NORM_TOL, ncv=min(NORM_NCV, n),
+                      v0=common.start_vector(n, m.dtype, 0), return_eigenvectors=False)
         return float(np.max(np.abs(w))), "eigsh"
     except sla.ArpackNoConvergence as err:
         if err.eigenvalues.size:
@@ -251,6 +278,8 @@ def expected_set(ref_vals: np.ndarray, tgt: dict[str, Any], scale: float, rtol: 
     band = rtol * (abs(mu_k) + scale)
     required = np.flatnonzero(key < kth - band)
     optional = np.flatnonzero(np.abs(key - kth) <= band)
+    if optional.size == k - required.size:   # no tie at the boundary: every one of them is needed
+        required, optional = np.sort(np.concatenate([required, optional])), np.empty(0, dtype=np.int64)
     window = {"nearest": (sigma - kth - band, sigma + kth + band),
               "smallest": (-np.inf, mu_k.real + band),
               "largest": (mu_k.real - band, np.inf)}[tgt["mode"]]
@@ -346,6 +375,84 @@ def cluster_records(ref: cio.Reference, match: np.ndarray, exp: ExpectedSet, X: 
     return records
 
 
+def pooled_reference(docs: list[dict[str, Any]], scale: float, rtol: float = MATCH_RTOL) -> cio.Reference | None:
+    """Uncertified in-memory reference from the accepted, non-duplicate pairs of several evaluations
+    of one case (module docstring). Eigenvalues of all solvers are chained into clusters (gaps <=
+    rtol * (|mu| + scale)); each cluster keeps the values of the solver that returned the most copies
+    in it - a lower bound of its multiplicity, never a guess above what one solver proved. None when
+    no solver has an accepted pair."""
+    sources = [d["solver"] for d in docs]
+    per_solver = [np.array([complex(p["lambda_re"], p["lambda_im"]) for p in d["pairs"]
+                            if p["accepted"] and not p["duplicate"]], dtype=complex) for d in docs]
+    values = np.concatenate(per_solver) if per_solver else np.empty(0, dtype=complex)
+    if values.size == 0:
+        return None
+    owner = np.repeat(np.arange(len(per_solver)), [v.size for v in per_solver])
+    ids = reference_clusters(values, scale, rtol)
+    pooled = []
+    for cid in np.unique(ids):
+        counts = [np.count_nonzero((ids == cid) & (owner == s)) for s in range(len(per_solver))]
+        pooled.append(values[(ids == cid) & (owner == int(np.argmax(counts)))])
+    w = np.concatenate(pooled)
+    w = w[np.lexsort((w.imag, w.real))]
+    if not np.any(w.imag):
+        w = w.real
+    info = {"kind": POOLED_KIND, "complete": False, "window": None, "count": int(w.size), "sources": sources,
+            "note": f"accepted distinct pairs pooled from {', '.join(sources)} (uncertified)"}
+    return cio.Reference(w, None, info)
+
+
+def format_checks(problem: str, tgt: dict[str, Any], lam_real: np.ndarray, X: np.ndarray, B: sp.spmatrix | None,
+                  scale: float, tie_rtol: float) -> dict[str, Any]:
+    """docs/FORMATS.md §3 conventions of a result directory (module docstring). lam_real are the
+    eigenvalues.npy values; X holds every returned vector (real pairs first, then complex ones)."""
+    lam = np.asarray(lam_real, dtype=float)
+    key = {"nearest": np.abs(lam - float(tgt.get("sigma", 0.0))), "interval": lam, "smallest": lam,
+           "largest": -lam}[tgt["mode"]]
+    inversions = np.flatnonzero(np.diff(key) < -tie_rtol * (np.abs(lam[1:]) + scale))
+    issues = []
+    if inversions.size:
+        issues.append(f"eigenvalues.npy is not in '{tgt['mode']}' target order at position(s) "
+                      f"{(inversions + 1).tolist()}")
+    max_dev = None
+    if X.shape[1]:
+        if problem == "GHIEP" or B is None:
+            dev, what = np.abs(np.linalg.norm(X, axis=0) - 1.0), "of unit 2-norm"
+        else:
+            bnorm = np.sqrt(np.maximum(np.real(np.sum(X.conj() * (B @ X), axis=0)), 0.0))
+            dev, what = np.abs(bnorm - 1.0), "B-normalized"
+        max_dev = float(np.max(_finite_or_inf(dev)))
+        if max_dev > FORMAT_NORM_TOL:
+            issues.append(f"eigenvectors are not {what}: max deviation {max_dev:.1e}")
+    return {"order_ok": not inversions.size, "max_normalization_error": max_dev, "issues": issues}
+
+
+def _reported_peak(report: dict[str, Any]) -> int | None:
+    """Solver-reported peak RSS: SolveReport's peak_rss_bytes, or the SLEPc baseline's sum over ranks."""
+    for key in ("peak_rss_bytes", "peak_rss_bytes_sum"):
+        if report.get(key) is not None:
+            return int(report[key])
+    return None
+
+
+def _measured(guard: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The tools/run/guard.py summary of the run, reduced to what the evaluation reports."""
+    if guard is None:
+        return None
+    gib = guard.get("peak_rss_gib")
+    return {"wall_s": guard.get("wall_s"), "peak_rss_bytes": int(gib * 2**30) if gib is not None else None,
+            "returncode": guard.get("returncode"), "killed": guard.get("killed"), "cores": guard.get("cores"),
+            "threads": guard.get("threads")}
+
+
+def _claim(solver_success: Any, verdict: str) -> str | None:
+    if solver_success is None:
+        return None
+    if bool(solver_success) == (verdict == "pass"):
+        return "agrees"
+    return "overclaim" if solver_success else "underclaim"
+
+
 # ----------------------------------------------------------------------------------- driver
 
 def _max(values) -> float | None:
@@ -357,23 +464,30 @@ def _data_root(c: cio.Case, root: str | Path) -> Path:
     return c.path.parent.parent if c.path.parent.name == "cases" else Path(root)
 
 
-def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path = cio.DEFAULT_ROOT,
+def evaluate(case_ref: str | Path | cio.Case, result_dir: str | Path, *, root: str | Path = cio.DEFAULT_ROOT,
              solver: str | None = None, tol: float | None = None, match_rtol: float = MATCH_RTOL,
              cluster_rtol: float = CLUSTER_RTOL, tie_rtol: float | None = None, dup_tol: float = DUP_TOL,
-             dense_max: int = common.DENSE_MAX) -> dict[str, Any]:
-    """Evaluation document (docs/FORMATS.md §4) for one (case, result directory). tol defaults to the
-    case config's tol, tie_rtol to TIE_FACTOR * tol."""
-    c = cio.load_case(case_ref, root=root)
+             dense_max: int = common.DENSE_MAX, norms: Norms | None = None,
+             reference: cio.Reference | None = None, guard: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Evaluation document (docs/FORMATS.md §4) for one (case, result directory). case_ref is a case
+    name, a case directory or an already loaded case. tol defaults to the case config's tol, tie_rtol
+    to TIE_FACTOR * tol. Callers evaluating several results of one case pass the case's norms
+    (estimate_norms) to estimate them once. `reference` replaces data/refs/<case> (e.g. a
+    pooled_reference); `guard` is the tools/run/guard.py summary of the solver run, if any."""
+    c = case_ref if isinstance(case_ref, cio.Case) else cio.load_case(case_ref, root=root)
     problem = common.problem_type(c)
     tgt = common.target(c)
     tol = common.tol(c) if tol is None else float(tol)
     tie_rtol = TIE_FACTOR * tol if tie_rtol is None else float(tie_rtol)
     res = cio.load_result(result_dir)
     data_root = _data_root(c, root)
-    stored_ref = cio.load_ref(c.name, root=data_root)
+    if reference is not None:
+        stored_ref, ref_source = reference, reference.info.get("note", "in-memory reference")
+    else:
+        stored_ref, ref_source = cio.load_ref(c.name, root=data_root), str(data_root / "refs" / c.name)
     comparable = stored_ref is not None and stored_ref.info.get("kind") not in common.CONTINUUM_KINDS
     ref = stored_ref if comparable else None
-    norms = estimate_norms(c.A, c.B, dense_max)
+    norms = estimate_norms(c.A, c.B, dense_max) if norms is None else norms
     scale = norms.scale
 
     n = c.n
@@ -399,21 +513,26 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
     dups = find_duplicates(X, c.B if problem == "GHEP" else None, dup_tol) if lambdas.size else []
     dup_of = {d["index"]: d["duplicate_of"] for d in dups}
     ref_vals = np.asarray(ref.eigenvalues, dtype=complex) if ref is not None else None
+    # A pooled reference holds computed values, partly this solver's own: it decides completeness,
+    # but an "error" against it would be zero by construction for its contributors.
+    errors_meaningful = ref is not None and ref.info.get("kind") != POOLED_KIND
     for i, p in enumerate(pairs):
         p.update(index=i, kind=kinds[i], ref_index=None, ref_lambda_re=None, ref_lambda_im=None,
                  eig_abs_error=None, eig_rel_error=None, eig_scaled_error=None,
                  duplicate=i in dup_of, duplicate_of=dup_of.get(i))
         if match[i] >= 0:
             mu = ref_vals[match[i]]
-            err = float(abs(lambdas[i] - mu))
-            p.update(ref_index=int(match[i]), ref_lambda_re=float(mu.real), ref_lambda_im=float(mu.imag),
-                     eig_abs_error=err, eig_rel_error=err / abs(mu) if mu != 0 else None,
-                     eig_scaled_error=err / (abs(mu) + scale) if abs(mu) + scale > 0 else None)
+            p.update(ref_index=int(match[i]), ref_lambda_re=float(mu.real), ref_lambda_im=float(mu.imag))
+            if errors_meaningful:
+                err = float(abs(lambdas[i] - mu))
+                p.update(eig_abs_error=err, eig_rel_error=err / abs(mu) if mu != 0 else None,
+                         eig_scaled_error=err / (abs(mu) + scale) if abs(mu) + scale > 0 else None)
 
     exp = expected_set(ref_vals, tgt, scale, tie_rtol) if ref is not None and ref_vals.size else None
     completeness = assess_completeness(tgt, lambdas, ref, exp, match, lambdas.size - len(dups), n)
     clusters = cluster_records(ref, match, exp, X, scale, cluster_rtol) if exp is not None else []
     b_orth = b_orthogonality(X, c.B) if problem != "GHIEP" and lambdas.size else None
+    fmt = format_checks(problem, tgt, lam_real, X, c.B, scale, tie_rtol)
 
     reasons = []
     if not pairs:
@@ -431,6 +550,7 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
         reasons.append(f"{len(completeness['spurious'])} spurious eigenvalue(s) absent from the complete reference")
 
     report = res.report
+    verdict = "fail" if reasons else "pass"
     summary = {
         "n_pairs": len(pairs), "n_real": kinds.count("real"), "n_complex": kinds.count("complex"),
         "n_accepted": len(pairs) - bad, "n_duplicates": len(dups),
@@ -442,20 +562,23 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
         "max_eig_scaled_error": _max(p["eig_scaled_error"] for p in pairs),
         "max_subspace_angle": _max(r["max_angle"] for r in clusters),
         "b_orthogonality": b_orth,
+        "solver_claim": _claim(report.get("success"), verdict),
     }
     return {
         "schema_version": cio.SCHEMA_VERSION,
         "case": c.name,
         "solver": solver or report.get("solver") or Path(result_dir).name,
         "inputs": {"case": str(c.path), "result": str(Path(result_dir)),
-                   "reference": str(data_root / "refs" / c.name) if stored_ref is not None else None},
+                   "reference": ref_source if stored_ref is not None else None},
         "problem": problem, "n": n, "nnz_a": int(c.A.nnz), "nnz_b": int(c.B.nnz) if c.B is not None else 0,
         "complex_scalars": common.is_complex(c),
         "config": c.config, "target": tgt, "tol": tol,
         "tolerances": {"match_rtol": match_rtol, "cluster_rtol": cluster_rtol, "tie_rtol": tie_rtol,
                        "dup_tol": dup_tol},
-        "time_total_s": report.get("time_total_s"), "peak_rss_bytes": report.get("peak_rss_bytes"),
+        "time_total_s": report.get("time_total_s"), "peak_rss_bytes": _reported_peak(report),
+        "measured": _measured(guard),
         "solver_success": report.get("success"),
+        "solver_warnings": list(report.get("warnings", [])),
         "norms": {"norm2_a": norms.norm2_a, "norm2_b": norms.norm2_b, "scale": scale,
                   "norm_method": {"A": norms.method_a, "B": norms.method_b}},
         "reference": None if stored_ref is None else {
@@ -466,8 +589,9 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
         "duplicates": dups,
         "completeness": completeness,
         "clusters": clusters,
+        "format": fmt,
         "summary": summary,
-        "verdict": "fail" if reasons else "pass",
+        "verdict": verdict,
         "reasons": reasons,
     }
 
@@ -485,11 +609,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tie-rtol", type=float, help=f"target-set tie band (default: {TIE_FACTOR:g} * tol)")
     ap.add_argument("--dup-tol", type=float, default=DUP_TOL)
     ap.add_argument("--dense-max", type=int, default=common.DENSE_MAX)
+    ap.add_argument("--guard", type=Path, help="tools/run/guard.py --summary JSON of the solver run")
     args = ap.parse_args(argv)
     common.require_guard("evaluate")
+    guard = json.loads(args.guard.read_text()) if args.guard else None
     doc = evaluate(args.case, args.result, root=args.root, solver=args.solver, tol=args.tol,
                    match_rtol=args.match_rtol, cluster_rtol=args.cluster_rtol, tie_rtol=args.tie_rtol,
-                   dup_tol=args.dup_tol, dense_max=args.dense_max)
+                   dup_tol=args.dup_tol, dense_max=args.dense_max, guard=guard)
     out = args.out or args.result / EVAL_FILE
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n")
@@ -498,6 +624,8 @@ def main(argv: list[str] | None = None) -> int:
           f"max_eta={s['max_backward_error']} completeness={doc['completeness']['status']} -> {out}")
     for reason in doc["reasons"]:
         print(f"  - {reason}")
+    for issue in doc["format"]["issues"]:
+        print(f"  format: {issue}")
     return 0
 
 

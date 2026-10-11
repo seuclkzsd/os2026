@@ -134,6 +134,82 @@ def test_spurious_eigenvalue_is_detected(tmp_path):
     assert doc["completeness"]["spurious"] == [3] and doc["verdict"] == "fail"
 
 
+# --------------------------------------------------------------------- format and bookkeeping
+
+@pytest.mark.parametrize("problem", ["HEP", "GHEP"])
+def test_format_issues_are_reported_but_do_not_fail(tmp_path, problem):
+    ref = _hermitian_case(tmp_path, "c", problem)
+    w, V = _nearest(ref, SIGMA, 4)
+    doc = evaluate.evaluate("c", _save(tmp_path / "ok", w, V), root=tmp_path)
+    assert doc["format"]["order_ok"] and doc["format"]["issues"] == []
+    assert doc["format"]["max_normalization_error"] < 1e-12
+    V[:, 0] *= 2.0    # eta is scale invariant: only the normalization convention is broken
+    doc = evaluate.evaluate("c", _save(tmp_path / "bad", w[::-1], V[:, ::-1]), root=tmp_path)
+    assert doc["verdict"] == "pass", doc["reasons"]
+    assert not doc["format"]["order_ok"] and doc["format"]["max_normalization_error"] == pytest.approx(1.0)
+    order, norm = doc["format"]["issues"]
+    assert "'nearest' target order at position(s) [1, 2, 3]" in order
+    assert ("B-normalized" if problem == "GHEP" else "unit 2-norm") in norm
+
+
+def test_slepc_style_report_and_guard_summary(tmp_path):
+    ref = _hermitian_case(tmp_path, "c")
+    w, V = _nearest(ref, SIGMA, 4)
+    out = cio.save_result(tmp_path / "slepc", w, V, {"solver": "slepc-ks", "time_total_s": 2.0,
+                                                    "peak_rss_bytes_sum": 3 * 2**20, "success": False,
+                                                    "warnings": ["w1"]})
+    guard = {"returncode": 0, "killed": None, "wall_s": 4.5, "peak_rss_gib": 0.25, "cores": "28,29", "threads": 2}
+    doc = evaluate.evaluate("c", out, root=tmp_path, guard=guard)
+    assert doc["solver"] == "slepc-ks" and doc["peak_rss_bytes"] == 3 * 2**20 and doc["solver_warnings"] == ["w1"]
+    assert doc["measured"] == {"wall_s": 4.5, "peak_rss_bytes": 2**28, "returncode": 0, "killed": None,
+                               "cores": "28,29", "threads": 2}
+    assert doc["verdict"] == "pass" and doc["summary"]["solver_claim"] == "underclaim"
+
+
+# ------------------------------------------------------------------------- pooled references
+
+def _unreferenced_case(root, name="p", sigma=1.05, k=4):
+    """SPECTRUM case without a stored reference; returns its exact eigenpairs (dense eigh)."""
+    A = _prescribed(SPECTRUM, np.random.default_rng(7))
+    _case(root, name, A, problem="HEP", sigma=sigma, k=k)
+    return np.linalg.eigh(A)
+
+
+def test_pooled_reference_catches_a_missed_copy(tmp_path):
+    # nearest 4 to 1.05: the triple 1.0 and 0.7; 'short' has two copies of 1.0 and 1.6 instead
+    w, V = _unreferenced_case(tmp_path)
+    full = np.flatnonzero(np.isclose(w, TRIPLE) | np.isclose(w, 0.7))
+    short = np.concatenate([full[np.isclose(w[full], TRIPLE)][:2], np.flatnonzero(np.isclose(w, 0.7) | np.isclose(w, 1.6))])
+    docs = [evaluate.evaluate("p", _save(tmp_path / s, w[idx], V[:, idx]), root=tmp_path, solver=s)
+            for s, idx in (("full", full), ("short", short))]
+    assert all(d["reference"] is None and d["completeness"]["status"] == "unknown" for d in docs)
+    assert all(d["verdict"] == "pass" for d in docs)     # without a reference nothing is caught
+    pooled = evaluate.pooled_reference(docs, docs[0]["norms"]["scale"])
+    assert pooled.info["kind"] == "pooled" and not pooled.info["complete"] and pooled.info["sources"] == ["full", "short"]
+    assert pooled.eigenvalues == pytest.approx([0.7, TRIPLE, TRIPLE, TRIPLE, 1.6])
+    full_doc, short_doc = (evaluate.evaluate("p", tmp_path / s, root=tmp_path, solver=s, reference=pooled)
+                           for s in ("full", "short"))
+    assert full_doc["verdict"] == "pass" and full_doc["completeness"]["status"] == "consistent"
+    assert full_doc["summary"]["max_eig_rel_error"] is None and full_doc["pairs"][0]["ref_index"] is not None
+    assert short_doc["verdict"] == "fail" and short_doc["completeness"]["status"] == "inconsistent"
+    assert short_doc["completeness"]["boundary_deficit"] == 0 and len(short_doc["completeness"]["missing"]) == 1
+    assert short_doc["reference"]["kind"] == "pooled" and "pooled from full, short" in short_doc["inputs"]["reference"]
+
+
+def test_pooled_reference_ignores_rejected_and_duplicate_pairs(tmp_path):
+    w, V = _unreferenced_case(tmp_path)
+    idx = np.argsort(np.abs(w - 1.05))[:4]
+    X = V[:, idx].copy()
+    X[:, 3] += 1e-3 * V[:, 0]                       # fails the residual test
+    lam = w[idx].copy()
+    lam[1], X[:, 1] = lam[0], X[:, 0]               # duplicate of the first vector
+    doc = evaluate.evaluate("p", _save(tmp_path / "r", lam, X), root=tmp_path)
+    pooled = evaluate.pooled_reference([doc], doc["norms"]["scale"])
+    assert pooled.eigenvalues == pytest.approx([TRIPLE, TRIPLE])
+    bad = dict(doc, pairs=[dict(p, accepted=False) for p in doc["pairs"]])
+    assert evaluate.pooled_reference([bad], 1.0) is None
+
+
 # -------------------------------------------------------------------------- multiplicity clusters
 
 def test_multiplicity_cluster_accepts_any_basis(tmp_path):
@@ -159,6 +235,11 @@ def test_cluster_cut_by_k_accepts_any_subspace(tmp_path):
     V[:, 1] = ref.eigenvectors[:, np.argmin(np.abs(ref.eigenvalues - 0.7))]
     doc = evaluate.evaluate("c", _save(tmp_path / "res2", w[:2], V[:, :2]), root=tmp_path)
     assert doc["summary"]["max_subspace_angle"] > 1.0 and doc["verdict"] == "fail"
+    # one copy short of the cluster: a deficit among the three interchangeable copies, none 'missing'
+    doc = evaluate.evaluate("c", _save(tmp_path / "res3", w[:1], V[:, :1]), root=tmp_path)
+    comp = doc["completeness"]
+    assert comp["status"] == "incomplete" and comp["missing"] == [] and comp["boundary_deficit"] == 1
+    assert [m["lambda_re"] for m in comp["boundary_candidates"]] == pytest.approx([TRIPLE] * 2)
 
 
 def test_nearest_set_is_resolved_inside_a_dense_cluster(tmp_path):
@@ -175,8 +256,8 @@ def test_nearest_set_is_resolved_inside_a_dense_cluster(tmp_path):
     wrong = _save(tmp_path / "wrong", w[[0, 2]], V[:, [0, 2]])     # skips the 2nd nearest
     doc = evaluate.evaluate("z", wrong, root=tmp_path)
     comp = doc["completeness"]
-    assert doc["verdict"] == "fail" and comp["status"] == "incomplete" and comp["boundary_deficit"] == 1
-    assert [m["lambda_re"] for m in comp["boundary_candidates"]] == pytest.approx([w[1]], abs=1e-12)
+    assert doc["verdict"] == "fail" and comp["status"] == "incomplete" and comp["boundary_deficit"] == 0
+    assert [m["lambda_re"] for m in comp["missing"]] == pytest.approx([w[1]], abs=1e-12)
     assert comp["extra"] == [1] and doc["tolerances"]["tie_rtol"] == pytest.approx(1e-9)
     # a tie band wider than the cluster makes its members interchangeable
     doc = evaluate.evaluate("z", wrong, root=tmp_path, tie_rtol=1e-6)
