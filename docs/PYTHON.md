@@ -17,7 +17,7 @@ PYTHONPATH=build/release/python python -c "import hsolve; print(hsolve.version()
   显式 ON 而缺 pybind11 时报错。debug 预设带 ASan/UBSan，普通 python 须预加载运行库才能导入：
   `LD_PRELOAD=$CONDA_PREFIX/lib/libasan.so.8:$CONDA_PREFIX/lib/libubsan.so.1 ASAN_OPTIONS=detect_leaks=0
   HSOLVE_PYTHON_DIR=build/debug/python python -m pytest tests/py/test_python_binding.py`
-  （2026-10-11 实测 54 项全过、无 sanitizer 报告，约 4 分钟）；日常使用 release。
+  （2026-10-11 实测 62 项全过、无 sanitizer 报告，约 5 分钟）；日常使用 release。
 - 依赖：numpy；scipy 仅在传入 scipy 稀疏矩阵或调用 `load_matrix` 时需要。
 - 测试：`python -m pytest tests/py/test_python_binding.py`（`tools/dev/test.sh release` 也会运行）；
   默认从 `build/release/python` 导入，`HSOLVE_PYTHON_DIR=<dir>` 指定其它构建；未构建时整个文件跳过。
@@ -45,7 +45,7 @@ hsolve.solve(A, mode="largest", k=4)
 
 # 测例目录 / 配置文件：与 CLI 完全相同的读入流水线
 res = hsolve.solve("case/A.npz", "case/B.npz", config="case/config.json")
-A = hsolve.load_matrix("case/A.npz")           # scipy.sparse.csr_array，零拷贝
+A = hsolve.load_matrix("case/A.npz")           # scipy.sparse.csr_array，值与列索引不拷贝
 ```
 
 ## 3. API
@@ -70,7 +70,7 @@ A = hsolve.load_matrix("case/A.npz")           # scipy.sparse.csr_array，零拷
 | 字段 | 内容 |
 |---|---|
 | `eigenvalues` | float64 (m,)，实特征值，按目标排序（nearest：离 σ 由近到远；interval / smallest：升序；largest：降序） |
-| `eigenvectors` | (n, m)，Fortran 序；输入（A 或 B）为复数 dtype 时 complex128，否则 float64；HEP/GHEP 为 B-正交归一，GHIEP 为 2-范数归一 |
+| `eigenvectors` | (n, m)，Fortran 序；A 或 B 为复数 dtype（内存数组的 dtype，或文件中存储的值类型）时 complex128——虚部全为零、按实数求解时也是——否则 float64；HEP/GHEP 为 B-正交归一，GHIEP 为 2-范数归一 |
 | `complex_eigenvalues`, `complex_eigenvectors` | GHIEP 的真复特征对，complex128 (c,) 与 (n, c)；通常为空 |
 | `report` | dict，与 CLI `report.json` 相同的键（`docs/FORMATS.md` §3）；输入预处理的说明以 `"input: A: ..."` 追加到 `report["warnings"]` |
 | `config` | dict，本次生效的**完整**配置——存成 `config.json` 即可用 CLI 或 `solve(config=...)` 复现 |
@@ -82,8 +82,12 @@ A = hsolve.load_matrix("case/A.npz")           # scipy.sparse.csr_array，零拷
 
 - `hsolve.load_matrix(path, *, storage='auto', hermitian_tol=1e-10, return_info=False)`：用 C++ 读入器
   （与 CLI 相同：合并重复项、丢弃精确零、三角恢复、厄密检查与厄密化、零虚部复数降为实数）读文件，
-  返回 `scipy.sparse.csr_array`，其数组直接引用 C++ 缓冲区（不拷贝）；`return_info=True` 另返回
-  `{source_format, storage, hermitian_defect, notes}`。
+  返回 `scipy.sparse.csr_array`：`data` 与 `indices`（int32）直接引用 C++ 缓冲区（不拷贝），`indptr`
+  是 n+1 个元素的 int32 副本（C++ 行指针随即释放）。原因：scipy 的 csr_array 要求 indptr 与 indices
+  同一种索引类型，只要有一个是 int64 就把另一个也拷成 int64；直接交出 int64 行指针会让它把全部列索引
+  拷一遍，而 C++ 的 int32 原件仍被占用（每个非零元 12 B 而非 4 B）。n 或 nnz 超出 int32 时 indices 为
+  一份 int64 副本（scipy 本来也要做这次拷贝；C++ 原件随即释放），indptr 引用 C++ 缓冲区。实测见 §8。
+  `return_info=True` 另返回 `{source_format, storage, hermitian_defect, notes}`。
 - `hsolve.default_config()`：全部配置键的默认值（dict）。
 - `hsolve.version()` / `hsolve.__version__`、`hsolve.build_info()`。
 
@@ -94,7 +98,7 @@ Python 内置异常，`except ValueError` 等惯用写法照常生效：
 
 | code | 类 | 也是 | 典型原因 |
 |---|---|---|---|
-| `invalid_input` | `InvalidInputError` | `ValueError` | k ≤ 0 或 k > n、非方阵、A/B 阶数不同、非有限值、越界索引、未知配置键、非法 mode/storage |
+| `invalid_input` | `InvalidInputError` | `ValueError` | k ≤ 0 或 k > n、非方阵、A/B 阶数不同、非有限值（含重复项求和溢出）、越界索引、未知配置键、非法 mode/storage |
 | `io` | `HsolveIOError` | `OSError` | 矩阵或配置文件不存在/损坏 |
 | `not_hermitian` | `NotHermitianError` | `ValueError` | ‖M−Mᴴ‖_F/‖M‖_F > `hermitian_tol` |
 | `unsupported` | `UnsupportedError` | `NotImplementedError` | 当前版本不支持的组合（如 B 不定时的 interval） |
@@ -104,7 +108,10 @@ Python 内置异常，`except ValueError` 等惯用写法照常生效：
 | `not_converged` | `NotConvergedError` | `RuntimeError` | — |
 | `internal` | `InternalError` | `RuntimeError` | 内部不变量被破坏（缺陷，请报告） |
 
-参数类型错误（如 `k=2.5`、`config=42`、传入 `LinearOperator`）抛 `TypeError`。
+参数类型错误（如 `k=2.5`、`sigma='0.5'`、`config=42`、传入 `LinearOperator`）抛 `TypeError`：实数参数
+（`sigma/lower/upper/tol/hermitian_tol`）接受 int、float、numpy 整数/浮点标量与 0 维数组，整数参数
+（`k/threads/verbose`）接受 int 与 numpy 整数，字符串一律不接受。
+测试 `test_every_error_code_has_its_class` 用 C++ 枚举导出的码表核对上表 9 个类，并逐个检查翻译。
 
 ## 4. 输入：格式、类型与拷贝
 
@@ -124,9 +131,21 @@ dtype 转换在这次写入中完成；稀疏输入从不稠密化。
 - 值 dtype：float32/64、complex64/128 直接读取（float32 → double 精确）；整数/布尔/float16/longdouble
   先由 numpy 转为 float64（longdouble 有舍入）；索引 int32/int64 直接读取，其它整型转 int64。
 - 实/复分派：A 或 B 含非零虚部 → 复数求解（实的一方在转换中提升，不另拷贝）；复数 dtype 但虚部
-  全为零 → 按实数求解（更快，与 CLI 读文件的行为一致），特征向量仍以 complex128 返回。
-- 规范化与 `hs::load_matrix` 相同：重复项求和、求和后的精确零丢弃、inf/nan 报 `InvalidInputError`；
-  三角存储按 `storage` 恢复；之后由 `hs::solve` 做厄密检查（缺陷 ≤ `hermitian_tol` 时取厄密部分）。
+  全为零 → 按实数求解（更快，与 CLI 读文件的行为一致），特征向量仍以 complex128 返回——文件路径
+  输入同样如此（文件中存的是复数类型即可）。
+- 形状在转换之前按调用者给出的方向检查（`A is not square (30x20)`、`B has order 31, A has 30`）：
+  csc 在内部是 Aᴴ，三角输入先要镜像，但报错不会出现转置后的形状或内部函数名。
+- 规范化与 `hs::load_matrix` 相同：重复项求和、求和后的精确零丢弃、inf/nan 报 `InvalidInputError`
+  （有限的重复项求和溢出成 inf 也一样，load_matrix 同样在求和之后检查）；三角存储按 `storage` 恢复；
+  之后由 `hs::solve` 做厄密检查（缺陷 ≤ `hermitian_tol` 时取厄密部分）。
+- 已知差异（待 driver 修复）：内存输入的厄密检查是 `hs::solve` 的 `hermitian_input`，它用
+  未缩放的平方和计算 ‖M−Mᴴ‖_F/‖M‖_F，并以「缺陷 > 0」决定是否取厄密部分；`hs::load_matrix` 用缩放
+  平方和（任意量级都准确）并按逐元素精确比较决定。只有元素模超出约 1e±154 时二者结果才不同：例如
+  非厄密矩阵乘以 1e155，内存输入的缺陷算成 NaN 而通过检查、随后在 LAPACK 中以 `InternalError` 失败
+  （路径输入报 `NotHermitianError`）；近厄密矩阵乘以 1e-150，内存输入的缺陷算成 0 而不取厄密部分。
+  这样的量级下求解本身也不可靠（2026-10-11 实测：精确厄密的 40 阶矩阵乘以 1e155 时内存与路径输入都以
+  `InternalError: dsyev failed` 失败，乘以 1e-160 时都报 Lanczos 基向量非有限；1e±150 都正常），实际
+  影响小。修复属于 driver（改用缩放缺陷与精确比较），届时内存输入自动一致，本模块无需改动。
 - 内存：调用期间 scipy 持有的输入与求解器的 CsrMatrix 并存（≈ 输入大小 + 1 份 CSR）；转换后的
   矩阵在结果返回 Python 前释放。
 
@@ -149,9 +168,10 @@ dtype 转换在这次写入中完成；稀疏输入从不稠密化。
 
 - 配置：同一 schema、同一校验器（`hs::parse_config`）；`result.config` 可直接存为 `config.json`。
 - 路径输入走与 CLI 相同的 `hs::load_matrix`（`hermitian_tol` 取自配置）；内存输入按同样的规则
-  规范化。测试（`tests/py/test_python_binding.py`）中 22 种实矩阵输入（csr/csc/coo 的 matrix 与
-  array 版本、int64 索引、乱序 + 重复项、显式零、bsr/lil、稠密 C/F 序与步长视图、三角存储……）与
-  9 种复矩阵输入在 `deterministic=true` 下得到**逐位相同**的特征值与特征向量。
+  规范化（例外：元素模超出约 1e±154 时的厄密检查，见 §4）。测试（`tests/py/test_python_binding.py`）
+  中 22 种实矩阵输入（csr/csc/coo 的 matrix 与 array 版本、int64 索引、乱序 + 重复项、显式零、
+  bsr/lil、稠密 C/F 序与步长视图、三角存储……）与 9 种复矩阵输入在 `deterministic=true` 下得到
+  **逐位相同**的特征值与特征向量。
 
 ## 8. 实测开销
 
@@ -193,6 +213,22 @@ dtype 转换在这次写入中完成；稀疏输入从不稠密化。
 - 内存输入：转换 + 结果交接占求解时间的 0.4–1.6%。路径输入的开销是读 npz（CLI 同样要付）。
 - 峰值差：Python 解释器 + numpy/scipy 约 0.07 GiB（`import scipy.sparse, hsolve` 实测），内存输入另含
   scipy 持有的那份矩阵。两次重复的特征值差 ≤ 1e-13（默认非确定性模式，见 `deterministic`）。
+- 重复项求和溢出检查（只在有重复项的列上多一次 `isfinite`）不改变转换耗时：上表的
+  `bench_pybind_convert 100 5` 与修改前的二进制交替各跑 3 次（2026-10-11），各项中位数之比 0.92–1.09，
+  在本机此时 ±10% 的噪声内（逐行排序 1.00，coo 打乱 0.92）。
+
+`load_matrix` 返回的矩阵所占内存（`python/bench/load_memory.py PATH --mode hsolve|scipy`，每种各一个
+进程，经 guard，2 核，2026-10-11；读入并 gc 后 RSS 的增长，两次重复；「改前」为 int64 indptr 版本）：
+
+| A.npz | n / nnz | 改前 (MiB) | 现在 (MiB) | `scipy.sparse.load_npz` (MiB) | 三个数组本身 (MiB) |
+|---|---|---|---|---|---|
+| yee-pec-box-1e5（实） | 109744 / 1.39M | 30.7, 30.7 | 17.0, 18.2 | 18.7, 18.6 | 16.3 |
+| syn-near-singular-complex-1e5（复） | 100000 / 2.40M | 66.8, 68.2 | 46.9, 46.9 | 47.1, 47.0 | 46.2 |
+| wg-square-1e6（实） | 998001 / 3.74M | 80.6, 80.6 | 48.3, 47.2 | 48.4, 49.5 | 46.6 |
+
+现在与 scipy 自己读文件持平。改前列索引占 12 B/nnz（scipy 拷成的 int64 副本 8 B，加仍被占用的 int32
+原件 4 B），现在 4 B/nnz；行指针由每行 8 B 降为 4 B——合计与实测差值一致（如 wg-square-1e6：
+3.74M × 8 B + 1e6 × 4 B ≈ 32 MiB）。读入耗时不变（0.06 / 0.37 / 0.15 s）。
 
 ## 9. 限制
 
