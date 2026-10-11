@@ -123,6 +123,11 @@ struct FactorOptions {
                               ///< 2 AMF; or kOrderingNestedDissection (hsolve, multithreaded)
   int ordering_threads = 0;   ///< threads of compute_ordering for kOrderingNestedDissection;
                               ///< 0 = `threads` (the ordering itself does not depend on it)
+  int block_analysis = 0;     ///< complex T with a MUMPS ordering: declare the embedding's pairs
+                              ///< {i, n+i} as blocks (ICNTL(15) = 1), so that MUMPS orders the
+                              ///< n-vertex graph of K. 1 on, 0 off, -1 auto (on when at least
+                              ///< half of the off-diagonal couplings are complex). Measured: see
+                              ///< the block-analysis note in the header comment
   int scaling = 7;            ///< ICNTL(8): 7 = recomputed at every factorization (shift-independent)
   int threads = 0;            ///< ICNTL(16) OpenMP threads; 0 = omp_get_max_threads()
   int mem_relax_pct = 35;     ///< ICNTL(14) initial value; on a workspace error it is doubled (at
@@ -172,6 +177,7 @@ struct FactorStats {
   index_t analyses = 0;      ///< successful + failed analyze() calls
   double analyze_s = 0.0;    ///< accumulated over all analyze() calls
   double ordering_s = 0.0;   ///< part of analyze_s spent in compute_ordering (hsolve orderings)
+  bool block_analysis = false;  ///< the last analysis declared the embedding's 2x2 blocks
   double factorize_s = 0.0;  ///< accumulated over all factorize() calls
   double solve_s = 0.0;      ///< accumulated over all solve() calls
   index_t factorizations = 0;    ///< successful + failed factorize() calls
@@ -399,12 +405,23 @@ struct OrderingOptions {
   int init_tries = 7;           ///< greedy-growing attempts for the coarsest separator
   int refine_passes = 10;       ///< node-FM refinement passes per level (stop early without gain)
   std::uint64_t seed = 2026;    ///< seed of the (counter-based, thread-independent) random choices
+  /// Complex T only. Compressed: order the n-vertex graph of K, then eliminate the two embedding
+  /// variables of every vertex back to back (half the graph; right when most couplings are
+  /// complex). Full: order the 2n-vertex graph of the embedding itself, which can exploit
+  /// couplings without imaginary part (if Im K vanishes on most of them, the embedding nearly
+  /// decouples into two copies of Re K: measured 2.95e12 vs 2.24e12 flops for METIS on the 2n
+  /// graph on a Bloch-periodic Yee cell, n = 1e5). Auto: Compressed when at least half of the
+  /// off-diagonal couplings have an imaginary part, else Full.
+  enum class Embedding { Auto, Compressed, Full };
+  Embedding embedding = Embedding::Auto;
 };
 
 struct OrderingStats {
   double seconds = 0.0;         ///< wall time of compute_ordering (graph construction included)
   int threads = 0;              ///< OpenMP threads used
-  index_t vertices = 0;         ///< vertices of the ordered graph (n: the embedding is compressed)
+  index_t vertices = 0;         ///< vertices of the ordered graph (n; 2n for a Full embedding)
+  double complex_fraction = 0;  ///< complex T: share of off-diagonal couplings with Im != 0
+  bool compressed = false;      ///< complex T: the n-vertex graph of K was ordered
   std::int64_t edges = 0;       ///< its undirected edges
   index_t separators = 0;       ///< separators computed (nonleaf subgraphs)
   index_t leaves = 0;           ///< subgraphs ordered by minimum degree
@@ -415,9 +432,10 @@ struct OrderingStats {
 /// embedding E of order 2n for complex T) by nested dissection: multilevel vertex separators
 /// (sorted heavy-edge matching, greedy growing, one-sided node FM refinement) applied
 /// recursively, the two halves of every separator ordered concurrently as OpenMP tasks, leaves by
-/// minimum degree. Complex T: the n-vertex graph of K is ordered and expanded so that the two
-/// embedding variables i and n+i of every vertex are eliminated one after the other (the
-/// embedding's pattern is that of K with 2x2 blocks, so this loses nothing and halves the graph).
+/// minimum degree. Complex T: either the n-vertex graph of K is ordered and expanded so that the
+/// two embedding variables i and n+i of every vertex are eliminated one after the other, or the
+/// embedding's own 2n-vertex graph (couplings whose real or imaginary part is zero in A and B
+/// left out, as in the factorization) is ordered - see OrderingOptions::embedding.
 /// Returns PERM_IN for ICNTL(7) = 1: entry v is the 1-based pivot position of variable v (size n,
 /// or 2n). Deterministic: a function of the pencil's pattern and `options` (threads excluded).
 /// Thread-safe (no shared state; uses its own OpenMP parallel region). O(nnz log n) work.

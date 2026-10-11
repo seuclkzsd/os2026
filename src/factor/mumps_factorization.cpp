@@ -12,6 +12,7 @@
 
 #include "factor/mumps_api.hpp"
 #include "factor/mumps_input.hpp"
+#include "factor/ordering_detail.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
 #include "hsolve/util.hpp"
@@ -56,6 +57,8 @@ const FactorOptions& validated(const FactorOptions& o) {
   if (o.ooc_dir.size() >= sizeof(DMUMPS_STRUC_C::ooc_tmpdir))
     HS_THROW(InvalidInput, "FactorOptions.ooc_dir is longer than MUMPS allows ("
                                << sizeof(DMUMPS_STRUC_C::ooc_tmpdir) - 1 << " characters)");
+  if (o.block_analysis < -1 || o.block_analysis > 1)
+    HS_THROW(InvalidInput, "FactorOptions.block_analysis must be -1, 0 or 1, got " << o.block_analysis);
   if (o.verbosity < 0)
     HS_THROW(InvalidInput, "FactorOptions.verbosity must be >= 0, got " << o.verbosity);
   return o;
@@ -190,6 +193,34 @@ void MumpsFactorization<T, U>::analyze(const ShiftedPencil<T>& pencil, double al
     mumps_.icntl(7) = mumps_ordering();
     s.perm_in = nullptr;
   }
+  // Complex T with a MUMPS ordering: the embedding's pairs {i, n+i} as blocks (ICNTL(15)=1), so
+  // that MUMPS orders the n-vertex graph of K (FactorOptions::block_analysis).
+  bool blocks = false;
+  if constexpr (kEmbeddingFactor == 2) {
+    if (given.empty() && options_.block_analysis != 0)
+      blocks = options_.block_analysis > 0 ||
+               ordering::complex_coupling_fraction(pencil) >= ordering::kCompressedFraction;
+  }
+  if (blocks) {
+    const int n = static_cast<int>(pencil.order());
+    blkptr_.resize(static_cast<std::size_t>(n) + 1);
+    blkvar_.resize(static_cast<std::size_t>(2 * n));
+    for (int b = 0; b <= n; ++b) blkptr_[b] = 2 * b + 1;
+    for (int b = 0; b < n; ++b) {
+      blkvar_[2 * b] = b + 1;          // Re part of vertex b
+      blkvar_[2 * b + 1] = n + b + 1;  // Im part
+    }
+    mumps_.icntl(15) = 1;
+    s.nblk = n;
+    s.blkptr = blkptr_.data();
+    s.blkvar = blkvar_.data();
+  } else {
+    mumps_.icntl(15) = 0;
+    s.nblk = 0;
+    s.blkptr = nullptr;
+    s.blkvar = nullptr;
+  }
+  stats_.block_analysis = blocks;
 
   const int info1 = mumps_.run(kAnalyze);
   s.perm_in = nullptr;

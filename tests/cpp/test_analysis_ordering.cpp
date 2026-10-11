@@ -14,6 +14,7 @@
 #include <set>
 #include <vector>
 
+#include "factor/mumps_factorization.hpp"
 #include "factor/ordering_detail.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
@@ -336,6 +337,7 @@ TYPED_TEST(FactorOrderingPencil, PivotOrderIsAValidPermutation) {
   hs::OrderingStats st;
   hs::OrderingOptions o;
   o.threads = 2;
+  o.embedding = hs::OrderingOptions::Embedding::Compressed;  // pairs (complex T)
   const std::vector<int> perm = hs::compute_ordering(pencil, o, &st);
   const index_t n = pencil.order();
   const index_t m = hs::is_complex_v<T> ? 2 * n : n;
@@ -445,6 +447,166 @@ TYPED_TEST(FactorOrderingPencil, InertiaCounterReusesTheOrder) {
   const hs::Inertia in = counter.count(1.0, -s);
   EXPECT_TRUE(in.valid);
   EXPECT_EQ(in.neg, k);
+}
+
+// Null-pivot detection depends on the elimination order (factor.hpp): shifts exactly on
+// eigenvalues must still be flagged with the nested-dissection order, and perturbed shifts
+// factorize with the exact inertia (as FactorSingular checks for the MUMPS orderings).
+TYPED_TEST(FactorOrderingPencil, ShiftOnAnEigenvalueIsSingular) {
+  using T = TypeParam;
+  for (auto [nx, ny] : {std::pair<index_t, index_t>{50, 51}, {60, 60}}) {
+    const auto a = hs::test::laplacian_2d<T>(nx, ny);
+    const auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
+    const ShiftedPencil<T> pencil(a, nullptr);
+    hs::FactorOptions fo;
+    fo.ordering = hs::kOrderingNestedDissection;
+    auto f = hs::make_mumps_factorization<T>(fo);
+    f->analyze(pencil, 1.0, -3.0);
+    const index_t n = static_cast<index_t>(w.size());
+    for (int t = 0; t < 16; ++t) {
+      const double lambda = w[(n - 1) * t / 15];
+      EXPECT_FALSE(f->factorize(1.0, -lambda)) << nx << "x" << ny << " lambda=" << lambda;
+      EXPECT_FALSE(f->inertia().valid);
+      const double sigma = lambda + 8e-8;
+      ASSERT_TRUE(f->factorize(1.0, -sigma)) << "perturbed shift " << sigma;
+      EXPECT_EQ(f->inertia().neg, count_below(w, sigma));
+    }
+  }
+}
+
+// ---------------------------------------------------------------- complex embedding choices
+
+// 2-D Laplacian whose x-couplings carry a phase on every fifth grid row (Hermitian; about 10% of
+// the couplings complex), and the same with a phase on every x-coupling (about 50%).
+CsrMatrix<cplx> phased_laplacian(index_t nx, index_t ny, int every_row) {
+  std::vector<index_t> r, c;
+  std::vector<cplx> v;
+  auto add_edge = [&](index_t p, index_t q, cplx x) {
+    r.push_back(p), c.push_back(q), v.push_back(x);
+    r.push_back(q), c.push_back(p), v.push_back(std::conj(x));
+  };
+  for (index_t j = 0; j < ny; ++j)
+    for (index_t i = 0; i < nx; ++i) {
+      const index_t p = i + j * nx;
+      r.push_back(p), c.push_back(p), v.push_back(cplx(4.0));
+      const cplx x = (j % every_row == 0) ? -std::polar(1.0, 0.3 * static_cast<double>(i + 1)) : cplx(-1.0);
+      if (i + 1 < nx) add_edge(p, p + 1, x);
+      if (j + 1 < ny) add_edge(p, p + nx, cplx(-1.0));
+    }
+  return hs::csr_from_coo<cplx>(nx * ny, nx * ny, r, c, v);
+}
+
+TEST(FactorOrderingEmbedding, CouplingFractionCountsComplexCouplings) {
+  const auto real_valued = hs::test::laplacian_2d<cplx>(20, 20);
+  const ShiftedPencil<cplx> p0(real_valued, nullptr);
+  EXPECT_EQ(ord::complex_coupling_fraction(p0), 0.0);
+  const auto partly = phased_laplacian(20, 20, 5);  // 4 of 20 rows: 4*19 of 2*20*19 couplings
+  const ShiftedPencil<cplx> p1(partly, nullptr);
+  EXPECT_NEAR(ord::complex_coupling_fraction(p1), 4.0 * 19 / (2.0 * 20 * 19), 1e-12);
+  std::vector<double> w(300);
+  for (std::size_t i = 0; i < w.size(); ++i) w[i] = -1.0 + 0.01 * static_cast<double>(i);
+  const auto full = hs::test::prescribed_spectrum<cplx>(w, 6, 3);
+  const ShiftedPencil<cplx> p2(full, nullptr);
+  EXPECT_GT(ord::complex_coupling_fraction(p2), 0.9);
+  const auto real_matrix = hs::test::laplacian_2d<double>(20, 20);
+  const ShiftedPencil<double> p3(real_matrix, nullptr);
+  EXPECT_EQ(ord::complex_coupling_fraction(p3), 0.0);
+}
+
+TEST(FactorOrderingEmbedding, AutoOrdersTheFullEmbeddingWhenFewCouplingsAreComplex) {
+  const auto a = phased_laplacian(40, 30, 5);
+  const ShiftedPencil<cplx> pencil(a, nullptr);
+  const index_t n = pencil.order();
+  hs::OrderingStats st;
+  hs::OrderingOptions o;
+  const std::vector<int> perm = hs::compute_ordering(pencil, o, &st);
+  EXPECT_FALSE(st.compressed);
+  EXPECT_EQ(st.vertices, 2 * n);
+  std::vector<int> sorted = perm;
+  std::sort(sorted.begin(), sorted.end());
+  for (index_t k = 0; k < 2 * n; ++k) ASSERT_EQ(sorted[k], k + 1);
+  o.embedding = hs::OrderingOptions::Embedding::Compressed;
+  const std::vector<int> paired = hs::compute_ordering(pencil, o, &st);
+  EXPECT_TRUE(st.compressed);
+  EXPECT_EQ(st.vertices, n);
+  for (index_t v = 0; v < n; ++v) EXPECT_EQ(paired[n + v], paired[v] + 1);
+  // Both orders factorize the embedding with the inertia of an AMD factorization, and solve.
+  hs::FactorOptions amd;
+  amd.ordering = 0;
+  auto ref = hs::make_mumps_factorization<cplx>(amd);
+  ref->analyze(pencil, 1.0, -2.0);
+  ASSERT_TRUE(ref->factorize(1.0, -2.0));
+  const CsrMatrix<cplx> km = hs::add(cplx(1.0), a, cplx(-2.0), hs::identity<cplx>(n));
+  for (auto mode : {hs::OrderingOptions::Embedding::Full, hs::OrderingOptions::Embedding::Compressed}) {
+    hs::OrderingOptions m;
+    m.embedding = mode;
+    hs::mumps::MumpsFactorization<cplx, double> f{hs::FactorOptions{}};
+    f.set_pivot_order(hs::compute_ordering(pencil, m));
+    f.analyze(pencil, 1.0, -2.0);
+    ASSERT_TRUE(f.factorize(1.0, -2.0));
+    EXPECT_EQ(f.inertia().neg, ref->inertia().neg);
+    EXPECT_LT(solve_backward_error(f, km), 1e-13);
+  }
+}
+
+TEST(FactorBlockAnalysis, DeclaredBlocksKeepTheInertiaAndSingularDetection) {
+  const index_t n = 1500;
+  std::vector<double> w(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) w[i] = -2.0 + 5.0 * (static_cast<double>(i) + 0.5) / static_cast<double>(n);
+  const auto a = hs::test::prescribed_spectrum<cplx>(w, 12, 2026);
+  const ShiftedPencil<cplx> pencil(a, nullptr);
+  for (int ordering : {0, 3, 5}) {
+    for (int blocks : {-1, 1}) {
+      hs::FactorOptions fo;
+      fo.ordering = ordering;
+      fo.block_analysis = blocks;
+      auto f = hs::make_mumps_factorization<cplx>(fo);
+      f->analyze(pencil, 1.0, 0.0);
+      EXPECT_TRUE(f->stats().block_analysis) << "ordering " << ordering << " blocks " << blocks;
+      for (index_t k : {150, 700, 1350}) {
+        const double s = 0.5 * (w[k - 1] + w[k]);
+        ASSERT_TRUE(f->factorize(1.0, -s));
+        EXPECT_EQ(f->inertia().neg, k) << "ordering " << ordering;
+        const CsrMatrix<cplx> km = hs::add(cplx(1.0), a, cplx(-s), hs::identity<cplx>(n));
+        EXPECT_LT(solve_backward_error(*f, km), 1e-13);
+      }
+      for (index_t k : {100, 900}) {
+        EXPECT_FALSE(f->factorize(1.0, -w[k])) << "exact eigenvalue " << w[k] << ", ordering " << ordering;
+        EXPECT_FALSE(f->inertia().valid);
+      }
+    }
+  }
+}
+
+TEST(FactorBlockAnalysis, AutoFollowsTheComplexFractionAndIgnoresGivenOrders) {
+  const auto partly = phased_laplacian(40, 40, 5);
+  const ShiftedPencil<cplx> pencil(partly, nullptr);
+  hs::FactorOptions fo;
+  fo.ordering = 0;
+  fo.block_analysis = -1;
+  auto f = hs::make_mumps_factorization<cplx>(fo);
+  f->analyze(pencil, 1.0, -1.0);
+  EXPECT_FALSE(f->stats().block_analysis);  // about 10% of the couplings are complex
+  fo.block_analysis = 1;
+  auto g = hs::make_mumps_factorization<cplx>(fo);
+  g->analyze(pencil, 1.0, -1.0);
+  EXPECT_TRUE(g->stats().block_analysis);
+  ASSERT_TRUE(f->factorize(1.0, -1.0));
+  ASSERT_TRUE(g->factorize(1.0, -1.0));
+  EXPECT_EQ(f->inertia().neg, g->inertia().neg);
+  // hsolve's own ordering is a given order: no MUMPS blocks.
+  fo.ordering = hs::kOrderingNestedDissection;
+  auto h = hs::make_mumps_factorization<cplx>(fo);
+  h->analyze(pencil, 1.0, -1.0);
+  EXPECT_FALSE(h->stats().block_analysis);
+  // Real T: nothing to declare.
+  const auto real_matrix = hs::test::laplacian_2d<double>(30, 30);
+  const ShiftedPencil<double> rp(real_matrix, nullptr);
+  hs::FactorOptions ro;
+  ro.block_analysis = 1;
+  auto r = hs::make_mumps_factorization<double>(ro);
+  r->analyze(rp, 1.0, 0.0);
+  EXPECT_FALSE(r->stats().block_analysis);
 }
 
 TEST(FactorOrderingOptions, InvalidValuesAreRejected) {

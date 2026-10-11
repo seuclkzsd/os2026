@@ -24,7 +24,17 @@
 #include <cstdint>
 #include <vector>
 
+#include "hsolve/sparse.hpp"
+
 namespace hs::ordering {
+
+/// Share of the off-diagonal couplings (entries of the pencil's upper pattern) whose imaginary
+/// part is nonzero in A or B; 1 for a complex pencil without off-diagonal couplings, 0 for real
+/// T. Decides between the compressed and the full embedding (OrderingOptions::embedding, and
+/// FactorOptions::block_analysis = -1): compressed from kCompressedFraction on. O(nnz).
+template <class T>
+double complex_coupling_fraction(const ShiftedPencil<T>& pencil);
+inline constexpr double kCompressedFraction = 0.5;
 
 /// Undirected graph in CSR form: symmetric adjacency, no self-loops, positive integer vertex
 /// and edge weights (edge weights stored per adjacency entry, equal in both directions). Rows
@@ -115,7 +125,9 @@ std::vector<std::int32_t> minimum_degree(const Graph& g);
 struct DissectionParams {
   SeparatorParams separator;
   std::int32_t leaf_size = 120;    ///< subgraphs with at most this many vertices: minimum degree
-  std::int32_t task_size = 4096;   ///< subgraphs below this size are ordered inline, not as tasks
+  std::int32_t task_size = 512;    ///< subgraphs below this size are ordered inline, not as tasks
+                                   ///< (syn-mem27-46, 2 threads: 0.76 s at 150..500, 0.79 at 1000,
+                                   ///< 0.84 at 2000, 1.11 at 4096, 1.30 at 20000; serial 1.40 s)
   std::uint64_t seed = 0x6873'6f6c'7665'2026ULL;
 };
 
@@ -125,6 +137,8 @@ struct DissectionStats {
   std::int64_t top_separator = 0;   ///< vertices in the first (largest) separator
   std::vector<std::int64_t> depth_separator;  ///< separator vertices summed per dissection depth
   double top_separator_s = 0.0;     ///< time of the first separator (the serial part)
+  double work_s = 0.0;              ///< summed over threads: time in separators, subgraph
+                                    ///< extraction and leaves (wall time x threads minus idle)
   int threads = 1;                  ///< OpenMP threads that ran the dissection
 };
 

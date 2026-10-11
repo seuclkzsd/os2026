@@ -84,6 +84,7 @@ class MumpsFactorization final : public SparseFactorization<T> {
   bool discard_at_analysis_ = false;  ///< ICNTL(31) of the current analysis
   std::vector<int> pivot_order_in_;   ///< PERM_IN for the next analysis (empty: ICNTL(7) ordering)
   std::vector<int> pivot_order_out_;  ///< SYM_PERM of the current analysis
+  std::vector<int> blkptr_, blkvar_;  ///< ICNTL(15) blocks of the current analysis (complex T)
 };
 
 }  // namespace hs::mumps
