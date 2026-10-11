@@ -28,9 +28,10 @@
 // Output: one JSON object per line on stdout. Run through tools/run/guard.py.
 //
 // Reproduction of the numbers quoted in include/hsolve/factor.hpp (2 threads, cores 36,37):
-//   python3 tools/run/guard.py --skip-busy-check --cores 36,37 --mem-gb 8 -- \
-//     build/release/bench_certpar_inertia --case data/cases/<case> --threads 2 --reps 3 \
+//   python3 tools/run/guard.py --skip-busy-check --cores 36,37 --mem-gb 8 --
+//     build/release/bench_certpar_inertia --case data/cases/<case> --threads 2 --reps 3
 //     --eigs data/refs/<case>/eigenvalues.npy --exp discard,permin,blockpair,single <window>
+//   (one command line)
 //   (--exp counter --reps 5; --exp concurrent [--mumps-lock 0]), with the windows and orderings
 //   of the driver's certificates (hsolve reports, 2 threads):
 //   syn-mem27-46     --lower -0.0009953284018943528 --upper 0.0012144683426627602 --ordering 3
