@@ -250,10 +250,37 @@ def test_resolve_grid_matches_target_n():
 
 
 @pytest.mark.parametrize("kw", [dict(nx=4, target_n=100), dict(ny=4, target_n=100), dict(nx=4, pattern="x"),
-                                dict(family="cavity2d", nx=4, eps_slab=2.0), dict(nx=4, freq_ghz=-1.0)])
+                                dict(family="cavity2d", nx=4, eps_slab=2.0), dict(nx=4, freq_ghz=-1.0),
+                                dict(nx=4, eps_slab=2.25, slab_width=0.0), dict(nx=4, eps_slab=2.25, slab_width=10.5)])
 def test_case_spec_rejects_bad_input(kw):
     with pytest.raises(ValueError):
         wg.CaseSpec(**kw)
+
+
+def test_case_spec_normalises_numbers():
+    """numpy scalars (e.g. from a scripted sweep) become plain Python numbers; integer fields
+    must be integral."""
+    spec = wg.CaseSpec(nx=np.int64(6), freq_ghz=np.linspace(40.0, 60.0, 3)[1], eps_slab=np.float64(2.25),
+                       slab_width=np.float32(2.5), seed=np.int32(3))
+    assert type(spec.nx) is int and type(spec.seed) is int
+    assert type(spec.freq_ghz) is float and type(spec.eps_slab) is float and type(spec.slab_width) is float
+    with pytest.raises(TypeError):
+        wg.CaseSpec(nx=6.5)
+
+
+@pytest.mark.parametrize("spec,name", [
+    (wg.CaseSpec(nx=6, ny=4, eps_slab=np.float64(2.25), freq_ghz=np.linspace(40.0, 60.0, 3)[1], slab_width=3.0),
+     "my case"),
+    (wg.CaseSpec(nx=5, ny=5, slab_width=3.0, perturb=0.1, seed=4), "-dash;$x"),     # slab_width ignored: no slab
+    (wg.CaseSpec(family="cavity2d", nx=4, ny=6, pattern="diagonal"), "c'q"),
+])
+def test_command_line_round_trips_the_spec(spec, name):
+    """meta.params.command parses back (POSIX shell words) into the same inputs, so it
+    regenerates the case exactly; names with blanks or shell metacharacters stay one word."""
+    argv = shlex.split(wg.command_line(spec, name, spec.nx, spec.ny))
+    assert argv[:3] == ["python", "-m", "tools.gen.waveguide"]
+    again, again_name, _ = wg.parse_args(argv[3:])
+    assert again == spec and again_name == name
 
 
 def _check_targets_against_discrete(gen, A, B):

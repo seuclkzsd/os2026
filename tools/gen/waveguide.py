@@ -62,6 +62,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import operator
+import shlex
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -499,12 +501,22 @@ class CaseSpec:
     seed: int = 0
 
     def __post_init__(self):
+        # Plain Python numbers (e.g. from numpy scalars of a scripted sweep), so that params and the
+        # recorded command line hold exactly round-tripping values; integers must be integral.
+        for name in ("a", "b", "freq_ghz", "eps_slab", "mu_slab", "slab_width", "perturb"):
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, float(getattr(self, name)))
+        for name in ("nx", "ny", "target_n", "seed"):
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, operator.index(getattr(self, name)))
         if self.family not in FAMILIES:
             raise ValueError(f"family must be one of {FAMILIES}")
         if self.a <= 0 or self.b <= 0 or self.freq_ghz <= 0 or self.eps_slab <= 0 or self.mu_slab <= 0:
             raise ValueError("a, b, freq, eps_slab and mu_slab must be positive")
         if self.family == "cavity2d" and (self.eps_slab, self.mu_slab) != (1.0, 1.0):
             raise ValueError("cavity2d is the hollow TE cutoff problem: no slab")
+        if self.slab_width is not None and not 0.0 < self.slab_width <= self.a:
+            raise ValueError("slab_width must lie in (0, a]; an air-filled guide keeps eps_slab = mu_slab = 1")
         if (self.nx is None) == (self.target_n is None):
             raise ValueError("give exactly one of nx (optionally with ny) and target_n")
         if self.ny is not None and self.nx is None:
@@ -517,10 +529,7 @@ class CaseSpec:
         """Resolved slab width (0 for an empty guide)."""
         if self.family != "waveguide" or (self.eps_slab, self.mu_slab) == (1.0, 1.0):
             return 0.0
-        w = self.a / 2.0 if self.slab_width is None else float(self.slab_width)
-        if not 0.0 <= w <= self.a:
-            raise ValueError("slab_width must lie in [0, a]")
-        return w
+        return self.a / 2.0 if self.slab_width is None else self.slab_width
 
     @property
     def loaded(self) -> bool:
@@ -571,15 +580,17 @@ def build_mesh(spec: CaseSpec, nx: int, ny: int) -> tuple[TriMesh, np.ndarray, n
 
 
 def command_line(spec: CaseSpec, name: str, nx: int, ny: int) -> str:
-    """CLI invocation that regenerates the case bit for bit (resolved grid, all parameters)."""
-    args = [f"--family {spec.family}", f"--a {spec.a!r}", f"--b {spec.b!r}"]
+    """Shell command (POSIX quoting) that regenerates the case bit for bit: the resolved grid and
+    every input as given, floats as round-tripping reprs, options in --key=value form so that no
+    value (e.g. a name starting with '-') can be taken for an option."""
+    args = {"family": spec.family, "a": repr(spec.a), "b": repr(spec.b)}
     if spec.family == "waveguide":
-        args += [f"--freq {spec.freq_ghz!r}", f"--eps-slab {spec.eps_slab!r}", f"--mu-slab {spec.mu_slab!r}"]
-        if spec.loaded:
-            args.append(f"--slab-width {spec.width!r}")
-    args += [f"--nx {nx}", f"--ny {ny}", f"--pattern {spec.pattern}", f"--perturb {spec.perturb!r}",
-             f"--seed {spec.seed}", f"--name {name}"]
-    return "python -m tools.gen.waveguide " + " ".join(args)
+        args.update({"freq": repr(spec.freq_ghz), "eps-slab": repr(spec.eps_slab), "mu-slab": repr(spec.mu_slab)})
+        if spec.slab_width is not None:
+            args["slab-width"] = repr(spec.slab_width)
+    args.update({"nx": str(nx), "ny": str(ny), "pattern": spec.pattern, "perturb": repr(spec.perturb),
+                 "seed": str(spec.seed), "name": name})
+    return shlex.join(["python", "-m", "tools.gen.waveguide", *(f"--{k}={v}" for k, v in args.items())])
 
 
 @dataclass
@@ -626,7 +637,7 @@ def generate(spec: CaseSpec, name: str) -> GeneratedCase:
     if wave:
         k0 = wavenumber(spec.freq_ghz)
         A, B = waveguide_pencil(disc, k0, eps_r, mu_r)
-        kt2_shift = k0 * k0 * max(1.0, spec.eps_slab * spec.mu_slab)
+        kt2_shift = k0 * k0 * (max(1.0, spec.eps_slab * spec.mu_slab) if spec.loaded else 1.0)
     else:
         k0 = 0.0
         A, B = cavity_pencil(disc)
