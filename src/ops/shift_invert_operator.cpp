@@ -38,8 +38,9 @@ constexpr double kRoundingLevel = 8.0 * std::numeric_limits<double>::epsilon();
 template <class T>
 void check_usable(const SparseFactorization<T>& factor, const char* who) {
   if (!factor.inertia().valid)
-    HS_THROW(InvalidInput, who << ": the factor holds no usable factorization (the last factorize() "
-                                  "failed or was never called)");
+    HS_THROW(InvalidInput,
+             who << ": the factor holds no usable factorization (the last factorize() "
+                    "failed or was never called)");
 }
 
 }  // namespace
@@ -126,20 +127,30 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
     active[k] = rel[k] > refinement_.rel_tol && omega[k] > floor;
     remaining += active[k];
   }
+  std::vector<index_t> cols;
   for (int step = 0; step < refinement_.max_steps && remaining > 0; ++step) {
-    // Corrections K~^{-1} r for the active columns, then the candidate iterates y + correction
-    // and their residuals. Finished columns keep the one-call block solve with a zero right-hand
-    // side (zero correction); their candidate residuals are ignored.
-    for (index_t k = 0; k < p; ++k) {
-      if (active[k]) {
-        std::copy(r + k * n, r + (k + 1) * n, c + k * n);
-      } else {
-        std::fill(c + k * n, c + (k + 1) * n, T(0));
-      }
-    }
-    factor_->solve(c, p, n);
+    // Corrections K~^{-1} r of the active columns, solved as one block of only those columns
+    // (a block solve costs more with every column, zero or not: 46 vs 81 ms for 1 vs 16 columns
+    // on syn-mem27-46, 4 threads), packed into the leading columns of c. Then the candidate
+    // iterates y + correction (y itself for finished columns) and their residuals; the finished
+    // columns' candidate residuals are ignored.
+    cols.clear();
+    for (index_t k = 0; k < p; ++k)
+      if (active[k]) cols.push_back(k);
+    const index_t na = static_cast<index_t>(cols.size());
+    for (index_t j = 0; j < na; ++j) std::copy(r + cols[j] * n, r + (cols[j] + 1) * n, c + j * n);
+    factor_->solve(c, na, n);
     ++refinement_steps_;
-    for (index_t k = 0; k < p; ++k) linalg::axpy(n, T(1), y + k * ldy, c + k * n);
+    // Unpack in decreasing order: column cols[j] >= j, so its packed source j is never
+    // overwritten before it is read.
+    for (index_t j = na - 1; j >= 0; --j) {
+      const index_t k = cols[j];
+      T* ck = c + k * n;
+      if (k != j) std::copy(c + j * n, c + (j + 1) * n, ck);
+      linalg::axpy(n, T(1), y + k * ldy, ck);
+    }
+    for (index_t k = 0; k < p; ++k)
+      if (!active[k]) std::copy(y + k * ldy, y + k * ldy + n, c + k * n);
     residual(x, ldx, c, n, p, candidate_omega.data());
     for (index_t k = 0; k < p; ++k) {
       if (!active[k]) continue;
@@ -175,7 +186,7 @@ void FactorSolveOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
   factor_->solve(y, p, ldy);
 }
 
-#define HS_INSTANTIATE_SHIFT_INVERT(T) \
+#define HS_INSTANTIATE_SHIFT_INVERT(T)   \
   template class ShiftInvertOperator<T>; \
   template class FactorSolveOperator<T>;
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_SHIFT_INVERT)

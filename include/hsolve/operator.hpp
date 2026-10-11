@@ -109,8 +109,8 @@ class ShiftInvertOperator final : public LinearOperator<T> {
   index_t refinement_steps_ = 0;
   double last_rel_residual_ = 0.0;
   double last_backward_error_ = 0.0;
-  std::vector<T> residual_;   ///< refinement workspace: residuals (n x p)
-  std::vector<T> candidate_;  ///< refinement workspace: corrected candidate iterates (n x p)
+  std::vector<T> residual_;      ///< refinement workspace: residuals (n x p)
+  std::vector<T> candidate_;     ///< refinement workspace: corrected candidate iterates (n x p)
   std::vector<double> scratch_;  ///< sparse-kernel scratch (interleaved copies)
 };
 

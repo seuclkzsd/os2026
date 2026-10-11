@@ -1,6 +1,7 @@
 // Unit tests for the P4 "solvephase" changes of src/ops: the operators on every sparse KernelPath
 // (results unchanged within rounding / within the refinement tolerance against the P1 Reference
-// kernels), the fused refinement residual, and FactorSolveOperator (Op = K^{-1}).
+// kernels), the fused refinement residual, refinement that stops at the rounding level and
+// solves only the active columns, and FactorSolveOperator (Op = K^{-1}).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -182,6 +183,39 @@ TYPED_TEST(OpsKernelPaths, RefinementStopsAtTheRoundingLevel) {
   EXPECT_LE(max_rel_diff(n, p, y2.data(), n, y1.data(), n), 1e-6);
 }
 
+// Columns that are already done (here: zero right-hand sides, residual exactly 0) are left out of
+// the correction solves; the active ones still reach double accuracy with a single factor, and
+// the finished ones are returned unchanged.
+TYPED_TEST(OpsKernelPaths, RefinementSolvesOnlyTheActiveColumns) {
+  using T = TypeParam;
+  Pencil<T> c(300, true);
+  ShiftedPencil<T> pencil(c.a, c.b_ptr());
+  FactorOptions single;
+  single.precision = FactorPrecision::Single;
+  auto f = hs::make_mumps_factorization<T>(single);
+  f->analyze(pencil, 1.0, -c.sigma);
+  ASSERT_TRUE(f->factorize(1.0, -c.sigma));
+  const index_t n = c.n, p = 5, ld = n + 1;
+  auto x = random_block<T>(n, p, ld, 41);
+  for (index_t k : {0, 2, 3})  // columns 1 and 4 stay active
+    std::fill(x.begin() + k * ld, x.begin() + k * ld + n, T(0));
+  const auto db = hs::test::to_dense(c.b);
+  hs::test::DenseShiftInvertOperator<T> exact(hs::test::to_dense(c.a), &db, c.sigma);
+  std::vector<T> y(static_cast<std::size_t>(ld * p), T(5)), z(static_cast<std::size_t>(n * p));
+  exact.apply(x.data(), ld, z.data(), n, p);
+  hs::SolveRefinement refine;
+  refine.max_steps = 10;
+  refine.rel_tol = 1e-13;
+  hs::ShiftInvertOperator<T> op(*f, pencil, c.sigma, refine);
+  op.apply(x.data(), ld, y.data(), ld, p);
+  EXPECT_GE(op.refinement_steps(), 1);
+  for (index_t k : {0, 2, 3})
+    for (index_t i = 0; i < n; ++i) ASSERT_EQ(y[i + k * ld], T(0)) << "k=" << k;
+  for (index_t k : {1, 4})
+    EXPECT_LE(max_rel_diff(n, 1, y.data() + k * ld, ld, z.data() + k * n, n), 1e-11) << "k=" << k;
+  for (index_t k = 0; k < p; ++k) EXPECT_EQ(y[n + k * ld], T(5)) << "padding written";
+}
+
 TYPED_TEST(OpsKernelPaths, UnavailablePathIsRefusedAtConstruction) {
   using T = TypeParam;
   if (hs::kernel_path_available(KernelPath::Avx512)) GTEST_SKIP() << "AVX-512 available here";
@@ -234,19 +268,22 @@ TYPED_TEST(OpsFactorSolve, RequiresAUsableFactorAndDetectsRefactorization) {
   const auto w = hs::test::laplacian_2d_eigenvalues(20, 21);
   ShiftedPencil<T> pencil(a, nullptr);
   auto f = hs::make_mumps_factorization<T>();
-  EXPECT_EQ(error_code_of([&] { hs::FactorSolveOperator<T> op(*f); }), hs::Error::Code::InvalidInput);
+  EXPECT_EQ(error_code_of([&] { hs::FactorSolveOperator<T> op(*f); }),
+            hs::Error::Code::InvalidInput);
   const double s1 = 0.5 * (w[100] + w[101]), s2 = 0.5 * (w[200] + w[201]);  // in spectral gaps
   f->analyze(pencil, 1.0, -s1);
   const double lambda = w[w.size() / 2];
   ASSERT_FALSE(f->factorize(1.0, -lambda));  // singular shift
-  EXPECT_EQ(error_code_of([&] { hs::FactorSolveOperator<T> op(*f); }), hs::Error::Code::InvalidInput);
+  EXPECT_EQ(error_code_of([&] { hs::FactorSolveOperator<T> op(*f); }),
+            hs::Error::Code::InvalidInput);
   ASSERT_TRUE(f->factorize(1.0, -s1));
   hs::FactorSolveOperator<T> op(*f);
   const auto x = random_block<T>(a.nrows, 1, a.nrows, 5);
   std::vector<T> y(static_cast<std::size_t>(a.nrows));
   op.apply(x.data(), a.nrows, y.data(), a.nrows, 1);
   ASSERT_TRUE(f->factorize(1.0, -s2));
-  EXPECT_EQ(error_code_of([&] { op.apply(x.data(), a.nrows, y.data(), a.nrows, 1); }), hs::Error::Code::Internal);
+  EXPECT_EQ(error_code_of([&] { op.apply(x.data(), a.nrows, y.data(), a.nrows, 1); }),
+            hs::Error::Code::Internal);
 }
 
 // A single-precision factor gives K^{-1} to single accuracy only (no refinement here).
