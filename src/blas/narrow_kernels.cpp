@@ -14,11 +14,15 @@
 //     dgemm_small_kernel_nn_skylakex.c (one cache line per column per tile: strided, latency-bound
 //     for the large leading dimensions of MUMPS fronts).
 //   * TN: dgemm_small_kernel_tn_skylakex.c's scheme - zmm accumulators for a block of C, each a
-//     dot product of a column of A with a column of B in 8-lane chunks, masked tails, horizontal
-//     reduction - with the block shape changed to 4 columns of A x up to 4 columns of B.
+//     dot product of a column of A with a column of B in 8-lane chunks, masked tails, and four
+//     horizontal sums reduced together into one ymm (its REDUCE_4) - with the block shape changed
+//     to 4 columns of A x up to 4 columns of B.
+//   * NN with at most 32 rows: register accumulators over all of k (the small-matrix kernel's
+//     structure), no row-chunk buffer.
 // Every C element is computed in a fixed order that does not depend on the row split (NN: one
-// FMA chain over k; TN: 8 lane chains over k, then a fixed reduction tree), so results are
-// identical for any thread count.
+// FMA chain over k, then alpha * t + beta * c with separately rounded products, on either NN path;
+// TN: 8 lane chains over k, then the same reduction tree for every row), so results are identical
+// for any thread count.
 #include <immintrin.h>
 #include <omp.h>
 
@@ -173,9 +177,85 @@ HS_AVX512 void nn_tiles_avx512(fint rows, fint ng, const double* a, fint lda, co
   }
 }
 
+// C(m x NG) = alpha * A(m x k) * B(k x NG) + beta * C for m <= 8 MB rows, accumulated in
+// registers (no t buffer: for the tiny products of MUMPS' 2-D solves). Per element the same
+// arithmetic as the chunked path - one FMA chain over k from 0, then alpha * t + beta * c with
+// separately rounded products - so the result does not depend on which path a row takes.
+template <int MB, int NG>
+HS_AVX512 void nn_reg_avx512(fint m, fint k, double alpha, const double* a, fint lda,
+                             const double* b, fint ldb, double beta, double* c, fint ldc) {
+  const __mmask8 last = static_cast<__mmask8>((1u << (m - 8 * (MB - 1))) - 1u);
+  __m512d acc[MB][NG];
+  for (int r = 0; r < MB; ++r)
+    for (int j = 0; j < NG; ++j) acc[r][j] = _mm512_setzero_pd();
+  for (fint kk = 0; kk < k; ++kk) {
+    const double* ak = a + static_cast<idx>(kk) * lda;
+    __m512d x[MB];
+    for (int r = 0; r < MB - 1; ++r) x[r] = _mm512_loadu_pd(ak + 8 * r);
+    x[MB - 1] = _mm512_maskz_loadu_pd(last, ak + 8 * (MB - 1));
+    for (int j = 0; j < NG; ++j) {
+      const __m512d bj = _mm512_set1_pd(b[kk + static_cast<idx>(j) * ldb]);
+      for (int r = 0; r < MB; ++r) acc[r][j] = _mm512_fmadd_pd(x[r], bj, acc[r][j]);
+    }
+  }
+  const __m512d va = _mm512_set1_pd(alpha);
+  const __m512d vb = _mm512_set1_pd(beta);
+  for (int j = 0; j < NG; ++j)
+    for (int r = 0; r < MB; ++r) {
+      double* cj = c + static_cast<idx>(j) * ldc + 8 * r;
+      const __mmask8 mk = r == MB - 1 ? last : static_cast<__mmask8>(0xFF);
+      __m512d v = _mm512_mul_pd(va, acc[r][j]);
+      if (beta != 0.0) v = _mm512_add_pd(v, _mm512_mul_pd(vb, _mm512_maskz_loadu_pd(mk, cj)));
+      _mm512_mask_storeu_pd(cj, mk, v);
+    }
+}
+
+template <int MB>
+HS_AVX512 void nn_reg_dispatch(fint m, fint n, fint k, double alpha, const double* a, fint lda,
+                               const double* b, fint ldb, double beta, double* c, fint ldc) {
+  for (fint j0 = 0; j0 < n; j0 += 4) {
+    const double* bj = b + static_cast<idx>(j0) * ldb;
+    double* cj = c + static_cast<idx>(j0) * ldc;
+    switch (std::min<fint>(4, n - j0)) {
+      case 4:
+        nn_reg_avx512<MB, 4>(m, k, alpha, a, lda, bj, ldb, beta, cj, ldc);
+        break;
+      case 3:
+        nn_reg_avx512<MB, 3>(m, k, alpha, a, lda, bj, ldb, beta, cj, ldc);
+        break;
+      case 2:
+        nn_reg_avx512<MB, 2>(m, k, alpha, a, lda, bj, ldb, beta, cj, ldc);
+        break;
+      default:
+        nn_reg_avx512<MB, 1>(m, k, alpha, a, lda, bj, ldb, beta, cj, ldc);
+        break;
+    }
+  }
+}
+
 HS_AVX512 void nn_rows_avx512(fint i0, fint i1, fint n, fint k, double alpha, const double* a,
                               fint lda, const double* b, fint ldb, double beta, double* c,
                               fint ldc) {
+  const fint m = i1 - i0;
+  if (m <= 32) {
+    const double* ai = a + i0;
+    double* ci = c + i0;
+    switch ((m + 7) / 8) {
+      case 4:
+        nn_reg_dispatch<4>(m, n, k, alpha, ai, lda, b, ldb, beta, ci, ldc);
+        break;
+      case 3:
+        nn_reg_dispatch<3>(m, n, k, alpha, ai, lda, b, ldb, beta, ci, ldc);
+        break;
+      case 2:
+        nn_reg_dispatch<2>(m, n, k, alpha, ai, lda, b, ldb, beta, ci, ldc);
+        break;
+      default:
+        nn_reg_dispatch<1>(m, n, k, alpha, ai, lda, b, ldb, beta, ci, ldc);
+        break;
+    }
+    return;
+  }
   const fint rc = nn_row_chunk(n);
   alignas(64) double t[4096];
   for (fint r0 = i0; r0 < i1; r0 += rc) {
@@ -197,12 +277,26 @@ HS_AVX512 void nn_rows_avx512(fint i0, fint i1, fint n, fint k, double alpha, co
   }
 }
 
-// out(IB x NG, ld IB) = A(:, 0..IB)^T * B(:, 0..NG), A k x IB (lda), B k x NG (ldb).
+// The four horizontal sums of a0..a3 as one ymm ({sum a0, sum a1, sum a2, sum a3}): pairwise
+// adds within 128-bit lanes, then across lanes - the reduction scheme of OpenBLAS' REDUCE_4
+// (dgemm_small_kernel_tn_skylakex.c) with fewer cross-lane permutes. Fixed order: deterministic.
+HS_AVX512 inline __m256d reduce4(__m512d a0, __m512d a1, __m512d a2, __m512d a3) {
+  const __m512d u01 = _mm512_add_pd(_mm512_unpacklo_pd(a0, a1), _mm512_unpackhi_pd(a0, a1));
+  const __m512d u23 = _mm512_add_pd(_mm512_unpacklo_pd(a2, a3), _mm512_unpackhi_pd(a2, a3));
+  const __m512d z = _mm512_add_pd(_mm512_shuffle_f64x2(u01, u23, 0x88),   // lanes 0, 2 | 0, 2
+                                  _mm512_shuffle_f64x2(u01, u23, 0xDD));  // lanes 1, 3 | 1, 3
+  const __m512d p = _mm512_shuffle_f64x2(z, z, 0xD8);                      // lanes 0, 2, 1, 3
+  return _mm256_add_pd(_mm512_castpd512_pd256(p), _mm512_extractf64x4_pd(p, 1));
+}
+
+// C(i..i+IB, j..j+NG) = alpha * A(:, i..i+IB)^T * B(:, j..j+NG) + beta * C, A k x IB (lda),
+// B k x NG (ldb), IB <= 4 (missing rows reduce zero accumulators: every row of C gets the same
+// reduction tree wherever it lies).
 template <int IB, int NG>
 HS_AVX512 void tn_block_avx512(fint k, const double* a, fint lda, const double* b, fint ldb,
-                               double* out) {
-  __m512d acc[IB][NG];
-  for (int r = 0; r < IB; ++r)
+                               double alpha, double beta, double* c, fint ldc) {
+  __m512d acc[4][NG];
+  for (int r = 0; r < 4; ++r)
     for (int j = 0; j < NG; ++j) acc[r][j] = _mm512_setzero_pd();
   fint kk = 0;
   for (; kk + 8 <= k; kk += 8) {
@@ -223,25 +317,29 @@ HS_AVX512 void tn_block_avx512(fint k, const double* a, fint lda, const double* 
       for (int j = 0; j < NG; ++j) acc[r][j] = _mm512_fmadd_pd(av, bv[j], acc[r][j]);
     }
   }
-  for (int r = 0; r < IB; ++r)
-    for (int j = 0; j < NG; ++j) out[r + j * IB] = _mm512_reduce_add_pd(acc[r][j]);
+  alignas(32) double sums[4];
+  for (int j = 0; j < NG; ++j) {
+    double* cj = c + static_cast<idx>(j) * ldc;
+    _mm256_store_pd(sums, reduce4(acc[0][j], acc[1][j], acc[2][j], acc[3][j]));
+    for (int r = 0; r < IB; ++r) cj[r] = beta == 0.0 ? alpha * sums[r] : alpha * sums[r] + beta * cj[r];
+  }
 }
 
 template <int IB>
 HS_AVX512 void tn_block_dispatch(int ng, fint k, const double* a, fint lda, const double* b,
-                                 fint ldb, double* out) {
+                                 fint ldb, double alpha, double beta, double* c, fint ldc) {
   switch (ng) {
     case 4:
-      tn_block_avx512<IB, 4>(k, a, lda, b, ldb, out);
+      tn_block_avx512<IB, 4>(k, a, lda, b, ldb, alpha, beta, c, ldc);
       break;
     case 3:
-      tn_block_avx512<IB, 3>(k, a, lda, b, ldb, out);
+      tn_block_avx512<IB, 3>(k, a, lda, b, ldb, alpha, beta, c, ldc);
       break;
     case 2:
-      tn_block_avx512<IB, 2>(k, a, lda, b, ldb, out);
+      tn_block_avx512<IB, 2>(k, a, lda, b, ldb, alpha, beta, c, ldc);
       break;
     default:
-      tn_block_avx512<IB, 1>(k, a, lda, b, ldb, out);
+      tn_block_avx512<IB, 1>(k, a, lda, b, ldb, alpha, beta, c, ldc);
       break;
   }
 }
@@ -249,33 +347,27 @@ HS_AVX512 void tn_block_dispatch(int ng, fint k, const double* a, fint lda, cons
 HS_AVX512 void tn_rows_avx512(fint i0, fint i1, fint n, fint k, double alpha, const double* a,
                               fint lda, const double* b, fint ldb, double beta, double* c,
                               fint ldc) {
-  double out[16];
   for (fint i = i0; i < i1; i += 4) {
     const int ib = static_cast<int>(std::min<fint>(4, i1 - i));
     const double* ai = a + static_cast<idx>(i) * lda;
     for (fint j0 = 0; j0 < n; j0 += 4) {
       const int ng = static_cast<int>(std::min<fint>(4, n - j0));
       const double* bj = b + static_cast<idx>(j0) * ldb;
+      double* cij = c + i + static_cast<idx>(j0) * ldc;
       switch (ib) {
         case 4:
-          tn_block_dispatch<4>(ng, k, ai, lda, bj, ldb, out);
+          tn_block_dispatch<4>(ng, k, ai, lda, bj, ldb, alpha, beta, cij, ldc);
           break;
         case 3:
-          tn_block_dispatch<3>(ng, k, ai, lda, bj, ldb, out);
+          tn_block_dispatch<3>(ng, k, ai, lda, bj, ldb, alpha, beta, cij, ldc);
           break;
         case 2:
-          tn_block_dispatch<2>(ng, k, ai, lda, bj, ldb, out);
+          tn_block_dispatch<2>(ng, k, ai, lda, bj, ldb, alpha, beta, cij, ldc);
           break;
         default:
-          tn_block_dispatch<1>(ng, k, ai, lda, bj, ldb, out);
+          tn_block_dispatch<1>(ng, k, ai, lda, bj, ldb, alpha, beta, cij, ldc);
           break;
       }
-      for (int j = 0; j < ng; ++j)
-        for (int r = 0; r < ib; ++r) {
-          double& cij = c[i + r + static_cast<idx>(j0 + j) * ldc];
-          const double s = out[r + j * ib];
-          cij = beta == 0.0 ? alpha * s : alpha * s + beta * cij;
-        }
     }
   }
 }

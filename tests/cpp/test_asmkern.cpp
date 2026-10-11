@@ -256,7 +256,10 @@ TEST(BlasHookKernels, NarrowGemmMatchesLongDoubleReference) {
 }
 
 TEST(BlasHookKernels, NarrowGemmIsBitwiseIndependentOfThreads) {
-  const fint m = 2049, n = 6, k = 300;
+  // m = 61: per-thread blocks of <= 32 rows take the register path (NN), the whole the chunked one
+  for (const fint m : {2049, 61})
+  for (const fint n : {6, 3})
+  for (const fint k : {300, 5})
   for (Isa isa : isas())
     for (char ta : {'N', 'T'}) {
       const fint lda = ta == 'N' ? m : k;

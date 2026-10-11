@@ -8,7 +8,10 @@
 # LD_PRELOAD=libxsmmext.so it intercepts dgemm_ (WRAP=1, the default here; WRAP=3 also dgemv_)
 # and runs problems up to the THRESHOLD (M*N*K, default 64^3 in 1.17) on JIT kernels, larger ones
 # on the next BLAS (dlsym(RTLD_NEXT)). Built shared (STATIC=0), thread-safe, without OpenMP and
-# without a BLAS dependency (BLAS=0: the fallback is found at run time). 1.17 is the last release
+# without linking a BLAS (the default BLAS setting on Linux; the fallback is found at run time).
+# Do not pass BLAS=0: given explicitly it defines __BLAS=0, which compiles the run-time fallback
+# out - shapes the JIT does not take then fail ("application must be linked against LAPACK/BLAS
+# dgemm", wrong results; seen with the first build here). 1.17 is the last release
 # with this wrapper and the classic small-GEMM interface (2.x replaced it by TPP kernels).
 # Source: https://github.com/libxsmm/libxsmm/archive/refs/tags/1.17.tar.gz
 # (sha256 = Spack's libxsmm package). License BSD-3-Clause.
@@ -31,7 +34,7 @@ main() {
   deps_unpack "$tarball" "$build"
   # glibc 2.17 compatibility of libm calls (common.sh, deps_glibc_compat).
   export LDFLAGS="${LDFLAGS:-} $(deps_glibc_compat "$build")"
-  local flags=(STATIC=0 BLAS=0 WRAP=1 OMP=0 "CC=$CC" "CXX=$CXX" "FC=$FC" FORTRAN=0 "$@")
+  local flags=(STATIC=0 WRAP=1 OMP=0 "CC=$CC" "CXX=$CXX" "FC=$FC" FORTRAN=0 "$@")
   echo "libxsmm $ver -> $prefix: ${flags[*]}"
   rm -rf "$prefix"
   (cd "$build" && make -j"$(deps_jobs)" "${flags[@]}" PREFIX="$prefix" >"$build/build.log" 2>&1 &&
