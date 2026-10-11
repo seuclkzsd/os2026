@@ -236,9 +236,20 @@ struct GeneralEigResult {
 ///     cycle over the whole space (n applications).
 ///   * Per step: p operator applications, O(n m p) BLAS3 flops (m = current basis size).
 ///     Memory: the basis holds n (ncv + p) scalars of T; note the larger auto ncv (e.g. nev = 18,
-///     p = 8, real T: ncv = 72 against 37 for p = 1).
+///     p = 8, real T: ncv = 72 against 37 for p = 1). krylov_schur_general_peak_columns gives the
+///     peak for given options.
 template <class T>
 GeneralEigResult<T> krylov_schur_general(LinearOperator<T>& op, Which which,
                                          const KrylovSchurOptions<T>& options);
+
+/// Memory planning for krylov_schur_general: the peak number of n-vectors of T it holds for an
+/// operator of order n with these options, without the operator's own workspace. That is the
+/// larger of (Krylov basis + Schur basis), the two being alive together while the result is
+/// formed, and (Schur basis + vectors): the basis is ncv + 1 columns for p = 1, the block layout's
+/// ncv + p in block mode, n + 1 for the exact whole-space cycle; the Schur basis m <= nev + 1
+/// columns (nev for complex T); the vectors m complex columns (2m n-vectors for real T).
+/// Validates the options as krylov_schur_general does (InvalidInput). O(1); thread-safe.
+template <class T>
+index_t krylov_schur_general_peak_columns(index_t n, const KrylovSchurOptions<T>& options);
 
 }  // namespace hs

@@ -774,9 +774,25 @@ GeneralEigResult<T> krylov_schur_general(LinearOperator<T>& op, Which which,
   return eigen_detail::krylov_schur_general_timed(op, which, options, nullptr);
 }
 
+template <class T>
+index_t krylov_schur_general_peak_columns(index_t n, const KrylovSchurOptions<T>& options) {
+  const eigen_detail::Dimensions dim = eigen_detail::validate(n, options);
+  // m_out (materialize): nev, or nev + 1 for real T when a conjugate pair straddles the cut.
+  const index_t m = std::min(dim.n, dim.nev + (is_complex_v<T> ? 0 : 1));
+  index_t basis = dim.ncv + 1;  // run_single: V is n x (ncv + 1)
+  if (options.block_size > 1) {
+    const eigen_detail::BlockGeneralLayout lay = eigen_detail::block_general_layout(
+        dim.n, dim.nev, dim.ncv, options.ncv == 0, options.block_size, is_complex_v<T>);
+    basis = lay.feasible ? lay.ncv + options.block_size : dim.n + 1;  // else the whole-space cycle
+  }
+  return std::max(basis + m, m + (is_complex_v<T> ? 1 : 2) * m);
+}
+
 #define HS_INSTANTIATE_KRYLOV_SCHUR_GENERAL(T)                                        \
   template GeneralEigResult<T> krylov_schur_general<T>(LinearOperator<T>&, Which,     \
                                                        const KrylovSchurOptions<T>&); \
+  template index_t krylov_schur_general_peak_columns<T>(index_t,                      \
+                                                        const KrylovSchurOptions<T>&); \
   template GeneralEigResult<T> eigen_detail::krylov_schur_general_timed<T>(           \
       LinearOperator<T>&, Which, const KrylovSchurOptions<T>&, eigen_detail::GeneralPhaseTimes*);
 

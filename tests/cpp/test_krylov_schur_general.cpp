@@ -1628,6 +1628,41 @@ TEST(KrylovSchurGeneral, BlockLayoutRules) {
       block_general_layout(1000, 4, 20, true, std::numeric_limits<index_t>::max(), false).feasible);
 }
 
+TEST(KrylovSchurGeneral, PeakColumnsFollowTheLayout) {
+  // max(basis + Schur basis, Schur basis + vectors) in n-vectors of T (eigen.hpp).
+  hs::KrylovSchurOptions<double> o;
+  o.nev = 18;  // auto ncv = 37, m = 19 (a straddling pair)
+  EXPECT_EQ(hs::krylov_schur_general_peak_columns<double>(100000, o), 57);  // 38 + 19 = 19 + 38
+  o.block_size = 8;
+  EXPECT_EQ(hs::krylov_schur_general_peak_columns<double>(100000, o), 72 + 8 + 19);
+  o.block_size = 2;  // spare 20, base max(38, 24) = 38, + 4 blocks = 46
+  EXPECT_EQ(hs::krylov_schur_general_peak_columns<double>(100000, o), 46 + 2 + 19);
+  hs::KrylovSchurOptions<cplx> oc;
+  oc.nev = 18;  // m = nev; the complex vectors are one n-vector each
+  EXPECT_EQ(hs::krylov_schur_general_peak_columns<cplx>(100000, oc), 38 + 18);
+  // A layout that does not fit the space: one exact single-vector cycle over all of it.
+  o.nev = 4;
+  o.block_size = 8;
+  EXPECT_EQ(hs::krylov_schur_general_peak_columns<double>(40, o), 41 + 5);
+  // A requested ncv beyond n is clamped (exact basis).
+  o.block_size = 1;
+  o.ncv = 100;
+  EXPECT_EQ(hs::krylov_schur_general_peak_columns<double>(30, o), 31 + 5);
+  // Wider blocks never need fewer columns here, and the count grows with p.
+  o.ncv = 0;
+  o.nev = 18;
+  index_t last = 0;
+  for (const index_t p : {index_t{1}, index_t{2}, index_t{4}, index_t{8}, index_t{16}, index_t{64}}) {
+    o.block_size = p;
+    const index_t cols = hs::krylov_schur_general_peak_columns<double>(1000000, o);
+    EXPECT_GE(cols, last) << p;
+    last = cols;
+  }
+  EXPECT_GE(last, 512);  // p = 64: the 4 GB basis of a 1e6 problem the driver must cap
+  o.nev = 0;
+  EXPECT_THROW(hs::krylov_schur_general_peak_columns<double>(100, o), hs::Error);
+}
+
 // ------------------------------------------------------------- projected-problem helpers
 
 TYPED_TEST(KrylovSchurGeneralTyped, ProjectedSchurRanksAndReordersWholeBlocks) {
