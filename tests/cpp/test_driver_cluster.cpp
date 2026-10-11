@@ -15,32 +15,46 @@ namespace {
 
 using hs::index_t;
 
-// A = Y^T diag(lambda_i s_i) Y, B = Y^T diag(s_i) Y with s_i = +-1 (B indefinite) and Y
-// nonsingular: A (Y^{-1} e_i) = lambda_i B (Y^{-1} e_i). Every lambda_i == 0 contributes a null
-// vector of A, so the zero cluster has dimension #zeros, all real.
+// A = Y^H diag(lambda_i s_i) Y, B = Y^H diag(s_i) Y with s_i = +-1 (B indefinite) and Y
+// nonsingular (complex for T = cplx): A (Y^{-1} e_i) = lambda_i B (Y^{-1} e_i). Every
+// lambda_i == 0 contributes a null vector of A, so the zero cluster has dimension #zeros, all real.
+template <class T>
 struct Pencil {
-  hs::CsrMatrix<double> a, b;
+  hs::CsrMatrix<T> a, b;
 };
 
-Pencil make_pencil(const std::vector<double>& lam, double y_coupling) {
+template <class T = double>
+Pencil<T> make_pencil(const std::vector<double>& lam, double y_coupling) {
   const auto n = static_cast<index_t>(lam.size());
-  hs::DenseMatrix<double> y(n, n), ad(n, n), bd(n, n);
+  hs::DenseMatrix<T> y(n, n), ad(n, n), bd(n, n);
   std::vector<double> sgn(static_cast<std::size_t>(n));
   for (index_t i = 0; i < n; ++i) {
-    for (index_t j = 0; j < n; ++j)
-      y(i, j) = (i == j ? 1.0 : 0.0) + y_coupling * std::sin(1.7 * i + 0.9 * j * j + 0.1) / std::sqrt(double(n));
+    for (index_t j = 0; j < n; ++j) {
+      const double re = std::sin(1.7 * i + 0.9 * j * j + 0.1), im = std::cos(0.7 * i * j + 0.3);
+      if constexpr (hs::is_complex_v<T>) {
+        y(i, j) = T(i == j ? 1.0 : 0.0) + y_coupling * T(re, im) / std::sqrt(2.0 * n);
+      } else {
+        y(i, j) = (i == j ? 1.0 : 0.0) + y_coupling * re / std::sqrt(double(n));
+      }
+    }
     sgn[i] = (i % 3 == 0) ? -1.0 : 1.0;
   }
   for (index_t r = 0; r < n; ++r)
     for (index_t c = r; c < n; ++c) {
-      double sa = 0.0, sb = 0.0;
+      T sa = T(0), sb = T(0);
       for (index_t i = 0; i < n; ++i) {
-        sa += y(i, r) * lam[i] * sgn[i] * y(i, c);
-        sb += y(i, r) * sgn[i] * y(i, c);
+        sa += hs::conj_if(y(i, r)) * (lam[i] * sgn[i]) * y(i, c);
+        sb += hs::conj_if(y(i, r)) * sgn[i] * y(i, c);
       }
-      ad(r, c) = ad(c, r) = sa;
-      bd(r, c) = bd(c, r) = sb;
+      ad(r, c) = sa;
+      ad(c, r) = hs::conj_if(sa);
+      bd(r, c) = sb;
+      bd(c, r) = hs::conj_if(sb);
     }
+  for (index_t r = 0; r < n; ++r) {  // exactly real diagonals
+    ad(r, r) = T(std::real(ad(r, r)));
+    bd(r, r) = T(std::real(bd(r, r)));
+  }
   return {hs::test::from_dense(ad), hs::test::from_dense(bd)};
 }
 
@@ -68,7 +82,8 @@ hs::SolverConfig nearest_cfg(double sigma, index_t k) {
   return cfg;
 }
 
-void expect_ok(const hs::Solution<double>& sol) {
+template <class T>
+void expect_ok(const hs::Solution<T>& sol) {
   const auto& r = sol.report;
   EXPECT_EQ(r.problem, hs::ProblemType::GeneralizedIndefinite);
   EXPECT_TRUE(r.success);
@@ -95,6 +110,15 @@ TEST(DriverZeroCluster, SigmaAtZeroReturnsNearestNonzeroModes) {
   expect_same_set(sol.eigenvalues, nearest_nonzero(lam, 0.0, 8), 1e-8);
   EXPECT_EQ(sol.report.zero_cluster_dim, 30);
   EXPECT_EQ(sol.report.slices.size(), 2u);  // one run on each side of the cluster
+}
+
+TEST(DriverZeroCluster, ComplexHermitianPencil) {
+  const auto lam = waveguide_like();
+  const auto p = make_pencil<hs::cplx>(lam, 0.3);
+  auto sol = hs::solve(p.a, &p.b, nearest_cfg(0.0, 8));
+  expect_ok(sol);
+  expect_same_set(sol.eigenvalues, nearest_nonzero(lam, 0.0, 8), 1e-8);
+  EXPECT_EQ(sol.report.zero_cluster_dim, 30);
 }
 
 TEST(DriverZeroCluster, WindowReachingTheClusterSwitchesToOneSidedRuns) {
