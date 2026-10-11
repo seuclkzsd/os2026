@@ -38,6 +38,8 @@ struct KrylovSchurOptions {
   double tol = 1e-12;        ///< relative residual-estimate tolerance (see contract above)
   std::uint64_t seed = 2026; ///< deterministic random start vector (linalg::fill_random)
   /// Optional start vector (column 0 is used; must be nonzero). Overrides the random start.
+  /// Hermitian solver with block_size = p > 1: the first min(p, cols) columns form the start
+  /// block (see lanczos_krylov_schur).
   const DenseMatrix<T>* initial = nullptr;
   /// Hermitian solver only: block D (n x d), orthonormal in the solver inner product. The Krylov
   /// basis is kept orthogonal to span(D) ("deflated restart": find further eigenpairs after the
@@ -47,6 +49,10 @@ struct KrylovSchurOptions {
   /// Hermitian solver with b_inner only: keep B*V next to V. Saves two B applications per step
   /// but doubles basis memory; default recomputes B*w on demand.
   bool store_bv = false;
+  /// Hermitian solver only: number p >= 1 of vectors per Krylov block (block Krylov-Schur, see
+  /// lanczos_krylov_schur). 1 = single-vector thick-restart Lanczos (bitwise the behaviour
+  /// without this option). krylov_schur_general rejects p != 1 (InvalidInput).
+  index_t block_size = 1;
 };
 
 /// One record per restart (observability / convergence analysis).
@@ -87,6 +93,40 @@ struct HermitianEigResult {
 /// step without store_bv, 1 with it). Memory (scalars): n*(d + ncv + 1) for the basis [D V]
 /// (twice that with store_bv, which also keeps M*[D V]) + n (M*w workspace without store_bv)
 /// + O(d^2 + ncv*(ncv + 4096)); the returned vectors add n*nev.
+///
+/// Block mode (options.block_size = p > 1; block Krylov-Schur, Zhou & Saad 2008). The Krylov
+/// space grows by blocks of p vectors: one op.apply of p columns per step, block CGS2 against
+/// [D V] (BLAS3) and Cholesky-QR in the M inner product inside the new block, so that the
+/// projected matrix is block tridiagonal (plus the restart's arrow block) and a Ritz pair's
+/// estimate is ||R s_last||_2 with R the p x p coupling of the last block. Columns of a new block
+/// that are linearly dependent on [D V] and the block's earlier columns to working precision
+/// (the block analogue of a Lanczos breakdown) are replaced by deterministic random vectors. A
+/// start block has generic components in every eigenvector of an eigenvalue of multiplicity
+/// <= p, so all its copies are found in one run. Everything else (result contract, locking,
+/// deflation, store_bv, the estimate semantics) is as for p = 1.
+///   * Start block: the first min(p, initial->cols()) columns of `initial` (column 0 nonzero, all
+///     finite), the remaining ones random; dependent columns other than column 0 are replaced.
+///   * ncv: base = the single-vector value (auto or requested) rounded up to a multiple of p, at
+///     least s + 2p with s = nev + 1 rounded up to a multiple of p. A requested ncv gives
+///     ncv = base; ncv = 0 gives base + 4p (as far as n - d >= 2 (ncv + p)). Each restart keeps
+///     k Ritz pairs, k = nev + (ncv - nev) / 2 rounded down to a multiple of p, but at least s
+///     (one spare pair) and at most ncv - p.
+///   * Early stop: a cycle also runs Rayleigh-Ritz at block boundaries, from base basis vectors on
+///     in the first cycle and from k + p on in later ones, and ends there once all nev wanted
+///     pairs have converged (one heev of the projected matrix per block); ritz_all then holds the
+///     Ritz values of that shorter basis. The result then just meets tol, whereas p = 1 tests
+///     only at cycle ends and usually overshoots tol by orders of magnitude: compare the two at
+///     matched residuals, not at equal tol.
+///   * A free space below twice the basis plus its residual block (n - d < 2 (ncv + p)), and any
+///     block_size too large for one (up to INT64_MAX), is solved exactly by one single-vector
+///     cycle over the whole free space (n - d applications), as ncv >= n - d does for p = 1.
+///   * Copies of a multiple eigenvalue beyond p enter only through rounding (as for p = 1 beyond
+///     one), so when the wanted set holds more than p copies, when and whether they converge
+///     depends on rounding.
+///   * Per step: one block of p operator applications, 3 block M applications (2 with store_bv)
+///     plus O(n (d + ncv) p) BLAS3 flops. Memory: the basis holds n*(d + ncv + p) scalars (twice
+///     that with store_bv), plus an n*p M*W workspace without store_bv; note the larger auto ncv
+///     (e.g. nev = 12, p = 8: ncv = 64, basis 72 columns, against 29 for p = 1).
 template <class T>
 HermitianEigResult<T> lanczos_krylov_schur(LinearOperator<T>& op, LinearOperator<T>* b_inner,
                                            Which which, const KrylovSchurOptions<T>& options);

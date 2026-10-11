@@ -135,6 +135,9 @@ Dimensions validate(index_t n, const KrylovSchurOptions<T>& o) {
              "invariant subspace of a non-normal operator is not invariant); rerun with a larger "
              "nev/ncv instead");
   }
+  if (o.block_size != 1)
+    HS_THROW(InvalidInput,
+             "krylov_schur_general: block_size=" << o.block_size << " (only 1 is supported)");
   if (n < 1) HS_THROW(InvalidInput, "krylov_schur_general: empty operator");
   if (o.nev < 1 || o.nev > n) {
     HS_THROW(InvalidInput, "krylov_schur_general: nev=" << o.nev << " outside [1, " << n << "]");
