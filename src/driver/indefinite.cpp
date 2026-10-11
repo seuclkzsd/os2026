@@ -438,11 +438,12 @@ Refined<T> refine_union(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil
   return out;
 }
 
-/// The vectors basis * coef(:, cols) of refined candidates: n x cols.size() of T (real candidates;
-/// the coefficients' imaginary parts are zero for real T) or complex.
+/// The vectors basis * coef(:, cols) of refined candidates, n x cols.size() (n = the pencil order,
+/// also for an empty selection): of T for real candidates (the coefficients' imaginary parts are
+/// zero for real T), or complex.
 template <class T, class V>
-DenseMatrix<V> candidate_vectors(const Refined<T>& ref, const std::vector<index_t>& cols) {
-  const index_t n = ref.basis.rows(), mb = ref.basis.cols(), k = static_cast<index_t>(cols.size());
+DenseMatrix<V> candidate_vectors(const Refined<T>& ref, const std::vector<index_t>& cols, index_t n) {
+  const index_t mb = ref.basis.cols(), k = static_cast<index_t>(cols.size());
   DenseMatrix<V> out(n, k);
   if (k == 0 || mb == 0) return out;
   constexpr index_t kParts = is_complex_v<V> && !is_complex_v<T> ? 2 : 1;
@@ -909,8 +910,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
   for (auto& r : runs) r.res.schur_basis = DenseMatrix<T>();
   std::vector<index_t> real_cols, complex_cols;
   for (const auto& cd : sel) (cd.real ? real_cols : complex_cols).push_back(cd.col);
-  sol.eigenvectors = candidate_vectors<T, T>(ref, real_cols);
-  sol.complex_eigenvectors = candidate_vectors<T, cplx>(ref, complex_cols);
+  sol.eigenvectors = candidate_vectors<T, T>(ref, real_cols, n);
+  sol.complex_eigenvectors = candidate_vectors<T, cplx>(ref, complex_cols, n);
   ref.basis = DenseMatrix<T>();
   const auto ncomplex = static_cast<index_t>(complex_cols.size());
   bool all_ok = static_cast<index_t>(sel.size()) == k;
