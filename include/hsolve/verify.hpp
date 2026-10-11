@@ -108,8 +108,10 @@ struct ExclusionOptions {
   /// Optional positive diagonal S (n entries): start columns S g. With B diagonal pass
   /// S = B^{-1/2} (start_scaling_for) and kappa = 1. Call-scoped pointer.
   const std::vector<double>* start_scaling = nullptr;
-  /// kappa >= cond(S B S), an upper bound the caller vouches for; ignored (1) without b_inner.
-  double b_condition = 1.0;
+  /// kappa >= cond(S B S), an upper bound the caller vouches for (start_scaling_for gives S and
+  /// kappa). Required (>= 1) with b_inner: the default 0 makes forgetting it an error rather than
+  /// a silently optimistic statement. Ignored (1) without b_inner.
+  double b_condition = 0.0;
   /// >= 0: caller's bound on e = ||Op X - X H11||_B (2-norm), e.g. sqrt(sum of the Lanczos
   /// estimates^2) of the Ritz vectors spanning X; saves the block application of Op to X.
   /// < 0 (default): computed (rigorous path).

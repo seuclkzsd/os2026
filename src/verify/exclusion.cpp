@@ -145,7 +145,9 @@ void validate(index_t n, const ExclusionOptions& opt, index_t x_rows, index_t m,
     HS_THROW(InvalidInput, "exclusion_check: delta must lie in (0, 1), got " << opt.delta);
   if (opt.block_size < 1) HS_THROW(InvalidInput, "exclusion_check: block_size must be >= 1");
   if (has_b && (!(opt.b_condition >= 1.0) || !std::isfinite(opt.b_condition)))
-    HS_THROW(InvalidInput, "exclusion_check: b_condition must be finite and >= 1, got " << opt.b_condition);
+    HS_THROW(InvalidInput, "exclusion_check: with b_inner, b_condition must be a finite bound >= 1 on cond(S B S) "
+                           "(see start_scaling_for), got "
+                               << opt.b_condition);
   if (!(opt.rounding_margin >= 0.0 && opt.rounding_margin < 0.5))
     HS_THROW(InvalidInput, "exclusion_check: rounding_margin must lie in [0, 0.5), got " << opt.rounding_margin);
   if (!std::isfinite(opt.coupling_bound))

@@ -408,6 +408,11 @@ TYPED_TEST(VerifyExclusion, CompleteSetPassesGeneralizedProblems) {
       EXPECT_TRUE(sc.rigorous) << sc.note;
     }
     opt.start_scaling = &sc.scaling;
+    // With b_inner the caller must vouch for kappa: the default is an error, not kappa = 1.
+    EXPECT_EQ(error_code_of([&] {
+                hs::exclusion_check<T>(*st.op, st.b_inner(), columns(st.pc.v, idx), kSigma, kRadius, opt);
+              }),
+              hs::Error::Code::InvalidInput);
     opt.b_condition = sc.kappa;
     const auto r = hs::exclusion_check<T>(*st.op, st.b_inner(), columns(st.pc.v, idx), kSigma, kRadius, opt);
     EXPECT_EQ(r.status, ExclusionStatus::Passed) << r.statement;
