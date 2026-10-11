@@ -1,9 +1,10 @@
 // Unit tests for the certificate-cost facilities of src/factor: InertiaCounter (exact counts for
 // shifted Laplacians, prescribed spectra, generalized pencils and saddle points, real and through
 // the complex embedding; the source factorization stays valid; single-precision counts at wide
-// gaps; error paths), inertia-only (discard-factors) MUMPS instances and their memory, pivot-order
-// reuse, and thread safety (distinct objects used from two threads; thread count fixed against
-// later OpenMP changes). Analytic or dense reference spectra throughout.
+// gaps and really in float; estimate(); detection off; memory cap; error paths), inertia-only
+// (discard-factors) MUMPS instances and their memory, released factors, pivot-order reuse, and
+// thread safety (the MUMPS call lock excludes; distinct objects used from two threads; thread
+// count fixed against later OpenMP changes). Analytic or dense reference spectra throughout.
 #include <gtest/gtest.h>
 #include <omp.h>
 
@@ -110,6 +111,26 @@ hs::Error::Code error_code_of(const std::function<void()>& fn) {
   ADD_FAILURE() << "expected an hs::Error";
   return hs::Error::Code::Internal;
 }
+
+// A SparseFactorization that is not the MUMPS backend (InertiaCounter must reject it).
+template <class T>
+class NotMumpsFactorization final : public hs::SparseFactorization<T> {
+ public:
+  void analyze(const ShiftedPencil<T>&, double, double) override {}
+  hs::FactorEstimate estimate() const override { return {}; }
+  bool factorize(double, double) override { return false; }
+  void solve(T*, index_t, index_t) override {}
+  hs::Inertia inertia() const override { return {}; }
+  void set_out_of_core(bool) override {}
+  void set_null_pivot_detection(bool) override {}
+  const hs::FactorStats& stats() const override { return stats_; }
+  const FactorOptions& options() const override { return options_; }
+  index_t order() const override { return 0; }
+
+ private:
+  hs::FactorStats stats_;
+  FactorOptions options_;
+};
 
 // Expects exact counts at every shift of `shifts` from a counter on an analysed main object.
 template <class T>
@@ -286,6 +307,33 @@ TYPED_TEST(FactorInertiaCounter, SinglePrecisionCountsAreExactAtWideGaps) {
   EXPECT_TRUE(counter.stats().reused_pivot_order);
 }
 
+// The Single branch really factorizes in float: K = 1e-50 * (A - sigma I) is an ordinary double
+// matrix (the null-pivot threshold is relative to its norm, and MUMPS scales it), but every entry
+// underflows to zero in float. A Single count that quietly ran in double would be valid here.
+TYPED_TEST(FactorInertiaCounter, SinglePrecisionCountsRunInFloat) {
+  using T = TypeParam;
+  const auto a = hs::test::laplacian_2d<T>(30, 31);
+  const auto w = hs::test::laplacian_2d_eigenvalues(30, 31);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
+  f->analyze(pencil, 1.0, -1.0);
+  InertiaCounter<T> counter(*f, {});
+  const double tiny = 1e-50;  // below the float range (smallest subnormal 1.4e-45)
+  for (double sigma : mid_gap_shifts(w, 3, 1e-6)) {
+    const auto in = counter.count(tiny, -tiny * sigma);
+    EXPECT_TRUE(in.valid) << "sigma=" << sigma;
+    EXPECT_EQ(in.neg, count_below(w, sigma)) << "sigma=" << sigma;
+    EXPECT_FALSE(counter.count(tiny, -tiny * sigma, true, FactorPrecision::Single).valid)
+        << "sigma=" << sigma;
+    // the same shift at unit scale counts exactly in float as well (wide gaps)
+    const auto s = counter.count(1.0, -sigma, true, FactorPrecision::Single);
+    EXPECT_TRUE(s.valid) << "sigma=" << sigma;
+    EXPECT_EQ(s.neg, count_below(w, sigma)) << "sigma=" << sigma;
+  }
+  EXPECT_EQ(counter.stats().single_counts, 6);
+  EXPECT_EQ(counter.stats().counts, 9);
+}
+
 // A Single (smumps) source passes its pivot order to the double counter as well.
 TYPED_TEST(FactorInertiaCounter, SinglePrecisionSourceGivesExactDoubleCounts) {
   using T = TypeParam;
@@ -314,6 +362,62 @@ TYPED_TEST(FactorInertiaCounter, MisuseIsRejected) {
   FactorOptions bad;
   bad.null_pivot_tol = 0.0;
   EXPECT_EQ(error_code_of([&] { InertiaCounter<T> c(*f, bad); }), hs::Error::Code::InvalidInput);
+  NotMumpsFactorization<T> other;
+  EXPECT_EQ(error_code_of([&] { InertiaCounter<T> c(other, {}); }), hs::Error::Code::InvalidInput);
+}
+
+// estimate() describes the counter's own inertia-only analysis, not the source's: no factors to
+// keep, so less working memory, and about the same elimination (the source's pivot order).
+TYPED_TEST(FactorInertiaCounter, EstimateIsTheInertiaOnlyAnalysis) {
+  using T = TypeParam;
+  const auto a = hs::test::laplacian_2d<T>(150, 150);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
+  f->analyze(pencil, 1.0, -4.0);
+  InertiaCounter<T> counter(*f, {});
+  const hs::FactorEstimate e = counter.estimate(), src = f->estimate();
+  EXPECT_GT(e.incore_mb, 0.0);
+  EXPECT_LT(e.incore_mb, src.incore_mb);
+  EXPECT_GT(e.flops, 0.8 * src.flops);  // PERM_IN: a few % more fill (factor.hpp)
+  EXPECT_LT(e.flops, 1.5 * src.flops);
+  EXPECT_EQ(e.blr_incore_mb, -1.0);  // counts never use BLR
+}
+
+// null_pivot_detection == false must really count without ICNTL(24): with an absurd threshold
+// (half the matrix norm) every count with detection is "singular", every count without it is
+// the exact inertia (mid-gap shifts).
+TYPED_TEST(FactorInertiaCounter, DetectionOffIgnoresTheNullPivotThreshold) {
+  using T = TypeParam;
+  const auto a = hs::test::laplacian_2d<T>(40, 35);
+  const auto w = hs::test::laplacian_2d_eigenvalues(40, 35);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
+  f->analyze(pencil, 1.0, -2.0);
+  FactorOptions o;
+  o.null_pivot_tol = 0.5;
+  InertiaCounter<T> counter(*f, o);
+  for (double sigma : mid_gap_shifts(w, 4, 1e-6)) {
+    EXPECT_FALSE(counter.count(1.0, -sigma).valid) << "sigma=" << sigma;
+    const auto in = counter.count(1.0, -sigma, /*null_pivot_detection=*/false);
+    EXPECT_TRUE(in.valid) << "sigma=" << sigma;
+    EXPECT_EQ(in.neg, count_below(w, sigma)) << "sigma=" << sigma;
+    EXPECT_EQ(in.zero, 0) << "sigma=" << sigma;
+  }
+}
+
+// max_memory_mb caps every count (ICNTL(23)): too small a cap throws OutOfMemoryBudget from
+// count() (INFO -19), as factorize() does.
+TYPED_TEST(FactorInertiaCounter, MemoryCapThrowsOutOfMemoryBudget) {
+  using T = TypeParam;
+  const auto a = hs::test::laplacian_2d<T>(150, 150);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
+  f->analyze(pencil, 1.0, -1.0);
+  FactorOptions o;
+  o.max_memory_mb = 1.0;
+  InertiaCounter<T> counter(*f, o);
+  ASSERT_GT(counter.estimate().incore_mb, 1.0);
+  EXPECT_EQ(error_code_of([&] { counter.count(1.0, -1.0); }), hs::Error::Code::OutOfMemoryBudget);
 }
 
 // ------------------------------------------------------------------------------- discard mode
