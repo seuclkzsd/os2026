@@ -208,7 +208,8 @@ void exp_counter(const Args& args, const hs::ShiftedPencil<T>& pencil, double si
         {"main_counts", {nu_main_a, nu_main_b}}, {"counter_counts", {nu_c_a, nu_c_b}},
         {"main_mb", main_mb}, {"counter_mb", counter_mb},
         {"model_saving_s", model_saving},
-        {"model_analysis_s", model_an}, {"rule_uses_counter", model_saving > model_an}});
+        {"model_analysis_s", model_an},
+        {"rule_uses_counter", hs::driver::counter_pays(hs::SolverConfig{}, fac->estimate(), in, args.threads, 2)}});
 }
 
 template <class T>

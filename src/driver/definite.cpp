@@ -395,11 +395,15 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   }
 
   // Inertia certificate (DESIGN §3.6-8), with up to two deflated reruns on a count mismatch. Its
-  // two counts per round come from an InertiaCounter when that pays (counter_pays): the main
-  // factors at sigma then stay intact for the reruns and the rescue.
+  // two counts per round come from an InertiaCounter when that pays (counter_pays). The main
+  // factors at sigma are released before the counter counts (MainFactors::Release): after the
+  // rescue above they are needed only for a rerun, which refactorizes once - as main-object counts
+  // would - and the counts never hold both in memory.
   const bool want_cert = cfg.inertia_check != Toggle::Off;
   InertiaCertificate& cert = rep.certificate;
-  CountSource<T> counts(fac, pencil, want_cert && counter_pays(c, fac, pencil, 2));
+  const bool on_counter = want_cert && counter_pays(cfg, fac.estimate(), mumps_input_size(pencil),
+                                                    fac.options().threads, 2);
+  CountSource<T> counts(fac, pencil, on_counter, MainFactors::Release);
   for (int round = 0; want_cert && round < 3; ++round) {
     if (sel.size() == 0) break;
     const double tiny = 1e-12 * std::max(scale, std::abs(t.sigma));

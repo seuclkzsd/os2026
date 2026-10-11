@@ -157,15 +157,30 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 template <class T>
 bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off);
 
+/// What a CountSource counting on its InertiaCounter does with the main factors, decided anew
+/// before every count (the main object may hold factors again since the previous count: a rerun,
+/// a rescue or the next slice refactorized it).
+enum class MainFactors {
+  /// Keep them, unless their working memory (INFOG(21)) plus the counter's estimate exceed the
+  /// factorization cap (FactorOptions::max_memory_mb, DESIGN §3.6-3): then release them. For
+  /// paths that run Krylov solves at a shift between counts (windows: slice shifts, rescue).
+  KeepWithinCap,
+  /// Always release them (MUMPS JOB=-4) before a count: for counts after which the factors are
+  /// needed only on a failed certificate (nearest target: one refactorization for the rerun, as
+  /// with main-object counts). The counts then never add the counter's working memory to the main
+  /// factors'. Nearest, six 3-D 1e5 cases, 4 threads, medians of 6 interleaved runs: peak RSS
+  /// 0.48..0.85 GiB, 21..26% below keeping them resident and 2..7% below main-object counts, at
+  /// the certificate time of the resident variant (0.05..0.14 s below main-object counts).
+  Release,
+};
+
 /// Where the Sylvester counts of a solve path come from (DESIGN §3.6-8):
 ///   * the main factorization object, refactorized at each count point: it then holds K(s)
 ///     (Ctx::held), which a Krylov run at s reuses (one-sided slice anchors);
 ///   * an InertiaCounter, built at the first count from the main analysis' pivot order
-///     (factor.hpp): inertia-only factorizations (measured 10-23% cheaper) that leave the main
-///     factors intact, so reruns and rescue at the working shift need no refactorization. When
-///     the main factors' working memory (INFOG(21)) plus the counter's estimate exceed the
-///     factorization cap, the main factors are released first (then they are refactorized when
-///     needed again, as with main-object counts).
+///     (factor.hpp): inertia-only factorizations (measured 10-23% cheaper) that do not touch the
+///     main factors; MainFactors says whether those are released before a count (then they are
+///     refactorized when needed again, as with main-object counts).
 /// Inexact main factors (single precision, BLR) always count on the counter: their own inertia is
 /// that of the rounded / compressed matrix. Not thread-safe; the pencil and the main object must
 /// outlive it.
@@ -173,7 +188,9 @@ template <class T>
 class CountSource {
  public:
   /// prefer_counter: count on the counter even with an exact main factor (see counter_pays()).
-  CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter);
+  /// main: what counter counts do with the main factors (no effect on main-object counts).
+  CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter,
+              MainFactors main = MainFactors::KeepWithinCap);
   ~CountSource();
   CountSource(const CountSource&) = delete;
   CountSource& operator=(const CountSource&) = delete;
@@ -189,16 +206,17 @@ class CountSource {
   SparseFactorization<T>& fac_;
   const ShiftedPencil<T>& pencil_;
   bool use_counter_ = false;
+  MainFactors main_ = MainFactors::KeepWithinCap;
   std::unique_ptr<InertiaCounter<T>> counter_;
 };
 
-/// Rule for the nearest target's certificate (two counts, exact main factor): an InertiaCounter
-/// pays when the two counts' saving, kCounterSaving of a factorization each (model of DESIGN
-/// §3.6-3b), exceeds its analysis (model_analysis_s: about what an AMD analysis of the input
-/// costs). Reruns after a failed certificate save a refactorization on top (not counted).
-/// cfg.inertia_counter On / Off override it.
-template <class T>
-bool counter_pays(const Ctx& c, const SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, index_t counts);
+/// Rule for the nearest target's certificate (`counts` counts, exact main factor): an
+/// InertiaCounter pays when the counts' saving, kCounterSaving of a factorization each (model of
+/// DESIGN §3.6-3b), exceeds its analysis (model_analysis_s: about what an AMD analysis of the
+/// input costs). e: the main analysis' estimate, in: mumps_input_size of the pencil, threads: of
+/// the factorizations. cfg.inertia_counter On / Off override it. Deterministic.
+bool counter_pays(const SolverConfig& cfg, const FactorEstimate& e, const MumpsInputSize& in, int threads,
+                  index_t counts);
 
 /// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2), moving s outward (direction
 /// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`. Counting on

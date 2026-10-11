@@ -304,16 +304,20 @@ TEST(DriverCounter, CountsEqualMainObjectCountsReal) { counter_matches_main_obje
 TEST(DriverCounter, CountsEqualMainObjectCountsComplex) { counter_matches_main_object<cplx>(62); }
 
 // A single-precision main factor always counts on the (double) counter: the same certificate as an
-// all-double run, without an analysis per count.
+// all-double run, and the main object factorizes K(sigma) only - main-object counts would
+// refactorize it at both window ends (the double run below does: inertia_counter = off).
 TEST(DriverCounter, SinglePrecisionFactorCountsInDouble) {
   std::vector<double> w;
   const auto a = shifted_laplacian(w);
   auto cfg = nearest_cfg(0.3, 6);
   cfg.block_size = 1;
+  cfg.inertia_counter = hs::Toggle::Off;  // ignored for inexact factors
   const auto dbl = hs::solve(a, nullptr, cfg);
   cfg.factor_precision = hs::FactorPrecision::Single;
   const auto sgl = hs::solve(a, nullptr, cfg);
   EXPECT_EQ(sgl.report.factor_stats.analyses, dbl.report.factor_stats.analyses);
+  EXPECT_EQ(dbl.report.factor_stats.factorizations, 3);  // K(sigma), K(a), K(b)
+  EXPECT_EQ(sgl.report.factor_stats.factorizations, 1);  // K(sigma); the counts on the counter
   expect_same_certificate(dbl, sgl);
 }
 

@@ -207,8 +207,9 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 // ------------------------------------------------------------------------------ inertia counts
 
 template <class T>
-CountSource<T>::CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter)
-    : fac_(fac), pencil_(pencil) {
+CountSource<T>::CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter,
+                            MainFactors main)
+    : fac_(fac), pencil_(pencil), main_(main) {
   const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
   use_counter_ = prefer_counter || !exact;
 }
@@ -228,28 +229,33 @@ Inertia CountSource<T>::count(Ctx& c, double s, bool detection) {
     if (in.valid) c.held = FactorHeld{s, !detection};
     return in;
   }
+  const double cap = fac_.options().max_memory_mb;
   if (!counter_) {
-    // Inertia-only instance on the main analysis' pivot order. Its working memory comes on top of
-    // the main factors unless they are released (cap: the factorization budget, DESIGN §3.6-3).
+    // Inertia-only instance on the main analysis' pivot order.
     counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
-    const double cap = fac_.options().max_memory_mb;
-    const double main_mb = fac_.inertia().valid ? fac_.stats().factor_mb_used : 0.0;
-    const bool release = cap > 0 && main_mb + counter_->estimate().incore_mb > cap;
-    if (release && fac_.release_factors()) c.held = FactorHeld{};
     event(c, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s},
-                                 {"incore_mb", counter_->estimate().incore_mb}, {"main_mb", main_mb},
-                                 {"cap_mb", cap}, {"main_released", release}});
+                                 {"incore_mb", counter_->estimate().incore_mb}, {"cap_mb", cap}});
+  }
+  // The counter's working memory comes on top of resident main factors. Decided before every
+  // count: the main object may hold factors again since the last one (refactorized for a rerun,
+  // a rescue, a slice shift).
+  if (fac_.inertia().valid) {
+    const double main_mb = fac_.stats().factor_mb_used;
+    const bool over_cap = cap > 0 && main_mb + counter_->estimate().incore_mb > cap;
+    if ((main_ == MainFactors::Release || over_cap) && fac_.release_factors()) {
+      c.held = FactorHeld{};
+      event(c, "main_factors_released", {{"main_mb", main_mb}, {"counter_mb", counter_->estimate().incore_mb},
+                                         {"cap_mb", cap}, {"over_cap", over_cap}});
+    }
   }
   return counter_->count(1.0, -s, detection);
 }
 
-template <class T>
-bool counter_pays(const Ctx& c, const SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, index_t counts) {
-  if (c.cfg.inertia_counter != Toggle::Auto) return c.cfg.inertia_counter == Toggle::On;
-  const MumpsInputSize in = mumps_input_size(pencil);
-  const double saving =
-      static_cast<double>(counts) * kCounterSaving * model_factor_s(fac.estimate(), in.order, fac.options().threads);
-  return saving > model_analysis_s(in.order, in.entries, static_cast<double>(fac.estimate().factor_entries));
+bool counter_pays(const SolverConfig& cfg, const FactorEstimate& e, const MumpsInputSize& in, int threads,
+                  index_t counts) {
+  if (cfg.inertia_counter != Toggle::Auto) return cfg.inertia_counter == Toggle::On;
+  const double saving = static_cast<double>(counts) * kCounterSaving * model_factor_s(e, in.order, threads);
+  return saving > model_analysis_s(in.order, in.entries, static_cast<double>(e.factor_entries));
 }
 
 // nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2). The count must come from an exact
@@ -455,7 +461,6 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   template void refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                             \
   template bool try_refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                         \
   template class CountSource<T>;                                                                            \
-  template bool counter_pays<T>(const Ctx&, const SparseFactorization<T>&, const ShiftedPencil<T>&, index_t); \
   template index_t count_below<T>(Ctx&, CountSource<T>&, double&, double, double, bool*, bool, bool*);      \
   template void analyze_within_budget<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double, bool); \
   template MumpsInputSize mumps_input_size<T>(const ShiftedPencil<T>&);                                     \
