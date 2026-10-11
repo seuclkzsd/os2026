@@ -10,6 +10,7 @@
 #include <iterator>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "hsolve/error.hpp"
@@ -48,15 +49,37 @@ inline void write_text(const std::filesystem::path& p, const std::string& text) 
   write_bytes(p, std::vector<char>(text.begin(), text.end()));
 }
 
-/// hs::to_string of the error code thrown by f, or "none".
+struct ThrownError {
+  std::string code = "none";  ///< hs::to_string of the error code, or "none"
+  std::string message;
+};
+
+/// The hs::Error thrown by f, if any.
 template <class F>
-std::string error_code_of(F&& f) {
+ThrownError error_of(F&& f) {
   try {
     f();
   } catch (const hs::Error& e) {
-    return hs::to_string(e.code());
+    return {hs::to_string(e.code()), e.what()};
   }
-  return "none";
+  return {};
+}
+
+/// hs::to_string of the error code thrown by f, or "none".
+template <class F>
+std::string error_code_of(F&& f) {
+  return error_of(std::forward<F>(f)).code;
+}
+
+/// Checks an expected.json error case: {"error": code, "message": optional substring}.
+template <class F>
+void expect_error(const nlohmann::json& c, F&& f) {
+  const ThrownError e = error_of(std::forward<F>(f));
+  EXPECT_EQ(e.code, c["error"].get<std::string>()) << e.message;
+  if (c.contains("message")) {
+    EXPECT_NE(e.message.find(c["message"].get<std::string>()), std::string::npos)
+        << "message: " << e.message;
+  }
 }
 
 /// Per-test scratch directory under the system temp dir, removed afterwards.

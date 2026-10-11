@@ -1,12 +1,15 @@
 // MatrixMarket reader (see mtx.hpp).
 #include "io/mtx.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "hsolve/error.hpp"
@@ -108,13 +111,66 @@ std::string lower(std::string_view s) {
   HS_THROW(Io, lr.name() << ":" << lr.line_number() << ": " << what);
 }
 
-// from_chars rejects a leading '+', which some writers emit.
+bool is_digit(char c) { return c >= '0' && c <= '9'; }
+
+// True when `tok`, a decimal that std::from_chars matched completely but reported as
+// result_out_of_range, is a nonzero value below the smallest subnormal double (~4.9e-324) rather
+// than one above DBL_MAX: from_chars reports both cases with the same code. They are told apart
+// by the decimal exponent of the leading nonzero digit, which is <= -324 for underflow and >= 308
+// for overflow.
+bool underflows_double(std::string_view tok) {
+  constexpr std::int64_t kExponentCap = std::int64_t{1} << 40;  // any larger |exponent| is equivalent
+  std::size_t k = (!tok.empty() && tok[0] == '-') ? 1 : 0;
+  std::int64_t lead = 0;  // decimal exponent of the leading nonzero digit of the mantissa
+  bool nonzero = false;
+  for (; k < tok.size() && is_digit(tok[k]); ++k) {
+    if (nonzero) {
+      ++lead;
+    } else if (tok[k] != '0') {
+      nonzero = true;
+    }
+  }
+  if (k < tok.size() && tok[k] == '.') {
+    std::int64_t zeros = 0;  // fraction zeros before the leading nonzero digit
+    for (++k; k < tok.size() && is_digit(tok[k]); ++k) {
+      if (nonzero) continue;
+      if (tok[k] == '0') {
+        ++zeros;
+      } else {
+        nonzero = true;
+        lead = -(zeros + 1);
+      }
+    }
+  }
+  if (!nonzero) return false;
+  std::int64_t exponent = 0;
+  if (k < tok.size() && (tok[k] == 'e' || tok[k] == 'E')) {
+    ++k;
+    const bool negative = k < tok.size() && tok[k] == '-';
+    if (k < tok.size() && (tok[k] == '-' || tok[k] == '+')) ++k;
+    for (; k < tok.size() && is_digit(tok[k]); ++k)
+      exponent = std::min(kExponentCap, exponent * 10 + (tok[k] - '0'));
+    if (negative) exponent = -exponent;
+  }
+  return lead + exponent < 0;
+}
+
+// from_chars rejects a leading '+', which some writers emit. A real value below the double range
+// (e.g. round-off written as 1e-400) reads as a signed zero, as with strtod and scipy.io.mmread;
+// coordinate zeros are then dropped per drop_zeros and array zeros are structural absence.
+// Overflow stays an error.
 template <class V>
 V parse_number(std::string_view tok, const LineReader& lr, const char* what) {
   if (!tok.empty() && tok.front() == '+') tok.remove_prefix(1);
+  const char* const last = tok.data() + tok.size();
   V v{};
-  const auto [end, ec] = std::from_chars(tok.data(), tok.data() + tok.size(), v);
-  if (tok.empty() || ec != std::errc() || end != tok.data() + tok.size())
+  const auto [end, ec] = std::from_chars(tok.data(), last, v);
+  if constexpr (std::is_floating_point_v<V>) {
+    if (!tok.empty() && ec == std::errc::result_out_of_range && end == last &&
+        underflows_double(tok))
+      return tok.front() == '-' ? -V(0) : V(0);
+  }
+  if (tok.empty() || ec != std::errc() || end != last)
     fail_at(lr, std::string("expected ") + what + ", got '" + std::string(tok) + "'");
   return v;
 }

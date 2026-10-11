@@ -25,6 +25,8 @@ struct MtxMatrix {
 /// entries are 1), complex gives cplx. Coordinate entries may repeat (summed) and exact zeros are
 /// dropped if drop_zeros; array format (column-major, only the lower triangle for symmetric/
 /// hermitian) always drops exact zeros. Comment ('%') and blank lines are skipped anywhere.
+/// Real values below the double range (e.g. 1e-400) read as signed zeros, as with strtod and
+/// scipy.io.mmread; values above it throw Io.
 /// Throws Io for malformed text (with the line number), InvalidInput for skew-symmetric,
 /// non-square or non-'matrix' objects. Streams the file in 4 MiB chunks.
 MtxMatrix read_matrix_market(const std::filesystem::path& path, bool drop_zeros);

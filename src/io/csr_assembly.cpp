@@ -2,7 +2,9 @@
 #include "io/csr_assembly.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <complex>
+#include <limits>
 #include <numeric>
 #include <utility>
 #include <vector>
@@ -20,6 +22,52 @@ index_t find_entry(const CsrMatrix<T>& a, index_t i, std::int32_t j) {
   const std::int32_t* it = std::lower_bound(b, e, j);
   return it != e && *it == j ? a.rowptr[i] + (it - b) : -1;
 }
+
+// Sum of squares kept as scale^2 * sumsq with scale = the largest magnitude added (LAPACK's
+// dlassq): squares are only ever taken of ratios <= 1, so nothing overflows, and a term is lost to
+// underflow only when it is below ~1e-308 relative to the largest one, where it cannot change
+// the sum.
+class ScaledSumSquares {
+ public:
+  void add(double x) {
+    const double ax = std::fabs(x);
+    if (ax == 0.0) return;
+    if (ax <= scale_) {
+      const double r = ax / scale_;
+      sumsq_ += r * r;
+    } else {
+      const double r = scale_ / ax;
+      sumsq_ = 1.0 + sumsq_ * r * r;
+      scale_ = ax;
+    }
+  }
+  template <class T>
+  void add_scalar(const T& v) {  // |v|^2 = re^2 + im^2
+    if constexpr (is_complex_v<T>) {
+      add(v.real());
+      add(v.imag());
+    } else {
+      add(v);
+    }
+  }
+  void merge(const ScaledSumSquares& o) {
+    if (o.scale_ == 0.0) return;
+    if (o.scale_ <= scale_) {
+      const double r = o.scale_ / scale_;
+      sumsq_ += o.sumsq_ * r * r;
+    } else {
+      const double r = scale_ / o.scale_;
+      sumsq_ = o.sumsq_ + sumsq_ * r * r;
+      scale_ = o.scale_;
+    }
+  }
+  double scale() const { return scale_; }
+  double sumsq() const { return sumsq_; }
+
+ private:
+  double scale_ = 0.0;
+  double sumsq_ = 0.0;
+};
 
 }  // namespace
 
@@ -163,6 +211,54 @@ CsrMatrix<T> transpose(const CsrMatrix<T>& a) {
 }
 
 template <class T>
+HermitianDefect hermitian_defect_scaled(const CsrMatrix<T>& a) {
+  HS_ASSERT(a.square(), "hermitian_defect_scaled: " << a.nrows << " x " << a.ncols);
+  struct Partial {
+    ScaledSumSquares norm;  ///< ||A||_F^2 over the block's rows
+    ScaledSumSquares asym;  ///< ||(A - A^H)/2||_F^2 over the block's rows
+    bool exact = true;
+  };
+  constexpr index_t kBlockRows = 4096;
+  const index_t n = a.nrows;
+  const index_t nblocks = (n + kBlockRows - 1) / kBlockRows;
+  std::vector<Partial> part(static_cast<std::size_t>(nblocks));
+#pragma omp parallel for schedule(dynamic)
+  for (index_t blk = 0; blk < nblocks; ++blk) {
+    Partial& s = part[static_cast<std::size_t>(blk)];
+    const index_t last = std::min(n, (blk + 1) * kBlockRows);
+    for (index_t i = blk * kBlockRows; i < last; ++i) {
+      for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p) {
+        const T aij = a.values[p];
+        const index_t q = find_entry(a, a.colind[p], static_cast<std::int32_t>(i));
+        const T aji_conj = q < 0 ? T(0) : conj_if(a.values[q]);
+        s.norm.add_scalar(aij);
+        if (aij == aji_conj) continue;
+        s.exact = false;
+        // Entry (i, j) of (A - A^H)/2; entry (j, i) is visited from row j (or, if not stored, has
+        // the same modulus and is never visited: hs::hermitian_defect counts it twice, so do
+        // we). Halving first keeps the difference of two finite values finite.
+        const T half_diff = 0.5 * aij - 0.5 * aji_conj;
+        s.asym.add_scalar(half_diff);
+        if (q < 0) s.asym.add_scalar(half_diff);
+      }
+    }
+  }
+  Partial total;
+  for (const Partial& s : part) {
+    total.norm.merge(s.norm);
+    total.asym.merge(s.asym);
+    total.exact = total.exact && s.exact;
+  }
+  if (total.exact) return {true, 0.0};
+  // ||A - A^H|| / ||A|| = 2 ||(A - A^H)/2|| / ||A||. Every half difference is bounded by the
+  // largest entry, so the ratio of the scales is <= 1 and the result is finite; it can only
+  // underflow, and then the true value lies below the smallest normal double.
+  const double rel = 2.0 * (total.asym.scale() / total.norm.scale()) *
+                     std::sqrt(total.asym.sumsq() / total.norm.sumsq());
+  return {false, std::max(rel, std::numeric_limits<double>::min())};
+}
+
+template <class T>
 bool hermitian_part_in_place(CsrMatrix<T>& a) {
   HS_ASSERT(a.square(), "hermitian_part_in_place: " << a.nrows << " x " << a.ncols);
   const index_t n = a.nrows;
@@ -202,6 +298,7 @@ bool hermitian_part_in_place(CsrMatrix<T>& a) {
                                              const std::int32_t*, const T*, std::size_t, bool,    \
                                              AssemblyStats&);                                     \
   template CsrMatrix<T> transpose<T>(const CsrMatrix<T>&);                                        \
+  template HermitianDefect hermitian_defect_scaled<T>(const CsrMatrix<T>&);                       \
   template bool hermitian_part_in_place<T>(CsrMatrix<T>&);
 
 HS_FOR_EACH_SCALAR(HS_IO_INSTANTIATE_ASSEMBLY)

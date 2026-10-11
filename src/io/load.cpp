@@ -401,18 +401,22 @@ void finish(CsrMatrix<T>&& a, io::MtxSymmetry declared, const LoadOptions& opt,
 
   // 2. Hermitian check; a nonzero defect within tolerance is removed so that every module (one
   // triangle for the factorization, full matrix for operators/residuals) sees the same matrix.
+  // Not hs::hermitian_defect: its unscaled sums of squares report 0 for any matrix with entries
+  // below ~1e-154 and NaN above ~1e154 (see io::hermitian_defect_scaled). Whether the Hermitian
+  // part is taken is decided by the exact value comparison, never by the computed norm.
   if (!opt.check_hermitian) {
     out.hermitian_defect = -1.0;
     out.notes.push_back("unchecked: Hermitian check skipped (check_hermitian = false)");
   } else {
-    const double defect = hermitian_defect(a);
-    out.hermitian_defect = defect;
-    if (!(defect <= opt.hermitian_tol))
+    const io::HermitianDefect defect = io::hermitian_defect_scaled(a);
+    out.hermitian_defect = defect.relative;
+    if (!(defect.relative <= opt.hermitian_tol))
       HS_THROW(NotHermitian, source << ": relative Hermitian defect ||A - A^H||_F / ||A||_F = "
-                                    << defect << " exceeds hermitian_tol = " << opt.hermitian_tol);
-    if (defect > 0.0) {
+                                    << defect.relative
+                                    << " exceeds hermitian_tol = " << opt.hermitian_tol);
+    if (!defect.exact) {
       if (!io::hermitian_part_in_place(a)) a = hermitian_part(a);
-      out.notes.push_back("hermitian: relative defect " + format_double(defect) +
+      out.notes.push_back("hermitian: relative defect " + format_double(defect.relative) +
                           " <= hermitian_tol; A replaced by its Hermitian part (A + A^H)/2");
     }
   }

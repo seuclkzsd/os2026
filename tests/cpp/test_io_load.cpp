@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <limits>
@@ -176,6 +177,11 @@ TEST_F(IoMtx, RejectsMalformedFiles) {
   EXPECT_EQ(load_error(real + "2 2 1\n1.5 1 1.0\n"), "io");    // non-integer index
   EXPECT_EQ(load_error(real + "2 2 1\n0 1 1.0\n"), "io");      // 1-based
   EXPECT_EQ(load_error(real + "2 2 1\n1 1 1e400\n"), "io");    // overflows double
+  EXPECT_EQ(load_error(real + "2 2 1\n1 1 -1e400\n"), "io");
+  EXPECT_EQ(load_error(real + "2 2 1\n1 1 1000e306\n"), "io");  // 1e309
+  EXPECT_EQ(load_error("%%MatrixMarket matrix coordinate complex general\n1 1 1\n1 1 1e-400 1e400\n"),
+            "io");
+  EXPECT_EQ(load_error(real + "2147483649 2147483649 0\n"), "invalid_input");  // order > 2^31
   EXPECT_EQ(load_error(real + "2 2 1\n1 1 1.0\n2 2 1.0\n"), "io");
   EXPECT_EQ(load_error(real + "2 2 100000\n1 1 1.0\n"), "io");  // more than the file can hold
   EXPECT_EQ(load_error(real + "2 2 1\n1 1 inf\n"), "invalid_input");
@@ -200,6 +206,76 @@ std::string mtx_number(T v) {
   char buf[64];
   const auto res = std::to_chars(buf, buf + sizeof(buf), v);
   return std::string(buf, res.ptr);
+}
+
+TEST_F(IoMtx, ReadsValuesBelowTheDoubleRangeAsZero) {
+  // As with strtod and scipy.io.mmread, a decimal below the smallest subnormal is a zero (here
+  // spelled in several ways) and is then dropped like any explicit zero; 1e-310 is a subnormal
+  // and kept. Overflow stays an error (RejectsMalformedFiles).
+  const std::string text =
+      "%%MatrixMarket matrix coordinate real symmetric\n3 3 6\n1 1 1e-400\n2 1 -0.00001e-320\n"
+      "2 2 100000e-329\n3 1 1e-99999999999999999999\n3 3 2.5\n3 2 1e-310\n";
+  write_text(tmp("m.mtx"), text);
+  const hs::LoadedMatrix m = hs::load_matrix(tmp("m.mtx"));
+  const auto& a = std::get<CsrMatrix<double>>(m.matrix);
+  EXPECT_EQ(a.rowptr, (std::vector<index_t>{0, 0, 1, 3}));
+  EXPECT_EQ(a.colind, (std::vector<std::int32_t>{2, 1, 2}));
+  EXPECT_EQ(a.values, (std::vector<double>{1e-310, 1e-310, 2.5}));
+  EXPECT_NE(std::find(m.notes.begin(), m.notes.end(), "zeros: dropped 4 explicit zero entries"),
+            m.notes.end());
+  hs::LoadOptions keep;
+  keep.drop_zeros = false;
+  EXPECT_EQ(std::get<CsrMatrix<double>>(hs::load_matrix(tmp("m.mtx"), keep).matrix).nnz(), 9);
+
+  write_text(tmp("c.mtx"),
+             "%%MatrixMarket matrix coordinate complex hermitian\n2 2 2\n1 1 1 -1e-400\n2 1 1e-400 3\n");
+  const hs::LoadedMatrix c = hs::load_matrix(tmp("c.mtx"));
+  const auto& z = std::get<CsrMatrix<cplx>>(c.matrix);
+  EXPECT_EQ(z.values, (std::vector<cplx>{{1.0, 0.0}, {0.0, -3.0}, {0.0, 3.0}}));
+  write_text(tmp("d.mtx"), "%%MatrixMarket matrix array real general\n2 2\n1e-400\n0\n0\n3\n");
+  EXPECT_EQ(std::get<CsrMatrix<double>>(hs::load_matrix(tmp("d.mtx")).matrix).values,
+            std::vector<double>{3.0});
+}
+
+TEST_F(IoMtx, HermitianCheckWorksAtAnyScale) {
+  // Entries whose squares underflow (1e-170) or overflow (1e200) double: the defect is still
+  // ||A - A^H||_F / ||A||_F (not 0 or NaN), and the gate and the Hermitian part follow it.
+  const auto load = [&](const std::string& entries, hs::LoadOptions opt = {}) {
+    write_text(tmp("m.mtx"), "%%MatrixMarket matrix coordinate real general\n" + entries);
+    return hs::load_matrix(tmp("m.mtx"), opt);
+  };
+  for (const double s : {1e-170, 1e200}) {
+    SCOPED_TRACE(s);
+    // Relative asymmetry 1e-12 in entry (2, 1): defect ~ 1e-12 / sqrt(2), within tolerance.
+    const hs::LoadedMatrix m =
+        load("2 2 4\n1 1 " + mtx_number(s) + "\n1 2 " + mtx_number(s) + "\n2 1 " +
+             mtx_number(s * (1.0 + 1e-12)) + "\n2 2 " + mtx_number(s) + "\n");
+    EXPECT_NEAR(m.hermitian_defect, 1e-12 / std::sqrt(2.0), 1e-15);
+    EXPECT_EQ(note_tags(m.notes), std::vector<std::string>{"hermitian"});
+    const auto& a = std::get<CsrMatrix<double>>(m.matrix);
+    ASSERT_EQ(a.nnz(), 4);
+    EXPECT_EQ(a.values[1], a.values[2]);  // (0, 1) == (1, 0): exactly symmetric now
+    EXPECT_GT(a.values[1], s);
+
+    // Far from Hermitian: rejected with the finite defect sqrt(8 / 10).
+    const auto e = hs::io_test::error_of(
+        [&] { load("2 2 2\n1 2 " + mtx_number(s) + "\n2 1 " + mtx_number(3 * s) + "\n"); });
+    EXPECT_EQ(e.code, "not_hermitian");
+    EXPECT_NE(e.message.find("= 0.894"), std::string::npos) << e.message;
+  }
+
+  // An asymmetry below the double range relative to the largest entry: not exactly Hermitian, so
+  // the Hermitian part is still taken, and the defect is the smallest normal double (> 0, so a
+  // zero tolerance rejects it).
+  const std::string tiny = "2 2 4\n1 1 1e300\n2 2 1e300\n1 2 1e-30\n2 1 2e-30\n";
+  const hs::LoadedMatrix m = load(tiny);
+  EXPECT_EQ(m.hermitian_defect, std::numeric_limits<double>::min());
+  const auto& a = std::get<CsrMatrix<double>>(m.matrix);
+  const double h = 0.5 * 1e-30 + 0.5 * 2e-30;  // hermitian_part's arithmetic
+  EXPECT_EQ(a.values, (std::vector<double>{1e300, h, h, 1e300}));
+  hs::LoadOptions exact;
+  exact.hermitian_tol = 0.0;
+  EXPECT_EQ(error_code_of([&] { load(tiny, exact); }), "not_hermitian");
 }
 
 template <class T>
@@ -343,6 +419,58 @@ TYPED_TEST(IoAssembly, TransposeDoesNotConjugate) {
   const auto da = hs::test::to_dense(a), dt = hs::test::to_dense(t);
   for (index_t i = 0; i < 3; ++i)
     for (index_t j = 0; j < 3; ++j) EXPECT_EQ(dt(j, i), da(i, j));
+}
+
+TYPED_TEST(IoAssembly, ScaledHermitianDefectAgreesWithSparseModule) {
+  using T = TypeParam;
+  CsrMatrix<T> a = hs::test::random_hermitian<T>(400, 0.05, 11);
+  const hs::io::HermitianDefect h = hs::io::hermitian_defect_scaled(a);
+  EXPECT_TRUE(h.exact);
+  EXPECT_EQ(h.relative, 0.0);
+  // Rounding-level asymmetry on a symmetric pattern, plus (for complex T) a non-real diagonal.
+  for (index_t p = 0; p < a.nnz(); ++p) a.values[p] *= 1.0 + 1e-11 * static_cast<double>(p % 5 - 2);
+  for (index_t p = a.rowptr[7]; p < a.rowptr[8]; ++p)
+    if (a.colind[p] == 7) a.values[p] += scalar<T>(0.0, 1e-9);
+  const hs::io::HermitianDefect d = hs::io::hermitian_defect_scaled(a);
+  EXPECT_FALSE(d.exact);
+  EXPECT_NEAR(d.relative, hs::hermitian_defect(a), 1e-12 * d.relative);
+
+  // A structurally absent mirror counts as zero, as in hs::hermitian_defect.
+  const std::vector<index_t> r{0, 1, 1, 2}, c{0, 1, 2, 2};
+  const CsrMatrix<T> asym = hs::csr_from_coo<T>(3, 3, r, c, {T(1), T(2), scalar<T>(0.5, -0.25), T(3)});
+  EXPECT_FALSE(hs::io::hermitian_defect_scaled(asym).exact);
+  EXPECT_NEAR(hs::io::hermitian_defect_scaled(asym).relative, hs::hermitian_defect(asym), 1e-15);
+
+  CsrMatrix<T> zero;  // no stored entries at all
+  zero.nrows = zero.ncols = 3;
+  zero.rowptr.assign(4, 0);
+  EXPECT_TRUE(hs::io::hermitian_defect_scaled(zero).exact);
+  EXPECT_EQ(hs::io::hermitian_defect_scaled(zero).relative, 0.0);
+}
+
+TYPED_TEST(IoAssembly, ScaledHermitianDefectIsScaleInvariant) {
+  using T = TypeParam;
+  CsrMatrix<T> a = hs::test::random_hermitian<T>(300, 0.05, 5);
+  for (index_t p = 0; p < a.nnz(); ++p) a.values[p] *= 1.0 + 1e-12 * static_cast<double>(p % 3 - 1);
+  const double ref = hs::io::hermitian_defect_scaled(a).relative;
+  ASSERT_GT(ref, 0.0);
+  // Power-of-two scalings are exact: squares of the scaled entries underflow (2^-600, 2^-1000)
+  // or overflow (2^600, 2^1000) in a plain sum of squares.
+  for (const int e : {-1000, -600, 600, 1000}) {
+    SCOPED_TRACE(e);
+    CsrMatrix<T> s = a;
+    for (T& v : s.values) v *= std::ldexp(1.0, e);
+    const hs::io::HermitianDefect d = hs::io::hermitian_defect_scaled(s);
+    EXPECT_FALSE(d.exact);
+    EXPECT_NEAR(d.relative, ref, 1e-14 * ref);
+  }
+  // Largest asymmetry 1e-330 relative to the largest entry: below the double range, reported as
+  // the smallest normal double.
+  const std::vector<index_t> r{0, 0, 1, 1}, c{0, 1, 0, 1};
+  const CsrMatrix<T> tiny = hs::csr_from_coo<T>(2, 2, r, c, {T(1e300), T(1e-30), T(2e-30), T(1e300)});
+  const hs::io::HermitianDefect d = hs::io::hermitian_defect_scaled(tiny);
+  EXPECT_FALSE(d.exact);
+  EXPECT_EQ(d.relative, std::numeric_limits<double>::min());
 }
 
 TYPED_TEST(IoAssembly, HermitianPartInPlaceMatchesSparseModuleBitwise) {

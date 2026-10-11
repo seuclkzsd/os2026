@@ -110,8 +110,10 @@ struct LoadedMatrix {
   /// Storage the matrix was restored from: Upper/Lower when one triangle was mirrored (detected,
   /// declared by options.storage or by a MatrixMarket symmetric/hermitian banner), else Full.
   Storage detected_storage = Storage::Full;
-  /// ||A - A^H||_F / ||A||_F of the matrix as read (before taking its Hermitian part);
-  /// -1 when options.check_hermitian is false.
+  /// ||A - A^H||_F / ||A||_F of the matrix as read (before taking its Hermitian part), computed
+  /// with scaled sums of squares, so it is accurate at any magnitude of the entries. It is 0
+  /// exactly when A is exactly Hermitian (a positive value below the double range is reported as
+  /// the smallest normal double); -1 when options.check_hermitian is false.
   double hermitian_defect = 0.0;
   /// Human-readable remarks, each "<tag>: <text>" with tag in {storage, hermitian, real,
   /// duplicates, zeros, ignored, unchecked} (restored triangle, Hermitian part taken, complex
@@ -125,13 +127,15 @@ struct LoadedMatrix {
 
 /// Load .npz (scipy sparse csr/csc/coo, matrix or array API, row/col or coords keys), .npy
 /// (dense 2-D, exact zeros dropped) or .mtx (MatrixMarket coordinate real/double/complex/integer/
-/// pattern x general/symmetric/hermitian, or array format; skew-symmetric throws InvalidInput) by
+/// pattern x general/symmetric/hermitian, or array format; skew-symmetric throws InvalidInput;
+/// real values below the double range such as 1e-400 read as 0, as with scipy.io.mmread) by
 /// extension (case-insensitive). npz keys not used by the format (e.g. scipy's `_is_array`) are
 /// ignored; bsr/dia throw Unsupported. The matrix must be square with order <= 2^31.
 /// Steps: build CSR (sort rows, sum duplicates, drop exact zeros per options) -> reject
 /// non-finite values (InvalidInput) -> restore triangular storage (symmetrize_from_triangle; a
 /// MatrixMarket symmetric/hermitian banner declares one stored triangle) -> Hermitian check
-/// (NotHermitian above hermitian_tol) -> if the defect is > 0 replace A by hermitian_part(A) and
+/// (NotHermitian above hermitian_tol) -> if A is not exactly Hermitian (some a_ij !=
+/// conj(a_ji), compared by value; the defect is then > 0) replace A by hermitian_part(A) and
 /// record it in notes, so every module sees the same exactly-Hermitian matrix. Complex input
 /// whose imaginary parts are all exactly 0 is returned as real (noted). Throws hs::Error.
 /// Memory: npz payloads whose dtype matches the result type are inflated straight into the CSR
