@@ -1,20 +1,28 @@
-// Driver hygiene (module anaint, P5; src/driver/solver.cpp): the in-memory Hermitian check by the
-// loader's rules (scaled defect, exact-value test) at extreme magnitudes, non-finite and all-zero
-// inputs, the OpenMP thread count restored on exit.
+// Driver hygiene and GHIEP planning (module anaint, P5; src/driver/solver.cpp, indefinite.cpp):
+// the in-memory Hermitian check by the loader's rules (scaled defect, exact-value test) at extreme
+// magnitudes, non-finite and all-zero inputs, the OpenMP thread count restored on exit, B proven
+// indefinite by its norm-estimate Lanczos (no factorization of B), and the GHIEP memory plan.
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
+#include "driver/internal.hpp"
+#include "driver/norms.hpp"
+#include "hsolve/eigen.hpp"
 #include "hsolve/error.hpp"
+#include "hsolve/log.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
 #include "support/fixtures.hpp"
@@ -39,6 +47,14 @@ std::vector<double> nearest(std::vector<double> w, double sigma, index_t k) {
   std::stable_sort(w.begin(), w.end(), [&](double a, double b) { return std::abs(a - sigma) < std::abs(b - sigma); });
   w.resize(static_cast<std::size_t>(k));
   return w;
+}
+
+void expect_same_set(std::vector<double> got, std::vector<double> want, double tol) {
+  ASSERT_EQ(got.size(), want.size());
+  std::sort(got.begin(), got.end());
+  std::sort(want.begin(), want.end());
+  for (std::size_t i = 0; i < got.size(); ++i)
+    EXPECT_NEAR(got[i], want[i], tol * std::max(1.0, std::abs(want[i]))) << i;
 }
 
 template <class T>
@@ -68,6 +84,18 @@ void expect_bitwise_equal(const hs::Solution<T>& x, const hs::Solution<T>& y) {
   EXPECT_EQ(std::memcmp(x.eigenvectors.data(), y.eigenvectors.data(),
                         static_cast<std::size_t>(x.eigenvectors.rows() * x.eigenvectors.cols()) * sizeof(T)),
             0);
+}
+
+/// Events named `name` of a JSON-lines log.
+std::vector<nlohmann::json> events(const std::string& path, const std::string& name) {
+  std::vector<nlohmann::json> out;
+  std::ifstream in(path);
+  std::string line;
+  while (std::getline(in, line)) {
+    const auto j = nlohmann::json::parse(line);
+    if (j.value("event", "") == name) out.push_back(j);
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------------ Hermitian input
@@ -202,6 +230,140 @@ TEST(DriverThreads, ThreadCountIsRestoredOnReturnAndOnError) {
 #else
   GTEST_SKIP() << "built without OpenMP";
 #endif
+}
+
+// ------------------------------------------------------------------------ definiteness of B
+
+TEST(DriverBDefiniteness, CheapTestsInOrder) {
+  using hs::driver::Definiteness;
+  using hs::driver::test_b_definiteness;
+  const hs::driver::NormEstimate none;
+  // Diagonal: by the signs.
+  std::vector<index_t> idx{0, 1, 2, 3};
+  auto diag = hs::csr_from_coo<double>(4, 4, idx, idx, std::vector<double>{1.0, 2.0, 3.0, 4.0});
+  auto r = test_b_definiteness(diag, none);
+  EXPECT_EQ(r.verdict, Definiteness::Positive);
+  EXPECT_EQ(r.how, "diagonal");
+  EXPECT_TRUE(r.inertia.valid);
+  diag.values[2] = -3.0;
+  r = test_b_definiteness(diag, none);
+  EXPECT_EQ(r.verdict, Definiteness::NotPositive);
+  EXPECT_EQ(r.inertia.neg, 1);
+  // Strictly dominant with a positive diagonal: HPD.
+  r = test_b_definiteness(hs::test::random_hpd<cplx>(50, 0.1, 3), none);
+  EXPECT_EQ(r.verdict, Definiteness::Positive);
+  EXPECT_EQ(r.how, "dominant");
+  // A diagonal entry <= 0.
+  auto lap = hs::test::laplacian_2d<double>(10, 9);  // diagonal 4, not strictly dominant
+  r = test_b_definiteness(lap, none);
+  EXPECT_EQ(r.verdict, Definiteness::Unknown);  // HPD, but only its inertia tells
+  auto neg_diag = lap;
+  for (index_t p = neg_diag.rowptr[5]; p < neg_diag.rowptr[6]; ++p)
+    if (neg_diag.colind[p] == 5) neg_diag.values[p] = 0.0;
+  r = test_b_definiteness(neg_diag, none);
+  EXPECT_EQ(r.verdict, Definiteness::NotPositive);
+  EXPECT_EQ(r.how, "diagonal_entry");
+  // The norm-estimate Lanczos: a Ritz value below -kIndefiniteRitz * ||B||_2 proves indefiniteness.
+  hs::driver::NormEstimate est;
+  est.steps = 30;
+  est.norm2 = 8.0;
+  est.ritz_max = 8.0;
+  est.ritz_min = -2.0 * hs::driver::kIndefiniteRitz * 8.0;
+  r = test_b_definiteness(lap, est);
+  EXPECT_EQ(r.verdict, Definiteness::NotPositive);
+  EXPECT_EQ(r.how, "lanczos");
+  est.ritz_min = -0.5 * hs::driver::kIndefiniteRitz * 8.0;  // within rounding of a PSD matrix
+  EXPECT_EQ(test_b_definiteness(lap, est).verdict, Definiteness::Unknown);
+  // The real estimate: L - 2I is indefinite with eigenvalues down to ~ -2.
+  auto shifted = lap;
+  for (index_t i = 0; i < shifted.nrows; ++i)
+    for (index_t p = shifted.rowptr[i]; p < shifted.rowptr[i + 1]; ++p)
+      if (shifted.colind[p] == i) shifted.values[p] -= 2.0;
+  r = test_b_definiteness(shifted, hs::driver::estimate_norm2(shifted, 30, 2026));
+  EXPECT_EQ(r.verdict, Definiteness::NotPositive);
+  EXPECT_EQ(r.how, "lanczos");
+  EXPECT_EQ(test_b_definiteness(lap, hs::driver::estimate_norm2(lap, 30, 2026)).verdict, Definiteness::Unknown);
+}
+
+/// A = L (2-D Laplacian, HPD), B = L - 2I (indefinite, positive diagonal, not dominant): the
+/// eigenvalues l / (l - 2) are real (A definite) and known from those of L.
+template <class T>
+void ghiep_without_factorizing_b() {
+  const index_t nx = 30, ny = 20;
+  const auto a = hs::test::laplacian_2d<T>(nx, ny);
+  auto b = a;
+  for (index_t i = 0; i < b.nrows; ++i)
+    for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p)
+      if (b.colind[p] == i) b.values[p] -= 2.0;
+  std::vector<double> w;
+  for (double l : hs::test::laplacian_2d_eigenvalues(nx, ny)) w.push_back(l / (l - 2.0));
+  auto cfg = nearest_cfg(3.3, 6);
+  cfg.deterministic = true;
+  const std::string path = ::testing::TempDir() + "/anaint_ghiep_lanczos.jsonl";
+  hs::Solution<T> sol;
+  {
+    hs::Logger log(0, path);
+    sol = hs::solve(a, &b, cfg, &log);
+  }
+  EXPECT_EQ(sol.report.problem, hs::ProblemType::GeneralizedIndefinite);
+  EXPECT_TRUE(sol.report.success);
+  expect_same_set(sol.eigenvalues, nearest(w, 3.3, 6), 1e-9);
+  const auto bi = events(path, "b_inertia");
+  ASSERT_EQ(bi.size(), 1u);
+  EXPECT_EQ(bi[0].at("how").get<std::string>(), "lanczos");
+  // No factorization of B: the same factorizations as when the type is given.
+  auto given = cfg;
+  given.problem = hs::ProblemType::GeneralizedIndefinite;
+  const auto ref = hs::solve(a, &b, given);
+  EXPECT_EQ(sol.report.factor_stats.factorizations, ref.report.factor_stats.factorizations);
+  expect_bitwise_equal(sol, ref);
+}
+
+TEST(DriverBDefiniteness, LanczosProvesIndefiniteBReal) { ghiep_without_factorizing_b<double>(); }
+TEST(DriverBDefiniteness, LanczosProvesIndefiniteBComplex) { ghiep_without_factorizing_b<cplx>(); }
+
+// ------------------------------------------------------------------------ GHIEP memory plan
+
+template <class T>
+void ghiep_reserve_is_the_general_peak() {
+  hs::SolverConfig cfg;
+  cfg.target.k = 18;
+  for (const index_t n : {index_t{5000}, index_t{100000}, index_t{1000000}}) {
+    hs::KrylovSchurOptions<T> ko;
+    ko.nev = 18;
+    ko.block_size = hs::driver::ghiep_block_size(cfg, n, 18);
+    const index_t m = 18 + (hs::is_complex_v<T> ? 0 : 1);
+    EXPECT_EQ(hs::driver::ghiep_reserve_columns<T>(cfg, n), hs::krylov_schur_general_peak_columns<T>(n, ko) + 2 * m)
+        << n;
+  }
+  EXPECT_EQ(hs::driver::ghiep_block_size(cfg, 100000, 18), 2);
+  EXPECT_EQ(hs::driver::ghiep_block_size(cfg, 5000, 18), 1);
+  // Explicit block width (capped at nev), single precision (refinement workspace 2p).
+  cfg.block_size = 8;
+  cfg.factor_precision = hs::FactorPrecision::Single;
+  hs::KrylovSchurOptions<T> ko;
+  ko.nev = 18;
+  ko.block_size = 8;
+  const index_t m = 18 + (hs::is_complex_v<T> ? 0 : 1);
+  EXPECT_EQ(hs::driver::ghiep_reserve_columns<T>(cfg, 100000),
+            hs::krylov_schur_general_peak_columns<T>(100000, ko) + 2 * 8 + 2 * m);
+  // k beyond n and an ncv the run would reject do not throw here (the run reports them).
+  cfg.target.k = 50;
+  cfg.ncv = 3;
+  EXPECT_GT(hs::driver::ghiep_reserve_columns<T>(cfg, 40), 0);
+}
+
+TEST(DriverGhiepMemory, ReserveIsTheGeneralKrylovSchurPeakReal) { ghiep_reserve_is_the_general_peak<double>(); }
+TEST(DriverGhiepMemory, ReserveIsTheGeneralKrylovSchurPeakComplex) { ghiep_reserve_is_the_general_peak<cplx>(); }
+
+// The waveguide shape (k = 18, n = 1e6, real): the general solver's plan holds far fewer columns
+// than the definite path's (ncv guess + 6k = 196), so the factorization cap grows by ~0.7 GB.
+TEST(DriverGhiepMemory, WaveguideReserveIsBelowTheDefinitePlan) {
+  hs::SolverConfig cfg;
+  cfg.target.k = 18;
+  const index_t cols = hs::driver::ghiep_reserve_columns<double>(cfg, 1000000);
+  EXPECT_LT(cols, 130);
+  EXPECT_GT(cols, 18 * 3);
 }
 
 }  // namespace

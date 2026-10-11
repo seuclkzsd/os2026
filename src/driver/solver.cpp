@@ -133,7 +133,7 @@ bool is_diagonal(const CsrMatrix<T>& b) {
   return true;
 }
 
-enum class Definiteness { Positive, NotPositive, Unknown };
+using driver::Definiteness;
 
 // O(nnz) screen of a Hermitian B before its factorization: every row strictly diagonally
 // dominant with a positive diagonal proves B HPD (Gershgorin); a diagonal entry <= 0 (e_i^H B e_i)
@@ -157,6 +157,47 @@ Definiteness screen_definiteness(const CsrMatrix<T>& b) {
 }
 
 }  // namespace
+
+// Tests that decide before the analysis, cheapest first (internal.hpp):
+//   * a diagonal B: HPD iff its diagonal is positive (lumped / Yee mass matrices);
+//   * screen_definiteness: O(nnz), dominant with a positive diagonal proves HPD, a diagonal entry
+//     <= 0 proves not HPD;
+//   * the norm-estimate Lanczos of B (already run for ||B||_2): its Ritz values lie in
+//     [lambda_min(B), lambda_max(B)] up to O(eps ||B||_2) (Paige: without reorthogonalization
+//     Ritz values may repeat, they do not leave the spectrum's hull), so one below
+//     -kIndefiniteRitz * ||B||_2 - about 1e6 times the rounding level - proves a negative
+//     eigenvalue. Lee-Sun-Cendes waveguide pencils show one at once (B's negative part is not
+//     small); before, their B was factorized for its inertia: 0.19 s, 10% of wg-square-1e5 (P4).
+// Unknown: B's inertia on the main analysis decides (one factorization).
+template <class T>
+driver::BDefiniteness driver::test_b_definiteness(const CsrMatrix<T>& b, const NormEstimate& nb) {
+  BDefiniteness r;
+  const index_t n = b.nrows;
+  if (is_diagonal(b)) {
+    r.inertia.neg = r.inertia.zero = r.inertia.pos = 0;
+    for (index_t i = 0; i < n; ++i) {
+      const double d = (b.rowptr[i + 1] > b.rowptr[i]) ? std::real(b.values[b.rowptr[i]]) : 0.0;
+      (d > 0.0 ? r.inertia.pos : d < 0.0 ? r.inertia.neg : r.inertia.zero)++;
+    }
+    r.inertia.valid = true;
+    r.verdict = (r.inertia.neg == 0 && r.inertia.zero == 0) ? Definiteness::Positive : Definiteness::NotPositive;
+    r.how = "diagonal";
+    return r;
+  }
+  r.verdict = screen_definiteness(b);
+  if (r.verdict == Definiteness::Positive) {
+    r.inertia.neg = r.inertia.zero = 0;
+    r.inertia.pos = n;
+    r.inertia.valid = true;
+    r.how = "dominant";
+  } else if (r.verdict == Definiteness::NotPositive) {
+    r.how = "diagonal_entry";  // not HPD; its inertia is not needed (counts stay -1, valid == false)
+  } else if (nb.steps > 0 && nb.ritz_min < -kIndefiniteRitz * nb.norm2) {
+    r.verdict = Definiteness::NotPositive;
+    r.how = "lanczos";
+  }
+  return r;
+}
 
 // ------------------------------------------------------------------------------------- solve
 
@@ -182,8 +223,9 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   rep.nnz_b = b ? b->nnz() : 0;
   rep.complex_scalars = is_complex_v<T>;
   const auto na = driver::estimate_norm2(*a, 30, cfg.seed);
+  const driver::NormEstimate nb = b ? driver::estimate_norm2(*b, 30, cfg.seed) : driver::NormEstimate{};
   rep.norm2_a = na.norm2;
-  rep.norm2_b = b ? driver::estimate_norm2(*b, 30, cfg.seed).norm2 : 1.0;
+  rep.norm2_b = b ? nb.norm2 : 1.0;
   rep.scale = rep.norm2_b > 0 ? rep.norm2_a / rep.norm2_b : rep.norm2_a;
   const double scale = std::max(rep.scale, 1e-300);
   event(c, "problem", {{"n", static_cast<std::int64_t>(n)}, {"nnz_a", static_cast<std::int64_t>(rep.nnz_a)},
@@ -196,32 +238,64 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     HS_THROW(InvalidInput, "a generalized problem type was requested but no B was given");
   if (cfg.method == Method::Lanczos) HS_THROW(Unsupported, "factorization-free Lanczos is roadmap P3");
 
-  // 2. Memory budget for the factorization (DESIGN §3.6-3).
+  // 2. Problem type as far as it is known before the analysis: given, B = I, or B's definiteness
+  //    proven without a factorization (test_b_definiteness). Auto here: B's inertia on the main
+  //    analysis decides below. The memory plan and the ordering choice follow the planned type.
+  ProblemType type = cfg.problem;
+  Timer tb;
+  driver::BDefiniteness bdef;
+  if (!b) {
+    type = ProblemType::Standard;
+  } else if (type == ProblemType::Auto) {
+    bdef = driver::test_b_definiteness(*b, nb);
+    if (bdef.verdict != Definiteness::Unknown)
+      type = bdef.verdict == Definiteness::Positive ? ProblemType::GeneralizedDefinite
+                                                    : ProblemType::GeneralizedIndefinite;
+  }
+  auto b_inertia_event = [&](const Inertia& ib, const std::string& how) {
+    event(c, "b_inertia", {{"neg", static_cast<std::int64_t>(ib.neg)}, {"zero", static_cast<std::int64_t>(ib.zero)},
+                           {"pos", static_cast<std::int64_t>(ib.pos)}, {"valid", ib.valid},
+                           {"screened", how != "diagonal" && how != "factorization" && how != "compute_inertia"},
+                           {"how", how}, {"ritz_min", nb.ritz_min}, {"seconds", tb.seconds()}});
+  };
+  if (b && cfg.problem == ProblemType::Auto && type != ProblemType::Auto) b_inertia_event(bdef.inertia, bdef.how);
+
+  // 3. Memory budget for the factorization (DESIGN §3.6-3): what the solve path keeps beside the
+  //    factors - the block Lanczos basis plus candidate blocks (definite), or the general
+  //    Krylov-Schur peak plus the bases held for the union refinement (indefinite); both while the
+  //    type is still open.
   const double budget = cfg.memory_budget_gb * 1073741824.0;
   const index_t k_guess = cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
-  // Krylov basis: the general solver's (GHIEP) or the block Lanczos basis of the auto block width
-  // (DESIGN §3.6-3; block layout of eigen.hpp). A wider explicit block_size is not reserved here:
-  // the factorization has priority, and fit_block_size() halves the width (with a warning) when
-  // its basis does not fit what the factors leave; GHIEP runs ignore block_size altogether.
+  // Definite path: the block Lanczos basis of the auto block width (DESIGN §3.6-3; block layout of
+  // eigen.hpp). A wider explicit block_size is not reserved here: the factorization has priority,
+  // and fit_block_size() halves the width (with a warning) when its basis does not fit what the
+  // factors leave.
   const index_t p_guess = std::min(cfg.block_size > 0 ? cfg.block_size : driver::kMaxAutoBlockSize,
                                    driver::kMaxAutoBlockSize);
   const index_t ncv_guess =
       std::max(cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32),
                driver::lanczos_basis_columns(n, 0, std::min(n, k_guess), cfg.ncv, p_guess));
-  const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(ncv_guess + 6 * k_guess);
+  const index_t definite_columns = ncv_guess + 6 * k_guess;
+  const index_t indefinite_columns = driver::ghiep_reserve_columns<T>(cfg, n);
+  const index_t reserve_columns = type == ProblemType::GeneralizedIndefinite ? indefinite_columns
+                                  : type == ProblemType::Auto ? std::max(definite_columns, indefinite_columns)
+                                                              : definite_columns;
+  const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(reserve_columns);
   const double cap_mb = (budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)) - krylov_bytes) * 0.95 / 1e6;
   if (cap_mb <= 0)
     HS_THROW(OutOfMemoryBudget, "matrices and Krylov basis alone exceed memory_budget_gb = " << cfg.memory_budget_gb);
   const FactorOptions fopts = driver::factor_options_from(cfg, cap_mb);
   rep.factor_options = fopts;
-  // 3. One analysis serves every factorization on the pencil's pattern: the B-definiteness test,
+
+  // 4. One analysis serves every factorization on the pencil's pattern: the B-definiteness test,
   //    K(sigma), certificate endpoints and reruns. ordering < 0 selects it adaptively.
   const double sigma0 = initial_shift(cfg.target, na, scale, rep.norm2_b);
   std::unique_ptr<SparseFactorization<T>> fac;
   if (cfg.ordering < 0) {
     const index_t kk = cfg.target.mode == TargetMode::Interval ? 32 : cfg.target.k;
     const bool cert = cfg.inertia_check != Toggle::Off;
-    fac = driver::adaptive_analysis(c, fopts, pencil, sigma0, 1 + (cert ? 2 : 0) + (b ? 1 : 0), std::max<index_t>(40, 3 * kk));
+    fac = driver::adaptive_analysis(c, fopts, pencil, sigma0, 1 + (cert ? 2 : 0) + (b ? 1 : 0),
+                                    std::max<index_t>(40, 3 * kk));
     driver::analyze_within_budget(c, *fac, pencil, sigma0, /*already_analyzed=*/true);
   } else {
     fac = make_mumps_factorization<T>(fopts);
@@ -229,47 +303,27 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   }
   rep.factor_options = fac->options();
 
-  // 4. Problem type: B is HPD iff its exact LDL^T has no negative or zero pivots (Sylvester).
-  ProblemType type = cfg.problem;
-  const bool b_diagonal = b && is_diagonal(*b);
+  // 5. B's inertia when the cheap tests left it open: B is HPD iff its exact LDL^T has no negative
+  //    or zero pivots (Sylvester), counted on the main analysis.
   bool b_factorized = false;  // the main object holds the factorization of B
-  if (!b) {
-    type = ProblemType::Standard;
-  } else if (type == ProblemType::Auto) {
-    Timer tb;
+  if (b && type == ProblemType::Auto) {
     Inertia ib;
-    // A diagonal B (e.g. lumped/Yee mass matrices) is HPD iff its diagonal is positive: no
-    // factorization needed. A diagonally dominant one with positive diagonal is HPD, one with a
-    // diagonal entry <= 0 is not (screen_definiteness). Otherwise count the inertia of B on the
-    // main analysis.
-    const Definiteness screen = b_diagonal ? Definiteness::Unknown : screen_definiteness(*b);
-    if (b_diagonal) {
-      ib.neg = ib.zero = ib.pos = 0;
-      for (index_t i = 0; i < n; ++i) {
-        const double d = (b->rowptr[i + 1] > b->rowptr[i]) ? std::real(b->values[b->rowptr[i]]) : 0.0;
-        (d > 0.0 ? ib.pos : d < 0.0 ? ib.neg : ib.zero)++;
-      }
-      ib.valid = true;
-    } else if (screen == Definiteness::Positive) {
-      ib.neg = ib.zero = 0;
-      ib.pos = n;
-      ib.valid = true;
-    } else if (screen == Definiteness::NotPositive) {
-      // not HPD; its inertia is not needed (counts stay -1, valid == false)
-    } else if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
+    std::string how;
+    if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
       driver::PhaseScope phase(clock, driver::Phase::Factor);
       if (fac->factorize(0.0, 1.0)) ib = fac->inertia();  // false: B singular -> not HPD
       b_factorized = ib.valid;
+      how = "factorization";
     } else {
       driver::PhaseScope phase(clock, driver::Phase::Factor);
       ib = compute_inertia(pencil, 0.0, 1.0, fopts);  // forces an exact double factorization
+      how = "compute_inertia";
     }
     type = (ib.valid && ib.neg == 0 && ib.zero == 0) ? ProblemType::GeneralizedDefinite
                                                      : ProblemType::GeneralizedIndefinite;
-    event(c, "b_inertia", {{"neg", static_cast<std::int64_t>(ib.neg)}, {"zero", static_cast<std::int64_t>(ib.zero)},
-                           {"pos", static_cast<std::int64_t>(ib.pos)}, {"valid", ib.valid},
-                           {"screened", screen != Definiteness::Unknown}, {"seconds", tb.seconds()}});
+    b_inertia_event(ib, how);
   }
+  const bool b_diagonal = b && is_diagonal(*b);
   rep.problem = type;
   Method method = cfg.method;
   if (method == Method::Auto)
@@ -307,7 +361,7 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     event(c, "spectrum_estimate", {{"lo1", spectrum.lo1}, {"lo2", spectrum.lo2}, {"hi1", spectrum.hi1}, {"hi2", spectrum.hi2}});
   }
 
-  // 5-11. Solve along the chosen path.
+  // 6-11. Solve along the chosen path.
   Solution<T> sol = (method == Method::ShiftInvertKrylovSchur)
                         ? driver::solve_indefinite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale)
                         : driver::solve_definite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale, sigma0, spectrum);
@@ -327,8 +381,10 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   return sol;
 }
 
-#define HS_INSTANTIATE_SOLVE(T) \
-  template Solution<T> solve<T>(const CsrMatrix<T>&, const non_deduced_t<CsrMatrix<T>>*, const SolverConfig&, Logger*);
+#define HS_INSTANTIATE_SOLVE(T)                                                                     \
+  template Solution<T> solve<T>(const CsrMatrix<T>&, const non_deduced_t<CsrMatrix<T>>*, const SolverConfig&, \
+                                Logger*);                                                               \
+  template driver::BDefiniteness driver::test_b_definiteness<T>(const CsrMatrix<T>&, const driver::NormEstimate&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_SOLVE)
 #undef HS_INSTANTIATE_SOLVE
 

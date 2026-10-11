@@ -318,6 +318,29 @@ struct SpectrumEstimate {
   bool valid = false;
 };
 
+// ------------------------------------------------------------------------------ definiteness of B
+
+enum class Definiteness { Positive, NotPositive, Unknown };
+
+/// A Ritz value of B's norm-estimate Lanczos below -kIndefiniteRitz * ||B||_2 proves B indefinite
+/// (test_b_definiteness).
+constexpr double kIndefiniteRitz = 1e-10;
+
+/// Whether B is HPD, as far as decided before the analysis, without a factorization.
+struct BDefiniteness {
+  Definiteness verdict = Definiteness::Unknown;
+  Inertia inertia;           ///< valid when the test yields it (diagonal B, dominant B)
+  std::string how = "none";  ///< "diagonal", "dominant", "diagonal_entry", "lanczos"; "none": Unknown
+};
+
+/// The cheap tests of B's definiteness (DESIGN §3.6-1), in this order: a diagonal B by the signs of
+/// its diagonal; strict diagonal dominance with a positive diagonal (HPD by Gershgorin); a diagonal
+/// entry <= 0 (not HPD); a Ritz value of `nb` - the norm-estimate Lanczos of B (estimate_norm2) -
+/// below -kIndefiniteRitz * nb.norm2 (not HPD: Ritz values stay inside the spectrum's hull up to
+/// O(eps ||B||_2)). Unknown: B's inertia must be counted. O(nnz(B)); does not modify b.
+template <class T>
+BDefiniteness test_b_definiteness(const CsrMatrix<T>& b, const NormEstimate& nb);
+
 // ------------------------------------------------------------------------------ solve paths
 
 /// HEP / GHEP (B HPD): shift-invert Lanczos, Rayleigh-Ritz, rescue, inertia certificate;
@@ -331,5 +354,22 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
 template <class T>
 Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double n2a,
                              double n2b, double scale);
+
+/// GHIEP: |lambda| <= kGhiepZeroBand * scale is numerically zero - the band of A's null-space
+/// cluster, kept away from the shifts (indefinite.cpp; zero_filter_tol can widen it).
+constexpr double kGhiepZeroBand = 1e-8;
+
+/// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil, before
+/// the memory fit: cfg.block_size if positive - capped at nev (a block wider than the wanted set
+/// only adds basis work), 64 and n / 16, and 1 for the side probes (nev <= 2) - else 2 for
+/// n >= 2e4 and nev >= 4, 1 below (measurements in indefinite.cpp). Deterministic.
+index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev);
+
+/// n-vectors of T the GHIEP path keeps beside the factorization (memory plan of DESIGN §3.6-3,
+/// reserved before the analysis): the first run's krylov_schur_general_peak_columns (block size of
+/// ghiep_block_size, refinement workspace for single / BLR factors) plus the plain run's Schur
+/// basis and the union refinement basis held while later runs factorize (indefinite.cpp).
+template <class T>
+index_t ghiep_reserve_columns(const SolverConfig& cfg, index_t n);
 
 }  // namespace hs::driver

@@ -65,7 +65,7 @@ namespace {
 /// shortfall with them, reported as not accepted).
 constexpr double kTrustworthy = 1e-6;
 /// |lambda| <= kZeroBand * scale is "numerically zero" (zero_filter_tol off): the cluster band.
-constexpr double kZeroBand = 1e-8;
+constexpr double kZeroBand = kGhiepZeroBand;
 /// Restart budget of the first attempt of a one-sided run: enough for well-separated runs (2..5
 /// restarts measured), small enough that a side with fewer eigenvalues than requested (its extra
 /// wanted Ritz values chase the dense theta ~ 0 end and never converge) costs little. Well-placed
@@ -108,12 +108,9 @@ constexpr index_t kMaxProbeNev = 2;
 /// take (fit_block_size); the rest is headroom for the solves' own workspace.
 constexpr double kBlockMemoryShare = 0.9;
 
-/// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil, before
-/// the memory fit (fit_block_size): the configured value if positive - capped at nev (a block
-/// wider than the wanted set only adds basis work), kMaxConfiguredBlock and n / 16, and 1 for the
-/// probes (nev <= kMaxProbeNev) - else the measured rule above.
-///
-/// Measurements (2 threads, cores 28-29, medians of interleaved repetitions). One multi-RHS solve
+}  // namespace
+
+// Krylov block size of a GHIEP run (internal.hpp). Measurements (2 threads, cores 28-29, medians of interleaved repetitions). One multi-RHS solve
 /// of p columns costs much less than p single solves (bench/ghiep_block.cpp --mode ks:
 /// wg-square-1e5 20.8 / 11.5 / 7.9 / 5.5 ms per vector for p = 1 / 2 / 4 / 8, wg-square-1e6
 /// 277 / 150 / 105 / 65 ms), while a block Krylov space needs more vectors for distinct
@@ -141,6 +138,31 @@ index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev) {
   }
   return n >= kBlockMinOrder && nev >= kBlockMinNev ? kAutoBlock : 1;
 }
+
+// Memory plan of the GHIEP path (internal.hpp). The first run is the plain run at sigma (or, with
+// sigma in the zero band, a one-sided run with as many pairs): its peak - Krylov basis plus Schur
+// basis, or Schur basis plus vectors - comes from krylov_schur_general_peak_columns with the block
+// size of ghiep_block_size, plus the operator's refinement workspace (2p) for single / BLR factors.
+// While later runs (probes, one-sided runs, reruns) hold the factorization, the solve keeps the
+// plain run's Schur basis and the union refinement basis (refine_union: m columns each, m = the
+// run's materialized Schur vectors); bases of further runs are not reserved - fit_block_size halves
+// their block size to what the budget leaves. The outputs are formed after the factorization is
+// released (release_factorization), so they need no reservation beside the factors.
+template <class T>
+index_t ghiep_reserve_columns(const SolverConfig& cfg, index_t n) {
+  if (n < 1) return 0;
+  KrylovSchurOptions<T> ko;
+  ko.nev = std::clamp<index_t>(cfg.target.k, 1, n);
+  // An ncv the run would reject is reported by the run itself; plan with the automatic one.
+  const index_t min_ncv = std::min(n, ko.nev + (is_complex_v<T> ? 1 : 2));
+  ko.ncv = cfg.ncv >= min_ncv ? cfg.ncv : 0;
+  ko.block_size = ghiep_block_size(cfg, n, ko.nev);
+  const bool refinement = cfg.factor_precision == FactorPrecision::Single || cfg.blr == Toggle::On;
+  const index_t m = std::min(n, ko.nev + (is_complex_v<T> ? 0 : 1));
+  return krylov_schur_general_peak_columns<T>(n, ko) + (refinement ? 2 * ko.block_size : 0) + 2 * m;
+}
+
+namespace {
 
 /// ko.block_size, halved while the run's peak - krylov_schur_general_peak_columns n-vectors, plus
 /// the operator's refinement workspace (2 n p, with refinement only) - exceeds kBlockMemoryShare of
@@ -983,7 +1005,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
 
 #define HS_INSTANTIATE_SOLVE_INDEFINITE(T)                                                                  \
   template Solution<T> solve_indefinite<T>(Ctx&, const ShiftedPencil<T>&, SparseFactorization<T>&, double, \
-                                           double, double);
+                                           double, double);                                                \
+  template index_t ghiep_reserve_columns<T>(const SolverConfig&, index_t);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_SOLVE_INDEFINITE)
 #undef HS_INSTANTIATE_SOLVE_INDEFINITE
 
