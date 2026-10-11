@@ -91,9 +91,9 @@ constexpr index_t kBatch = 4;
 /// streams A and B for at once); memory: n x kProjectBatch of T.
 constexpr index_t kProjectBatch = 8;
 /// Block-size rule of the GHIEP runs (ghiep_block_size): p = kAutoBlock for orders from
-/// kBlockMinOrder on (below, the solves are cheap next to the basis work: gains <= 7% at n = 1e4)
-/// and runs with at least kBlockMinNev wanted pairs (a block needs pairs to fill it; the probes,
-/// nev = 2, stay single-vector).
+/// kBlockMinOrder on (below, the solves are cheap next to the basis work: totals of ~0.1 s at
+/// n = 1e4, where p = 2 saves at most a few 10 ms) and runs with at least kBlockMinNev wanted pairs
+/// (a block needs pairs to fill it; the probes, nev = 2, stay single-vector).
 constexpr index_t kAutoBlock = 2;
 constexpr index_t kBlockMinOrder = 20000;
 constexpr index_t kBlockMinNev = 4;
@@ -123,19 +123,29 @@ constexpr double kBlockMemoryShare = 0.9;
 /// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil, before
 /// the memory fit (fit_block_size): the configured value if positive - capped at nev (a block
 /// wider than the wanted set only adds basis work), kMaxConfiguredBlock and n / 16, and 1 for the
-/// probes (nev <= kMaxProbeNev) - else the measured rule above. One multi-RHS solve of p columns costs much less than p single solves (2 threads,
-/// wg-square-1e5: 21 / 12.9 / 8.8 / 6.2 ms per vector for p = 1 / 2 / 4 / 8; wg-square-1e6:
-/// 248 / 155 / 114 / 72 ms), while a block Krylov space needs more vectors for distinct
+/// probes (nev <= kMaxProbeNev) - else the measured rule above.
+///
+/// Measurements (2 threads, cores 28-29, medians of interleaved repetitions). One multi-RHS solve
+/// of p columns costs much less than p single solves (bench/ghiep_block.cpp --mode ks:
+/// wg-square-1e5 20.8 / 11.5 / 7.9 / 5.5 ms per vector for p = 1 / 2 / 4 / 8, wg-square-1e6
+/// 277 / 150 / 105 / 65 ms), while a block Krylov space needs more vectors for distinct
 /// eigenvalues (wg-square-1e5, k = 18: 57 / 62 / 84 / 128 applications) - and many more in the
 /// one-sided runs next to the zero cluster, where every block brings p cluster directions back
-/// (wg-square-1e5 at sigma = 0: 294 / 435 / 734 / 1196). End to end (bench/ghiep_block.cpp e2e,
-/// 2 threads, medians), seconds for p = 1 / 2 / 4 / 8:
-///   wg-square-1e5     2.46 / 1.85 / 1.85 / 1.99    wg-square-1e5, sigma 0     9.0 / 7.9 / 13.8 / 15.1
-///   wg-halfslab-1e5   3.12 / 2.07 / 2.20 / 2.57    wg-halfslab-1e5, sigma 0  16.0 / 12.3 / 12.4 / 13.5
-/// and on the five synthetic pencils of the bench (syn-ghiep-{wg,wg0}-{20480,102400},
-/// syn-ghiep-cplx-102400: banded, cheap solves, zero cluster, complex pairs) p = 2 was 1.09 -
-/// 1.12x and p = 4 0.95 - 1.12x as fast as p = 1. p = 2 never lost against p = 1 (1.09 - 1.51x
-/// over all nine cases); p = 4 lost up to 1.5x. n ~ 1e4: p = 2 gained <= 7%, p >= 4 lost.
+/// (wg-square-1e5 at sigma = 0, whole solve: 284 / 400 / 620 / 855). End to end, seconds for
+/// p = 1 / 2 / 4 / 8 (3 repetitions; bench/ghiep_fix_e2e.cpp on the data cases, with --sigma 0 for
+/// the one-sided rows, bench/ghiep_block.cpp --mode e2e on the synthetic ones; forcing p needs
+/// SolverConfig::block_size - interface request 2 of module ghiep - so these were measured on this
+/// code plus that one field):
+///   wg-square-1e5     2.09 / 1.56 / 1.57 / 1.69    wg-square-1e5, sigma 0    9.9 / 8.6 / 14.6 / 10.1
+///   wg-halfslab-1e5   3.89 / 2.46 / 3.10 / 3.40    wg-halfslab-1e5, sigma 0  14.5 / 11.4 / 10.6 / 12.7
+/// and on the five synthetic pencils (syn-ghiep-{wg,wg0}-{20480,102400}, syn-ghiep-cplx-102400:
+/// banded, cheap solves, zero cluster, complex pairs) p = 2 was 1.06 - 1.14x, p = 4 0.97 - 1.12x
+/// and p = 8 0.79 - 1.12x as fast as p = 1. p = 2 never lost against p = 1 (1.06 - 1.58x over the
+/// nine cases); p = 4 lost up to 1.5x (0.68x). Every solve succeeded (eta <= 3e-12), with the same
+/// eigenvalues for every p (relative differences <= 3e-10, as between repetitions of p = 1: the
+/// L0-OpenMP solves are not bitwise reproducible). n ~ 1e4 (wg-square-pert-1e4, wg-halfslab-1e4):
+/// p = 2 1.03 - 1.19x, but on totals of 0.11 - 0.16 s (10 - 20 ms, the noise level of these
+/// runs), so the rule keeps p = 1 below kBlockMinOrder.
 index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev) {
   const index_t configured = configured_block_size(cfg, 0);
   if (configured > 0) {
