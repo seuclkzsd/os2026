@@ -201,17 +201,21 @@ TEST(DriverSolve, IndefiniteBRealSpectrumWithZeroCluster) {
       bd(r, c) = bd(c, r);
     }
   auto a = hs::test::from_dense(ad), b = hs::test::from_dense(bd);
-  // Target band away from the zero cluster, which stays present (theta_zero = -1/sigma is a large,
-  // unwanted Ritz value) - the realistic waveguide query. Asking for several copies of the exact
-  // 20-fold zero itself is NOT reliable for indefinite B yet: a single-vector Krylov space holds one
-  // copy of a semisimple multiple eigenvalue (others only via rounding) and GHIEP has no inertia
-  // certificate to force the rest out. Roadmap P3: zero-cluster shift placement + block Krylov.
+  // Target band next to the zero cluster - the realistic waveguide query. The 5 nearest sigma = 0.3
+  // are 4 eigenvalues and then (distance 0.3) the 20-fold zero. The cluster (null space of A) is
+  // never wanted (DESIGN §3.6-9): the driver sees the selection disk reach it, counts dim null(A)
+  // = 20 and takes the 5th pair from one-sided runs on both sides of the cluster instead
+  // (test_driver_cluster.cpp covers this in detail). Before P3 one copy of the zero was returned.
   const double sigma = 0.3;
   auto sol = hs::solve(a, &b, nearest_cfg(sigma, 5));
   EXPECT_EQ(sol.report.problem, hs::ProblemType::GeneralizedIndefinite);
   EXPECT_TRUE(sol.complex_eigenvalues.empty());
   expect_report_ok(sol, false);
-  expect_same_set(sol.eigenvalues, nearest(lam, sigma, 5), 1e-8);
+  std::vector<double> nonzero;
+  for (double x : lam)
+    if (x != 0.0) nonzero.push_back(x);
+  expect_same_set(sol.eigenvalues, nearest(nonzero, sigma, 5), 1e-8);
+  EXPECT_EQ(sol.report.zero_cluster_dim, nzero);
 }
 
 TEST(DriverSolve, RejectsNonHermitianAndSymmetrizesNearHermitian) {
