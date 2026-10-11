@@ -98,11 +98,14 @@ FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
 // ------------------------------------------------------------------------- factorization steps
 
 // Factorize K(sigma0) (DESIGN §3.6-4). A null pivot means sigma0 is (numerically) ON an eigenvalue:
-// perturb the shift, delta_r = (+/-) 1e-8 * max(scale, |sigma0|) * 10^r, at most twice. If every
-// nearby shift still looks singular, sigma0 lies inside a cluster denser than the null-pivot
-// threshold: moving away would change which eigenvalues are nearest, so factorize AT sigma0 with
-// null-pivot detection off (tiny pivots are kept; shift-invert then amplifies exactly the wanted
-// near-null directions). `detection_off` tells later refactorizations at this shift to do the same.
+// perturb the shift once, by delta = 1e-8 * max(scale, |sigma0|) - an isolated eigenvalue at
+// sigma0 is then ~1e3 times beyond the detection threshold (factor.hpp). If that shift still looks
+// singular, sigma0 lies inside a cluster denser than the null-pivot threshold: moving away (a
+// second, 10x larger perturbation used to be tried) would change which eigenvalues are nearest -
+// on syn-zero-cluster-real-1e5 it landed outside the cluster at 5x the wanted radius and the
+// certificate then counted 166 eigenvalues for 21 found - so factorize AT sigma0 with null-pivot
+// detection off (tiny pivots are kept; shift-invert then amplifies exactly the wanted near-null
+// directions). `detection_off` tells later refactorizations at this shift to do the same.
 template <class T>
 double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off) {
   PhaseScope phase(c.clock, Phase::Factor);
@@ -111,7 +114,7 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
   c.held = FactorHeld{};
   fac.set_null_pivot_detection(true);
   double s = sigma0;
-  const index_t perturbations = std::min<index_t>(2, c.cfg.max_shift_retries);
+  const index_t perturbations = std::min<index_t>(1, c.cfg.max_shift_retries);
   for (index_t r = 0;; ++r) {
     if (fac.factorize(1.0, -s)) {
       c.rep.shift_retries = std::max(c.rep.shift_retries, r);
