@@ -9,8 +9,9 @@ Only the config 'nearest' target is supported. ARPACK runs with scipy's defaults
 machine precision; ncv=min(n, max(2k+1, 20))) and a deterministic start vector from the config seed.
 
 Output conventions: pairs ordered nearest sigma first; HEP/GHEP vectors B-normalized column by
-column (eigsh already returns them B-orthonormal; the complex-Hermitian path goes through eigs),
-GHIEP vectors unit 2-norm. GHIEP pairs are split into real and complex ones with the SolverConfig
+column (eigsh already returns them B-orthonormal; for complex Hermitian matrices scipy's eigsh
+delegates to eigs, whose eigenvectors inside a degenerate eigenspace are not B-orthogonal - left
+as scipy returns them and measured by the evaluator's b_orthogonality), GHIEP vectors unit 2-norm. GHIEP pairs are split into real and complex ones with the SolverConfig
 rule (DESIGN §3.6-10): complex only if |Im lambda| > complex_tol * max(|lambda|, scale) AND its real
 projection fails the backward-error test while the complex pair passes. The real projection of
 (lambda, x) is (Re lambda, x) for complex matrices; for real matrices x and conj(x) span the real
