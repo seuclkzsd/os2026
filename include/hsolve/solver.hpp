@@ -25,8 +25,8 @@ namespace hs {
 
 enum class TargetMode {
   Nearest,   ///< the k eigenvalues closest to sigma
-  Interval,  ///< all eigenvalues in [lower, upper]
-  Smallest,  ///< the k algebraically smallest
+  Interval,  ///< all eigenvalues in [lower, upper]       (B HPD or B = I: they need inertia counts;
+  Smallest,  ///< the k algebraically smallest             indefinite B supports Nearest only)
   Largest,   ///< the k algebraically largest
 };
 
@@ -99,11 +99,15 @@ struct PairReport {
 /// Completeness certificate (HEP/GHEP only; DESIGN §3.6 step 8). Windows by target mode:
 /// Nearest: [a, b] with a <= sigma - r, b >= sigma + r (r = max |lambda_i - sigma|), endpoints
 /// pushed into spectral gaps; Smallest: (-inf, b]; Largest: [a, +inf); Interval: user bounds.
+/// Smallest / largest whose k-th eigenvalue lies in a large cluster of numerically equal
+/// eigenvalues (e.g. a null space without zero_filter_tol) require only the copies still needed
+/// from it: count_inertia then counts the eigenvalues before the cluster plus those copies (two
+/// counts prove the cluster's width; see note), and any such copies are a valid answer.
 struct InertiaCertificate {
   bool performed = false;
   double lower = 0.0;          ///< a (-inf for Smallest)
   double upper = 0.0;          ///< b (+inf for Largest)
-  index_t count_inertia = -1;  ///< eigenvalues in the window according to Sylvester inertia
+  index_t count_inertia = -1;  ///< eigenvalues required in the window according to Sylvester inertia
   index_t count_found = -1;    ///< distinct (B-orthogonal) computed eigenvectors in the window
   index_t endpoint_moves = 0;  ///< endpoints moved because inertia came back invalid
   bool passed = false;         ///< count_inertia == count_found
@@ -112,7 +116,11 @@ struct InertiaCertificate {
 
 /// One shift-invert Krylov run of a sliced or one-sided solve (DESIGN §3.6): spectrum slices of
 /// interval / smallest / largest targets, and the one-sided runs that keep the GHIEP zero
-/// cluster unwanted. Empty for single-shift nearest solves.
+/// cluster unwanted (plus GHIEP recovery runs for complex eigenvalues between them). Empty for
+/// single-shift nearest solves. reruns counts deflated reruns, including those at a multiple
+/// eigenvalue's own shift (sigma is the slice's first shift). A partial cluster slice (see
+/// InertiaCertificate) reports the cluster's count in count_inertia and passes with the copies
+/// required.
 struct SliceReport {
   double lower = 0.0;          ///< slice window (-inf / +inf: one-sided)
   double upper = 0.0;
