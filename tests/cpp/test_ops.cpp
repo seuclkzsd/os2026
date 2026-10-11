@@ -195,6 +195,15 @@ TYPED_TEST(OpsShiftInvert, RefinementOfSinglePrecisionFactorReachesDoubleAccurac
     early.apply(x.data(), ld, y.data(), ld, p);
     EXPECT_LE(early.last_relative_residual(), 1e-8);
     EXPECT_LT(early.refinement_steps(), refined.refinement_steps());
+
+    // rel_tol = 0 is unattainable: refinement stops once a correction no longer reduces the
+    // residual (double-precision floor), long before max_steps.
+    hs::SolveRefinement exhaustive;
+    exhaustive.max_steps = 50;
+    hs::ShiftInvertOperator<T> stagnating(*f, pencil, c.sigma, exhaustive);
+    stagnating.apply(x.data(), ld, y.data(), ld, p);
+    EXPECT_LT(stagnating.refinement_steps(), 15);
+    EXPECT_LE(max_rel_diff(c.n, p, y.data(), ld, z.data(), ld), 1e-12);
   }
 }
 
