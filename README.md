@@ -59,6 +59,16 @@ python3 tools/run/guard.py -- python -m tools.eval.sweep results/raw/mytag      
 python3 tools/run/guard.py --mem-gb 30 --timeout 3600 -- ./build/release/hsolve ...
 ```
 
+## 集群节点（gpu01 / gpu02 / c001）
+
+节点为 CentOS 7、无外网，环境由本机 conda 包缓存离线重建（详见脚本头注释）：
+
+```bash
+tools/dev/deploy_cluster.sh gpu01                       # 环境、代码（git remote "cluster"）、测例数据
+tools/dev/cluster_run.sh gpu02 -- tools/dev/build.sh release          # 在节点上编译当前 worktree 的提交
+tools/dev/cluster_run.sh gpu02 -- python3 tools/run/guard.py -- ...   # 在节点上运行（核与内存见 env/hosts/）
+```
+
 ## 目录
 
 | 路径 | 内容 |
