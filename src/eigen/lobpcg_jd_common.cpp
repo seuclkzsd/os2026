@@ -105,6 +105,21 @@ void require_finite(index_t n, const T* x, index_t p, const char* what) {
 }
 
 template <class T>
+void require_b_orthonormal(index_t n, index_t d, const T* y, const T* by, const char* who) {
+  DenseMatrix<T> g(d, d);
+  linalg::gram(n, d, y, n, by, n, g.data(), d);
+  double dev = 0.0;
+  for (index_t j = 0; j < d; ++j)
+    for (index_t i = 0; i < d; ++i) {
+      const double e = std::abs(g(i, j) - T(i == j ? 1.0 : 0.0));
+      if (std::isnan(e) || e > dev) dev = e;
+    }
+  if (!(dev <= kDeflationOrthoTol))
+    HS_THROW(InvalidInput, who << ": deflation block is not B-orthonormal or not finite (max |Y^H B Y - I| = " << dev
+                               << " > " << kDeflationOrthoTol << ")");
+}
+
+template <class T>
 index_t svqb(const DenseMatrix<T>& g, DenseMatrix<T>& m, double* cond) {
   const index_t k = g.rows();
   std::vector<double> d(static_cast<std::size_t>(k));
@@ -292,6 +307,7 @@ void fresh_residuals(LinearOperator<T>& a, LinearOperator<T>* b, index_t n, cons
   template void rotate_in_place<T>(index_t, T*, index_t, const T*, index_t, index_t);                 \
   template void hermitize<T>(DenseMatrix<T>&);                                                         \
   template void require_finite<T>(index_t, const T*, index_t, const char*);                           \
+  template void require_b_orthonormal<T>(index_t, index_t, const T*, const T*, const char*);          \
   template index_t svqb<T>(const DenseMatrix<T>&, DenseMatrix<T>&, double*);                            \
   template index_t b_orthonormalize<T>(index_t, const std::vector<OrthoBlock<T>>&, T*, T*, index_t,   \
                                        LinearOperator<T>*, double);                                   \

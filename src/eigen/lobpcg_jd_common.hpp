@@ -90,4 +90,12 @@ void hermitize(DenseMatrix<T>& m);
 template <class T>
 void require_finite(index_t n, const T* x, index_t p, const char* what);
 
+/// Largest accepted max |Y^H B Y - I| of a deflation block (LobpcgOptions / JdOptions::deflation).
+inline constexpr double kDeflationOrthoTol = 1e-8;
+
+/// Throws InvalidInput (message prefixed by `who`) unless the d columns y (ld n), with by = B y
+/// (== y when B = I), are B-orthonormal: max |Y^H B Y - I| <= kDeflationOrthoTol (NaN fails).
+template <class T>
+void require_b_orthonormal(index_t n, index_t d, const T* y, const T* by, const char* who);
+
 }  // namespace hs::eigen_detail

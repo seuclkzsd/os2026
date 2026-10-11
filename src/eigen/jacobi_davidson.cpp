@@ -326,17 +326,7 @@ void JacobiDavidson<T>::load_deflation() {
     b_->apply(basis_.data(), n_, bbasis_.data(), n_, d_);
     eigen_detail::require_finite(n_, bbasis_.data(), d_, "jacobi_davidson: B * deflation");
   }
-  DenseMatrix<T> g(d_, d_);
-  linalg::gram(n_, d_, basis_.data(), n_, bqcol(0), n_, g.data(), d_);
-  double dev = 0.0;
-  for (index_t j = 0; j < d_; ++j)
-    for (index_t i = 0; i < d_; ++i) {
-      const double e = std::abs(g(i, j) - T(i == j ? 1.0 : 0.0));
-      if (std::isnan(e) || e > dev) dev = e;
-    }
-  if (!(dev <= 1e-8))
-    HS_THROW(InvalidInput, "jacobi_davidson: deflation block is not B-orthonormal (max |Y^H B Y - I| = " << dev
-                                                                                                     << ")");
+  eigen_detail::require_b_orthonormal(n_, d_, basis_.data(), bqcol(0), "jacobi_davidson");
   nconv_ = d_;
 }
 

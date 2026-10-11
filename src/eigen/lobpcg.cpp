@@ -53,8 +53,6 @@ constexpr double kDropRel = 1e-10;
 /// The Rayleigh-Ritz basis [X P W] counts as ill conditioned (P is dropped) below this ratio of
 /// the extreme eigenvalues of its scaled Gram matrix.
 constexpr double kIllCond = 1e-6;
-/// Largest accepted |Y^H B Y - I|.
-constexpr double kDeflationOrthoTol = 1e-8;
 /// Attempts at completing a start block with fresh random vectors.
 constexpr int kStartAttempts = 4;
 
@@ -159,17 +157,7 @@ void Lobpcg<T>::load_deflation() {
     eigen_detail::require_finite(n_, by_.data(), d_, "lobpcg: B * deflation");
     by = by_.data();
   }
-  DenseMatrix<T> g(d_, d_);
-  linalg::gram(n_, d_, y_, n_, by, n_, g.data(), d_);
-  double dev = 0.0;
-  for (index_t j = 0; j < d_; ++j)
-    for (index_t i = 0; i < d_; ++i) {
-      const double e = std::abs(g(i, j) - T(i == j ? 1.0 : 0.0));
-      if (std::isnan(e) || e > dev) dev = e;
-    }
-  if (!(dev <= kDeflationOrthoTol))
-    HS_THROW(InvalidInput, "lobpcg: deflation block is not B-orthonormal or not finite (max |Y^H B Y - I| = " << dev
-                                                                                                            << ")");
+  eigen_detail::require_b_orthonormal(n_, d_, y_, by, "lobpcg");
 }
 
 template <class T>
