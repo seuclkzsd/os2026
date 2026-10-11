@@ -284,8 +284,11 @@ def tensor_eigenvalues(stiff_eigs: Sequence[np.ndarray], mass_eigs: Sequence[np.
 
 def shift_between_levels(eigenvalues, quantile: float) -> float:
     """A shift strictly between two distinct levels near the given quantile of the spectrum, so
-    that the shifted operator is indefinite (about `quantile` of it negative) and nonsingular."""
+    that the shifted operator is indefinite (about `quantile` of it negative) and nonsingular.
+    Needs at least two distinct levels."""
     lev, counts = distinct_levels(eigenvalues)
+    if lev.size < 2:
+        raise ValueError("a shift strictly between two levels needs at least two distinct eigenvalues")
     j = int(np.searchsorted(np.cumsum(counts), quantile * np.sum(counts)))
     j = min(max(j, 0), lev.size - 2)
     return float(lev[j] + 0.4 * (lev[j + 1] - lev[j]))

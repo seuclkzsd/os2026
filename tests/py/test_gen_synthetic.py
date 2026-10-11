@@ -122,12 +122,19 @@ def test_stencil_operator_matches_dense_and_has_full_stencil(order, points):
     assert shifted.getnnz(axis=1).max() == points
 
 
-def test_shift_between_levels_avoids_eigenvalues():
+def test_shift_between_levels_avoids_eigenvalues(tmp_path):
     w = np.array([0.0, 1.0, 1.0, 2.0, 3.0])
     c = syn.shift_between_levels(w, 0.5)
     assert 1.0 < c < 2.0
     with pytest.raises(ValueError):
         syn.laplacian((3,), None)
+    # one level: no shift avoids it (the old clamp returned the eigenvalue itself, A = 0)
+    with pytest.raises(ValueError, match="two distinct"):
+        syn.shift_between_levels([4.0, 4.0], 0.5)
+    with pytest.raises(ValueError, match="two distinct"):
+        syn.make_laplacian_case("t", (1, 1), None, 0.5, root=tmp_path)
+    with pytest.raises(ValueError, match="two distinct"):
+        syn.stencil_shift((1, 1, 1), 1, 0.5)
 
 
 # ------------------------------------------------------------- (b, c) prescribed spectra
