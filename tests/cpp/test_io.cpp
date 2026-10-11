@@ -14,6 +14,7 @@
 #include "hsolve/dense.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/io.hpp"
+#include "io/npz.hpp"
 #include "test_io_util.hpp"
 
 namespace {
@@ -451,6 +452,31 @@ TEST(IoNpz, DetectsCorruptMembers) {
     const std::string file = c["file"];
     EXPECT_EQ(error_code_of([&] { hs::read_npz(fixture(file)); }), c["error"].get<std::string>()) << file;
   }
+}
+
+TEST(IoNpzFile, ReadAsCoversEveryElementType) {
+  // read_as<T> for every instantiated T: straight into typed storage when the dtype matches,
+  // converted otherwise.
+  const hs::io::NpzFile f8(fixture("csr_matrix_f8.npz"));
+  const hs::io::NpzFile f4(fixture("csr_f4.npz"));
+  const hs::io::NpzFile i64(fixture("csr_int64_indices_f8.npz"));
+  const std::vector<double> data = f8.read_as<double>("data");
+  ASSERT_EQ(data.size(), 14u);
+  hs::io::NpyHeader h;
+  const std::vector<float> data_f4 = f4.read_as<float>("data", &h);  // values exact in float
+  EXPECT_EQ(h.dtype, "<f4");
+  EXPECT_EQ(h.shape, std::vector<std::size_t>{14});
+  EXPECT_EQ(std::vector<double>(data_f4.begin(), data_f4.end()), data);
+  EXPECT_EQ(f4.read_as<double>("data"), data);
+  EXPECT_EQ(f8.read_as<cplx>("data"), std::vector<cplx>(data.begin(), data.end()));
+  EXPECT_EQ(error_code_of([&] { f8.read_as<float>("data"); }), "invalid_input");  // f8 -> f4 unsafe
+
+  const std::vector<std::int32_t> indices = f8.read_as<std::int32_t>("indices");
+  EXPECT_EQ(f8.read_as<std::int64_t>("indices"),
+            std::vector<std::int64_t>(indices.begin(), indices.end()));
+  EXPECT_EQ(i64.read_as<std::int32_t>("indices"), indices);
+  EXPECT_EQ(i64.read_as<std::int64_t>("indptr"), f8.read_as<std::int64_t>("indptr"));
+  EXPECT_EQ(error_code_of([&] { f8.read_as<double>("missing"); }), "io");
 }
 
 class IoZip : public hs::io_test::TempDirTest {

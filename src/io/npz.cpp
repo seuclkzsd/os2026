@@ -53,13 +53,6 @@ std::vector<T> NpzFile::read_as(const std::string& key, NpyHeader* header) const
   return read_npy_payload_as<T>(*src, h);
 }
 
-template std::vector<double> NpzFile::read_as<double>(const std::string&, NpyHeader*) const;
-template std::vector<cplx> NpzFile::read_as<cplx>(const std::string&, NpyHeader*) const;
-template std::vector<std::int32_t> NpzFile::read_as<std::int32_t>(const std::string&,
-                                                                  NpyHeader*) const;
-template std::vector<std::int64_t> NpzFile::read_as<std::int64_t>(const std::string&,
-                                                                  NpyHeader*) const;
-
 }  // namespace io
 
 std::map<std::string, NpyArray> read_npz(const std::filesystem::path& path) {
@@ -68,5 +61,15 @@ std::map<std::string, NpyArray> read_npz(const std::filesystem::path& path) {
   for (const std::string& key : npz.keys()) out.emplace(key, npz.read(key));
   return out;
 }
+
+// read_as covers the element types of npy_to_vector: the public scalars plus three more.
+#define HS_IO_INSTANTIATE_NPZ(T) \
+  template std::vector<T> io::NpzFile::read_as<T>(const std::string&, io::NpyHeader*) const;
+
+HS_FOR_EACH_SCALAR(HS_IO_INSTANTIATE_NPZ)
+HS_IO_INSTANTIATE_NPZ(float)
+HS_IO_INSTANTIATE_NPZ(std::int32_t)
+HS_IO_INSTANTIATE_NPZ(std::int64_t)
+#undef HS_IO_INSTANTIATE_NPZ
 
 }  // namespace hs
