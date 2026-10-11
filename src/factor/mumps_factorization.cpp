@@ -347,7 +347,8 @@ void MumpsFactorization<T, U>::solve(T* b, index_t nrhs, index_t ldb) {
   // packed buffer of the MUMPS arithmetic: [Re b; Im b] per column for complex T (the
   // embedding's right-hand side), rounded to float for smumps.
   constexpr bool kInPlace = std::is_same_v<T, double> && std::is_same_v<U, double>;
-  std::vector<U> packed;
+  // Default-initialised (no zeroing pass: every entry is written before MUMPS reads it).
+  std::unique_ptr<U[]> packed;
   if constexpr (kInPlace) {
     if (ldb > INT_MAX)
       HS_THROW(Unsupported,
@@ -356,7 +357,7 @@ void MumpsFactorization<T, U>::solve(T* b, index_t nrhs, index_t ldb) {
     s.lrhs = static_cast<int>(ldb);
   } else {
     const index_t m = kEmbeddingFactor * n;
-    packed.resize(static_cast<std::size_t>(m * nrhs));
+    packed.reset(new U[static_cast<std::size_t>(m * nrhs)]);
 #pragma omp parallel for collapse(2) schedule(static)
     for (index_t k = 0; k < nrhs; ++k)
       for (index_t i = 0; i < n; ++i) {
@@ -368,7 +369,7 @@ void MumpsFactorization<T, U>::solve(T* b, index_t nrhs, index_t ldb) {
           packed[i + k * m] = static_cast<U>(v);
         }
       }
-    s.rhs = packed.data();
+    s.rhs = packed.get();
     s.lrhs = static_cast<int>(m);
   }
 
