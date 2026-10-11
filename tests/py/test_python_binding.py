@@ -441,8 +441,10 @@ def test_input_errors():
     good = lap1d(30)
     with pytest.raises(hsolve.InvalidInputError, match="not square"):
         hsolve.solve(sp.random(30, 20, density=0.2, format="csr", random_state=0), k=2)
-    with pytest.raises(hsolve.InvalidInputError):
+    with pytest.raises(hsolve.InvalidInputError, match=r"^B has order 31, A has 30$"):
         hsolve.solve(good, lap1d(31), k=2)  # B of a different order
+    with pytest.raises(hsolve.InvalidInputError, match=r"^B has order 31, A has 30$"):
+        hsolve.solve(good, lap1d(31).tocsc(), k=2)
     with pytest.raises(hsolve.InvalidInputError):
         hsolve.solve(np.zeros((3, 3, 3)), k=1)
     nan = good.copy()
@@ -460,6 +462,20 @@ def test_input_errors():
         hsolve.solve(sla.aslinearoperator(good), k=2)
     with pytest.raises(hsolve.InvalidInputError):
         hsolve.solve(np.array([["a", "b"], ["c", "d"]], dtype=object), k=1)
+
+
+def test_non_square_errors_name_the_callers_shape():
+    """Checked before conversion: csc input (converted to A^H) and one-triangle input (mirrored
+    first) used to report a transposed shape or an anonymous symmetrize_from_triangle error."""
+    r = sp.random(30, 20, density=0.3, format="csr", random_state=0)
+    for m in (r, r.tocsc(), r.tocoo(), r.toarray(), sp.triu(r, format="csr"), sp.tril(r, format="csc"),
+              sp.triu(r).toarray(), _int64(r.tocsc())):
+        with pytest.raises(hsolve.InvalidInputError, match=r"^A is not square \(30x20\)$"):
+            hsolve.solve(m, k=2)
+    with pytest.raises(hsolve.InvalidInputError, match=r"^B is not square \(30x20\)$"):
+        hsolve.solve(lap1d(30), r.tocsc(), k=2)
+    with pytest.raises(hsolve.InvalidInputError, match=r"^B is not square \(30x20\)$"):
+        hsolve.solve(lap1d(30), sp.triu(r, format="csr"), k=2)
 
 
 def test_duplicate_sums_that_overflow_are_rejected(tmp_path):

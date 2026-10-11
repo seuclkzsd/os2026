@@ -145,6 +145,10 @@ MatrixArg matrix_arg(const py::tuple& t, const std::string& name) {
     return m;
   }
   const auto shape = t[1].cast<std::pair<index_t, index_t>>();
+  // Checked here, in the caller's orientation (csc input is converted to A^H, ncols x nrows),
+  // before any conversion or triangle restoration.
+  if (shape.first != shape.second)
+    HS_THROW(InvalidInput, name << " is not square (" << shape.first << "x" << shape.second << ")");
   m.view.nrows = shape.first;
   m.view.ncols = shape.second;
   if (kind == "dense") {
@@ -322,6 +326,9 @@ py::tuple py_solve(const py::tuple& a_arg, const py::object& b_arg, const std::s
   MatrixArg a = matrix_arg(a_arg, "A");
   std::optional<MatrixArg> b;
   if (!b_arg.is_none()) b = matrix_arg(b_arg.cast<py::tuple>(), "B");
+  // Both orders are known before any conversion (a file's only after loading; hs::solve checks).
+  if (b && a.path.empty() && b->path.empty() && b->view.nrows != a.view.nrows)
+    HS_THROW(InvalidInput, "B has order " << b->view.nrows << ", A has " << a.view.nrows);
   std::optional<SolveOutcome> out;
   {
     py::gil_scoped_release nogil;
