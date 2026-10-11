@@ -51,12 +51,21 @@ comparable=false and not used below; build a discrete one with tools/eval/refere
     computed vectors matched into a cluster and the cluster's reference eigenspace are reported
     (Euclidean; an eigenspace is a set, so any basis of it is accepted).
 Duplicates: a vector within relative distance dup_tol of the span of the vectors before it (B-norm
-for GHEP, 2-norm otherwise) duplicates an earlier one. B-orthogonality ||X^H B X - I||_2 (HEP/GHEP).
-Non-finite residuals are reported as Infinity (Python's JSON extension), never hidden.
-Verdict 'pass' iff pairs were returned, every eta <= tol, no duplicates, completeness is not
-incomplete/inconsistent and no computed eigenvalue is spurious (unmatched where a complete reference
-lists every eigenvalue). Disagreement with an uncertified reference fails too: it means either the
-solver or the reference is wrong and needs a look.
+for GHEP, 2-norm otherwise) duplicates an earlier one; a zero or non-finite vector is 'degenerate'
+(duplicate_of = None). For GHIEP only vectors whose eigenvalues coincide (chained within
+tie_rtol * (|lambda| + scale)) are compared: eigenvectors of distinct eigenvalues of an indefinite
+pencil are not orthogonal and nearly parallel close to an exceptional point, where two real
+eigenvalues are about to merge into a complex pair. For HEP/GHEP they are (B-)orthogonal, so
+near-parallel vectors are duplicates whatever their eigenvalues. B-orthogonality ||X^H B X - I||_2
+(HEP/GHEP). Non-finite residuals, angles and orthogonality losses are reported as Infinity
+(Python's JSON extension), never hidden.
+Verdict 'pass' iff every eta <= tol, no duplicate or degenerate vectors, completeness is not
+incomplete/inconsistent, no computed eigenvalue is spurious (unmatched where a complete reference
+lists every eigenvalue) and pairs were returned (for an interval target: unless a reference
+confirms the interval holds no eigenvalue). Disagreement with an uncertified reference fails too: it
+means either the solver or the reference is wrong and needs a look. A result that cannot be
+evaluated at all (missing or malformed files, e.g. eigenvectors.npy not of shape (n, m)) raises
+ValueError.
 
 Pooled references: a case without a comparable stored reference can be checked against the accepted,
 distinct pairs of several solvers (pooled_reference; tools/eval/sweep.py does this per case). It is
@@ -66,12 +75,17 @@ bound; for a definite pencil the bound grows with cond(B), for GHIEP it holds on
 eigenvalue is well conditioned), and
 B-orthonormal accepted vectors in one cluster are backed by as many eigenvalues, so a solver that
 lacks a pooled eigenvalue nearer than its own k-th one, or fewer copies of a multiple one than another
-solver proved to exist, missed it. Eigenvalue errors are not reported against it (it holds the
-solvers' own values).
+solver proved to exist, missed it. Values of different solvers are merged only where the acceptance
+test cannot tell them apart (chained within tie_rtol * (|mu| + scale), the evaluation's resolution;
+the coarser match_rtol would merge distinct eigenvalues of a dense cluster and drop the one a solver
+missed); each such cluster keeps the copies of the solver that proved the most. Eigenvalue errors
+are not reported against it (it holds the solvers' own values).
 
 Bookkeeping that is reported but not part of the verdict:
   * format (docs/FORMATS.md §3): eigenvalues.npy ordered for the target (inversions within the tie
-    band are ties), HEP/GHEP vectors B-normalized, GHIEP vectors of unit 2-norm (FORMAT_NORM_TOL).
+    band are ties); HEP/GHEP vectors B-orthonormal - B-normalized (FORMAT_NORM_TOL) and mutually
+    B-orthogonal (||D^-1/2 X^H B X D^-1/2 - I||_2 <= FORMAT_ORTH_TOL, D = diag(X^H B X), so a
+    normalization error is not reported twice); GHIEP vectors of unit 2-norm.
   * solver_claim: the solver's own report.json 'success' against the verdict - 'agrees',
     'overclaim' (success claimed, evaluation fails: the dangerous case) or 'underclaim'.
   * time and peak memory as reported by the solver (peak_rss_bytes, or the SLEPc baseline's
@@ -92,6 +106,7 @@ import scipy.linalg as la
 import scipy.sparse as sp
 import scipy.sparse.linalg as sla
 from scipy.optimize import linear_sum_assignment
+from scipy.sparse.csgraph import connected_components
 
 from tools import case as cio
 from tools.eval import common
@@ -103,6 +118,7 @@ CLUSTER_RTOL = 1e-6
 TIE_FACTOR = 10.0      # default tie_rtol = TIE_FACTOR * tol (module docstring, completeness)
 DUP_TOL = 1e-4
 FORMAT_NORM_TOL = 1e-6  # vector normalization deviation reported as a format issue
+FORMAT_ORTH_TOL = 1e-6  # loss of (B-)orthogonality of normalized HEP/GHEP vectors reported as a format issue
 POOLED_KIND = "pooled"  # in-memory reference kind of pooled_reference (never written to data/refs)
 EVAL_FILE = "evaluation.json"
 
@@ -176,26 +192,40 @@ def pair_metrics(A: sp.spmatrix, B: sp.spmatrix | None, lambdas, X, norms: Norms
             for i in range(lam.size)]
 
 
-def b_orthogonality(X: np.ndarray, B: sp.spmatrix | None) -> float:
-    """||X^H B X - I||_2 (loss of B-orthonormality of the returned basis)."""
-    G = X.conj().T @ (X if B is None else B @ X)
-    return float(la.norm(G - np.eye(G.shape[0]), 2))
+def gram(X: np.ndarray, W: sp.spmatrix | None) -> np.ndarray:
+    """X^H W X (X^H X without W)."""
+    return X.conj().T @ (X if W is None else W @ X)
 
 
-def find_duplicates(X: np.ndarray, W: sp.spmatrix | None = None, dup_tol: float = DUP_TOL) -> list[dict]:
-    """Columns that add (almost) no new direction: relative W-distance to the span of the earlier
-    accepted columns <= dup_tol. Incremental Cholesky of the normalized Gram matrix: when columns
-    0..p-1 are accepted with Gn = L L^H, the new column's squared distance is 1 - ||L^-1 g||^2.
-    Gram-based distances are accurate to ~sqrt(eps), ample for dup_tol >= 1e-6. Zero or non-finite
-    columns count as duplicates of nothing (duplicate_of = None)."""
+def _norm2_or_inf(M: np.ndarray) -> float:
+    """||M||_2, inf when M holds a non-finite entry (LAPACK would reject it)."""
+    if not M.size:
+        return 0.0
+    return float(la.norm(M, 2)) if np.all(np.isfinite(M)) else float("inf")
+
+
+def b_orthogonality(X: np.ndarray, B: sp.spmatrix | None, G: np.ndarray | None = None) -> float:
+    """||X^H B X - I||_2 (loss of B-orthonormality of the returned basis); inf for non-finite
+    vectors. G: the precomputed gram(X, B)."""
+    G = gram(X, B) if G is None else G
+    return _norm2_or_inf(G - np.eye(G.shape[0]))
+
+
+def degenerate_columns(X: np.ndarray) -> np.ndarray:
+    """Mask of the zero or non-finite columns of X: they span no direction."""
+    return ~np.all(np.isfinite(X), axis=0) | ~np.any(X, axis=0)
+
+
+def _duplicates_in(X: np.ndarray, W: sp.spmatrix | None, dup_tol: float) -> list[dict]:
+    """find_duplicates on finite, non-zero columns (one comparison group)."""
     m = X.shape[1]
-    G = X.conj().T @ (X if W is None else W @ X)
+    G = gram(X, W)
     d = np.sqrt(np.maximum(np.real(np.diag(G)), 0.0))
     L = np.zeros((m, m), dtype=G.dtype)
     basis: list[int] = []
     out = []
     for j in range(m):
-        if not np.isfinite(d[j]) or d[j] == 0.0 or not np.all(np.isfinite(G[:, j])):
+        if not np.isfinite(d[j]) or d[j] == 0.0:    # overflow, or W-null (cannot happen for HPD W)
             out.append({"index": j, "duplicate_of": None, "distance": 0.0})
             continue
         p = len(basis)
@@ -210,6 +240,41 @@ def find_duplicates(X: np.ndarray, W: sp.spmatrix | None = None, dup_tol: float 
             L[p, p] = dist
             basis.append(j)
     return out
+
+
+def find_duplicates(X: np.ndarray, W: sp.spmatrix | None = None, dup_tol: float = DUP_TOL,
+                    groups: np.ndarray | None = None) -> list[dict]:
+    """Columns that add (almost) no new direction: relative W-distance to the span of the earlier
+    accepted columns <= dup_tol. Incremental Cholesky of the normalized Gram matrix: when columns
+    0..p-1 are accepted with Gn = L L^H, the new column's squared distance is 1 - ||L^-1 g||^2.
+    Gram-based distances are accurate to ~sqrt(eps), ample for dup_tol >= 1e-6. Zero or non-finite
+    columns are degenerate: duplicates of nothing (duplicate_of = None), and left out of every
+    other column's test. `groups` (one id per column) restricts the comparison to columns of the
+    same group (GHIEP: eigenvalue clusters, module docstring); None compares all columns."""
+    m = X.shape[1]
+    bad = degenerate_columns(X)
+    out = [{"index": int(j), "duplicate_of": None, "distance": 0.0} for j in np.flatnonzero(bad)]
+    groups = np.zeros(m, dtype=np.int64) if groups is None else np.asarray(groups)
+    for g in np.unique(groups[~bad]):
+        idx = np.flatnonzero((groups == g) & ~bad)
+        for d in _duplicates_in(X[:, idx], W, dup_tol):
+            out.append({"index": int(idx[d["index"]]), "distance": d["distance"],
+                        "duplicate_of": None if d["duplicate_of"] is None else int(idx[d["duplicate_of"]])})
+    return sorted(out, key=lambda d: d["index"])
+
+
+def value_groups(lambdas: np.ndarray, scale: float, rtol: float) -> np.ndarray:
+    """Group id per value: single-linkage clusters of |lambda_i - lambda_j| <= rtol * (max(|lambda_i|,
+    |lambda_j|) + scale) in the complex plane (non-finite values form groups of their own)."""
+    lam = np.asarray(lambdas, dtype=complex)
+    m = lam.size
+    if m == 0:
+        return np.zeros(0, dtype=np.int64)
+    mag = np.abs(lam)
+    with np.errstate(invalid="ignore"):
+        adj = np.abs(lam[:, None] - lam[None, :]) <= rtol * (np.maximum(mag[:, None], mag[None, :]) + scale)
+    _, ids = connected_components(sp.csr_matrix(adj), directed=False)
+    return ids.astype(np.int64)
 
 
 # ---------------------------------------------------------------------- reference comparison
@@ -355,7 +420,8 @@ def assess_completeness(tgt: dict[str, Any], lambdas: np.ndarray, ref: cio.Refer
 
 def cluster_records(ref: cio.Reference, match: np.ndarray, exp: ExpectedSet, X: np.ndarray,
                     scale: float, rtol: float) -> list[dict[str, Any]]:
-    """One record per reference cluster touched by a matched pair or by the expected set."""
+    """One record per reference cluster touched by a matched pair or by the expected set. A zero or
+    non-finite computed vector spans no direction: its angle is reported as inf."""
     vals = np.asarray(ref.eigenvalues, dtype=complex)
     ids = reference_clusters(vals, scale, rtol)
     touched = sorted(set(ids[match[match >= 0]].tolist()) | set(ids[exp.required].tolist())
@@ -363,6 +429,7 @@ def cluster_records(ref: cio.Reference, match: np.ndarray, exp: ExpectedSet, X: 
     vecs = ref.eigenvectors
     if vecs is not None and vecs.shape != (X.shape[0], vals.size):
         vecs = None
+    bad = degenerate_columns(X)
     records = []
     for cid in touched:
         members = np.flatnonzero(ids == cid)
@@ -372,27 +439,32 @@ def cluster_records(ref: cio.Reference, match: np.ndarray, exp: ExpectedSet, X: 
                                "lambda_max": float(vals[members].real.max()),
                                "computed_indices": comp, "angles": None, "max_angle": None}
         if vecs is not None and comp:
-            ang = la.subspace_angles(X[:, comp], vecs[:, members])
-            rec["angles"] = sorted(float(a) for a in ang)
-            rec["max_angle"] = float(np.max(ang))
+            good = [i for i in comp if not bad[i]]
+            ang = [float(a) for a in la.subspace_angles(X[:, good], vecs[:, members])] if good else []
+            ang += [float("inf")] * (len(comp) - len(good))
+            rec["angles"] = sorted(ang)
+            rec["max_angle"] = max(ang)
         records.append(rec)
     return records
 
 
-def pooled_reference(docs: list[dict[str, Any]], scale: float, rtol: float = MATCH_RTOL) -> cio.Reference | None:
+def pooled_reference(docs: list[dict[str, Any]], scale: float, rtol: float | None = None) -> cio.Reference | None:
     """Uncertified in-memory reference from the accepted, non-duplicate pairs of several evaluations
     of one case (module docstring). Eigenvalues of all solvers are chained into clusters (gaps <=
-    rtol * (|mu| + scale)); each cluster keeps the values of the solver that returned the most copies
-    in it - a lower bound of its multiplicity, never a guess above what one solver proved. None when
-    no solver has an accepted pair."""
+    rtol * (|mu| + scale); rtol defaults to the largest tie_rtol of the evaluations, the resolution
+    of the acceptance test); each cluster keeps the values of the solver that returned the most
+    copies in it - a lower bound of its multiplicity, never a guess above what one solver proved.
+    None when no solver has an accepted pair."""
     sources = [d["solver"] for d in docs]
+    if rtol is None:
+        rtol = max((d["tolerances"]["tie_rtol"] for d in docs), default=TIE_FACTOR * common.DEFAULT_TOL)
     per_solver = [np.array([complex(p["lambda_re"], p["lambda_im"]) for p in d["pairs"]
                             if p["accepted"] and not p["duplicate"]], dtype=complex) for d in docs]
     values = np.concatenate(per_solver) if per_solver else np.empty(0, dtype=complex)
     if values.size == 0:
         return None
     owner = np.repeat(np.arange(len(per_solver)), [v.size for v in per_solver])
-    ids = reference_clusters(values, scale, rtol)
+    ids = value_groups(values, scale, rtol)
     pooled = []
     for cid in np.unique(ids):
         counts = [np.count_nonzero((ids == cid) & (owner == s)) for s in range(len(per_solver))]
@@ -407,9 +479,10 @@ def pooled_reference(docs: list[dict[str, Any]], scale: float, rtol: float = MAT
 
 
 def format_checks(problem: str, tgt: dict[str, Any], lam_real: np.ndarray, X: np.ndarray, B: sp.spmatrix | None,
-                  scale: float, tie_rtol: float) -> dict[str, Any]:
+                  scale: float, tie_rtol: float, G: np.ndarray | None = None) -> dict[str, Any]:
     """docs/FORMATS.md §3 conventions of a result directory (module docstring). lam_real are the
-    eigenvalues.npy values; X holds every returned vector (real pairs first, then complex ones)."""
+    eigenvalues.npy values; X holds every returned vector (real pairs first, then complex ones);
+    G is the precomputed gram(X, B) of a HEP/GHEP result."""
     lam = np.asarray(lam_real, dtype=float)
     key = {"nearest": np.abs(lam - float(tgt.get("sigma", 0.0))), "interval": lam, "smallest": lam,
            "largest": -lam}[tgt["mode"]]
@@ -418,17 +491,29 @@ def format_checks(problem: str, tgt: dict[str, Any], lam_real: np.ndarray, X: np
     if inversions.size:
         issues.append(f"eigenvalues.npy is not in '{tgt['mode']}' target order at position(s) "
                       f"{(inversions + 1).tolist()}")
-    max_dev = None
-    if X.shape[1]:
-        if problem == "GHIEP" or B is None:
-            dev, what = np.abs(np.linalg.norm(X, axis=0) - 1.0), "of unit 2-norm"
-        else:
-            bnorm = np.sqrt(np.maximum(np.real(np.sum(X.conj() * (B @ X), axis=0)), 0.0))
-            dev, what = np.abs(bnorm - 1.0), "B-normalized"
-        max_dev = float(np.max(_finite_or_inf(dev)))
+    max_dev = max_orth = None
+    if X.shape[1] and problem == "GHIEP":
+        max_dev = float(np.max(_finite_or_inf(np.abs(np.linalg.norm(X, axis=0) - 1.0))))
         if max_dev > FORMAT_NORM_TOL:
-            issues.append(f"eigenvectors are not {what}: max deviation {max_dev:.1e}")
-    return {"order_ok": not inversions.size, "max_normalization_error": max_dev, "issues": issues}
+            issues.append(f"eigenvectors are not of unit 2-norm: max deviation {max_dev:.1e}")
+    elif X.shape[1]:
+        G = gram(X, B) if G is None else G
+        b, xbx = ("B-", "X^H B X") if B is not None else ("", "X^H X")
+        d = np.real(np.diag(G))
+        max_dev = float(np.max(_finite_or_inf(np.abs(np.sqrt(np.maximum(d, 0.0)) - 1.0))))
+        if max_dev > FORMAT_NORM_TOL:
+            issues.append(f"eigenvectors are not {'B-normalized' if b else 'of unit 2-norm'}: "
+                          f"max deviation {max_dev:.1e}")
+        # orthogonality of the normalized vectors (a zero column is a normalization error only)
+        keep = np.flatnonzero(d > 0) if np.all(np.isfinite(G)) else np.arange(d.size)
+        s = np.sqrt(d[keep])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            max_orth = _norm2_or_inf(G[np.ix_(keep, keep)] / np.outer(s, s) - np.eye(keep.size))
+        if max_orth > FORMAT_ORTH_TOL:
+            issues.append(f"eigenvectors are not {b}orthogonal: ||D^-1/2 {xbx} D^-1/2 - I||_2 = {max_orth:.1e}, "
+                          f"D = diag({xbx})")
+    return {"order_ok": not inversions.size, "max_normalization_error": max_dev,
+            "max_orthogonality_error": max_orth, "issues": issues}
 
 
 def _reported_peak(report: dict[str, Any]) -> int | None:
@@ -457,11 +542,43 @@ def _claim(solver_success: Any, verdict: str) -> str | None:
     return "overclaim" if solver_success else "underclaim"
 
 
+def _summary(pairs: list[dict], **extra) -> dict[str, Any]:
+    return {
+        "n_pairs": len(pairs), "n_real": sum(p["kind"] == "real" for p in pairs),
+        "n_complex": sum(p["kind"] == "complex" for p in pairs),
+        "n_accepted": sum(p["accepted"] for p in pairs), "n_duplicates": sum(p["duplicate"] for p in pairs),
+        "max_abs_residual": _max(p["abs_residual"] for p in pairs),
+        "max_rel_residual": _max(p["rel_residual"] for p in pairs),
+        "max_backward_error": _max(p["backward_error"] for p in pairs),
+        "max_eig_abs_error": _max(p["eig_abs_error"] for p in pairs),
+        "max_eig_rel_error": _max(p["eig_rel_error"] for p in pairs),
+        "max_eig_scaled_error": _max(p["eig_scaled_error"] for p in pairs),
+        "max_subspace_angle": None, "b_orthogonality": None, "solver_claim": None, **extra,
+    }
+
+
 # ----------------------------------------------------------------------------------- driver
 
 def _max(values) -> float | None:
     vals = [v for v in values if v is not None]
     return float(max(vals)) if vals else None
+
+
+def _vectors(arr: np.ndarray | None, n: int, m: int, what: str, result_dir: str | Path) -> np.ndarray:
+    """The (n, m) eigenvector array of a result (docs/FORMATS.md §3); (n,) is accepted for m == 1 and
+    any empty array for m == 0. Anything else is rejected: reshaping a transposed (m, n) array would
+    scramble its entries into wrong but plausible-looking vectors."""
+    if arr is None:
+        raise ValueError(f"{result_dir}: {m} {what} eigenvalue(s) but no {what} eigenvectors file")
+    a = np.asarray(arr)
+    if m == 0 and a.size == 0:
+        return np.zeros((n, 0), dtype=a.dtype if a.dtype.kind in "fc" else float)
+    if a.ndim == 1 and m == 1 and a.shape[0] == n:
+        return a.reshape(n, 1)
+    if a.shape != (n, m):
+        raise ValueError(f"{result_dir}: {what} eigenvectors have shape {a.shape}, expected (n, m) = {(n, m)} "
+                         "(docs/FORMATS.md §3)")
+    return a
 
 
 def _data_root(c: cio.Case, root: str | Path) -> Path:
@@ -498,24 +615,25 @@ def evaluate(case_ref: str | Path | cio.Case, result_dir: str | Path, *, root: s
     if np.iscomplexobj(res.eigenvalues):
         raise ValueError(f"{result_dir}: eigenvalues.npy must be real; complex pairs go to complex_eigenvalues.npy")
     lam_real = np.asarray(res.eigenvalues, dtype=float).ravel()
-    X = np.asarray(res.eigenvectors).reshape(n, -1) if res.eigenvectors.size else np.zeros((n, 0))
-    if X.shape[1] != lam_real.size:
-        raise ValueError(f"{result_dir}: {lam_real.size} eigenvalues but eigenvectors {res.eigenvectors.shape}")
+    X = _vectors(res.eigenvectors, n, lam_real.size, "real", result_dir)
     lambdas = lam_real.astype(complex)
     kinds = ["real"] * lam_real.size
     if res.complex_eigenvalues is not None and res.complex_eigenvalues.size:
         lc = np.asarray(res.complex_eigenvalues, dtype=complex).ravel()
-        Xc = np.asarray(res.complex_eigenvectors).reshape(n, lc.size)
+        Xc = _vectors(res.complex_eigenvectors, n, lc.size, "complex", result_dir)
         lambdas = np.concatenate([lambdas, lc])
         X = np.concatenate([X.astype(np.result_type(X, Xc)), Xc], axis=1)
         kinds += ["complex"] * lc.size
     # Real arithmetic unless complex pairs are present (real pairs then carry Im = 0 exactly).
-    pairs = pair_metrics(c.A, c.B, lambdas if "complex" in kinds else lam_real, X, norms, tol)
+    with np.errstate(invalid="ignore", over="ignore"):    # non-finite vectors: inf metrics, never hidden
+        pairs = pair_metrics(c.A, c.B, lambdas if "complex" in kinds else lam_real, X, norms, tol)
 
     match = (match_to_reference(lambdas, ref.eigenvalues, scale, match_rtol) if ref is not None
              else np.full(lambdas.size, -1, dtype=np.int64))
-    dups = find_duplicates(X, c.B if problem == "GHEP" else None, dup_tol) if lambdas.size else []
+    groups = value_groups(lambdas, scale, tie_rtol) if problem == "GHIEP" else None
+    dups = find_duplicates(X, c.B if problem == "GHEP" else None, dup_tol, groups) if lambdas.size else []
     dup_of = {d["index"]: d["duplicate_of"] for d in dups}
+    n_degenerate = sum(d["duplicate_of"] is None for d in dups)
     ref_vals = np.asarray(ref.eigenvalues, dtype=complex) if ref is not None else None
     # A pooled reference holds computed values, partly this solver's own: it decides completeness,
     # but an "error" against it would be zero by construction for its contributors.
@@ -535,17 +653,25 @@ def evaluate(case_ref: str | Path | cio.Case, result_dir: str | Path, *, root: s
     exp = expected_set(ref_vals, tgt, scale, tie_rtol) if ref is not None and ref_vals.size else None
     completeness = assess_completeness(tgt, lambdas, ref, exp, match, lambdas.size - len(dups), n)
     clusters = cluster_records(ref, match, exp, X, scale, cluster_rtol) if exp is not None else []
-    b_orth = b_orthogonality(X, c.B) if problem != "GHIEP" and lambdas.size else None
-    fmt = format_checks(problem, tgt, lam_real, X, c.B, scale, tie_rtol)
+    G = gram(X, c.B) if problem != "GHIEP" and lambdas.size else None
+    b_orth = b_orthogonality(X, c.B, G) if G is not None else None
+    fmt = format_checks(problem, tgt, lam_real, X, c.B, scale, tie_rtol, G)
 
     reasons = []
     if not pairs:
-        reasons.append("no eigenpairs returned")
+        status = completeness["status"]
+        if tgt["mode"] != "interval" or status in ("incomplete", "inconsistent"):
+            reasons.append("no eigenpairs returned")
+        elif not (status == "complete" or (status == "consistent" and _covers(ref.info, exp.window))):
+            # an empty interval is a correct answer only where a reference confirms it
+            reasons.append("no eigenpairs returned and no reference confirms that the interval is empty")
     bad = sum(not p["accepted"] for p in pairs)
     if bad:
         reasons.append(f"{bad} of {len(pairs)} pairs have backward error > tol={tol:g}")
-    if dups:
-        reasons.append(f"{len(dups)} duplicate eigenvector(s)")
+    if len(dups) > n_degenerate:
+        reasons.append(f"{len(dups) - n_degenerate} duplicate eigenvector(s)")
+    if n_degenerate:
+        reasons.append(f"{n_degenerate} zero or non-finite eigenvector(s)")
     if completeness["status"] in ("incomplete", "inconsistent"):
         reasons.append(f"completeness {completeness['status']}: {len(completeness['missing'])} missing, "
                        f"boundary deficit {completeness['boundary_deficit']}, "
@@ -555,19 +681,8 @@ def evaluate(case_ref: str | Path | cio.Case, result_dir: str | Path, *, root: s
 
     report = res.report
     verdict = "fail" if reasons else "pass"
-    summary = {
-        "n_pairs": len(pairs), "n_real": kinds.count("real"), "n_complex": kinds.count("complex"),
-        "n_accepted": len(pairs) - bad, "n_duplicates": len(dups),
-        "max_abs_residual": _max(p["abs_residual"] for p in pairs),
-        "max_rel_residual": _max(p["rel_residual"] for p in pairs),
-        "max_backward_error": _max(p["backward_error"] for p in pairs),
-        "max_eig_abs_error": _max(p["eig_abs_error"] for p in pairs),
-        "max_eig_rel_error": _max(p["eig_rel_error"] for p in pairs),
-        "max_eig_scaled_error": _max(p["eig_scaled_error"] for p in pairs),
-        "max_subspace_angle": _max(r["max_angle"] for r in clusters),
-        "b_orthogonality": b_orth,
-        "solver_claim": _claim(report.get("success"), verdict),
-    }
+    summary = _summary(pairs, max_subspace_angle=_max(r["max_angle"] for r in clusters), b_orthogonality=b_orth,
+                       solver_claim=_claim(report.get("success"), verdict))
     return {
         "schema_version": cio.SCHEMA_VERSION,
         "case": c.name,

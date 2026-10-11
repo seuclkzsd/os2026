@@ -134,6 +134,110 @@ def test_spurious_eigenvalue_is_detected(tmp_path):
     assert doc["completeness"]["spurious"] == [3] and doc["verdict"] == "fail"
 
 
+@pytest.mark.parametrize("problem,bad", [("HEP", np.nan), ("HEP", np.inf), ("GHEP", np.nan)])
+def test_non_finite_eigenvector_fails_and_is_reported(tmp_path, problem, bad):
+    # e.g. a solver breakdown: one NaN/Inf entry, finite eigenvalue, success claimed
+    ref = _hermitian_case(tmp_path, "c", problem)
+    w, V = _nearest(ref, SIGMA, 4)
+    V[3, 2] = bad
+    doc = evaluate.evaluate("c", _save(tmp_path / "res", w, V), root=tmp_path)
+    assert doc["verdict"] == "fail" and doc["summary"]["solver_claim"] == "overclaim"
+    assert [p["backward_error"] for p in doc["pairs"]][2] == np.inf
+    assert [p["accepted"] for p in doc["pairs"]] == [True, True, False, True]
+    # only the bad column is degenerate: the finite ones stay distinct
+    assert doc["duplicates"] == [{"index": 2, "duplicate_of": None, "distance": 0.0}]
+    assert "1 zero or non-finite eigenvector(s)" in doc["reasons"]
+    assert not any(r.endswith("duplicate eigenvector(s)") for r in doc["reasons"])
+    assert doc["completeness"]["distinct_returned"] == 3 and doc["completeness"]["status"] == "incomplete"
+    assert doc["summary"]["max_subspace_angle"] == np.inf and doc["summary"]["b_orthogonality"] == np.inf
+    finite_angles = [a for c in doc["clusters"] for a in c["angles"] if np.isfinite(a)]
+    assert len(finite_angles) == 3 and max(finite_angles) < 1e-12
+    # the JSON keeps the infinities (never hidden) and the report renders them
+    assert json.loads(json.dumps(doc))["summary"]["max_backward_error"] == np.inf
+    assert "| inf |" in report.render([doc], "t")
+    # without a reference (no subspace angles) and through a pooled one: same verdict, no crash
+    doc = evaluate.evaluate("c", tmp_path / "res", root=tmp_path, reference=evaluate.pooled_reference([doc], 1.0))
+    assert doc["verdict"] == "fail" and doc["summary"]["b_orthogonality"] == np.inf
+
+
+def test_find_duplicates_isolates_degenerate_columns():
+    X = np.eye(6)[:, :5].copy()
+    X[1, 2], X[:, 4] = np.nan, 0.0
+    X = np.column_stack([X, X[:, 0]])
+    assert evaluate.find_duplicates(X) == [{"index": 2, "duplicate_of": None, "distance": 0.0},
+                                           {"index": 4, "duplicate_of": None, "distance": 0.0},
+                                           {"index": 5, "duplicate_of": 0, "distance": 0.0}]
+    # comparison groups: column 5 duplicates column 0 only when they share a group
+    assert evaluate.find_duplicates(X, groups=np.array([0, 0, 0, 0, 0, 1]))[2:] == []
+    assert evaluate.b_orthogonality(X, None) == np.inf
+
+
+def test_misshaped_eigenvectors_are_rejected(tmp_path):
+    ref = _hermitian_case(tmp_path, "c")
+    w, V = _nearest(ref, SIGMA, 4)
+    with pytest.raises(ValueError, match=r"shape \(4, 20\), expected \(n, m\) = \(20, 4\)"):
+        evaluate.evaluate("c", _save(tmp_path / "t", w, np.ascontiguousarray(V.T)), root=tmp_path)
+    with pytest.raises(ValueError, match="shape"):
+        evaluate.evaluate("c", _save(tmp_path / "f", w, V.ravel()), root=tmp_path)
+    # a single pair may be stored as a vector (n,); an empty result in any empty shape
+    assert evaluate.evaluate("c", _save(tmp_path / "one", w[:1], V[:, 0]), root=tmp_path)["summary"]["n_pairs"] == 1
+    assert evaluate.evaluate("c", _save(tmp_path / "none", np.zeros(0), np.zeros(0)), root=tmp_path)["pairs"] == []
+    # complex pairs need their vectors
+    out = _save(tmp_path / "cx", w, V)
+    np.save(out / "complex_eigenvalues.npy", np.array([1 + 1j, 1 - 1j]))
+    with pytest.raises(ValueError, match="no complex eigenvectors"):
+        evaluate.evaluate("c", out, root=tmp_path)
+
+
+@pytest.mark.parametrize("problem", ["HEP", "GHEP"])
+def test_format_reports_a_non_orthogonal_basis(tmp_path, problem):
+    # a normalized but not (B-)orthogonal basis of the triple eigenspace: every pair is exact, the
+    # verdict passes, but FORMATS §3 asks for B-orthonormal vectors
+    rng = np.random.default_rng(7)
+    A = _prescribed(SPECTRUM, rng)
+    B = None
+    if problem == "GHEP":   # (L A L^T, L L^T) keeps the spectrum, triple included
+        L = np.eye(SPECTRUM.size) + 0.1 * np.tril(rng.standard_normal((SPECTRUM.size,) * 2), -1)
+        A, B = L @ A @ L.T, L @ L.T
+    _case(tmp_path, "c", A, B, problem=problem, sigma=1.05, k=3)
+    reference.build_reference("c", tmp_path)
+    w, V = _nearest(cio.load_ref("c", tmp_path), 1.05, 3)
+    assert w == pytest.approx([TRIPLE] * 3)
+    V[:, 1] += 0.3 * V[:, 0]
+    V[:, 1] /= np.sqrt(np.real(V[:, 1] @ (V[:, 1] if B is None else B @ V[:, 1])))
+    doc = evaluate.evaluate("c", _save(tmp_path / "res", w, V), root=tmp_path)
+    assert doc["verdict"] == "pass", doc["reasons"]
+    fmt = doc["format"]
+    assert fmt["max_normalization_error"] < 1e-12 and fmt["max_orthogonality_error"] > 0.2
+    b = "B-" if problem == "GHEP" else ""
+    assert fmt["issues"] == [f"eigenvectors are not {b}orthogonal: ||D^-1/2 X^H {'B ' if b else ''}X D^-1/2 - I||_2 = "
+                             f"{fmt['max_orthogonality_error']:.1e}, D = diag(X^H {'B ' if b else ''}X)"]
+    assert "Result format issues" in report.render([doc], "t")
+
+
+def test_empty_interval_answer(tmp_path):
+    # FORMATS §2 interval target holding no eigenvalue: an empty result is the correct answer
+    ref = _hermitian_case(tmp_path, "c")
+    cfg = json.loads((tmp_path / "cases/c/config.json").read_text())
+    cfg["target"] = {"mode": "interval", "lower": -0.5, "upper": 0.1}       # SPECTRUM has none in it
+    (tmp_path / "cases/c/config.json").write_text(json.dumps(cfg))
+    empty = cio.save_result(tmp_path / "empty", np.zeros(0), np.zeros((20, 0)), {"success": True})
+    doc = evaluate.evaluate("c", empty, root=tmp_path)
+    assert doc["verdict"] == "pass" and doc["reasons"] == [] and doc["summary"]["solver_claim"] == "agrees"
+    assert doc["completeness"]["status"] == "complete" and doc["completeness"]["expected"] == [0, 0]
+    # without a reference the emptiness is unverified
+    doc = evaluate.evaluate("c", empty, root=tmp_path, reference=cio.Reference(np.array([5.0]), None, {
+        "kind": "solver", "complete": False, "window": [4.0, 6.0]}))
+    assert doc["verdict"] == "fail" and doc["completeness"]["status"] == "consistent"
+    assert doc["reasons"] == ["no eigenpairs returned and no reference confirms that the interval is empty"]
+    # an interval that does hold eigenvalues
+    cfg["target"] = {"mode": "interval", "lower": -0.7, "upper": 0.1}
+    (tmp_path / "cases/c/config.json").write_text(json.dumps(cfg))
+    doc = evaluate.evaluate("c", empty, root=tmp_path)
+    assert doc["verdict"] == "fail" and doc["completeness"]["status"] == "incomplete"
+    assert doc["reasons"][0].startswith("no eigenpairs returned") and ref.eigenvalues.size == 20
+
+
 # --------------------------------------------------------------------- format and bookkeeping
 
 @pytest.mark.parametrize("problem", ["HEP", "GHEP"])
@@ -197,6 +301,29 @@ def test_pooled_reference_catches_a_missed_copy(tmp_path):
     assert short_doc["verdict"] == "fail" and short_doc["completeness"]["status"] == "inconsistent"
     assert short_doc["completeness"]["boundary_deficit"] == 0 and len(short_doc["completeness"]["missing"]) == 1
     assert short_doc["reference"]["kind"] == "pooled" and "pooled from full, short" in short_doc["inputs"]["reference"]
+
+
+def test_pooled_reference_resolves_a_dense_cluster(tmp_path):
+    # Eigenvalues 1e-7 apart next to sigma = 0, k = 3: 'aa' returns the 3 nearest, 'bb' the 1st,
+    # 2nd and 4th. The values are 10x farther apart than the resolution tie_rtol * scale ~ 1e-8 of an
+    # accepted pair, so the pool keeps all four and bb's miss of the 3rd is caught (a MATCH_RTOL
+    # chain, ~1e-5 wide, merged them and kept only aa's three: bb passed).
+    eigs = np.concatenate([SPECTRUM, 1e-7 * np.arange(1, 5)])
+    A = _prescribed(eigs, np.random.default_rng(7))
+    _case(tmp_path, "z", A, problem="HEP", sigma=0.0, k=3)
+    w, V = np.linalg.eigh(A)
+    near = np.argsort(np.abs(w))
+    docs = [evaluate.evaluate("z", _save(tmp_path / s, w[near[idx]], V[:, near[idx]]), root=tmp_path, solver=s)
+            for s, idx in (("aa", [0, 1, 2]), ("bb", [0, 1, 3]))]
+    pooled = evaluate.pooled_reference(docs, docs[0]["norms"]["scale"])
+    assert pooled.eigenvalues == pytest.approx(1e-7 * np.arange(1, 5), abs=1e-14)
+    aa, bb = (evaluate.evaluate("z", tmp_path / s, root=tmp_path, solver=s, reference=pooled) for s in ("aa", "bb"))
+    assert aa["verdict"] == "pass" and aa["completeness"]["status"] == "consistent"
+    assert bb["verdict"] == "fail" and bb["completeness"]["status"] == "inconsistent"
+    assert [m["lambda_re"] for m in bb["completeness"]["missing"]] == pytest.approx([3e-7], abs=1e-14)
+    # the same values of two solvers within the resolution are merged, not counted twice
+    twin = dict(docs[0], solver="twin", pairs=[dict(p, lambda_re=p["lambda_re"] * (1 + 1e-12)) for p in docs[0]["pairs"]])
+    assert evaluate.pooled_reference([docs[0], twin], 9.5).eigenvalues.size == 3
 
 
 def test_pooled_reference_ignores_rejected_and_duplicate_pairs(tmp_path):
@@ -269,15 +396,15 @@ def test_nearest_set_is_resolved_inside_a_dense_cluster(tmp_path):
 
 # ------------------------------------------------------------------------------------- GHIEP
 
-def _ghiep_dense(rng, lam_real):
-    """Real symmetric A, B (B indefinite) with eigenvalues da/db plus the complex pair +-0.5i from the
-    block A2 = [[0, .5], [.5, 0]], B2 = diag(1, -1); congruence by a random W keeps the spectrum."""
+def _ghiep_dense(rng, lam_real, block=((0, 0.5), (0.5, 0))):
+    """Real symmetric A, B (B indefinite) with eigenvalues da/db plus those of the 2x2 block A2 / B2 =
+    diag(1, -1) (default: the complex pair +-0.5i); congruence by a random W keeps the spectrum."""
     db = np.array([1, -1, 1, -1, 1, 1, -1, 1.0])
     da = lam_real * db
     A0 = np.zeros((10, 10))
     B0 = np.zeros((10, 10))
     A0[:8, :8], B0[:8, :8] = np.diag(da), np.diag(db)
-    A0[8:, 8:], B0[8:, 8:] = [[0, 0.5], [0.5, 0]], np.diag([1.0, -1.0])
+    A0[8:, 8:], B0[8:, 8:] = block, np.diag([1.0, -1.0])
     W = np.eye(10) + 0.3 * rng.standard_normal((10, 10))
     sym = lambda m: (m + m.T) / 2
     return sym(W.T @ A0 @ W), sym(W.T @ B0 @ W)
@@ -302,6 +429,29 @@ def test_ghiep_indefinite_b_with_complex_pair(tmp_path):
     assert doc["summary"]["n_complex"] == 2 and doc["summary"]["b_orthogonality"] is None
     assert doc["summary"]["max_backward_error"] < 1e-13
     assert doc["completeness"]["status"] == "complete"
+
+
+@pytest.mark.parametrize("split", [1e-3, 1e-6, 1e-7])
+def test_ghiep_near_exceptional_point_is_not_a_duplicate(tmp_path, split):
+    # Block [[0.5 + d, e], [e, -(0.5 - d)]] / diag(1, -1): real eigenvalues 0.5 +- sqrt(d^2 - e^2), whose
+    # eigenvectors become parallel as e -> d (exceptional point; then a complex pair). Exact pairs of
+    # distinct eigenvalues are not duplicates, however close their vectors (distance ~1e-5 at 1e-6).
+    d = 0.01
+    lam_real = np.array([-2.0, -0.8, 0.1, 0.9, 1.7, 3.0, -5.0, 6.0])
+    A, B = _ghiep_dense(np.random.default_rng(5), lam_real, [[0.5 + d, np.sqrt(d**2 - split**2)], [np.sqrt(d**2 - split**2), -(0.5 - d)]])
+    _case(tmp_path, "g", A, B, problem="GHIEP", sigma=0.5, k=4)
+    reference.build_reference("g", tmp_path)
+    ref = cio.load_ref("g", tmp_path)
+    idx = np.argsort(np.abs(ref.eigenvalues - 0.5))[:4]
+    w, V = ref.eigenvalues[idx].real, ref.eigenvectors[:, idx].real
+    assert abs(w[0] - w[1]) == pytest.approx(2 * split, rel=0.05) and abs(w[0] + w[1] - 1.0) < 1e-9
+    doc = evaluate.evaluate("g", _save(tmp_path / "res", w, V), root=tmp_path)
+    assert doc["verdict"] == "pass", doc["reasons"]
+    assert doc["duplicates"] == [] and doc["completeness"]["distinct_returned"] == 4
+    # the same pair twice is still a duplicate
+    doc = evaluate.evaluate("g", _save(tmp_path / "dup", w[[0, 1, 2, 0]], V[:, [0, 1, 2, 0]]), root=tmp_path)
+    assert doc["duplicates"] == [{"index": 3, "duplicate_of": 0, "distance": pytest.approx(0.0, abs=1e-7)}]
+    assert doc["verdict"] == "fail"
 
 
 def _sparse_ghiep(n, seed):
