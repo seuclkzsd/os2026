@@ -88,20 +88,18 @@ struct Partition {
 
 /// out[0, width) = sum over slots of the per-slot accumulators filled by
 /// block_fn(row0, rows, acc) (acc: the slot's `width` doubles, zero-initialised; blocks of one
-/// slot arrive in order on one thread). `work` (scalars touched) only decides whether to go
-/// parallel. Deterministic for any thread count.
+/// slot arrive in order on one thread). `parallel` (a function of the sizes only) selects an
+/// OpenMP loop over the slots, run even for a single slot. Deterministic for any thread count.
 template <class BlockFn>
-void reduce_blocks(const Partition& part, index_t width, index_t work, double* out,
-                   BlockFn&& block_fn) {
+void reduce_blocks(const Partition& part, index_t width, bool parallel, double* out, BlockFn&& block_fn) {
   std::fill(out, out + width, 0.0);
   if (part.nblocks == 0) return;
-  if (part.nslots == 1) {
-    for (index_t b = 0; b < part.nblocks; ++b)
-      block_fn(part.row(b), part.row(b + 1) - part.row(b), out);
+  if (part.nslots == 1 && !parallel) {
+    for (index_t b = 0; b < part.nblocks; ++b) block_fn(part.row(b), part.row(b + 1) - part.row(b), out);
     return;
   }
   std::vector<double> acc(static_cast<std::size_t>(part.nslots * width), 0.0);
-#pragma omp parallel for schedule(static) if (work >= kParallelMinWork)
+#pragma omp parallel for schedule(static) if (parallel)
   for (index_t s = 0; s < part.nslots; ++s) {
     double* slot = acc.data() + s * width;
     for (index_t b = part.first_block(s); b < part.first_block(s + 1); ++b)
@@ -324,13 +322,88 @@ void run_sweep(index_t n, index_t k, const Sweep& s, double* proj, double* norm)
     return;
   }
   std::vector<double> out(static_cast<std::size_t>(width));
-  reduce_blocks(part, width, work, out.data(), block);
+  reduce_blocks(part, width, work >= kParallelMinWork, out.data(), block);
   if (s.p) std::copy(out.begin(), out.begin() + kd, proj);
   if (s.na) *norm = out[static_cast<std::size_t>(width - 1)];
 }
 
 /// sqrt of a squared norm, keeping NaN (std::max returns its first argument for NaN).
 inline double root(double m2) { return std::sqrt(std::max(m2, 0.0)); }
+
+// ---- block CGS (BLAS3 on row blocks) ---------------------------------------------------------
+// gemm is called on fixed row blocks from inside an OpenMP parallel region (also with a single
+// slot), where an OpenMP BLAS runs single-threaded: the partial products then depend on the block
+// sizes only, and the result is identical for any thread count.
+
+/// Bytes of the n x (k + p) operands per row block of the block sweeps (L2-resident when fused).
+constexpr index_t kBlockTileBytes = 256 * 1024;
+/// Bound on the reduction slots' memory: wide k x p partial products get fewer slots.
+constexpr index_t kBlockSlotBytes = 2 * 1024 * 1024;
+
+/// One sweep of the block routine: per row block, optionally (in this order)
+///   update:     W -= V C and, when bv != nullptr, BW -= BV C      (c != nullptr, k x p, ld k)
+///   projection: proj = P^H X (k x p, ld k)                        (pm != nullptr)
+///   norms:      norms[j] = Re(A(:, j)^H B(:, j)), j < p            (na != nullptr)
+template <class T>
+struct BlockSweep {
+  const T* v = nullptr;
+  index_t ldv = 0;
+  const T* bv = nullptr;
+  index_t ldbv = 0;
+  T* w = nullptr;
+  index_t ldw = 0;
+  T* bw = nullptr;
+  index_t ldbw = 0;
+  const T* c = nullptr;
+  const T* pm = nullptr;
+  index_t ldp = 0;
+  const T* x = nullptr;
+  index_t ldx = 0;
+  const T* na = nullptr;
+  index_t lda = 0;
+  const T* nb = nullptr;
+  index_t ldb = 0;
+};
+
+template <class T>
+void run_block_sweep(index_t n, index_t k, index_t p, const BlockSweep<T>& s, T* proj, double* norms) {
+  using lapack::fint;
+  constexpr index_t d = kDoubles<T>;
+  const index_t kp = s.pm ? k * p : 0;  // projection entries (scalars of T)
+  const index_t width = kp * d + (s.na ? p : 0);
+  const index_t mats = s.c ? (s.bv ? 2 : 1) : (s.pm ? 1 : 0);
+  const index_t row_bytes = (std::max<index_t>(k, 1) * mats + p * (s.bw ? 2 : 1)) * static_cast<index_t>(sizeof(T));
+  const index_t rows = std::clamp<index_t>(kBlockTileBytes / row_bytes / 32 * 32, 128, 4096);
+  const index_t max_slots = std::clamp<index_t>(kBlockSlotBytes / (8 * std::max<index_t>(width, 1)), 32, kMaxSlots);
+  const Partition part(n, rows, max_slots);
+  auto block = [&](index_t r0, index_t len, double* acc) {
+    const auto m = static_cast<fint>(len);
+    if (s.c) {
+      lapack::gemm('N', 'N', m, static_cast<fint>(p), static_cast<fint>(k), T(-1), s.v + r0, static_cast<fint>(s.ldv),
+                   s.c, static_cast<fint>(k), T(1), s.w + r0, static_cast<fint>(s.ldw));
+      if (s.bv)
+        lapack::gemm('N', 'N', m, static_cast<fint>(p), static_cast<fint>(k), T(-1), s.bv + r0,
+                     static_cast<fint>(s.ldbv), s.c, static_cast<fint>(k), T(1), s.bw + r0, static_cast<fint>(s.ldbw));
+    }
+    if (s.pm && len > 0)
+      lapack::gemm('C', 'N', static_cast<fint>(k), static_cast<fint>(p), m, T(1), s.pm + r0, static_cast<fint>(s.ldp),
+                   s.x + r0, static_cast<fint>(s.ldx), T(1), reinterpret_cast<T*>(acc), static_cast<fint>(k));
+    if (s.na)
+      for (index_t j = 0; j < p; ++j)
+        acc[kp * d + j] += ddot(len * d, dbl(s.na + r0 + j * s.lda), dbl(s.nb + r0 + j * s.ldb));
+  };
+  // std::vector<double> storage of T = complex<double> slots: alignment 8 suffices for both.
+  std::vector<double> out(static_cast<std::size_t>(width));
+  if (width == 0) {
+    const index_t nb = part.nblocks;
+#pragma omp parallel for schedule(static)
+    for (index_t b = 0; b < nb; ++b) block(part.row(b), part.row(b + 1) - part.row(b), nullptr);
+    return;
+  }
+  reduce_blocks(part, width, /*parallel=*/true, out.data(), block);
+  if (s.pm) std::copy(out.begin(), out.begin() + kp * d, dbl(proj));
+  if (s.na) std::copy(out.begin() + kp * d, out.end(), norms);
+}
 
 }  // namespace
 
@@ -355,7 +428,7 @@ T dot(index_t n, const T* x, const T* y) {
   const double* yd = dbl(y);
   if constexpr (is_complex_v<T>) {
     double s[2];
-    reduce_blocks(part, 2, 2 * n, s, [&](index_t r0, index_t rows, double* acc) {
+    reduce_blocks(part, 2, 2 * n >= kParallelMinWork, s, [&](index_t r0, index_t rows, double* acc) {
       double re, im;
       zdotc(rows, xd + 2 * r0, yd + 2 * r0, re, im);
       acc[0] += re;
@@ -364,7 +437,7 @@ T dot(index_t n, const T* x, const T* y) {
     return T(s[0], s[1]);
   } else {
     double s;
-    reduce_blocks(part, 1, n, &s,
+    reduce_blocks(part, 1, n >= kParallelMinWork, &s,
                   [&](index_t r0, index_t rows, double* acc) { acc[0] += ddot(rows, xd + r0, yd + r0); });
     return s;
   }
@@ -376,7 +449,7 @@ double norm2(index_t n, const T* x) {
   const double* xd = dbl(x);
   constexpr index_t d = kDoubles<T>;
   double s;
-  reduce_blocks(part, 1, d * n, &s, [&](index_t r0, index_t rows, double* acc) {
+  reduce_blocks(part, 1, d * n >= kParallelMinWork, &s, [&](index_t r0, index_t rows, double* acc) {
     acc[0] += ddot(d * rows, xd + d * r0, xd + d * r0);
   });
   return std::sqrt(s);
@@ -508,6 +581,121 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
 }
 
 template <class T>
+int orthogonalize_block_cgs2(index_t n, index_t k, index_t p, const T* v, index_t ldv, const T* bv,
+                             index_t ldbv, T* w, index_t ldw, T* bw, index_t ldbw, T* h, index_t ldh,
+                             double* norms_before, double* norms_after, const ApplyBlockFn<T>* apply_m,
+                             const OrthoOptions& options) {
+  const bool stored = bv != nullptr;
+  const bool recompute = !stored && apply_m != nullptr;
+  HS_ASSERT(!stored || bw != nullptr, "stored mode needs bw = M*W");
+  HS_ASSERT(!recompute || bw != nullptr, "recompute mode needs a bw workspace");
+  HS_ASSERT(stored || recompute || bw == nullptr, "bw given without bv or apply_m");
+  if (!(options.eta >= 0.0 && options.eta <= 1.0))
+    HS_THROW(InvalidInput, "orthogonalize_block_cgs2: eta must lie in [0, 1], got " << options.eta);
+  if (n < 0 || k < 0 || p < 0)
+    HS_THROW(InvalidInput, "orthogonalize_block_cgs2: negative size n=" << n << " k=" << k << " p=" << p);
+  if (p == 0) return 0;
+  if (h)
+    for (index_t j = 0; j < p; ++j) std::fill(h + j * ldh, h + j * ldh + k, T(0));
+  // Column norms of the current W: Re(w_j^H M w_j) with BW == M W, or ||w_j||^2.
+  std::vector<double> m0(static_cast<std::size_t>(p)), m1(m0), m2(m0);
+  BlockSweep<T> nrm;
+  nrm.na = w;
+  nrm.lda = ldw;
+  nrm.nb = bw ? bw : w;
+  nrm.ldb = bw ? ldbw : ldw;
+  auto export_norms = [&](const std::vector<double>& sq, double* out) {
+    if (out)
+      for (index_t j = 0; j < p; ++j) out[j] = root(sq[static_cast<std::size_t>(j)]);
+  };
+  if (k == 0) {
+    if (recompute) (*apply_m)(w, ldw, bw, ldbw, p);
+    run_block_sweep<T>(n, 0, p, nrm, nullptr, m0.data());
+    export_norms(m0, norms_before);
+    export_norms(m0, norms_after);
+    return 0;
+  }
+  std::vector<T> c1(static_cast<std::size_t>(k * p)), c2(c1);
+  auto accumulate = [&](const std::vector<T>& c) {
+    if (h)
+      for (index_t j = 0; j < p; ++j)
+        for (index_t i = 0; i < k; ++i) h[i + j * ldh] += c[static_cast<std::size_t>(i + j * k)];
+  };
+  // Projections use M V: BV against W in stored mode, V against M W otherwise.
+  BlockSweep<T> proj = nrm;
+  proj.pm = stored ? bv : v;
+  proj.ldp = stored ? ldbv : ldv;
+  proj.x = recompute ? bw : w;
+  proj.ldx = recompute ? ldbw : ldw;
+
+  // Pass 1 projection with the norms before.
+  if (recompute) (*apply_m)(w, ldw, bw, ldbw, p);
+  run_block_sweep<T>(n, k, p, proj, c1.data(), m0.data());
+  accumulate(c1);
+  // Pass 1 update, fused with the pass 2 projection and the new norms (not in recompute mode).
+  BlockSweep<T> upd;
+  upd.v = v;
+  upd.ldv = ldv;
+  upd.w = w;
+  upd.ldw = ldw;
+  if (stored) {
+    upd.bv = bv;
+    upd.ldbv = ldbv;
+    upd.bw = bw;
+    upd.ldbw = ldbw;
+  }
+  upd.c = c1.data();
+  if (recompute) {
+    run_block_sweep<T>(n, k, p, upd, nullptr, nullptr);
+    (*apply_m)(w, ldw, bw, ldbw, p);
+    run_block_sweep<T>(n, k, p, nrm, nullptr, m1.data());
+  } else {
+    BlockSweep<T> fused = upd;
+    fused.pm = proj.pm;
+    fused.ldp = proj.ldp;
+    fused.x = proj.x;
+    fused.ldx = proj.ldx;
+    fused.na = nrm.na;
+    fused.lda = nrm.lda;
+    fused.nb = nrm.nb;
+    fused.ldb = nrm.ldb;
+    run_block_sweep<T>(n, k, p, fused, c2.data(), m1.data());
+  }
+  export_norms(m0, norms_before);
+  // DGKS per block: skip pass 2 only if no column lost more than 1 - eta of its norm.
+  bool skip = options.reorth == Reorth::IfNeeded;
+  for (index_t j = 0; skip && j < p; ++j) {
+    const double before = root(m0[static_cast<std::size_t>(j)]), after = root(m1[static_cast<std::size_t>(j)]);
+    skip = after > 0.0 && after >= options.eta * before;
+  }
+  if (skip) {
+    export_norms(m1, norms_after);
+    return 1;
+  }
+  // Pass 2.
+  if (recompute) {
+    BlockSweep<T> pj = proj;
+    pj.na = pj.nb = nullptr;
+    run_block_sweep<T>(n, k, p, pj, c2.data(), nullptr);
+  }
+  accumulate(c2);
+  upd.c = c2.data();
+  if (recompute) {
+    run_block_sweep<T>(n, k, p, upd, nullptr, nullptr);
+    (*apply_m)(w, ldw, bw, ldbw, p);
+    run_block_sweep<T>(n, k, p, nrm, nullptr, m2.data());
+  } else {
+    upd.na = nrm.na;
+    upd.lda = nrm.lda;
+    upd.nb = nrm.nb;
+    upd.ldb = nrm.ldb;
+    run_block_sweep<T>(n, k, p, upd, nullptr, m2.data());
+  }
+  export_norms(m2, norms_after);
+  return 2;
+}
+
+template <class T>
 void gram(index_t n, index_t k, const T* v, index_t ldv, const T* w, index_t ldw, T* c, index_t ldc) {
   lapack::gemm('C', 'N', static_cast<lapack::fint>(k), static_cast<lapack::fint>(k),
                static_cast<lapack::fint>(n), T(1), v, static_cast<lapack::fint>(ldv), w,
@@ -531,6 +719,9 @@ void multiply(index_t n, index_t k, index_t m, const T* v, index_t ldv, const T*
   template double orthogonalize_cgs2<T>(index_t, index_t, const T*, index_t, const T*, index_t, T*, \
                                         T*, T*, const ApplyFn<T>*, const OrthoOptions&,             \
                                         OrthoInfo*);                                                \
+  template int orthogonalize_block_cgs2<T>(index_t, index_t, index_t, const T*, index_t, const T*,  \
+                                           index_t, T*, index_t, T*, index_t, T*, index_t, double*, \
+                                           double*, const ApplyBlockFn<T>*, const OrthoOptions&);  \
   template void gram<T>(index_t, index_t, const T*, index_t, const T*, index_t, T*, index_t);       \
   template void multiply<T>(index_t, index_t, index_t, const T*, index_t, const T*, index_t, T*,    \
                             index_t);

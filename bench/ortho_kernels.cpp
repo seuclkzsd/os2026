@@ -4,7 +4,7 @@
 // Run under the guard, e.g. (one line)
 //   python3 tools/run/guard.py --skip-busy-check --cores 26,27 --mem-gb 4 --timeout 600 --
 //       build/release/bench_ortho_kernels reduce 2000000
-// Sections: reduce <n> | cgs <n> <k> [reps]
+// Sections: reduce <n> | cgs <n> <k> [reps] | block <n> <k> <p> [reps]
 #include <omp.h>
 
 #include <algorithm>
@@ -248,10 +248,85 @@ void bench_cgs(index_t n, index_t k, Mode mode, double ratio, int reps) {
   std::fflush(stdout);
 }
 
+/// Block routine vs p single-vector calls: W (n x p) with column ratios cycling over
+/// {1, 0.5, 1e-6} (so the block needs two passes) against the same V as bench_cgs.
+template <class T>
+void bench_block(index_t n, index_t k, index_t p, Mode mode, int reps) {
+  CgsProblem<T> pb(n, k, 1.0, mode != Mode::Euclidean);
+  hs::DenseMatrix<T> w0(n, p), w(n, p), bw(n, p), h(k, p);
+  for (index_t j = 0; j < p; ++j) {
+    const double ratio = j % 3 == 0 ? 1.0 : j % 3 == 1 ? 0.5 : 1e-6;
+    std::vector<T> y(static_cast<std::size_t>(k)), r(static_cast<std::size_t>(n)), br(static_cast<std::size_t>(n));
+    la::fill_random(y.data(), k, 40 + static_cast<std::uint64_t>(j), 0);
+    la::fill_random(r.data(), n, 40 + static_cast<std::uint64_t>(j), 1);
+    pb.apply(r.data(), br.data());
+    const double rn = la::orthogonalize_cgs2<T>(n, k, pb.v.data(), n, pb.bv.data(), n, r.data(), br.data(), nullptr);
+    if (ratio < 1.0) la::multiply(n, k, 1, pb.v.data(), n, y.data(), k, w0.col(j), n);
+    const double yn = la::norm2(k, y.data());
+    const double sc = ratio < 1.0 ? ratio * yn / std::sqrt(1.0 - ratio * ratio) / rn : 1.0 / rn;
+    la::axpy(n, T(sc), r.data(), w0.col(j));
+  }
+  const T* bv = mode == Mode::Stored ? pb.bv.data() : nullptr;
+  T* bwp = mode == Mode::Euclidean ? nullptr : bw.data();
+  const la::ApplyBlockFn<T> apply_block = [&](const T* x, index_t ldx, T* y, index_t ldy, index_t cols) {
+    for (index_t j = 0; j < cols; ++j) pb.apply(x + j * ldx, y + j * ldy);
+  };
+  auto reset = [&] {
+    std::copy(w0.data(), w0.data() + n * p, w.data());
+    if (mode == Mode::Stored)
+      for (index_t j = 0; j < p; ++j) pb.apply(w.col(j), bw.col(j));
+  };
+  // 0: p legacy calls, 1: p orthogonalize_cgs2 calls (DGKS), 2: block routine (DGKS per block).
+  std::vector<double> times[3];
+  int block_passes = 0;
+  double loss[3] = {0, 0, 0};
+  for (int rep = 0; rep <= reps; ++rep)
+    for (int method = 0; method < 3; ++method) {
+      reset();
+      std::vector<double> nrm(static_cast<std::size_t>(p));
+      hs::Timer timer;
+      if (method == 2) {
+        block_passes = la::orthogonalize_block_cgs2<T>(n, k, p, pb.v.data(), n, bv, n, w.data(), n, bwp, n, h.data(),
+                                                       k, nullptr, nrm.data(),
+                                                       mode == Mode::Recompute ? &apply_block : nullptr);
+      } else {
+        for (index_t j = 0; j < p; ++j) {
+          T* bwj = bwp ? bw.col(j) : nullptr;
+          const la::ApplyFn<T>* apply = mode == Mode::Recompute ? &pb.apply : nullptr;
+          nrm[j] = method == 0 ? legacy_cgs2<T>(n, k, pb.v.data(), n, bv, n, w.col(j), bwj, h.col(j), apply)
+                               : la::orthogonalize_cgs2<T>(n, k, pb.v.data(), n, bv, n, w.col(j), bwj, h.col(j), apply);
+        }
+      }
+      const double sec = timer.seconds();
+      if (rep > 0) times[method].push_back(sec);
+      if (rep == reps) {
+        for (index_t j = 0; j < p; ++j) {
+          std::vector<T> col(w.col(j), w.col(j) + n);
+          loss[method] = std::max(loss[method], pb.loss(col, nrm[j]));
+        }
+      }
+    }
+  double ms[3];
+  for (int m = 0; m < 3; ++m) {
+    std::sort(times[m].begin(), times[m].end());
+    ms[m] = 1e3 * times[m][times[m].size() / 2];
+  }
+  std::printf(
+      "{\"section\":\"block\",\"scalar\":\"%s\",\"mode\":\"%s\",\"n\":%lld,\"k\":%lld,\"p\":%lld,\"threads\":%d,"
+      "\"legacy_columns_ms\":%.3f,\"cgs2_columns_ms\":%.3f,\"block_ms\":%.3f,\"block_passes\":%d,"
+      "\"speedup_block_vs_legacy\":%.2f,\"speedup_block_vs_cgs2\":%.2f,"
+      "\"loss_legacy\":%.1e,\"loss_cgs2\":%.1e,\"loss_block\":%.1e}\n",
+      scalar_name(hs::is_complex_v<T>), mode_name(mode), static_cast<long long>(n), static_cast<long long>(k),
+      static_cast<long long>(p), omp_get_max_threads(), ms[0], ms[1], ms[2], block_passes, ms[0] / ms[2],
+      ms[1] / ms[2], loss[0], loss[1], loss[2]);
+  std::fflush(stdout);
+}
+
 int usage() {
   std::fprintf(stderr,
                "usage: bench_ortho_kernels reduce <n>\n"
-               "       bench_ortho_kernels cgs <n> <k> [reps]\n");
+               "       bench_ortho_kernels cgs <n> <k> [reps]\n"
+               "       bench_ortho_kernels block <n> <k> <p> [reps]\n");
   return 2;
 }
 
@@ -277,6 +352,17 @@ int main(int argc, char** argv) {
         bench_cgs<double>(n, k, mode, ratio, reps);
         bench_cgs<cplx>(n, k, mode, ratio, reps);
       }
+    return 0;
+  }
+  if (section == "block" && argc >= 5) {
+    const index_t n = std::atoll(argv[2]);
+    const index_t k = std::atoll(argv[3]);
+    const index_t p = std::atoll(argv[4]);
+    const int reps = argc >= 6 ? std::atoi(argv[5]) : 5;
+    for (Mode mode : {Mode::Euclidean, Mode::Stored, Mode::Recompute}) {
+      bench_block<double>(n, k, p, mode, reps);
+      bench_block<cplx>(n, k, p, mode, reps);
+    }
     return 0;
   }
   return usage();

@@ -51,6 +51,10 @@ void scal(index_t n, T alpha, T* x);
 template <class T>
 using ApplyFn = std::function<void(const T* x, T* y)>;
 
+/// Y = M * X for p columns (X n x p with ld ldx, Y n x p with ld ldy): the block form of ApplyFn.
+template <class T>
+using ApplyBlockFn = std::function<void(const T* x, index_t ldx, T* y, index_t ldy, index_t p)>;
+
 /// When the CGS routines run their second projection pass.
 enum class Reorth {
   /// Always two passes (classical CGS2, "twice is enough": the result is orthogonal to working
@@ -109,6 +113,30 @@ template <class T>
 double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T* bv, index_t ldbv,
                           T* w, T* bw, T* h, const ApplyFn<T>* apply_m = nullptr,
                           const OrthoOptions& options = OrthoOptions{}, OrthoInfo* info = nullptr);
+
+/// Block CGS2: orthogonalize the p columns of W (n x p, ld ldw) against the k columns of V
+/// (n x k, ld ldv) in the M-inner product, with BLAS3 (gemm) on row blocks. The columns of W are
+/// NOT orthogonalized among themselves (follow with a QR of the block, e.g. orthogonalize_cgs2 per
+/// column). Same three modes as orthogonalize_cgs2: Euclidean (bv, bw, apply_m all null), stored
+/// (bv = M*V with ld ldbv, bw = M*W on entry with ld ldbw, updated by subtraction with the same
+/// accuracy caveat) and recompute (apply_m != nullptr, bw = n x p workspace with ld ldbw, M*W
+/// recomputed after every pass). On exit bw == M*W (stored/recompute modes).
+/// DGKS per block: with Reorth::IfNeeded the second pass runs (on the whole block) unless every
+/// column keeps ||w_j after pass 1||_M >= eta * ||w_j before||_M (a zero column forces it).
+/// h (k x p, ld ldh, may be nullptr) receives the accumulated V^H M W. norms_before / norms_after
+/// (length p each, may be nullptr) receive the column norms on entry / exit, computed as in
+/// OrthoInfo. Returns the number of passes: 0 when k == 0 or p == 0, else 1 or 2.
+/// Preconditions: V M-orthonormal; W, BW do not alias V, BV. Cost: the sweeps of
+/// orthogonalize_cgs2 with p columns each (the reads of V are shared by the p columns; 4nkp flops
+/// per pass). Workspace: O(k p) scalars per reduction slot, at most ~2 MB of slots.
+/// Deterministic for any thread count as long as the single-threaded BLAS gemm is (it is called on
+/// fixed row blocks from inside an OpenMP region, where an OpenMP BLAS does not spawn threads).
+template <class T>
+int orthogonalize_block_cgs2(index_t n, index_t k, index_t p, const T* v, index_t ldv, const T* bv,
+                             index_t ldbv, T* w, index_t ldw, T* bw, index_t ldbw, T* h, index_t ldh,
+                             double* norms_before, double* norms_after,
+                             const ApplyBlockFn<T>* apply_m = nullptr,
+                             const OrthoOptions& options = OrthoOptions{});
 
 /// C (k x k) = V^H * W for V (n x k, ld ldv), W (n x k, ld ldw). Used for Gram matrices and
 /// Rayleigh quotients. BLAS3.

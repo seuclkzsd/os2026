@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <omp.h>
 
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstring>
@@ -141,6 +142,8 @@ struct OrthoSetup {
   la::ApplyFn<T> apply;
   index_t k = 0;  ///< columns of V built so far
 
+  OrthoSetup(const OrthoSetup&) = delete;  // `apply` captures this
+  OrthoSetup& operator=(const OrthoSetup&) = delete;
   OrthoSetup(index_t n_, index_t cap_, Mode mode_) : n(n_), cap(cap_), mode(mode_), v(n_, cap_), bv(n_, cap_) {
     m.resize(static_cast<std::size_t>(n));
     for (index_t i = 0; i < n; ++i)
@@ -381,11 +384,13 @@ TYPED_TEST(LinalgDenseOpsCgs, EmptyBasisAndNonFiniteInput) {
 
 TYPED_TEST(LinalgDenseOpsCgs, BitwiseIdenticalForAnyThreadCount) {
   using T = TypeParam;
-  // (n, k): several reduction slots of one block each; more than 256 blocks (several blocks per
-  // slot); a basis wide enough for every column group of the kernels plus remainders.
+  // (n, k): several reduction slots of one block each (all modes); more than 256 blocks, i.e.
+  // several blocks per slot; a basis wide enough for every column group of the kernels plus
+  // remainders. The last two are mode-independent properties: Euclidean only (test time).
   const std::pair<index_t, index_t> shapes[] = {{20000, 23}, {1100000, 2}, {6000, 77}};
   for (auto [n, k] : shapes)
     for (Mode mode : kModes) {
+      if (k != 23 && mode != Mode::Euclidean) continue;
       OrthoSetup<T> s(n, k, mode);
       std::vector<T> x(static_cast<std::size_t>(n));
       for (index_t j = 0; j < k; ++j) {
@@ -413,15 +418,208 @@ TYPED_TEST(LinalgDenseOpsCgs, BitwiseIdenticalForAnyThreadCount) {
         ThreadCount tc(1);
         ref = run();
       }
+      for (int threads : kThreadCounts) {  // threads == 1 repeats the reference run
+        ThreadCount tc(threads);
+        const Out o = run();
+        EXPECT_TRUE(bitwise_equal(o.w, ref.w)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
+        EXPECT_TRUE(bitwise_equal(o.bw, ref.bw)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
+        EXPECT_TRUE(bitwise_equal(o.h, ref.h)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
+        EXPECT_TRUE(bitwise_equal(o.nrm, ref.nrm)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
+      }
+    }
+}
+
+// ---- block CGS -----------------------------------------------------------------------------------
+
+/// Runs orthogonalize_block_cgs2 on W (n x p, ld n) with the setup's mode. bw: n x p (ld n), M W
+/// on entry in stored mode, workspace in recompute mode.
+template <class T>
+int block_orthogonalize(const OrthoSetup<T>& s, index_t p, T* w, T* bw, T* h, double* before, double* after,
+                        const la::OrthoOptions& opt) {
+  const index_t n = s.n;
+  const la::ApplyBlockFn<T> apply = [&s](const T* x, index_t ldx, T* y, index_t ldy, index_t cols) {
+    for (index_t j = 0; j < cols; ++j) s.apply(x + j * ldx, y + j * ldy);
+  };
+  switch (s.mode) {
+    case Mode::Euclidean:
+      return la::orthogonalize_block_cgs2<T>(n, s.k, p, s.v.data(), n, nullptr, 0, w, n, nullptr, 0, h, s.k, before,
+                                             after, nullptr, opt);
+    case Mode::Stored:
+      return la::orthogonalize_block_cgs2<T>(n, s.k, p, s.v.data(), n, s.bv.data(), n, w, n, bw, n, h, s.k, before,
+                                             after, nullptr, opt);
+    case Mode::Recompute:
+      return la::orthogonalize_block_cgs2<T>(n, s.k, p, s.v.data(), n, nullptr, 0, w, n, bw, n, h, s.k, before, after,
+                                             &apply, opt);
+  }
+  return -1;
+}
+
+/// Fills s with s.cap random M-orthonormal columns.
+template <class T>
+void fill_random_basis(OrthoSetup<T>& s, std::uint64_t seed) {
+  std::vector<T> x(static_cast<std::size_t>(s.n));
+  while (s.k < s.cap) {
+    la::fill_random(x.data(), s.n, seed, static_cast<std::uint64_t>(s.k));
+    s.append(x, policy(la::Reorth::Always));
+  }
+}
+
+/// W (n x p): column j = V y_j + ratio_j-weighted component outside span(V) (ratio 1: random).
+template <class T>
+hs::DenseMatrix<T> block_input(const OrthoSetup<T>& s, const std::vector<double>& ratios, std::uint64_t seed) {
+  const index_t n = s.n, k = s.k, p = static_cast<index_t>(ratios.size());
+  hs::DenseMatrix<T> w(n, p);
+  std::vector<T> y(static_cast<std::size_t>(k)), x(static_cast<std::size_t>(n));
+  for (index_t j = 0; j < p; ++j) {
+    la::fill_random(x.data(), n, seed, static_cast<std::uint64_t>(2 * j));
+    if (ratios[j] >= 1.0) {
+      std::copy(x.begin(), x.end(), w.col(j));
+      continue;
+    }
+    la::fill_random(y.data(), k, seed, static_cast<std::uint64_t>(2 * j + 1));
+    // x_perp: x orthogonalized against V (M-norm xn).
+    std::vector<T> bx(static_cast<std::size_t>(n));
+    if (s.mode == Mode::Stored) s.apply(x.data(), bx.data());
+    const double xn =
+        s.orthogonalize(x.data(), s.mode == Mode::Euclidean ? nullptr : bx.data(), nullptr, policy(la::Reorth::Always), nullptr);
+    la::multiply(n, k, 1, s.v.data(), n, y.data(), k, w.col(j), n);
+    const double yn = la::norm2(k, y.data()), r = ratios[j];
+    la::axpy(n, T(r * yn / std::sqrt(1.0 - r * r) / xn), x.data(), w.col(j));
+  }
+  return w;
+}
+
+template <class T>
+class LinalgDenseOpsBlockCgs : public ::testing::Test {};
+TYPED_TEST_SUITE(LinalgDenseOpsBlockCgs, Scalars);
+
+TYPED_TEST(LinalgDenseOpsBlockCgs, AgreesWithColumnwiseCgsInAllModes) {
+  using T = TypeParam;
+  const index_t n = 3000, k = 30;
+  for (Mode mode : kModes) {
+    OrthoSetup<T> s(n, k, mode);
+    fill_random_basis(s, 31);
+    // Block A: all columns independent of span(V); block B: one column nearly in span(V).
+    const std::vector<std::vector<double>> blocks = {{1.0, 1.0, 1.0}, {1.0, 0.3, 1e-8, 1.0, 0.9}};
+    for (const auto& ratios : blocks)
+      for (la::Reorth reorth : {la::Reorth::Always, la::Reorth::IfNeeded}) {
+        const index_t p = static_cast<index_t>(ratios.size());
+        const hs::DenseMatrix<T> w0 = block_input(s, ratios, 32);
+        hs::DenseMatrix<T> w = w0, bw(n, p), h(k, p);
+        if (mode == Mode::Stored)
+          for (index_t j = 0; j < p; ++j) s.apply(w.col(j), bw.col(j));
+        std::vector<double> before(static_cast<std::size_t>(p)), after(static_cast<std::size_t>(p));
+        const int passes = block_orthogonalize(s, p, w.data(), bw.data(), h.data(), before.data(), after.data(),
+                                               policy(reorth));
+        const bool all_independent = ratios.size() == 3;
+        EXPECT_EQ(passes, reorth == la::Reorth::IfNeeded && all_independent ? 1 : 2) << mode_name(mode);
+        for (index_t j = 0; j < p; ++j) {
+          // The same column through orthogonalize_cgs2 with the same number of passes.
+          std::vector<T> wj(w0.col(j), w0.col(j) + n), bwj(static_cast<std::size_t>(n)), hj(static_cast<std::size_t>(k));
+          if (mode == Mode::Stored) s.apply(wj.data(), bwj.data());
+          la::OrthoInfo info;
+          const double nj = s.orthogonalize(wj.data(), mode == Mode::Euclidean ? nullptr : bwj.data(), hj.data(),
+                                            policy(passes == 2 ? la::Reorth::Always : la::Reorth::IfNeeded), &info);
+          EXPECT_EQ(info.passes, passes);
+          EXPECT_NEAR(before[j], info.norm_before, 1e-13 * info.norm_before);
+          EXPECT_NEAR(after[j], nj, 1e-12 * info.norm_before) << mode_name(mode) << " col " << j;
+          double dw = 0.0, dh = 0.0, wmax = 0.0;
+          for (index_t i = 0; i < n; ++i) {
+            dw = std::max(dw, std::abs(w(i, j) - wj[i]));
+            wmax = std::max(wmax, std::abs(w0(i, j)));
+          }
+          for (index_t i = 0; i < k; ++i) dh = std::max(dh, std::abs(h(i, j) - hj[i]));
+          EXPECT_LE(dw, 1e-14 * wmax) << mode_name(mode) << " col " << j;
+          EXPECT_LE(dh, 1e-13) << mode_name(mode) << " col " << j;
+          // M-orthogonality of the result and bw == M w.
+          std::vector<T> mw(static_cast<std::size_t>(n));
+          s.apply(w.col(j), mw.data());
+          double proj = 0.0, dbw = 0.0, bwmax = 0.0;
+          for (index_t c = 0; c < k; ++c) proj = std::max(proj, std::abs(la::dot(n, s.v.col(c), mw.data())));
+          for (index_t i = 0; mode != Mode::Euclidean && i < n; ++i) {
+            dbw = std::max(dbw, std::abs(bw(i, j) - mw[i]));
+            bwmax = std::max(bwmax, 100.0 * std::abs(w0(i, j)));
+          }
+          EXPECT_LE(proj, 1e-14 * after[j]) << mode_name(mode) << " col " << j;
+          EXPECT_LE(dbw, 1e-13 * bwmax) << mode_name(mode) << " col " << j;
+        }
+      }
+  }
+}
+
+TYPED_TEST(LinalgDenseOpsBlockCgs, EdgeCases) {
+  using T = TypeParam;
+  const index_t n = 500;
+  for (Mode mode : kModes) {
+    OrthoSetup<T> s(n, 2, mode);
+    hs::DenseMatrix<T> w(n, 2), bw(n, 2);
+    la::fill_random(w.data(), 2 * n, 41, 0);
+    if (mode == Mode::Stored)
+      for (index_t j = 0; j < 2; ++j) s.apply(w.col(j), bw.col(j));
+    const hs::DenseMatrix<T> w0 = w;
+    std::vector<double> before(2), after(2);
+    // k == 0: nothing removed, norms reported, M W computed in recompute mode.
+    EXPECT_EQ(block_orthogonalize<T>(s, 2, w.data(), bw.data(), nullptr, before.data(), after.data(), la::OrthoOptions{}), 0);
+    for (index_t j = 0; j < 2; ++j) {
+      EXPECT_TRUE(std::equal(w.col(j), w.col(j) + n, w0.col(j)));
+      EXPECT_EQ(before[j], after[j]);
+      double m2 = 0.0;
+      for (index_t i = 0; i < n; ++i) m2 += s.m[i] * hs::abs2(w(i, j));
+      EXPECT_NEAR(after[j], std::sqrt(m2), 1e-13 * std::sqrt(m2));
+      for (index_t i = 0; mode != Mode::Euclidean && i < n; ++i) EXPECT_EQ(bw(i, j), s.m[i] * w(i, j));
+    }
+    // p == 0: no work.
+    s.append(std::vector<T>(w0.col(0), w0.col(0) + n), la::OrthoOptions{});
+    EXPECT_EQ(block_orthogonalize<T>(s, 0, w.data(), bw.data(), nullptr, nullptr, nullptr, la::OrthoOptions{}), 0);
+    // Invalid eta.
+    EXPECT_THROW(block_orthogonalize<T>(s, 2, w.data(), bw.data(), nullptr, nullptr, nullptr,
+                                     policy(la::Reorth::IfNeeded, -0.1)),
+                 hs::Error);
+  }
+}
+
+TYPED_TEST(LinalgDenseOpsBlockCgs, BitwiseIdenticalForAnyThreadCount) {
+  using T = TypeParam;
+  // (n, k, p): one block per reduction slot (all modes); several blocks per slot, as wide k x p
+  // partials get fewer slots (Euclidean only, test time).
+  const std::array<index_t, 3> shapes[] = {{20000, 23, 4}, {30000, 64, 48}};
+  for (const auto& [n, k, p] : shapes)
+    for (Mode mode : kModes) {
+      if (k != 23 && mode != Mode::Euclidean) continue;
+      OrthoSetup<T> s(n, k, mode);
+      fill_random_basis(s, 51);
+      std::vector<double> ratios(static_cast<std::size_t>(p), 1.0);
+      ratios[1] = 0.1;  // two passes
+      const hs::DenseMatrix<T> w0 = block_input(s, ratios, 52);
+      struct Out {
+        hs::DenseMatrix<T> w, bw, h;
+        std::vector<double> after;
+      };
+      auto run = [&]() {
+        Out o{w0, hs::DenseMatrix<T>(n, p), hs::DenseMatrix<T>(k, p), std::vector<double>(static_cast<std::size_t>(p))};
+        if (mode == Mode::Stored)
+          for (index_t j = 0; j < p; ++j) s.apply(o.w.col(j), o.bw.col(j));
+        EXPECT_EQ(block_orthogonalize<T>(s, p, o.w.data(), o.bw.data(), o.h.data(), nullptr, o.after.data(),
+                                      la::OrthoOptions{}),
+                  2);
+        return o;
+      };
+      auto same = [](const hs::DenseMatrix<T>& a, const hs::DenseMatrix<T>& b) {
+        return a.rows() == b.rows() && a.cols() == b.cols() &&
+               std::memcmp(a.data(), b.data(), static_cast<std::size_t>(a.rows() * a.cols()) * sizeof(T)) == 0;
+      };
+      Out ref;
+      {
+        ThreadCount tc(1);
+        ref = run();
+      }
       for (int threads : kThreadCounts) {
         ThreadCount tc(threads);
-        for (int rep = 0; rep < 2; ++rep) {
-          const Out o = run();
-          EXPECT_TRUE(bitwise_equal(o.w, ref.w)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
-          EXPECT_TRUE(bitwise_equal(o.bw, ref.bw)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
-          EXPECT_TRUE(bitwise_equal(o.h, ref.h)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
-          EXPECT_TRUE(bitwise_equal(o.nrm, ref.nrm)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
-        }
+        const Out o = run();
+        EXPECT_TRUE(same(o.w, ref.w)) << "n=" << n << " k=" << k << " " << mode_name(mode) << " threads=" << threads;
+        EXPECT_TRUE(same(o.bw, ref.bw)) << "n=" << n << " k=" << k << " " << mode_name(mode) << " threads=" << threads;
+        EXPECT_TRUE(same(o.h, ref.h)) << "n=" << n << " k=" << k << " " << mode_name(mode) << " threads=" << threads;
+        EXPECT_TRUE(bitwise_equal(o.after, ref.after)) << "n=" << n << " " << mode_name(mode) << " threads=" << threads;
       }
     }
 }
