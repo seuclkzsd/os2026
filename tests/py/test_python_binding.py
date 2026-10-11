@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -459,6 +460,29 @@ def test_input_errors():
         hsolve.solve(sla.aslinearoperator(good), k=2)
     with pytest.raises(hsolve.InvalidInputError):
         hsolve.solve(np.array([["a", "b"], ["c", "d"]], dtype=object), k=1)
+
+
+def test_duplicate_sums_that_overflow_are_rejected(tmp_path):
+    """Finite duplicates whose sum overflows are rejected like hs::load_matrix does (it checks
+    after summing), not passed on to fail inside LAPACK as an InternalError. Matrix: diagonal 4,
+    plus (0, 2) and (2, 0) each stored twice as 1e308 (rows unsorted)."""
+    big = 1e308
+    indptr = np.array([0, 3, 4, 7, 8], dtype=np.int32)
+    indices = np.array([2, 0, 2, 1, 2, 0, 0, 3], dtype=np.int32)
+    data = np.array([big, 4.0, big, 4.0, 4.0, big, big, 4.0])
+    csr = sp.csr_matrix((data, indices, indptr), shape=(4, 4))
+    csc = sp.csc_matrix((data, indices, indptr), shape=(4, 4))  # same arrays: column 0 holds (2, 0) twice
+    coo = csr.tocoo()
+    zcsr = sp.csr_matrix((data * (1 + 0.5j), indices, indptr), shape=(4, 4))  # (not astype: it sums duplicates)
+    assert coo.nnz == zcsr.nnz == 8  # duplicates kept
+    cases = [(csr, "(0, 2)"), (_int64(csr), "(0, 2)"), (csc, "(2, 0)"), (coo, "(0, 2)"),
+             (_int64(coo), "(0, 2)"), (zcsr, "(0, 2)"), (zcsr.tocoo(), "(0, 2)")]
+    for m, where in cases:
+        with pytest.raises(hsolve.InvalidInputError, match=re.escape(f"A: non-finite value at {where}: the duplicate")):
+            hsolve.solve(m, sigma=0.0, k=1)
+    sp.save_npz(tmp_path / "dup.npz", coo, compressed=False)  # the file loader agrees
+    with pytest.raises(hsolve.InvalidInputError, match="non-finite value inf"):
+        hsolve.solve(tmp_path / "dup.npz", sigma=0.0, k=1)
 
 
 def test_file_errors(tmp_path):

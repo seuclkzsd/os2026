@@ -17,7 +17,8 @@
 //  * coo:   counting sort by row straight into the CSR arrays, then per-row sort/merge.
 //  * dense: one counting pass and one copy of the nonzeros (any strides, C or Fortran order).
 // Canonicalisation follows hs::load_matrix: duplicates are summed, exact zeros (after summation)
-// are dropped, non-finite values are rejected with InvalidInput.
+// are dropped, non-finite values are rejected with InvalidInput - both stored values and sums of
+// finite duplicates that overflow (load_matrix checks after summing, too).
 //
 // Thread safety: all functions are reentrant; the buffers must not be modified concurrently.
 // OpenMP: the per-row passes are parallel; results do not depend on the thread count.
@@ -113,7 +114,7 @@ inline T convert(const S& s, bool conj) {
   }
 }
 
-enum class Fault : int { None = 0, Range, NonFinite, ImagPart };
+enum class Fault : int { None = 0, Range, NonFinite, SumNonFinite, ImagPart };
 
 /// First failing row over an OpenMP loop (rows are independent; the smallest row wins so the
 /// message does not depend on the thread count).
@@ -135,8 +136,9 @@ struct FirstFault {
   bool any() const { return fault != Fault::None; }
 };
 
+/// `transposed`: f.row is the user's column and f.position the user's row (csc input).
 [[noreturn]] inline void throw_fault(const std::string& name, const FirstFault& f, const char* what_pos,
-                                     index_t minor_dim) {
+                                     index_t minor_dim, bool transposed = false) {
   switch (f.fault) {
     case Fault::Range:
       HS_THROW(InvalidInput, name << ": index out of range in row/column " << f.row << " (" << what_pos << " "
@@ -144,6 +146,10 @@ struct FirstFault {
     case Fault::NonFinite:
       HS_THROW(InvalidInput, name << ": non-finite value (inf or nan) in row/column " << f.row << " (" << what_pos
                                   << " " << f.position << ")");
+    case Fault::SumNonFinite:
+      HS_THROW(InvalidInput, name << ": non-finite value at (" << (transposed ? f.position : f.row) << ", "
+                                  << (transposed ? f.row : f.position)
+                                  << "): the duplicate entries stored there sum to inf or nan (overflow)");
     case Fault::ImagPart:
       HS_THROW(Internal, name << ": complex value with a nonzero imaginary part converted to a real matrix");
     case Fault::None:
@@ -170,11 +176,18 @@ void stable_sort_by_column(std::vector<std::pair<std::int32_t, T>>& buf) {
   }
 }
 
+struct MergeResult {
+  index_t kept = 0;                ///< entries left in the row
+  std::int32_t nonfinite_col = -1;  ///< >= 0: first column whose duplicates sum to inf/nan
+};
+
 /// Stable sort of (column, value) pairs by column, then duplicates summed in input order and
-/// exact zeros (after summation) dropped, in place. Returns the number of kept entries.
+/// exact zeros (after summation) dropped, in place. The values must be finite; a sum that
+/// overflows is reported in nonfinite_col (the row is then incomplete and must be rejected).
 template <class T>
-index_t merge_sorted_row(std::vector<std::pair<std::int32_t, T>>& buf, index_t& duplicates, index_t& zeros) {
+MergeResult merge_sorted_row(std::vector<std::pair<std::int32_t, T>>& buf, index_t& duplicates, index_t& zeros) {
   stable_sort_by_column(buf);
+  MergeResult r;
   index_t w = 0;
   const index_t len = static_cast<index_t>(buf.size());
   for (index_t p = 0; p < len;) {
@@ -182,6 +195,7 @@ index_t merge_sorted_row(std::vector<std::pair<std::int32_t, T>>& buf, index_t& 
     T sum = buf[p].second;
     index_t q = p + 1;
     for (; q < len && buf[q].first == c; ++q) sum += buf[q].second;
+    if (q - p > 1 && !finite(sum) && r.nonfinite_col < 0) r.nonfinite_col = c;
     duplicates += q - p - 1;
     if (sum == T(0)) {
       ++zeros;
@@ -191,7 +205,8 @@ index_t merge_sorted_row(std::vector<std::pair<std::int32_t, T>>& buf, index_t& 
     p = q;
   }
   buf.resize(static_cast<std::size_t>(w));
-  return w;
+  r.kept = w;
+  return r;
 }
 
 inline void prefix_sum(std::vector<index_t>& rowptr) {
@@ -265,14 +280,19 @@ CsrMatrix<T> compressed_to_csr(const MatrixView& v, ConvertStats& st) {
         sorted_row[static_cast<std::size_t>(i)] = 0;
         buf.clear();
         for (index_t p = b; p < e; ++p) buf.emplace_back(static_cast<std::int32_t>(idx[p]), convert<T>(val[p], conj));
-        kept = merge_sorted_row(buf, dups, zeros);
+        const MergeResult merged = merge_sorted_row(buf, dups, zeros);
+        if (merged.nonfinite_col >= 0) {
+          fault.record(i, Fault::SumNonFinite, merged.nonfinite_col);
+          continue;
+        }
+        kept = merged.kept;
       } else {
         zeros += (e - b) - kept;
       }
       out.rowptr[static_cast<std::size_t>(i) + 1] = kept;
     }
   }
-  if (fault.any()) throw_fault(v.name, fault, "index", m);
+  if (fault.any()) throw_fault(v.name, fault, "index", m, csc);
   prefix_sum(out.rowptr);
   out.colind.resize(static_cast<std::size_t>(out.rowptr.back()));
   out.values.resize(static_cast<std::size_t>(out.rowptr.back()));
@@ -296,7 +316,7 @@ CsrMatrix<T> compressed_to_csr(const MatrixView& v, ConvertStats& st) {
       } else {
         buf.clear();
         for (index_t p = b; p < e; ++p) buf.emplace_back(static_cast<std::int32_t>(idx[p]), convert<T>(val[p], conj));
-        merge_sorted_row(buf, unused_dups, unused_zeros);
+        merge_sorted_row(buf, unused_dups, unused_zeros);  // validated in pass 1
         for (const auto& [c, x] : buf) {
           out.colind[static_cast<std::size_t>(q)] = c;
           out.values[static_cast<std::size_t>(q)] = x;
@@ -355,6 +375,7 @@ CsrMatrix<T> coo_to_csr(const MatrixView& v, ConvertStats& st) {
   // Canonicalise each row in place; kept[i] = entries left at the start of row i's segment.
   std::vector<index_t> kept(static_cast<std::size_t>(n), 0);
   index_t dups = 0, zeros = 0, unsorted = 0;
+  FirstFault fault;
 #pragma omp parallel reduction(+ : dups, zeros, unsorted)
   {
     std::vector<std::pair<std::int32_t, T>> buf;
@@ -374,7 +395,12 @@ CsrMatrix<T> coo_to_csr(const MatrixView& v, ConvertStats& st) {
       buf.clear();
       for (index_t p = b; p < e; ++p)
         buf.emplace_back(out.colind[static_cast<std::size_t>(p)], out.values[static_cast<std::size_t>(p)]);
-      const index_t k = merge_sorted_row(buf, dups, zeros);
+      const MergeResult merged = merge_sorted_row(buf, dups, zeros);
+      if (merged.nonfinite_col >= 0) {
+        fault.record(i, Fault::SumNonFinite, merged.nonfinite_col);
+        continue;
+      }
+      const index_t k = merged.kept;
       for (index_t t = 0; t < k; ++t) {
         out.colind[static_cast<std::size_t>(b + t)] = buf[static_cast<std::size_t>(t)].first;
         out.values[static_cast<std::size_t>(b + t)] = buf[static_cast<std::size_t>(t)].second;
@@ -382,6 +408,7 @@ CsrMatrix<T> coo_to_csr(const MatrixView& v, ConvertStats& st) {
       kept[static_cast<std::size_t>(i)] = k;
     }
   }
+  if (fault.any()) throw_fault(v.name, fault, "column", m);
   // Close the gaps left by merged duplicates / dropped zeros (moves only towards the front).
   if (dups + zeros > 0) {
     index_t w = 0;
@@ -516,7 +543,8 @@ inline bool has_nonzero_imag(const MatrixView& v) {
 }
 
 /// Convert `v` to a canonical CsrMatrix<T> (validate() holds): duplicates summed, exact zeros
-/// dropped, non-finite values rejected (InvalidInput), shape checked (order < 2^31).
+/// dropped, non-finite values and duplicate sums that overflow rejected (InvalidInput), shape
+/// checked (order < 2^31).
 /// T = double requires every value to be real (has_nonzero_imag(v) == false). For Csc the result
 /// is A^H (see the file comment), whose shape is ncols x nrows. Stats are accumulated into `st`.
 template <class T>
