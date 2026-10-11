@@ -79,22 +79,22 @@ std::uint64_t child_seed(std::uint64_t parent, int side) noexcept;
 inline constexpr std::uint8_t kSeparator = 2;
 
 struct SeparatorParams {
-  double imbalance = 1.2;          ///< each half weighs at most imbalance * total / 2 (METIS ND: 1.2)
-  std::int32_t coarsen_to = 100;   ///< stop coarsening at this many vertices
-  int init_tries = 7;              ///< greedy-growing attempts on the coarsest graph
-  int refine_passes = 10;          ///< node-FM passes per level (stop early without gain)
-  int refine_mode = 1;             ///< 0 two-sided FM, 1 one-sided (METIS ND default), 2 both
+  double imbalance = 1.2;  ///< each half weighs at most imbalance * total / 2 (METIS ND: 1.2)
+  std::int32_t coarsen_to = 100;  ///< stop coarsening at this many vertices
+  int init_tries = 7;             ///< greedy-growing attempts on the coarsest graph
+  int refine_passes = 10;         ///< node-FM passes per level (stop early without gain)
+  int refine_mode = 1;            ///< 0 two-sided FM, 1 one-sided (METIS ND default), 2 both
 };
 
 /// What vertex_separator did, level by level (index 0 = the input graph), for benches and tests.
 struct SeparatorTrace {
-  std::vector<std::int32_t> vertices;      ///< vertices of each level
-  std::vector<std::int64_t> edges;         ///< adjacency entries of each level
-  std::vector<std::int64_t> projected;     ///< separator weight projected onto each level
-  std::vector<std::int64_t> refined;       ///< ... and after refinement there
-  double coarsen_s = 0.0;                  ///< time in matching + contraction
-  double init_s = 0.0;                     ///< time in the initial separators
-  double refine_s = 0.0;                   ///< time in projection + FM refinement
+  std::vector<std::int32_t> vertices;   ///< vertices of each level
+  std::vector<std::int64_t> edges;      ///< adjacency entries of each level
+  std::vector<std::int64_t> projected;  ///< separator weight projected onto each level
+  std::vector<std::int64_t> refined;    ///< ... and after refinement there
+  double coarsen_s = 0.0;               ///< time in matching + contraction
+  double init_s = 0.0;                  ///< time in the initial separators
+  double refine_s = 0.0;                ///< time in projection + FM refinement
 };
 
 /// Multilevel vertex separator of g (g.n >= 1). Returns the part label of every vertex. The
@@ -124,26 +124,26 @@ std::vector<std::int32_t> minimum_degree(const Graph& g);
 
 struct DissectionParams {
   SeparatorParams separator;
-  std::int32_t leaf_size = 120;    ///< subgraphs with at most this many vertices: minimum degree
-  std::int32_t task_size = 512;    ///< subgraphs below this size are ordered inline, not as tasks
-                                   ///< (syn-mem27-46, 2 threads: 0.76 s at 150..500, 0.79 at 1000,
-                                   ///< 0.84 at 2000, 1.11 at 4096, 1.30 at 20000; serial 1.40 s)
+  std::int32_t leaf_size = 120;  ///< subgraphs with at most this many vertices: minimum degree
+  std::int32_t task_size = 512;  ///< subgraphs below this size are ordered inline, not as tasks
+                                 ///< (syn-mem27-46, 2 threads: 0.76 s at 150..500, 0.79 at 1000,
+                                 ///< 0.84 at 2000, 1.11 at 4096, 1.30 at 20000; serial 1.40 s)
   std::uint64_t seed = 0x6873'6f6c'7665'2026ULL;
 };
 
 struct DissectionStats {
-  std::int64_t separators = 0;      ///< nonleaf subgraphs (separators computed)
-  std::int64_t leaves = 0;          ///< subgraphs ordered by minimum degree
-  std::int64_t top_separator = 0;   ///< vertices in the first (largest) separator
+  std::int64_t separators = 0;                ///< nonleaf subgraphs (separators computed)
+  std::int64_t leaves = 0;                    ///< subgraphs ordered by minimum degree
+  std::int64_t top_separator = 0;             ///< vertices in the first (largest) separator
   std::vector<std::int64_t> depth_separator;  ///< separator vertices summed per dissection depth
-  double top_separator_s = 0.0;     ///< time of the first separator (the serial part)
-  double work_s = 0.0;              ///< time in separators, subgraph extraction and leaves, summed
-                                    ///< over the pieces
-  double critical_path_s = 0.0;     ///< longest root-to-leaf chain of that work, i.e. the wall
-                                    ///< time with unlimited threads (Brent: T_p <= work/p +
-                                    ///< critical). Exact with 1 thread; with more, a piece's
-                                    ///< time includes waiting for its stolen trial bisections
-  int threads = 1;                  ///< OpenMP threads that ran the dissection
+  double top_separator_s = 0.0;               ///< time of the first separator (the serial part)
+  double work_s = 0.0;           ///< time in separators, subgraph extraction and leaves, summed
+                                 ///< over the pieces
+  double critical_path_s = 0.0;  ///< longest root-to-leaf chain of that work, i.e. the wall
+                                 ///< time with unlimited threads (Brent: T_p <= work/p +
+                                 ///< critical). Exact with 1 thread; with more, a piece's
+                                 ///< time includes waiting for its stolen trial bisections
+  int threads = 1;               ///< OpenMP threads that ran the dissection
 };
 
 /// Nested-dissection elimination order of g with `threads` OpenMP threads (>= 1): order[k] =

@@ -33,7 +33,8 @@ namespace ord = hs::ordering;
 // ------------------------------------------------------------------------------- helpers
 
 // Graph of a symmetric pattern given as an edge list (both directions are added).
-ord::Graph graph_from_edges(std::int32_t n, const std::vector<std::pair<std::int32_t, std::int32_t>>& edges) {
+ord::Graph graph_from_edges(std::int32_t n,
+                            const std::vector<std::pair<std::int32_t, std::int32_t>>& edges) {
   std::vector<std::vector<std::int32_t>> up(static_cast<std::size_t>(n));
   for (auto [a, b] : edges) {
     if (a == b) continue;
@@ -53,7 +54,8 @@ ord::Graph graph_from_edges(std::int32_t n, const std::vector<std::pair<std::int
 }
 
 // Edges of an nx x ny (x nz) grid with the 5-point (7-point) stencil.
-std::vector<std::pair<std::int32_t, std::int32_t>> grid_edges(int nx, int ny, int nz = 1, int offset = 0) {
+std::vector<std::pair<std::int32_t, std::int32_t>> grid_edges(int nx, int ny, int nz = 1,
+                                                              int offset = 0) {
   std::vector<std::pair<std::int32_t, std::int32_t>> e;
   auto id = [&](int i, int j, int k) { return offset + i + nx * (j + ny * k); };
   for (int k = 0; k < nz; ++k)
@@ -122,8 +124,10 @@ double solve_backward_error(hs::SparseFactorization<T>& f, const CsrMatrix<T>& k
   std::uniform_real_distribution<double> u(-1.0, 1.0);
   std::vector<T> b(static_cast<std::size_t>(n)), x;
   for (auto& bi : b) {
-    if constexpr (hs::is_complex_v<T>) bi = T(u(rng), u(rng));
-    else bi = u(rng);
+    if constexpr (hs::is_complex_v<T>)
+      bi = T(u(rng), u(rng));
+    else
+      bi = u(rng);
   }
   x = b;
   f.solve(x.data(), 1, n);
@@ -184,7 +188,8 @@ TEST(FactorOrderingSeparator, GridSeparatorsAreValidBalancedAndSmall) {
       const auto where = ord::vertex_separator(g, seed, p);
       const ord::SeparatorCheck c = ord::check_separator(g, where);
       ASSERT_TRUE(c.valid);
-      EXPECT_LE(c.weight[2], cs.max_sep) << cs.nx << "x" << cs.ny << "x" << cs.nz << " seed " << seed;
+      EXPECT_LE(c.weight[2], cs.max_sep)
+          << cs.nx << "x" << cs.ny << "x" << cs.nz << " seed " << seed;
       EXPECT_GT(c.weight[0], 0);
       EXPECT_GT(c.weight[1], 0);
       const double bound = p.imbalance * 0.5 * static_cast<double>(g.n) + 2;
@@ -224,12 +229,14 @@ TEST(FactorOrderingSeparator, DisconnectedAndEdgelessGraphs) {
   const auto e2 = grid_edges(20, 20, 1, 400);
   e.insert(e.end(), e2.begin(), e2.end());
   const ord::Graph g = graph_from_edges(800, e);
-  const ord::SeparatorCheck c = ord::check_separator(g, ord::vertex_separator(g, 5, ord::SeparatorParams{}));
+  const ord::SeparatorCheck c =
+      ord::check_separator(g, ord::vertex_separator(g, 5, ord::SeparatorParams{}));
   EXPECT_TRUE(c.valid);
   EXPECT_LE(c.weight[2], 20);
   // No edges at all.
   const ord::Graph empty = graph_from_edges(50, {});
-  const ord::SeparatorCheck ce = ord::check_separator(empty, ord::vertex_separator(empty, 5, ord::SeparatorParams{}));
+  const ord::SeparatorCheck ce =
+      ord::check_separator(empty, ord::vertex_separator(empty, 5, ord::SeparatorParams{}));
   EXPECT_TRUE(ce.valid);
   EXPECT_EQ(ce.weight[2], 0);
 }
@@ -286,7 +293,8 @@ TEST(FactorOrderingDissection, IsAPermutationOnAssortedGraphs) {
   }
   for (const auto& [n, edges] : cases) {
     ord::DissectionStats st;
-    const auto order = ord::nested_dissection(graph_from_edges(n, edges), ord::DissectionParams{}, 2, &st);
+    const auto order =
+        ord::nested_dissection(graph_from_edges(n, edges), ord::DissectionParams{}, 2, &st);
     EXPECT_TRUE(is_permutation(order, n)) << "n=" << n << ", " << edges.size() << " edges";
     EXPECT_EQ(st.threads, 2);
   }
@@ -380,7 +388,8 @@ TYPED_TEST(FactorOrderingPencil, InertiaAndSolvesAreExact) {
   for (double sigma : {0.1, 1.3, 2.9, 4.05, 6.7}) {
     // Shifts between eigenvalues (the spectrum is fine-grained: move off any eigenvalue).
     const index_t k = count_below(w, sigma);
-    const double s = (k > 0 && k < static_cast<index_t>(w.size())) ? 0.5 * (w[k - 1] + w[k]) : sigma;
+    const double s =
+        (k > 0 && k < static_cast<index_t>(w.size())) ? 0.5 * (w[k - 1] + w[k]) : sigma;
     ASSERT_TRUE(f->factorize(1.0, -s)) << "sigma=" << s;
     EXPECT_EQ(f->inertia().neg, count_below(w, s)) << "sigma=" << s;
     const CsrMatrix<T> k_mat = hs::add(T(1.0), a, T(-s), hs::identity<T>(a.nrows));
@@ -392,7 +401,8 @@ TYPED_TEST(FactorOrderingPencil, GenuinelyComplexSpectrumCountsMatch) {
   using T = TypeParam;
   const index_t n = 1200;
   std::vector<double> w(static_cast<std::size_t>(n));
-  for (index_t i = 0; i < n; ++i) w[i] = -2.0 + 5.0 * (static_cast<double>(i) + 0.5) / static_cast<double>(n);
+  for (index_t i = 0; i < n; ++i)
+    w[i] = -2.0 + 5.0 * (static_cast<double>(i) + 0.5) / static_cast<double>(n);
   const auto a = hs::test::prescribed_spectrum<T>(w, 12, 2026);
   const ShiftedPencil<T> pencil(a, nullptr);
   hs::FactorOptions nd;
@@ -489,7 +499,8 @@ CsrMatrix<cplx> phased_laplacian(index_t nx, index_t ny, int every_row) {
     for (index_t i = 0; i < nx; ++i) {
       const index_t p = i + j * nx;
       r.push_back(p), c.push_back(p), v.push_back(cplx(4.0));
-      const cplx x = (j % every_row == 0) ? -std::polar(1.0, 0.3 * static_cast<double>(i + 1)) : cplx(-1.0);
+      const cplx x =
+          (j % every_row == 0) ? -std::polar(1.0, 0.3 * static_cast<double>(i + 1)) : cplx(-1.0);
       if (i + 1 < nx) add_edge(p, p + 1, x);
       if (j + 1 < ny) add_edge(p, p + nx, cplx(-1.0));
     }
@@ -537,7 +548,8 @@ TEST(FactorOrderingEmbedding, AutoOrdersTheFullEmbeddingWhenFewCouplingsAreCompl
   ref->analyze(pencil, 1.0, -2.0);
   ASSERT_TRUE(ref->factorize(1.0, -2.0));
   const CsrMatrix<cplx> km = hs::add(cplx(1.0), a, cplx(-2.0), hs::identity<cplx>(n));
-  for (auto mode : {hs::OrderingOptions::Embedding::Full, hs::OrderingOptions::Embedding::Compressed}) {
+  for (auto mode :
+       {hs::OrderingOptions::Embedding::Full, hs::OrderingOptions::Embedding::Compressed}) {
     hs::OrderingOptions m;
     m.embedding = mode;
     hs::mumps::MumpsFactorization<cplx, double> f{hs::FactorOptions{}};
@@ -552,7 +564,8 @@ TEST(FactorOrderingEmbedding, AutoOrdersTheFullEmbeddingWhenFewCouplingsAreCompl
 TEST(FactorBlockAnalysis, DeclaredBlocksKeepTheInertiaAndSingularDetection) {
   const index_t n = 1500;
   std::vector<double> w(static_cast<std::size_t>(n));
-  for (index_t i = 0; i < n; ++i) w[i] = -2.0 + 5.0 * (static_cast<double>(i) + 0.5) / static_cast<double>(n);
+  for (index_t i = 0; i < n; ++i)
+    w[i] = -2.0 + 5.0 * (static_cast<double>(i) + 0.5) / static_cast<double>(n);
   const auto a = hs::test::prescribed_spectrum<cplx>(w, 12, 2026);
   const ShiftedPencil<cplx> pencil(a, nullptr);
   for (int ordering : {0, 3, 5}) {
@@ -571,7 +584,8 @@ TEST(FactorBlockAnalysis, DeclaredBlocksKeepTheInertiaAndSingularDetection) {
         EXPECT_LT(solve_backward_error(*f, km), 1e-13);
       }
       for (index_t k : {100, 900}) {
-        EXPECT_FALSE(f->factorize(1.0, -w[k])) << "exact eigenvalue " << w[k] << ", ordering " << ordering;
+        EXPECT_FALSE(f->factorize(1.0, -w[k]))
+            << "exact eigenvalue " << w[k] << ", ordering " << ordering;
         EXPECT_FALSE(f->inertia().valid);
       }
     }
@@ -632,10 +646,12 @@ TEST(FactorOrderingOptions, InvalidValuesAreRejected) {
   EXPECT_EQ(bad([](hs::OrderingOptions& o) { o.init_tries = 0; }), hs::Error::Code::InvalidInput);
   hs::FactorOptions fo;
   fo.ordering_threads = -2;
-  EXPECT_EQ(code_of([&] { hs::make_mumps_factorization<double>(fo); }), hs::Error::Code::InvalidInput);
+  EXPECT_EQ(code_of([&] { hs::make_mumps_factorization<double>(fo); }),
+            hs::Error::Code::InvalidInput);
   fo.ordering_threads = 0;
   fo.ordering = 9;
-  EXPECT_EQ(code_of([&] { hs::make_mumps_factorization<double>(fo); }), hs::Error::Code::InvalidInput);
+  EXPECT_EQ(code_of([&] { hs::make_mumps_factorization<double>(fo); }),
+            hs::Error::Code::InvalidInput);
   fo.ordering = hs::kOrderingNestedDissection;
   EXPECT_NO_THROW(hs::make_mumps_factorization<double>(fo));
 }

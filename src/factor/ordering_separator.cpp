@@ -50,8 +50,10 @@ class GainHeap {
     const std::int32_t i = pos_[v];
     const std::int64_t old = heap_[i].key;
     heap_[i].key = key;
-    if (key > old) up(i);
-    else down(i);
+    if (key > old)
+      up(i);
+    else
+      down(i);
   }
   void remove(std::int32_t v) {
     const std::int32_t i = pos_[v];
@@ -65,8 +67,10 @@ class GainHeap {
     const Item moved = heap_[last];
     heap_.pop_back();
     place(i, moved);
-    if (i > 0 && above(moved, heap_[(i - 1) / 2])) up(i);
-    else down(i);
+    if (i > 0 && above(moved, heap_[(i - 1) / 2]))
+      up(i);
+    else
+      down(i);
   }
   void clear() {
     for (const Item& it : heap_) pos_[it.v] = -1;
@@ -121,7 +125,8 @@ class GainHeap {
 // degrees; each unmatched vertex takes its heaviest unmatched neighbour, scanning its row from a
 // random rotation so that unit weights do not favour low numbers) and contraction. Returns the
 // coarse graph, numbered in the order of the fine graph; cmap[v] is the coarse vertex of v.
-Graph coarsen_once(const Graph& g, Random& rng, std::int64_t max_vwgt, std::vector<std::int32_t>& cmap) {
+Graph coarsen_once(const Graph& g, Random& rng, std::int64_t max_vwgt,
+                   std::vector<std::int32_t>& cmap) {
   const std::int32_t n = g.n;
   // Visit order as in METIS' Match_SHEM: a partial shuffle (n/8 swaps of 4-element groups: the
   // order stays mostly local, which keeps the row accesses cache-friendly), then a stable bucket
@@ -144,8 +149,9 @@ Graph coarsen_once(const Graph& g, Random& rng, std::int64_t max_vwgt, std::vect
         std::swap(perm[a + 3], perm[b + 1]);
       }
     }
-    const std::int32_t cap = std::max<std::int32_t>(
-        1, static_cast<std::int32_t>(0.7 * static_cast<double>(g.edges()) / std::max<std::int32_t>(1, n)));
+    const std::int32_t cap =
+        std::max<std::int32_t>(1, static_cast<std::int32_t>(0.7 * static_cast<double>(g.edges()) /
+                                                            std::max<std::int32_t>(1, n)));
     std::vector<std::int32_t> bucket(static_cast<std::size_t>(cap) + 2, 0);
     for (std::int32_t v = 0; v < n; ++v) ++bucket[std::min(g.degree(v), cap) + 1];
     for (std::int32_t d = 0; d <= cap; ++d) bucket[d + 1] += bucket[d];
@@ -272,7 +278,8 @@ class NodeFm {
         heap_[0].insert(v, g_->vwgt[v] - ed_[1][v], rank(v));
         heap_[1].insert(v, g_->vwgt[v] - ed_[0][v], rank(v));
       }
-      const std::int64_t limit = std::clamp<std::int64_t>(2 * static_cast<std::int64_t>(sep_.size()), 25, 300);
+      const std::int64_t limit =
+          std::clamp<std::int64_t>(2 * static_cast<std::int64_t>(sep_.size()), 25, 300);
       const bool improved = run_pass(where, max_part, limit, -1);
       if (!improved) break;
     }
@@ -291,7 +298,8 @@ class NodeFm {
         separator_degrees(where, v);
         heap_[to].insert(v, g_->vwgt[v] - ed_[1 - to][v], rank(v));
       }
-      const std::int64_t limit = std::clamp<std::int64_t>(3 * static_cast<std::int64_t>(sep_.size()), 25, 300);
+      const std::int64_t limit =
+          std::clamp<std::int64_t>(3 * static_cast<std::int64_t>(sep_.size()), 25, 300);
       const bool improved = run_pass(where, max_part, limit, to);
       if (pass % 2 == 1 && !improved) break;
     }
@@ -302,7 +310,8 @@ class NodeFm {
 
   // Current graph, part weights and separator list.
   void start(const Graph& g, std::uint64_t salt, const std::vector<std::uint8_t>& where) {
-    HS_ASSERT(static_cast<std::size_t>(g.n) <= locked_.size(), "NodeFm: graph larger than the workspace");
+    HS_ASSERT(static_cast<std::size_t>(g.n) <= locked_.size(),
+              "NodeFm: graph larger than the workspace");
     g_ = &g;
     salt_ = salt;
     pw_[0] = pw_[1] = pw_[2] = 0;
@@ -325,7 +334,8 @@ class NodeFm {
 
   // One pass over the filled heap(s) (only_to = -1: two-sided). Returns whether the separator
   // improved; leaves the heaps empty and the separator list updated.
-  bool run_pass(std::vector<std::uint8_t>& where, std::int64_t max_part, std::int64_t limit, int only_to) {
+  bool run_pass(std::vector<std::uint8_t>& where, std::int64_t max_part, std::int64_t limit,
+                int only_to) {
     const std::int64_t initial = pw_[kSeparator];
     log_.clear();
     std::int64_t best = pw_[kSeparator];
@@ -444,9 +454,10 @@ class NodeFm {
 
   const Graph* g_ = nullptr;
   std::uint64_t salt_ = 0;
-  std::int64_t pw_[3] = {0, 0, 0};    ///< weights of half 0, half 1, separator
-  std::vector<std::int32_t> sep_;     ///< separator vertices
-  std::unique_ptr<std::int64_t[]> ed_[2];  ///< separator vertex: weight of its neighbours in half 0 / 1
+  std::int64_t pw_[3] = {0, 0, 0};  ///< weights of half 0, half 1, separator
+  std::vector<std::int32_t> sep_;   ///< separator vertices
+  std::unique_ptr<std::int64_t[]>
+      ed_[2];                         ///< separator vertex: weight of its neighbours in half 0 / 1
   std::vector<std::uint8_t> locked_;  ///< left the separator in this pass
   std::vector<std::uint8_t> listed_;  ///< scratch mark for the separator list update
   GainHeap heap_[2];                  ///< heap_[s]: gain of moving a separator vertex into half s
@@ -454,8 +465,8 @@ class NodeFm {
 };
 
 // Refinement by SeparatorParams::refine_mode.
-void refine(NodeFm& fm, const Graph& g, Random& rng, std::vector<std::uint8_t>& where, std::int64_t max_part,
-            const SeparatorParams& p) {
+void refine(NodeFm& fm, const Graph& g, Random& rng, std::vector<std::uint8_t>& where,
+            std::int64_t max_part, const SeparatorParams& p) {
   const std::uint64_t salt = rng.next();
   if (p.refine_mode != 1) fm.refine_two_sided(g, salt, where, max_part, p.refine_passes);
   if (p.refine_mode != 0) fm.refine_one_sided(g, salt, where, max_part, p.refine_passes);
@@ -466,7 +477,8 @@ void refine(NodeFm& fm, const Graph& g, Random& rng, std::vector<std::uint8_t>& 
 // Greedy graph growing: breadth-first from a random vertex (restarting at a random unreached
 // vertex in another component) until half 0 holds half of the weight; the boundary vertices of
 // both halves form the separator.
-void grow_separator(const Graph& g, Random& rng, std::int64_t max_part, std::vector<std::uint8_t>& where) {
+void grow_separator(const Graph& g, Random& rng, std::int64_t max_part,
+                    std::vector<std::uint8_t>& where) {
   const std::int32_t n = g.n;
   where.assign(static_cast<std::size_t>(n), 1);
   std::vector<std::uint8_t> queued(static_cast<std::size_t>(n), 0);
@@ -512,7 +524,8 @@ void grow_separator(const Graph& g, Random& rng, std::int64_t max_part, std::vec
 }
 
 // Separator weight of `where` on g; diff receives the weight difference of the halves.
-std::int64_t separator_score(const Graph& g, const std::vector<std::uint8_t>& where, std::int64_t& diff) {
+std::int64_t separator_score(const Graph& g, const std::vector<std::uint8_t>& where,
+                             std::int64_t& diff) {
   std::int64_t pw[3] = {0, 0, 0};
   for (std::int32_t v = 0; v < g.n; ++v) pw[where[v]] += g.vwgt[v];
   diff = std::llabs(pw[0] - pw[1]);
@@ -535,8 +548,8 @@ std::int64_t max_part_weight(const Graph& g, double imbalance) {
 
 // Best of `tries` refined greedy growings on a (small) graph. METIS' ConstructSeparator refines
 // the boundary separator two-sided, then one-sided.
-std::vector<std::uint8_t> initial_separator(const Graph& g, Random& rng, std::int64_t max_part, int tries,
-                                            const SeparatorParams& p, NodeFm& fm) {
+std::vector<std::uint8_t> initial_separator(const Graph& g, Random& rng, std::int64_t max_part,
+                                            int tries, const SeparatorParams& p, NodeFm& fm) {
   std::vector<std::uint8_t> where, trial;
   std::int64_t best_w = -1, best_diff = 0;
   for (int t = 0; t < std::max(1, tries); ++t) {
@@ -577,7 +590,8 @@ struct Hierarchy {
 
   // Contracts until the top has at most `target` vertices, `max_levels` contractions were done
   // or a contraction removes less than 10% of the vertices.
-  void build(const Graph& base, Random& rng, std::int64_t max_vwgt, std::int32_t target, int max_levels) {
+  void build(const Graph& base, Random& rng, std::int64_t max_vwgt, std::int32_t target,
+             int max_levels) {
     while (static_cast<int>(coarse.size()) < max_levels) {
       const Graph& cur = top(base);
       if (cur.n <= target) break;
@@ -615,11 +629,11 @@ struct Hierarchy {
 
 // One multilevel bisection (METIS MlevelNodeBisectionL1): coarsen to min(coarsen_to,
 // max(n/8, 40)) vertices, initial separator there, refine back up.
-std::vector<std::uint8_t> bisect_once(const Graph& g, Random& rng, const SeparatorParams& p, std::int64_t max_part,
-                                      int tries, SeparatorTrace* trace) {
+std::vector<std::uint8_t> bisect_once(const Graph& g, Random& rng, const SeparatorParams& p,
+                                      std::int64_t max_part, int tries, SeparatorTrace* trace) {
   const std::int32_t target = std::min(p.coarsen_to, std::max<std::int32_t>(g.n / 8, 40));
-  const std::int64_t max_vwgt =
-      std::max<std::int64_t>(1, static_cast<std::int64_t>(1.5 * static_cast<double>(g.total_vwgt) / target));
+  const std::int64_t max_vwgt = std::max<std::int64_t>(
+      1, static_cast<std::int64_t>(1.5 * static_cast<double>(g.total_vwgt) / target));
   Lap timer;
   Hierarchy h;
   h.build(g, rng, max_vwgt, target, 1 << 30);
@@ -641,8 +655,8 @@ std::vector<std::uint8_t> bisect_once(const Graph& g, Random& rng, const Separat
 
 }  // namespace
 
-std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed, const SeparatorParams& p,
-                                           SeparatorTrace* trace) {
+std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
+                                           const SeparatorParams& p, SeparatorTrace* trace) {
   HS_ASSERT(g.n >= 1, "vertex_separator: empty graph");
   Random rng(seed);
   const std::int64_t max_part = max_part_weight(g, p.imbalance);

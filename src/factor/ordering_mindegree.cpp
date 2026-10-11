@@ -11,7 +11,9 @@ namespace hs::ordering {
 
 namespace {
 
-inline int popcount64(std::uint64_t x) noexcept { return __builtin_popcountll(x); }
+inline int popcount64(std::uint64_t x) noexcept {
+  return __builtin_popcountll(x);
+}
 
 }  // namespace
 

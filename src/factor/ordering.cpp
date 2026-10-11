@@ -40,7 +40,8 @@ struct Piece {
 
 class Dissector {
  public:
-  Dissector(const DissectionParams& p, std::int32_t n) : p_(p), order_(static_cast<std::size_t>(n), -1) {}
+  Dissector(const DissectionParams& p, std::int32_t n)
+      : p_(p), order_(static_cast<std::size_t>(n), -1) {}
 
   void run(std::unique_ptr<Piece> piece) noexcept {
     try {
@@ -62,7 +63,8 @@ class Dissector {
       stats->critical_path_s = static_cast<double>(critical_ns_.load()) * 1e-9;
       stats->depth_separator.clear();
       for (const auto& d : depth_separator_) stats->depth_separator.push_back(d.load());
-      while (!stats->depth_separator.empty() && stats->depth_separator.back() == 0) stats->depth_separator.pop_back();
+      while (!stats->depth_separator.empty() && stats->depth_separator.back() == 0)
+        stats->depth_separator.pop_back();
     }
     return std::move(order_);
   }
@@ -152,7 +154,8 @@ class Dissector {
   const DissectionParams& p_;
   std::vector<std::int32_t> order_;
   static constexpr int kMaxDepth = 64;
-  std::atomic<std::int64_t> separators_{0}, leaves_{0}, top_separator_{0}, work_ns_{0}, critical_ns_{0};
+  std::atomic<std::int64_t> separators_{0}, leaves_{0}, top_separator_{0}, work_ns_{0},
+      critical_ns_{0};
   double top_separator_s_ = 0.0;  // written by the task at depth 0 only
   std::atomic<std::int64_t> depth_separator_[kMaxDepth] = {};
   std::mutex error_mutex_;
@@ -194,7 +197,8 @@ std::vector<std::uint8_t> embedding_parts(const ShiftedPencil<T>& pencil) {
   const auto& prow = pencil.rowptr();
   const auto& pcol = pencil.colind();
   const index_t n = pencil.order();
-  std::vector<std::uint8_t> flags(static_cast<std::size_t>(pencil.nnz()), is_complex_v<T> ? 0 : kHasRe);
+  std::vector<std::uint8_t> flags(static_cast<std::size_t>(pencil.nnz()),
+                                  is_complex_v<T> ? 0 : kHasRe);
   if constexpr (is_complex_v<T>) {
     auto mark = [&](const CsrMatrix<T>& m) {
       // The pattern contains upper(m) and both are sorted: one merge walk per row.
@@ -230,7 +234,8 @@ double coupling_fraction(const ShiftedPencil<T>& pencil, const std::vector<std::
 // pencil: coupling (i, j) of K contributes (i, j) and (n+i, n+j) when it has a real part, and
 // (i, n+j) and (j, n+i) when it has an imaginary part (the pattern MUMPS factorizes).
 template <class T>
-ordering::Graph embedding_graph(const ShiftedPencil<T>& pencil, const std::vector<std::uint8_t>& flags) {
+ordering::Graph embedding_graph(const ShiftedPencil<T>& pencil,
+                                const std::vector<std::uint8_t>& flags) {
   const auto& prow = pencil.rowptr();
   const auto& pcol = pencil.colind();
   const auto n = static_cast<std::int32_t>(pencil.order());
@@ -263,7 +268,8 @@ ordering::Graph embedding_graph(const ShiftedPencil<T>& pencil, const std::vecto
     g.adj[static_cast<std::size_t>(fill[a]++)] = b;
     g.adj[static_cast<std::size_t>(fill[b]++)] = a;
   });
-  for (std::int32_t v = 0; v < g.n; ++v) std::sort(g.adj.begin() + g.xadj[v], g.adj.begin() + g.xadj[v + 1]);
+  for (std::int32_t v = 0; v < g.n; ++v)
+    std::sort(g.adj.begin() + g.xadj[v], g.adj.begin() + g.xadj[v + 1]);
   g.ewgt.assign(g.adj.size(), 1);
   g.vwgt.assign(static_cast<std::size_t>(g.n), 1);
   g.total_vwgt = g.n;
@@ -284,11 +290,13 @@ double ordering::complex_coupling_fraction(const ShiftedPencil<T>& pencil) {
 template <class T>
 std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const OrderingOptions& o,
                                   OrderingStats* stats) {
-  if (o.threads < 0) HS_THROW(InvalidInput, "OrderingOptions.threads must be >= 0, got " << o.threads);
+  if (o.threads < 0)
+    HS_THROW(InvalidInput, "OrderingOptions.threads must be >= 0, got " << o.threads);
   if (o.leaf_size < 1 || o.leaf_size > INT_MAX)
     HS_THROW(InvalidInput, "OrderingOptions.leaf_size must be >= 1, got " << o.leaf_size);
   if (!(o.imbalance >= 1.0) || !std::isfinite(o.imbalance))
-    HS_THROW(InvalidInput, "OrderingOptions.imbalance must be finite and >= 1, got " << o.imbalance);
+    HS_THROW(InvalidInput,
+             "OrderingOptions.imbalance must be finite and >= 1, got " << o.imbalance);
   if (o.coarsen_to < 2 || o.coarsen_to > INT_MAX)
     HS_THROW(InvalidInput, "OrderingOptions.coarsen_to must be >= 2, got " << o.coarsen_to);
   if (o.init_tries < 1 || o.refine_passes < 0)
@@ -297,7 +305,8 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
   constexpr int kFactor = is_complex_v<T> ? 2 : 1;
   const index_t n = pencil.order();
   if (n * kFactor > INT_MAX)
-    HS_THROW(Unsupported, "compute_ordering: MUMPS order " << n * kFactor << " exceeds the 32-bit range");
+    HS_THROW(Unsupported,
+             "compute_ordering: MUMPS order " << n * kFactor << " exceeds the 32-bit range");
   Timer timer;
   bool compressed = kFactor == 2;
   double complex_fraction = 0.0;
@@ -311,7 +320,8 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
     if (!compressed) g = embedding_graph(pencil, flags);
   }
   if (kFactor == 1 || compressed)
-    g = ordering::graph_from_upper(static_cast<std::int32_t>(n), pencil.rowptr().data(), pencil.colind().data());
+    g = ordering::graph_from_upper(static_cast<std::int32_t>(n), pencil.rowptr().data(),
+                                   pencil.colind().data());
   const std::int64_t edges = g.edges() / 2;
   const index_t vertices = g.n;
   ordering::DissectionParams p;
@@ -323,12 +333,14 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
   p.seed = o.seed;
   const int threads = o.threads > 0 ? o.threads : max_threads();
   ordering::DissectionStats ds;
-  const std::vector<std::int32_t> order = ordering::nested_dissection(std::move(g), p, threads, &ds);
+  const std::vector<std::int32_t> order =
+      ordering::nested_dissection(std::move(g), p, threads, &ds);
 
   std::vector<int> perm(static_cast<std::size_t>(n * kFactor), 0);
   for (index_t k = 0; k < vertices; ++k) {
     const std::int32_t v = order[static_cast<std::size_t>(k)];
-    HS_ASSERT(v >= 0 && v < vertices && perm[v] == 0, "compute_ordering: not a permutation at " << k);
+    HS_ASSERT(v >= 0 && v < vertices && perm[v] == 0,
+              "compute_ordering: not a permutation at " << k);
     if (compressed) {
       perm[v] = static_cast<int>(2 * k + 1);      // Re part of vertex v
       perm[n + v] = static_cast<int>(2 * k + 2);  // Im part, eliminated right after
@@ -350,9 +362,9 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
   return perm;
 }
 
-#define HS_INSTANTIATE_ORDERING(T)                                                             \
+#define HS_INSTANTIATE_ORDERING(T)                                                               \
   template std::vector<int> compute_ordering<T>(const ShiftedPencil<T>&, const OrderingOptions&, \
-                                                OrderingStats*);                         \
+                                                OrderingStats*);                                 \
   template double ordering::complex_coupling_fraction<T>(const ShiftedPencil<T>&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_ORDERING)
 #undef HS_INSTANTIATE_ORDERING

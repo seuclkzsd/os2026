@@ -98,6 +98,51 @@
 // factorize() cannot certify a Single factor. Whether it is usable (eps_s * cond(K) < 1) shows in
 // the refinement residual ShiftInvertOperator::last_relative_residual(), which callers of Single
 // (and BLR) factors must check.
+//
+// Orderings and the symbolic phase (P4; bench/analysis_orderings.cpp, 2 threads on the shared
+// 6336Y node, medians of 3 interleaved one-process runs). Per ordering: JOB=1 wall time [s] /
+// RINFOG(1) [GFlop] / numeric factorization [s] (L0-OpenMP); hsolve ND: analysis with 1 thread,
+// then with 2 threads / GFlop / factorization:
+//   case (n, nnz upper)       AMD             METIS           SCOTCH          hsolve ND (1|2 thr)
+//   syn-mem27-46 (97k, 1.3M)  0.07/212/4.31   1.11/65/1.67    1.51/71/1.80    1.50|0.85/66/1.78
+//   yee-pec-box-1e5 (110k)    0.10/487/8.99   1.22/73/1.95    1.47/72/1.95    1.38|0.75/81/2.17
+//   ss-qa8fk-qa8fm (66k)      0.09/73/1.91    0.72/20/0.69    1.00/23/0.76    0.95|0.55/18/0.61
+//   wg-square-1e5 (99k)       0.06/1.2/0.19   0.70/0.55/0.15  0.72/0.59/0.15  0.82|0.47/0.59/0.14
+//   cav2d-rect-pert-1e5       0.03/0.17/0.09  0.46/0.13/0.08  0.36/0.15/0.09  0.54|0.32/0.15/0.09
+//   wg-square-1e6 (998k)      0.72/55/2.55    8.54/19/1.64    7.30/18/1.62    9.98|5.85/19/1.66
+// (AMF: about half of AMD's flops at AMD's cost on 3-D; PORD: 0.5-0.8 s and 1.0-2x METIS' flops;
+// QAMD = AMD here.) Facts behind the options:
+//   * The fill-reducing ordering is 90-97% of a METIS/SCOTCH analysis: the same analysis given
+//     the resulting order (PERM_IN) takes 0.03-0.08 s at n ~ 1e5 and 0.5-0.6 s at n = 1e6 - the
+//     floor of any analysis (input checks, symbolic factorization, tree, mapping, estimates); AMD
+//     costs little more than that floor.
+//   * Inside MUMPS the orderings are serial: SCOTCH_PTHREAD_NUMBER=1 or 2 changed nothing (MUMPS
+//     sets SCOTCH threads only for BLR clustering), METIS/SCOTCH cannot be linked directly here
+//     (they come in only as dependencies of libdmumps; ld refuses indirect DSOs, and dlopen needs
+//     libdl, absent from the link line with the glibc 2.28 sysroot), and METIS 5.1 draws from libc
+//     rand(), so concurrent METIS calls would not be reproducible. Hence hsolve's own nested
+//     dissection (kOrderingNestedDissection, compute_ordering): same scheme, counter-based random
+//     numbers, OpenMP tasks. Its flops are within -7..+12% of METIS (table), its order does not
+//     depend on the thread count, and its serial work W and critical path C (longest chain of
+//     dependent separators, measured with 1 thread) bound the wall time on p threads by
+//     W/p + C (Brent): W, C = 1.41, 0.29 s (syn-mem27-46), 1.23, 0.22 (yee-pec-box-1e5), 0.90,
+//     0.18 (ss-qa8fk-qa8fm), 0.74, 0.13 (wg-square-1e5), 9.6, 1.4 (wg-square-1e6) - at 16 threads
+//     <= 0.38, 0.30, 0.24, 0.17, 2.0 s plus the PERM_IN analysis, vs METIS' serial 1.11, 1.22,
+//     0.72, 0.70, 8.5 s. The critical path is the chain of top-level separators (the first one:
+//     0.12-0.14 s on syn-mem27-46, 0.6-0.8 s on wg-square-1e6, 70-90% of it coarsening).
+//   * ICNTL(58) (symbolic factorization): the default 2 (column counts) is the fast one; 1 made
+//     the given-order analysis 1.7x (n = 1e6) to 4x (syn-mem27-46) slower. ICNTL(6) = 0 changed
+//     nothing (no maximum transversal at analysis with ICNTL(12) = 1, the effective value in
+//     every run); ICNTL(12)/(13)/(14) do not touch the ordering. Scaling ICNTL(8) = 7 is computed
+//     at factorization, so it costs the analysis nothing.
+//   * Block analysis (block_analysis, ICNTL(15) = 1 with blocks {i, n+i} of the complex
+//     embedding): MUMPS then orders the n-vertex graph of K. syn-near-singular-complex-1e5 (every
+//     coupling complex): AMD analysis 0.37 -> 0.28 s, SCOTCH 3.0 -> 0.30 s at equal or lower
+//     flops (3.5e8 -> 3.3e8); factorization time within the noise for SCOTCH, +3..20% for AMD in
+//     two A/B series. On a Bloch-periodic Yee cell (n = 1e5, 3% of the couplings complex: the
+//     embedding nearly decouples) blocks cost flops with METIS (2.24e12 -> 2.69e12): hence the
+//     auto rule (on from 50% complex couplings, kCompressedFraction in src/factor). The same rule
+//     picks between the compressed and the full embedding graph in compute_ordering.
 #pragma once
 
 #include <cstdint>
@@ -442,7 +487,8 @@ struct OrderingStats {
 /// Throws InvalidInput (bad options), Unsupported (order above the 32-bit MUMPS range).
 /// Scalar set: T in {double, cplx}.
 template <class T>
-std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const OrderingOptions& options = {},
+std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil,
+                                  const OrderingOptions& options = {},
                                   OrderingStats* stats = nullptr);
 
 }  // namespace hs
