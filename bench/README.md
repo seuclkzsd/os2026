@@ -5,9 +5,15 @@ One executable per `bench/<name>.cpp` (target `bench_<name>`, built with the lib
 quoted in docs and commit messages. Run them through `tools/run/guard.py` (e.g.
 `python3 tools/run/guard.py --skip-busy-check --cores 26,27 --mem-gb 4 -- build/release/bench_<name> ...`);
 they print machine-readable results (JSON lines) to stdout. The header comment of each source gives
-the full usage and the exact command behind its quoted numbers; `results/p3_measurements.md`
-collects the P3 results. Heavier, case-based comparisons live in `tools/bench/` (Python: SLEPc
-baseline, `compare.py`). `CASE` below is a directory under `$HS_DATA_ROOT/cases` (or `./data/cases`).
+the full usage and the exact command behind its quoted numbers; `results/p3_measurements.md` and
+`results/p4_measurements.md` collect the P3 and P4 results. Heavier, case-based comparisons live in
+`tools/bench/` (Python: SLEPc baseline `baseline_slepc.py`, tuner `tune_slepc.py`, `-log_view` parser
+`slepc_log.py`, profiles `slepc_profile.py` / `slepc_profiles.json`, `compare.py`; see
+`results/baseline_tuning.md`). `CASE` below is a directory under `$HS_DATA_ROOT/cases` (or
+`./data/cases`). Since the end of P4 measurements run on the cluster nodes:
+`tools/dev/cluster_run.sh gpu01 -- python3 tools/run/guard.py ... -- build/release/bench_<name> ...`
+(core and memory defaults from `env/hosts/`; the core lists in the header comments are those of the
+development server where the quoted numbers were taken).
 
 | program | measures | run |
 |---|---|---|
@@ -29,6 +35,26 @@ baseline, `compare.py`). `CASE` below is a directory under `$HS_DATA_ROOT/cases`
 | `bench_slicing_sweep` | `hs::solve` on a case for several settings: interval slice sizes, smallest / largest (vs the pre-P3 path), nearest with zero-cluster handling | `bench_slicing_sweep --A A.npz [--B B.npz] interval LO HI SIZE...` \| `smallest K` \| `largest K` \| `nearest SIGMA K [ZFT]` |
 | `bench_slicing_fix_probe` | regression probes of the slicing review (multiplets, clusters, null spaces, anchors, GHIEP zero cluster) on small known spectra | `bench_slicing_fix_probe PROBE\|all [SEED]` |
 | `bench_pybind_convert` | cost of converting scipy/numpy buffers to `hs::CsrMatrix` (python/src/csr_convert.hpp) per layout and dtype, against an owning copy | `bench_pybind_convert [N=100] [repeats=5]` |
+
+P4 programs:
+
+| program | measures | run |
+|---|---|---|
+| `bench_solvephase_profile` | time split of one shift-invert apply per p (B X, MUMPS solve, pack/unpack, refinement residual, apply with / without refinement), P1 vs P4 kernels in one process, backward errors, STREAM triad | `bench_solvephase_profile CASE_DIR [--ordering amd\|scotch\|metis\|auto] [--precision single] ...` |
+| `bench_solvephase_mumps` | inside one MUMPS solve with the BLAS interposed: time above / inside the L0 layer (`--exp split`), ICNTL(27), ICNTL(21), solve threads, dgemm->dgemv for N = 1 (`gemvfwd`), parallel trsm, skinny GEMM | `bench_solvephase_mumps CASE_DIR --exp split\|icntl27\|icntl21\|partrsm\|gemvfwd\|skinny\|solvethreads [--p ...]` |
+| `bench_solvephase_kernels` | spmm and `shifted_residual` per KernelPath (Reference / Portable / Avx512) on the case matrices, with the deviation from Reference | `bench_solvephase_kernels CASE_DIR [--p 1,2,4,8,16] [--reps 9]` |
+| `bench_solvephase_lanczos` | shift-invert Lanczos with Reference vs Auto kernels at equal tolerance, per block size | `bench_solvephase_lanczos CASE_DIR [--p 1,8] [--reps 5]` |
+| `bench_solvephase_fix_refine` | the three P4 refinement changes one at a time against a replica of the P1 operator (kernels, active-column solves, rounding-level stop) | `bench_solvephase_fix_refine CASE_DIR [--precision double\|single] [--p 1,8]` |
+| `bench_solvephase_fix_lanczos` | the same Lanczos A/B with alternating arm order, kernel time apart from the solves, block size 1 as A/A control | `bench_solvephase_fix_lanczos CASE_DIR [--p 1,8] [--reps 9]` |
+| `bench_analysis_orderings` | MUMPS analysis per ordering (ICNTL(7) or hsolve ND as PERM_IN): time, given-order split, estimates, factorization; `--exp separator` (multilevel trace), `--exp dissect` (work, critical path) | `bench_analysis_orderings --case DIR [--exp orderings\|separator\|dissect] --orderings 0,5,3,pnd:2 [--factorize 1]` |
+| `bench_analysis_fix_pipeline` | what an ordering costs the driver: analysis, main factorization, refactorizations at the certificate ends or an InertiaCounter pair, 1- and p-RHS solves | `bench_analysis_fix_pipeline --case DIR --ordering 0\|3\|5\|10 [--counter 1]` |
+| `bench_analysis_fix_imbalance` | MUMPS flops of hsolve's ND on grid Laplacians per separator imbalance (behind `kMaxImbalance`) | `bench_analysis_fix_imbalance [--grids ...] [--imbalance ...]` |
+| `bench_drvint_profile` | a HEP/GHEP run outside the Krylov iteration: setup steps, AMD vs SCOTCH analyses with `model_analysis_s` (its fit data), certificate counts main object vs InertiaCounter (and `counter_pays`), per-RHS solve cost, output | `bench_drvint_profile --case DIR --exp setup,analysis,counter,solves,output` |
+| `bench_drvint_fix_ordering` | AMD / SCOTCH / METIS analyses of K(sigma): time, fill and run-to-run stability, next to the driver's ordering decision | `bench_drvint_fix_ordering --case DIR [--orderings 0,3,5] [--factorize]` |
+| `bench_ghiep_block` | block Krylov-Schur on GHIEP: `--mode ks` (apply cost per p, krylov_schur_general runs, accuracy), `--mode e2e` (hs::solve per `block_size`); synthetic pencils `syn-ghiep-<wg\|wg0\|cplx>-<n>` generated in process | `bench_ghiep_block [--mode ks\|e2e] [--p 1,2,4,8] CASE...` |
+| `bench_ghiep_fix_e2e` | end-to-end GHIEP solves per block size with `--sigma` / `--k` overrides (the one-sided zero-cluster rows) | `bench_ghiep_fix_e2e [--p 1,2,4,8] [--sigma S] [--k K] CASE...` |
+| `bench_ghiep_fix_ortho` | the block step's fast path (`block_cgs_cholqr2`) vs the two-pass `BlockOrthonormalizer` on the same inputs | `bench_ghiep_fix_ortho [--n 100000] [--k 24,48,72] [--p 2,4,8,16,64] [--input krylov\|random]` |
+| `bench_certfast_measure` | exact certificate counts (driver path, InertiaCounter double / single pair) vs `exclusion_check` (delta x block size x pass radius), detection of removed copies, with hsolve's CLI solution as X | `bench_certfast_measure --case DIR --solution SOL [--reps 5] [--deltas 1e-6,1e-12] [--blocks 1,4]` |
 
 Measurement scripts outside `bench/`: `python/bench/overhead.py` (Python API vs CLI wall time and
 peak), `python/bench/load_memory.py` (`hsolve.load_matrix` vs `scipy.sparse.load_npz` memory),
