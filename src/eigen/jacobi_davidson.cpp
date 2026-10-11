@@ -153,6 +153,7 @@ class JacobiDavidson {
   T* bvcol(index_t j) { return bqcol(nconv_ + j); }
   T* kvcol(index_t j) { return kv_.col(nconv_ + j); }
 
+  void load_deflation();
   bool append(const T* t);
   bool append_random();
   void extract();
@@ -182,6 +183,7 @@ class JacobiDavidson {
   const JdOptions<T>& opt_;
 
   index_t n_ = 0, nev_ = 0, kmin_ = 0, kmax_ = 0, inner_max_ = 0;
+  index_t d_ = 0;  ///< deflation columns (pre-locked, never returned) at the front of Q
   bool harmonic_ = false, use_gmres_ = false;
   double norm_a_ = 0.0, norm_b_ = 1.0;
 
@@ -230,8 +232,14 @@ JacobiDavidson<T>::JacobiDavidson(LinearOperator<T>& a, LinearOperator<T>* b, Li
   if (m && m->size() != n_)
     HS_THROW(InvalidInput, "jacobi_davidson: preconditioner has order " << m->size() << ", A " << n_);
   if (!std::isfinite(tau)) HS_THROW(InvalidInput, "jacobi_davidson: non-finite target " << tau);
-  if (nev_ < 1 || nev_ > n_)
-    HS_THROW(InvalidInput, "jacobi_davidson: nev must lie in [1, n = " << n_ << "], got " << nev_);
+  if (options.deflation && options.deflation->cols() > 0) {
+    if (options.deflation->rows() != n_)
+      HS_THROW(InvalidInput, "jacobi_davidson: deflation block has " << options.deflation->rows()
+                                                                     << " rows, A has order " << n_);
+    d_ = options.deflation->cols();
+  }
+  if (nev_ < 1 || nev_ > n_ - d_)
+    HS_THROW(InvalidInput, "jacobi_davidson: nev must lie in [1, n - d = " << n_ - d_ << "], got " << nev_);
   if (!(options.tol > 0.0) || !std::isfinite(options.tol))
     HS_THROW(InvalidInput, "jacobi_davidson: tol must be positive and finite, got " << options.tol);
   if (options.max_iterations < 0) HS_THROW(InvalidInput, "jacobi_davidson: max_iterations must be >= 0");
@@ -247,7 +255,7 @@ JacobiDavidson<T>::JacobiDavidson(LinearOperator<T>& a, LinearOperator<T>* b, Li
   if (options.min_basis > 0 && options.max_basis > 0 && options.max_basis <= options.min_basis)
     HS_THROW(InvalidInput, "jacobi_davidson: max_basis " << options.max_basis << " must exceed min_basis "
                                                          << options.min_basis);
-  kmax_ = std::min(kmax_, n_);
+  kmax_ = std::min(kmax_, n_ - d_);
   kmin_ = kmax_ > 1 ? std::min(kmin_, kmax_ - 1) : 1;
   if (options.initial) {
     const auto* ini = options.initial;
@@ -286,12 +294,12 @@ JacobiDavidson<T>::JacobiDavidson(LinearOperator<T>& a, LinearOperator<T>* b, Li
   b0_ = b ? b->applications() : 0;
   m0_ = m ? m->applications() : 0;
 
-  const index_t cols = nev_ + kmax_;
+  const index_t cols = d_ + nev_ + kmax_;
   basis_.resize(n_, cols);
   if (b_) bbasis_.resize(n_, cols);
   kv_.resize(n_, cols);
   if (m_ && use_gmres_) {
-    mbq_.resize(n_, nev_);
+    mbq_.resize(n_, d_ + nev_);
     mbu_.resize(static_cast<std::size_t>(n_));
   }
   hk_.resize(kmax_, kmax_);
@@ -305,6 +313,31 @@ JacobiDavidson<T>::JacobiDavidson(LinearOperator<T>& a, LinearOperator<T>* b, Li
       for (auto& v : mr_) v.resize(static_cast<std::size_t>(n_));
     }
   }
+}
+
+/// Copies the deflation block Y in front of Q (pre-locked) and checks Y^H B Y = I.
+template <class T>
+void JacobiDavidson<T>::load_deflation() {
+  if (d_ == 0) return;
+  const DenseMatrix<T>& y = *opt_.deflation;
+  std::copy(y.data(), y.data() + n_ * d_, basis_.data());
+  eigen_detail::require_finite(n_, basis_.data(), d_, "jacobi_davidson: deflation block");
+  if (b_) {
+    b_->apply(basis_.data(), n_, bbasis_.data(), n_, d_);
+    eigen_detail::require_finite(n_, bbasis_.data(), d_, "jacobi_davidson: B * deflation");
+  }
+  DenseMatrix<T> g(d_, d_);
+  linalg::gram(n_, d_, basis_.data(), n_, bqcol(0), n_, g.data(), d_);
+  double dev = 0.0;
+  for (index_t j = 0; j < d_; ++j)
+    for (index_t i = 0; i < d_; ++i) {
+      const double e = std::abs(g(i, j) - T(i == j ? 1.0 : 0.0));
+      if (std::isnan(e) || e > dev) dev = e;
+    }
+  if (!(dev <= 1e-8))
+    HS_THROW(InvalidInput, "jacobi_davidson: deflation block is not B-orthonormal (max |Y^H B Y - I| = " << dev
+                                                                                                     << ")");
+  nconv_ = d_;
 }
 
 /// B-orthonormalizes t against [Q V] and appends it to V (K v, HK, G updated). False when t lies
@@ -864,8 +897,8 @@ template <class T>
 void JacobiDavidson<T>::record() {
   RestartRecord rec;
   rec.restart = iterations_;
-  rec.nconv = nconv_;
-  rec.max_estimate = nconv_ >= nev_ ? 0.0 : eta_;
+  rec.nconv = nconv_ - d_;
+  rec.max_estimate = nconv_ - d_ >= nev_ ? 0.0 : eta_;
   rec.op_applies = a_.applications() - a0_;
   history_.push_back(rec);
 }
@@ -874,6 +907,7 @@ template <class T>
 IterativeEigResult<T> JacobiDavidson<T>::run() {
   norm_a_ = opt_.norm_a > 0.0 ? opt_.norm_a : eigen_detail::estimate_norm2(a_, opt_.seed ^ 0x6a645f6e6f726dULL);
   norm_b_ = !b_ ? 1.0 : (opt_.norm_b > 0.0 ? opt_.norm_b : eigen_detail::estimate_norm2(*b_, opt_.seed ^ 0x62ULL));
+  load_deflation();
   if (opt_.initial) {
     eigen_detail::require_finite(n_, opt_.initial->data(), opt_.initial->cols(), "jacobi_davidson: initial block");
     for (index_t j = 0; j < opt_.initial->cols() && k_ < kmax_; ++j) append(opt_.initial->col(j));
@@ -883,7 +917,7 @@ IterativeEigResult<T> JacobiDavidson<T>::run() {
     // then present in V with an O(1) relative component, which the tau-tracking expansions
     // amplify; from a single vector further copies appear only at rounding level and were missed
     // (measured: a triple eigenvalue at distance 0.05 lost to a simple one at 0.35).
-    const index_t p = std::min<index_t>(std::min(nev_, kmax_ - 1), n_);
+    const index_t p = std::min<index_t>(std::min(nev_, kmax_ - 1), n_ - d_);
     for (index_t j = 0; j < std::max<index_t>(p, 1); ++j)
       if (!append_random() && k_ == 0)
         HS_THROW(InvalidInput, "jacobi_davidson: cannot draw a start vector with positive B-norm (B not HPD?)");
@@ -898,7 +932,7 @@ IterativeEigResult<T> JacobiDavidson<T>::run() {
     current_pair();
     if (eta_ <= opt_.tol && verify_and_lock()) {
       j_cur = 0;
-      if (nconv_ == nev_) {
+      if (nconv_ - d_ == nev_) {
         record();
         break;
       }
@@ -924,11 +958,12 @@ IterativeEigResult<T> JacobiDavidson<T>::run() {
 
 template <class T>
 IterativeEigResult<T> JacobiDavidson<T>::finish() {
-  const index_t extra = std::min(nev_ - nconv_, k_);
-  const index_t mtot = nconv_ + extra;
+  const index_t found = nconv_ - d_;
+  const index_t extra = std::min(nev_ - found, k_);
+  const index_t mtot = found + extra;
   DenseMatrix<T> x(n_, mtot);
   std::vector<double> th(locked_theta_);
-  std::copy(basis_.data(), basis_.data() + n_ * nconv_, x.data());
+  std::copy(qcol(d_), qcol(d_) + n_ * found, x.data());
   if (extra > 0) {
     // Best current approximations: [sel, ranked extraction vectors] orthonormalized, then a
     // Rayleigh-Ritz step inside their span, so the vectors are B-orthonormal Ritz vectors.
@@ -941,7 +976,7 @@ IterativeEigResult<T> JacobiDavidson<T>::finish() {
     lapack::gemm('N', 'N', fi(k), fi(extra), fi(extra), T(1), c.data(), fi(k), red.data(), fi(extra), T(0),
                  cr.data(), fi(k));
     lapack::gemm('N', 'N', fi(n_), fi(extra), fi(k), T(1), vcol(0), fi(n_), cr.data(), fi(k), T(0),
-                 x.col(nconv_), fi(n_));
+                 x.col(found), fi(n_));
     for (double v : nu) th.push_back(tau_ + v);
   }
   std::vector<double> res, eta;

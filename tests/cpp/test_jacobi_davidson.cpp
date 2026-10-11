@@ -293,6 +293,54 @@ TYPED_TEST(JacobiDavidsonTyped, LockingFindsEveryCopyOfAMultipleEigenvalue) {
   expect_same_values(r.theta, {1.0, 1.0, 1.0, 1.2, 1.2}, 1e-10);
 }
 
+TYPED_TEST(JacobiDavidsonTyped, DeflationFindsTheNextPairs) {
+  using T = TypeParam;
+  const index_t n = 240;
+  const auto a = hs::test::random_hermitian<T>(n, 0.05, 23);
+  const auto b = hs::test::random_hpd<T>(n, 0.05, 24);
+  const auto lambda = hs::test::dense_eigenvalues(a, &b);
+  hs::CsrOperator<T> aop(a), bop(b);
+  const double tau = 0.5 * (lambda[100] + lambda[101]);
+  DenseOperator<T> prec(dense_inverse(round_to_float(shifted<T>(a, &b, tau))));
+  JdOptions<T> opt;
+  opt.nev = 4;
+  opt.tol = 1e-12;
+  const auto first = hs::jacobi_davidson<T>(aop, &bop, &prec, tau, opt);
+  ASSERT_TRUE(first.converged);
+  opt.deflation = &first.vectors;
+  const auto second = hs::jacobi_davidson<T>(aop, &bop, &prec, tau, opt);
+  EXPECT_TRUE(second.converged);
+  check_contract<T>(aop, &bop, second, tau, opt.nev, opt.tol);
+  const auto near8 = nearest(lambda, tau, 8);
+  expect_same_values(second.theta, std::vector<double>(near8.begin() + 4, near8.end()), 1e-9);
+  EXPECT_LT(gram_deviation<T>(first.vectors, &bop, second.vectors, false), 1e-10);
+}
+
+TYPED_TEST(JacobiDavidsonTyped, DeflatedRerunRecoversAFurtherCopy) {
+  // The driver's remedy for a missed copy of a multiple eigenvalue (inertia certificate count >
+  // found): rerun with the found vectors as deflation block.
+  using T = TypeParam;
+  std::vector<double> spectrum = {2.0, 2.0, 2.0, 2.0};
+  for (index_t i = 0; i < 196; ++i) spectrum.push_back(i < 98 ? -1.0 + 0.01 * i : 3.0 + 0.01 * (i - 98));
+  const auto a = hs::test::prescribed_spectrum<T>(spectrum, 5, 25);
+  hs::CsrOperator<T> op(a);
+  const double tau = 2.01;
+  DenseOperator<T> prec(dense_inverse(shifted<T>(a, nullptr, tau)));
+  JdOptions<T> opt;
+  opt.nev = 3;
+  opt.tol = 1e-12;
+  const auto first = hs::jacobi_davidson<T>(op, nullptr, &prec, tau, opt);
+  ASSERT_TRUE(first.converged);
+  expect_same_values(first.theta, {2.0, 2.0, 2.0}, 1e-10);
+  opt.deflation = &first.vectors;
+  opt.nev = 1;
+  const auto second = hs::jacobi_davidson<T>(op, nullptr, &prec, tau, opt);
+  EXPECT_TRUE(second.converged);
+  check_contract<T>(op, nullptr, second, tau, opt.nev, opt.tol);
+  expect_same_values(second.theta, {2.0}, 1e-10);
+  EXPECT_LT(gram_deviation<T>(first.vectors, nullptr, second.vectors, false), 1e-10);
+}
+
 TYPED_TEST(JacobiDavidsonTyped, MinresWithAndWithoutHpdPreconditioner) {
   // Target below the spectrum: A - tau I is positive definite, so its inverse is a valid MINRES
   // preconditioner; without one MINRES solves the correction equation unpreconditioned.
@@ -473,6 +521,15 @@ TYPED_TEST(JacobiDavidsonTyped, InvalidOptionsThrowInvalidInput) {
   o = {};
   DenseMatrix<T> wrong(20, 0);
   o.initial = &wrong;
+  expect_invalid(o);
+  o = {};
+  DenseMatrix<T> defl_rows(19, 2), defl_zero(20, 2), defl_ok(20, 18);
+  for (index_t j = 0; j < 18; ++j) defl_ok(j, j) = T(1);
+  o.deflation = &defl_rows;
+  expect_invalid(o);
+  o.deflation = &defl_zero;  // not orthonormal
+  expect_invalid(o);
+  o.deflation = &defl_ok;  // nev = 6 > n - d = 2
   expect_invalid(o);
 }
 

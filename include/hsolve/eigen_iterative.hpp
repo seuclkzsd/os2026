@@ -152,6 +152,11 @@ struct JdOptions {
   /// Optional start block (n x p, p >= 1), B-orthonormalized and used as the initial search
   /// space instead of the random start block.
   const DenseMatrix<T>* initial = nullptr;
+  /// Optional block Y (n x d) of known eigenvectors, B-orthonormal (|Y^H B Y - I| <= 1e-8): they
+  /// are treated as already locked (the search space and every correction stay B-orthogonal to
+  /// them) and are not returned, so the call finds nev further pairs (deflated rerun after an
+  /// inertia certificate found missing eigenvalues). nev + d <= n.
+  const DenseMatrix<T>* deflation = nullptr;
   JdExtraction extraction = JdExtraction::Auto;
   JdInnerSolver inner_solver = JdInnerSolver::Auto;
   double norm_a = 0.0;  ///< ||A||_2 for the backward error; 0 = estimate (30 Lanczos steps)
@@ -175,8 +180,9 @@ struct JdOptions {
 /// accuracy (r is exact), so a single-precision factor of A - tau B yields double-precision
 /// eigenpairs. When that factor is inaccurate on the eigenvectors nearest tau (eps_s *
 /// cond(A - tau B) ~ 1, i.e. its backward error is as large as the wanted |lambda - tau|) the inner
-/// solves need many more steps and the cost becomes erratic (measured on syn-mem27-46: 249 to
-/// 15845 preconditioner applications from run to run, always converged).
+/// solves need many more steps (measured, 2 threads, nev = 12: syn-mem27-46 285-560
+/// preconditioner applications over 5 runs versus 36 solves of double shift-invert Lanczos;
+/// yee-pec-cube-32 217 versus 68).
 /// The pairs found are the nearest ones in practice, not provably: a missing eigenvalue (e.g. a
 /// further copy of a multiple eigenvalue never represented in V) is not detected here - the
 /// driver's inertia certificate does that.
@@ -185,8 +191,8 @@ struct JdOptions {
 /// Cost per outer iteration: 1 + (inner iterations) applications each of A and B (with B), as many
 /// preconditioner applications (+1 for M B u with GMRES, +1 per locked pair once),
 /// O(n (nconv + basis size)) for the B-orthogonalization and projections.
-/// Memory (scalars): n * (nev + max_basis) for [Q V], the same again for B [Q V] (B only),
-/// n * (nev + max_basis) for (A - tau B) V, n * (nev + 1) for M B [Q u] (GMRES with a
+/// Memory (scalars): n * (d + nev + max_basis) for [Y Q V], the same again for B [Y Q V] (B only)
+/// and for (A - tau B) V, n * (d + nev + 1) for M B [Y Q u] (GMRES with a
 /// preconditioner), inner workspace n * (2 inner_iterations + 1) (GMRES) or 7 n (MINRES), plus 7 n
 /// work vectors; the result adds n * nev.
 template <class T>
