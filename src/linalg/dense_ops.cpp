@@ -507,6 +507,12 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
     return finish(m2);
   }
   std::vector<double> c1(static_cast<std::size_t>(kd)), c2(static_cast<std::size_t>(kd));
+  // ||c||^2 of a coefficient vector (doubles; complex interleaved), serial: deterministic.
+  auto sq_coefficients = [&](const std::vector<double>& c) {
+    double s2 = 0.0;
+    for (double x : c) s2 += x * x;
+    return s2;
+  };
   auto accumulate = [&](const std::vector<double>& c) {
     if (h) {
       double* hd = dbl(h);
@@ -541,8 +547,19 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
     upd.bw = dbl(bw);
   }
   upd.c = c1.data();
+  // Without M w on exit, recompute mode first tries the Pythagorean norm ||w - V c1||_M^2 =
+  // ||w||_M^2 - ||c1||^2 (V M-orthonormal): accurate to O(eps) relative whenever it passes the
+  // DGKS test (ratio >= eta), which then needs no further application of M.
+  const bool pythagoras = recompute && !options.mw_on_exit;
   if (recompute) {
     run_sweep<cx>(n, k, upd, nullptr, nullptr);
+    if (pythagoras && options.reorth == Reorth::IfNeeded) {
+      const double est = m0 - sq_coefficients(c1);
+      if (est > 0.0 && std::sqrt(est) >= options.eta * inf.norm_before) {
+        inf.norm_pass1 = root(est);
+        return finish(est);
+      }
+    }
     (*apply_m)(w, bw);
     m1 = sq_norm();
   } else {
@@ -570,6 +587,12 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
   upd.c = c2.data();
   if (recompute) {
     run_sweep<cx>(n, k, upd, nullptr, nullptr);
+    if (pythagoras) {
+      // ||w1 - V c2||_M^2 = ||w1||_M^2 - ||c2||^2 with ||w1||_M from M w1 (exact): c2 is small
+      // against w1 after pass 1, so the subtraction loses nothing. bw keeps M w1.
+      m2 = m1 - sq_coefficients(c2);
+      return finish(m2);
+    }
     (*apply_m)(w, bw);
     m2 = sq_norm();
   } else {

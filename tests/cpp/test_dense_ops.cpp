@@ -307,6 +307,85 @@ TYPED_TEST(LinalgDenseOpsCgs, CoefficientsNormsAndMw) {
     }
 }
 
+TYPED_TEST(LinalgDenseOpsCgs, RecomputeWithoutMwOnExitSavesAnApplication) {
+  using T = TypeParam;
+  const index_t n = 4000, k = 25;
+  OrthoSetup<T> s(n, k, Mode::Recompute);
+  std::vector<T> x(static_cast<std::size_t>(n));
+  for (index_t j = 0; j < k; ++j) {
+    la::fill_random(x.data(), n, 61, static_cast<std::uint64_t>(j));
+    s.append(x, policy(la::Reorth::Always));
+  }
+  int applications = 0;
+  const la::ApplyFn<T> counted = [&](const T* a, T* b) {
+    ++applications;
+    s.apply(a, b);
+  };
+  // Inputs with ||w_perp||_M / ||w||_M = 1 (one DGKS pass), 0.6 and 1e-9 (two passes).
+  for (double target : {1.0, 0.6, 1e-9})
+    for (la::Reorth reorth : {la::Reorth::IfNeeded, la::Reorth::Always}) {
+      std::vector<T> w0(static_cast<std::size_t>(n)), r(static_cast<std::size_t>(n)), br(static_cast<std::size_t>(n));
+      la::fill_random(r.data(), n, 62, 0);
+      const double rn = s.orthogonalize(r.data(), br.data(), nullptr, policy(la::Reorth::Always), nullptr);
+      for (index_t i = 0; i < n; ++i) w0[i] = (target < 1.0 ? T(1.0) * s.v(i, 3) : T(0.0));
+      const double sc = target < 1.0 ? target / std::sqrt(1.0 - target * target) / rn : 1.0 / rn;
+      la::axpy(n, T(sc), r.data(), w0.data());
+      struct Out {
+        std::vector<T> w, h;
+        double nrm;
+        la::OrthoInfo info;
+        int applications;
+      };
+      auto run = [&](bool mw_on_exit) {
+        Out o{w0, std::vector<T>(static_cast<std::size_t>(k)), 0.0, {}, 0};
+        std::vector<T> bw(static_cast<std::size_t>(n));
+        la::OrthoOptions opt = policy(reorth);
+        opt.mw_on_exit = mw_on_exit;
+        applications = 0;
+        o.nrm = la::orthogonalize_cgs2<T>(n, k, s.v.data(), n, nullptr, 0, o.w.data(), bw.data(), o.h.data(), &counted,
+                                          opt, &o.info);
+        o.applications = applications;
+        if (mw_on_exit) {
+          for (index_t i = 0; i < n; ++i) EXPECT_EQ(bw[i], s.m[i] * o.w[i]);
+        }
+        return o;
+      };
+      const Out with = run(true), without = run(false);
+      const int passes = reorth == la::Reorth::Always || target < 0.7 ? 2 : 1;
+      EXPECT_EQ(with.info.passes, passes);
+      EXPECT_EQ(without.info.passes, passes);
+      EXPECT_EQ(with.applications, passes + 1);
+      EXPECT_EQ(without.applications, passes);
+      // Same iterates and coefficients; the norm differs only by rounding.
+      EXPECT_TRUE(bitwise_equal(without.w, with.w)) << "target=" << target;
+      EXPECT_TRUE(bitwise_equal(without.h, with.h)) << "target=" << target;
+      double m2 = 0.0;
+      for (index_t i = 0; i < n; ++i) m2 += s.m[i] * hs::abs2(with.w[i]);
+      EXPECT_NEAR(with.nrm, std::sqrt(m2), 1e-14 * std::sqrt(m2));
+      EXPECT_NEAR(without.nrm, std::sqrt(m2), 1e-14 * std::sqrt(m2)) << "target=" << target;
+      EXPECT_NEAR(without.info.norm_pass1, with.info.norm_pass1, 1e-12 * with.info.norm_pass1 + 1e-14 * with.info.norm_before);
+    }
+  // Euclidean and stored modes ignore the option.
+  for (Mode mode : {Mode::Euclidean, Mode::Stored}) {
+    OrthoSetup<T> e(n, 3, mode);
+    for (index_t j = 0; j < 3; ++j) {
+      la::fill_random(x.data(), n, 63, static_cast<std::uint64_t>(j));
+      e.append(x, la::OrthoOptions{});
+    }
+    std::vector<T> w1(static_cast<std::size_t>(n)), bw1(static_cast<std::size_t>(n));
+    la::fill_random(w1.data(), n, 64, 0);
+    if (mode == Mode::Stored) e.apply(w1.data(), bw1.data());
+    std::vector<T> w2 = w1, bw2 = bw1;
+    la::OrthoOptions off;
+    off.mw_on_exit = false;
+    T* b1 = mode == Mode::Stored ? bw1.data() : nullptr;
+    T* b2 = mode == Mode::Stored ? bw2.data() : nullptr;
+    const double n1 = e.orthogonalize(w1.data(), b1, nullptr, la::OrthoOptions{}, nullptr);
+    const double n2 = e.orthogonalize(w2.data(), b2, nullptr, off, nullptr);
+    EXPECT_TRUE(bitwise_equal(w1, w2) && bitwise_equal(bw1, bw2) && bitwise_equal(n1, n2)) << mode_name(mode);
+  }
+}
+
 TYPED_TEST(LinalgDenseOpsCgs, EtaControlsTheSecondPass) {
   using T = TypeParam;
   const index_t n = 2000, k = 10;

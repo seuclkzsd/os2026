@@ -72,6 +72,12 @@ struct OrthoOptions {
   /// DGKS threshold in [0, 1] (1/sqrt(2), as in ARPACK and SLEPc). 1 makes IfNeeded equivalent to
   /// Always except for a w that is exactly orthogonal already; 0 never runs pass 2 for a nonzero w.
   double eta = 0.70710678118654752;
+  /// Recompute mode only: false declares that the caller does not need bw == M*w on exit (e.g.
+  /// bw is mere workspace). The norms are then taken from the Pythagorean relation
+  /// ||w - V c||_M^2 = ||w||_M^2 - ||c||^2 (V M-orthonormal) where that is accurate: a call
+  /// whose first pass passes the DGKS test applies M once (not twice), a call with two passes
+  /// twice (not three times). On exit bw holds M times an earlier iterate of w.
+  bool mw_on_exit = true;
 };
 
 /// What one orthogonalize_cgs2 call did. Norms are M-norms (2-norms in Euclidean mode), computed
@@ -97,7 +103,8 @@ struct OrthoInfo {
 ///                        recomputed after every pass, so every norm (and the DGKS test) uses
 ///                        the M*w of the current w: 2 applications of M with one pass, 3 with two.
 /// options.reorth selects the second pass (default IfNeeded: DGKS with eta = 1/sqrt(2)); Always
-/// forces two passes. On exit bw == M*w (stored/recompute modes). h (length k, may be nullptr)
+/// forces two passes. On exit bw == M*w (stored/recompute modes; see options.mw_on_exit for the
+/// exception). h (length k, may be nullptr)
 /// receives the accumulated coefficients V^H M w. Returns the M-norm sqrt(Re(w^H M w)) (0 if not
 /// positive, also for NaN) or ||w||_2 (NaN propagates) of the result; info (may be nullptr)
 /// receives the pass count and the norms before / after each pass.
