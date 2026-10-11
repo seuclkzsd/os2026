@@ -171,6 +171,20 @@ void expect_values(const std::vector<double>& got, const std::vector<double>& wa
   for (std::size_t i = 0; i < got.size(); ++i) EXPECT_NEAR(got[i], want[i], tol) << "index " << i;
 }
 
+/// |got[i] - want[i]| <= rel * |want[i]| for every i.
+void expect_relative(const std::vector<double>& got, const std::vector<double>& want, double rel) {
+  ASSERT_EQ(got.size(), want.size());
+  for (std::size_t i = 0; i < got.size(); ++i)
+    EXPECT_NEAR(got[i], want[i], rel * std::abs(want[i])) << "index " << i;
+}
+
+/// Op = diag(spectrum). Its application has only relative rounding errors (|fl(d_i x_i) - d_i x_i|
+/// <= eps |d_i x_i|), so eigenvalues far below ||Op|| stay accurately determined.
+template <class T>
+hs::test::DiagonalOperator<T> diagonal_operator(const std::vector<double>& spectrum) {
+  return hs::test::DiagonalOperator<T>(std::vector<T>(spectrum.begin(), spectrum.end()));
+}
+
 /// Spectrum with spread-out, asymmetric ends (fast convergence for every `which`): 10 t^3 + t +
 /// 0.05 on a uniform grid t in [-1, 1].
 std::vector<double> cubic_spectrum(index_t n) {
@@ -391,6 +405,66 @@ TYPED_TEST(LanczosTyped, InvariantSubspaceBreakdown) {
   }
 }
 
+TYPED_TEST(LanczosTyped, SmallCouplingsAreKeptOverAWideDynamicRange) {
+  // A Lanczos coupling far below ||Op|| can still be large compared with a wanted |theta|. A
+  // breakdown test scaled by ||Op|| (instead of the step's own ||Op v_j||) dropped such couplings:
+  // wrong eigenvalues or large true residuals came back marked converged with estimate 0.
+  // Diagonal operators keep the contract's residual floor (1e-14 max |theta|) honest here.
+  using T = TypeParam;
+  {
+    SCOPED_TRACE("one eigenvalue 1e13 above a bulk in (0.5, 1.5]");
+    std::vector<double> spectrum = {1e13};
+    for (index_t i = 1; i < 200; ++i) spectrum.push_back(0.5 + static_cast<double>(i) / 199.0);
+    auto op = diagonal_operator<T>(spectrum);
+    KrylovSchurOptions<T> opt;
+    opt.nev = 3;
+    opt.tol = 1e-8;
+    const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, Which::LargestMagnitude, opt);
+    // A bulk Ritz vector keeps a rounding-size component along e_0, amplified by 1e13: true
+    // residuals ~1e-4, hence eigenvalue errors ~residual^2 / gap ~ 1e-6 (the bug gave 0.3).
+    expect_relative(r.theta, wanted(spectrum, Which::LargestMagnitude, opt.nev), 1e-4);
+  }
+  {
+    SCOPED_TRACE("shift-invert spectrum, sigma 1e-12 (relative) below lambda_1");
+    // theta = 1 / (lambda - sigma) of the 1-D Laplacian: ||Op|| = 4e17, wanted theta 1.4e5..1.2e4.
+    const auto lambda = hs::test::laplacian_1d_eigenvalues(2000);
+    const double sigma = lambda[0] * (1.0 - 1e-12);
+    std::vector<double> theta;
+    for (double l : lambda) theta.push_back(1.0 / (l - sigma));
+    auto op = diagonal_operator<T>(theta);
+    KrylovSchurOptions<T> opt;
+    opt.nev = 6;
+    const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, Which::LargestMagnitude, opt);
+    expect_relative(r.theta, wanted(theta, Which::LargestMagnitude, opt.nev), 1e-5);
+  }
+  {
+    SCOPED_TRACE("start vector within 1e-9 of the invariant subspace span{e_0, e_1}");
+    // The couplings out of span{e_0, e_1} are far above rounding but below 1e-12 ||Op||; dropping
+    // them hid a true residual of 5e-8 behind the estimate 0 of the pair theta = 3.
+    const index_t n = 2000;
+    std::vector<double> spectrum = {1e6, 3.0};
+    for (index_t i = 2; i < n; ++i)
+      spectrum.push_back(0.5 + 1.5 * static_cast<double>(i - 2) / static_cast<double>(n - 3));
+    auto op = diagonal_operator<T>(spectrum);
+    DenseMatrix<T> x0(n, 1);
+    hs::linalg::fill_random(x0.data(), n, 5);
+    hs::linalg::scal(n, T(1e-9), x0.data());
+    x0(0, 0) += T(1.0);
+    x0(1, 0) += T(1.0);
+    KrylovSchurOptions<T> opt;
+    opt.nev = 2;
+    opt.initial = &x0;
+    const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, Which::LargestMagnitude, opt);
+    expect_relative(r.theta, {1e6, 3.0}, 1e-10);
+  }
+}
+
 TYPED_TEST(LanczosTyped, InitialVectorSpanningTheWantedSpace) {
   // A start vector inside the wanted invariant subspace: the first three Lanczos steps reproduce
   // it exactly, so the first cycle already returns the exact pairs.
@@ -515,6 +589,35 @@ TYPED_TEST(LanczosTyped, EstimatesStayHonestOverManyRestarts) {
     // A Hermitian Ritz value lies within its residual of an eigenvalue: <= tol * |theta| <= 4 tol.
     expect_values(r.theta, wanted(exact, Which::LargestAlgebraic, opt.nev), 4.0 * tol);
   }
+}
+
+TYPED_TEST(LanczosTyped, ZeroEstimatesOfEarlyConvergedPairsAreHonest) {
+  // The isolated top values 10, 6, 3 converge long before 2 (relative gap 1/11 to the bulk in
+  // [-1, 1]) and keep improving until their coupling is at rounding level relative to every wanted
+  // pair. They are then decoupled exactly, by locking or equally by heev's deflation of negligible
+  // off-diagonals, and report estimate 0. That must stay honest: the true residual is at rounding
+  // level, which bounds the locking threshold from above (a tol-level threshold fails here).
+  using T = TypeParam;
+  std::vector<double> spectrum = {10.0, 6.0, 3.0, 2.0};
+  for (index_t i = 0; i < 396; ++i) spectrum.push_back(-1.0 + 2.0 * static_cast<double>(i) / 395.0);
+  auto op = diagonal_operator<T>(spectrum);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.ncv = 9;
+  opt.tol = 1e-12;
+  const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  EXPECT_TRUE(r.converged);
+  EXPECT_GT(r.restarts, 2);
+  check_contract<T>(op, nullptr, r, Which::LargestAlgebraic, opt);
+  expect_values(r.theta, {10.0, 6.0, 3.0, 2.0}, 1e-11);
+  const auto res = true_residuals<T>(op, nullptr, r, nullptr);
+  index_t decoupled = 0;
+  for (index_t i = 0; i < opt.nev; ++i) {
+    if (r.estimate[i] != 0.0) continue;
+    ++decoupled;
+    EXPECT_LE(res[i], 1e-14 * std::abs(r.theta[i])) << "pair " << i;
+  }
+  EXPECT_GE(decoupled, 1);
 }
 
 TYPED_TEST(LanczosTyped, NonConvergenceIsReportedNotThrown) {

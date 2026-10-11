@@ -17,19 +17,33 @@
 // steps from v_k. Only the theoretical entries of H are stored (diagonal, arrow, tridiagonal):
 // the remaining CGS2 coefficients vanish in exact arithmetic and only purify the new vector.
 //
-// Locking. A kept converged pair gets b_l := 0, which decouples it exactly from later
-// Rayleigh-Ritz steps (its row and column of H are diagonal), but only once its coupling is at
-// working precision, |b_l| <= kLockTol * ||Op||_M. Zeroing a larger (tol-sized) coupling would
-// perturb the relation by |b_l|, and the dropped term conj(b_l) <u, y>_M (u = residual vector of
-// that restart) would then hide in the residual of every other Ritz vector y: relative to a
-// smaller |theta_y| that breaks "estimate <= tol |theta| => converged" (measured: true residuals
-// 28x the estimate at tol = 1e-6), and accounting for it honestly would stall such pairs forever.
-// Pairs converged only to tol therefore stay coupled and keep improving; the estimates remain
-// exact for the computed relation.
+// Dropped couplings. Setting a coupling to zero (locking, breakdown) makes the stored relation the
+// one of Op - E, with E a Hermitian rank-2 term of norm |dropped coupling| (e.g. locking b_l:
+// E = b_l v_k v_l^H M + conj(b_l) v_l v_k^H M, v_k the residual vector). The estimates do not see
+// E, so the true residual of a Ritz vector can exceed its estimate by up to |dropped coupling|.
+// A coupling is therefore only dropped at the rounding level of the quantities it touches; this
+// keeps "estimate <= tol |theta| => converged" honest for pairs of any magnitude, including a
+// wide dynamic range of |theta| (shift-invert near an eigenvalue).
 //
-// Breakdown. beta <= kBreakdownTol * (lower bound of ||Op||_M) means span[D V] is invariant (to
-// rounding): the coupling is set to 0 and the next basis vector is a fresh deterministic random
-// vector orthogonalized against [D V]; H becomes block diagonal and Lanczos continues there.
+// Locking. A kept converged pair gets b_l := 0, which decouples it exactly from later
+// Rayleigh-Ritz steps (its row and column of H are diagonal), once |b_l| <= kLockTol * (smallest
+// |theta| reference among the wanted pairs): E is then a few roundoffs relative to every wanted
+// pair. Zeroing a tol-sized coupling as soon as the pair converges would hide conj(b_l) <v_k, y>_M
+// in the residual of every other Ritz vector y; relative to a smaller |theta_y| that breaks the
+// convergence test (measured: true residuals 28x the estimate at tol = 1e-6). Scaling the
+// threshold by ||Op|| instead fails the same way when ||Op|| >> |theta_y|. Pairs converged only
+// to tol therefore stay coupled and keep improving; the estimates remain exact for the computed
+// relation.
+//
+// Breakdown. beta <= kBreakdownTol * ||Op v_j||_M means that Op v_j lies in span[D V] up to the
+// rounding error of computing it: the coupling is set to 0 and the next basis vector is a fresh
+// deterministic random vector orthogonalized against [D V]; H becomes block diagonal and Lanczos
+// continues there. The test is local to the step on purpose: compared with a global ||Op|| it
+// would discard genuine couplings that are small only relative to the largest eigenvalue, and
+// the wanted pairs with small |theta| would be declared converged (estimate 0) with large true
+// residuals or be skipped altogether. Any beta above rounding level is kept: CGS2 still yields a
+// new direction orthogonal to working precision, since the orthogonality loss of the second
+// pass is about eps * (rounding noise of the first pass) / beta.
 //
 // Deflation semantics. The basis stays M-orthogonal to span(D), so the solver computes eigenpairs
 // of the deflated operator P Op P (P = I - D D^H M). The estimates measure ||P (Op x - theta
@@ -56,11 +70,14 @@ namespace {
 
 using lapack::fint;
 
-/// beta <= kBreakdownTol * ||Op||_M (lower bound) is treated as an exact invariant subspace.
-constexpr double kBreakdownTol = 1e-12;
-/// A converged pair is locked (coupling zeroed) once |b_l| <= kLockTol * ||Op||_M (lower bound):
-/// a few units of roundoff, the accuracy to which the relation holds anyway.
-constexpr double kLockTol = 1e-15;
+constexpr double kEps = std::numeric_limits<double>::epsilon();
+/// beta <= kBreakdownTol * ||Op v_j||_M is an invariant subspace to rounding: a few dozen
+/// roundoffs of the step's own magnitude, the accuracy to which Op v_j and its CGS2 projection
+/// are computed anyway (see "Breakdown" above).
+constexpr double kBreakdownTol = 64 * kEps;
+/// A converged pair is locked (coupling zeroed) once |b_l| <= kLockTol * (smallest reference
+/// |theta| of the wanted pairs): a few roundoffs relative to every wanted pair.
+constexpr double kLockTol = 4 * kEps;
 /// Largest accepted |(D^H M D - I)_ij|: D is used as an orthonormal projector basis, so a
 /// noticeably non-orthonormal block would silently corrupt every orthogonalization.
 constexpr double kDeflationOrthoTol = 1e-8;
@@ -133,7 +150,6 @@ class ThickRestartLanczos {
   std::vector<T> coef_;            ///< CGS2 coefficients of the current vector against [D V]
   DenseMatrix<T> h_;               ///< ncv x ncv projected matrix, both triangles stored
   double beta_ = 0.0;              ///< coupling of v_{ncv-1} to the residual vector v_ncv
-  double op_norm_lb_ = 0.0;        ///< max ||Op v_j||_M and |theta| seen: lower bound of ||Op||_M
   std::uint64_t next_stream_ = 0;  ///< fill_random stream: 0 = start vector, then breakdowns
 
   // Rayleigh-Ritz results of the current cycle.
@@ -309,12 +325,11 @@ void ThickRestartLanczos<T>::expand(index_t first) {
     }
     ScopedTimer t(time_.orthogonalization);
     const auto [op_norm, beta] = orthogonalize(j + 1);  // op_norm = ||Op v_j||_M
-    op_norm_lb_ = std::max(op_norm_lb_, op_norm);
     // Op is M-self-adjoint, so the diagonal coefficient is real up to rounding.
     h_(j, j) = T(std::real(coef_[d_ + j]));
     const bool last = j + 1 == ncv_;
     double coupling = beta;
-    if (beta <= kBreakdownTol * op_norm_lb_) {
+    if (beta <= kBreakdownTol * op_norm) {  // local scale, see "Breakdown" above
       coupling = 0.0;
       // A full-space cycle needs no vector beyond v_{n-d-1}; otherwise the continuation (or the
       // next restart) needs a residual vector, so start an independent Krylov sequence.
@@ -342,7 +357,6 @@ void ThickRestartLanczos<T>::rayleigh_ritz() {
 
   double max_abs = 0.0;
   for (double th : theta_) max_abs = std::max(max_abs, std::abs(th));
-  op_norm_lb_ = std::max(op_norm_lb_, max_abs);
 
   est_.assign(static_cast<std::size_t>(m), 0.0);
   conv_.assign(static_cast<std::size_t>(m), 0);
@@ -409,18 +423,21 @@ void ThickRestartLanczos<T>::rotate_in_place(T* v, const DenseMatrix<T>& s) {
 }
 
 /// Thick restart keeping the `keep` best Ritz pairs (ranking order) and locking the converged ones
-/// whose coupling is at working precision.
+/// whose coupling is at working precision relative to every wanted pair.
 template <class T>
 void ThickRestartLanczos<T>::restart(index_t keep) {
   ScopedTimer t(time_.restart);
   const index_t m = ncv_;
+  double min_wanted_ref = std::numeric_limits<double>::infinity();
+  for (index_t l = 0; l < nev_; ++l) min_wanted_ref = std::min(min_wanted_ref, ref_[order_[l]]);
+  const double lock_tol = kLockTol * min_wanted_ref;
   DenseMatrix<T> sk(m, keep);
   std::vector<T> b(static_cast<std::size_t>(keep));
   for (index_t l = 0; l < keep; ++l) {
     const index_t i = order_[l];
     std::copy(s_.col(i), s_.col(i) + m, sk.col(l));
     b[l] = T(beta_) * s_(m - 1, i);  // coupling of Ritz vector l to v_m
-    if (conv_[i] && std::abs(b[l]) <= kLockTol * op_norm_lb_) b[l] = T(0);
+    if (conv_[i] && std::abs(b[l]) <= lock_tol) b[l] = T(0);
   }
 
   rotate_in_place(vcol(0), sk);
