@@ -158,7 +158,7 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 // nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2). Endpoints are placed at spectral-gap
 // midpoints. The count must come from an exact (double, full-rank) factorization: the inertia of a
 // single-precision or BLR factor is that of the rounded/compressed matrix, so then compute_inertia
-// builds a separate double factorization. The first two attempts use null-pivot detection (a null
+// builds a separate double factorization. The first attempt uses null-pivot detection only (a null
 // pivot means s sits on an eigenvalue: move it outward). Inside a cluster denser than the detection
 // threshold every s is flagged, so later attempts count WITHOUT detection: a backward-stable LDL^T
 // gives the exact inertia of K + E with ||E|| ~ eps*growth*||K||, i.e. it counts correctly every
@@ -170,13 +170,13 @@ index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>&
   const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
   if (exact) c.held = FactorHeld{};
   for (int tries = 0; tries < 8; ++tries) {
-    // At each position: detection on (certified), then - exact factor only, from the third
+    // At each position: detection on (certified), then - exact factor only, from the second
     // position on - detection off at the SAME position; move outward when that fails. Counting
     // without detection right at a null pivot would put the eigenvalue(s) at s on an arbitrary
     // side (a multiple eigenvalue exactly on an interval end lost one copy that way), so the
-    // first two positions only move.
+    // requested position only moves; after one move only a dense cluster still flags it.
     for (const bool detection : {true, false}) {
-      if (!detection && (!exact || tries < 2)) break;
+      if (!detection && (!exact || tries < 1)) break;
       Inertia in;
       if (exact) {
         fac.set_null_pivot_detection(detection);

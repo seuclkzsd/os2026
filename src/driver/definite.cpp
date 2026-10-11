@@ -237,9 +237,25 @@ void add_pair_reports(SolveReport& rep, const std::vector<double>& lambda, const
 
 // =============================================================================== nearest k
 
+// First radius of the windowed nearest solve: distance of the k-th nearest hint (Ritz values of
+// the plain run, converged or not) outside the band, or twice the farthest if there are fewer.
+double radius_from_hints(std::vector<double> hints, double sigma, index_t k, double band) {
+  std::vector<double> d;
+  for (double h : hints)
+    if (std::isfinite(h) && std::abs(h) > band) d.push_back(std::abs(h - sigma));
+  std::sort(d.begin(), d.end());
+  const double floor_r = std::max(std::abs(sigma) + 2.0 * band, 4.0 * band);
+  if (static_cast<index_t>(d.size()) >= k) return std::max(d[static_cast<std::size_t>(k - 1)] * (1.0 + 1e-6), floor_r);
+  return std::max(d.empty() ? 0.0 : 2.0 * d.back(), floor_r);
+}
+
+// Nearest k with one shift at sigma. With a zero band (zero_filter_tol) that reaches the selection
+// or the certificate window, the band's cluster competes for the run's pairs (a null space of
+// dimension d supplies copy after copy) and inertia counts in the window include it: then
+// *band_radius receives a first radius for the windowed solve and the result is discarded.
 template <class T>
 Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double n2a, double n2b,
-                          double scale) {
+                          double scale, double* band_radius) {
   const SolverConfig& cfg = c.cfg;
   SolveReport& rep = c.rep;
   const index_t n = pencil.order();
@@ -279,8 +295,19 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     metrics = std::move(m2);
   };
   select_and_verify();
-  if (rep.zero_modes_filtered > 0)
-    warn(c, std::to_string(rep.zero_modes_filtered) + " zero modes filtered (|lambda| <= zero_filter_tol*scale)");
+  auto hand_over = [&]() {
+    std::vector<double> hints = run.ritz_hints;
+    hints.insert(hints.end(), run.all.lambda.begin(), run.all.lambda.end());
+    *band_radius = radius_from_hints(hints, t.sigma, k, zero_tol);
+    rep.restarts = run.restarts;
+    rep.op_applies = run.applies;
+    return Solution<T>{};
+  };
+  if (zero_tol >= 0) {
+    double r = 0.0;
+    for (double l : sel.lambda) r = std::max(r, std::abs(l - t.sigma));
+    if (rep.zero_modes_filtered > 0 || sel.size() < k || std::abs(t.sigma) - r <= zero_tol) return hand_over();
+  }
 
   // Inertia certificate (DESIGN §3.6-8), with up to two deflated reruns on a count mismatch.
   const bool want_cert = cfg.inertia_check != Toggle::Off;
@@ -299,6 +326,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     for (double l : sel.lambda) r = std::max(r, std::abs(l - t.sigma));
     double a_end = push_out(t.sigma - r, -1.0);
     double b_end = push_out(t.sigma + r, +1.0);
+    if (zero_tol >= 0 && a_end <= zero_tol && b_end >= -zero_tol) return hand_over();  // window meets the band
     const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
     const index_t nu_a = count_below(c, fac, pencil, a_end, -1.0, step);
     const index_t nu_b = count_below(c, fac, pencil, b_end, +1.0, step);
@@ -310,8 +338,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     for (double l : run.all.lambda)
       if (std::isfinite(l) && l >= a_end && l <= b_end && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
     cert.count_found = found;
-    cert.passed = cert.count_inertia == cert.count_found ||
-                  (zero_tol >= 0 && cert.count_inertia >= cert.count_found);  // filtered zeros are counted by inertia
+    cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
     event(c, "certificate", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end}, {"upper", b_end},
                              {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
                              {"count_found", static_cast<std::int64_t>(found)}, {"passed", cert.passed}});
@@ -386,6 +413,9 @@ class WindowSolver {
   }
 
   Solution<T> solve();
+  /// Nearest target with a zero band: the k nearest sigma outside the band, from windows
+  /// [sigma - r, sigma + r] minus the band; r0 (> 0) is the first radius tried.
+  void set_nearest_radius(double r0) { nearest_r0_ = r0; }
 
  private:
   // ---- counts and cuts
@@ -422,6 +452,7 @@ class WindowSolver {
   std::vector<Slice> slices_;
   Pool<T> pool_;
   index_t restarts_ = 0, applies_ = 0;
+  double nearest_r0_ = -1.0;
 };
 
 template <class T>
@@ -867,6 +898,34 @@ Solution<T> WindowSolver<T>::solve() {
     }
     rep.certificate.lower = lo.s;
     rep.certificate.upper = hi.s;
+  } else if (mode == TargetMode::Nearest) {
+    // The k nearest sigma outside the band lie in [sigma - r, sigma + r] once that disk holds k
+    // eigenvalues outside the band: grow r from the hint until it does (two counts per radius).
+    if (!(band_ >= 0) || !(nearest_r0_ > 0)) HS_THROW(Internal, "windowed nearest needs a zero band and a radius");
+    const auto [neg, pos] = band_edges();
+    auto outside = [&](const CountPoint& lo, const CountPoint& hi) {
+      index_t tot = hi.nu - lo.nu;
+      const CountPoint& bl = lo.s > neg.s ? lo : neg;
+      const CountPoint& bh = hi.s < pos.s ? hi : pos;
+      if (bh.s > bl.s) tot -= bh.nu - bl.nu;
+      return tot;
+    };
+    double r = nearest_r0_;
+    CountPoint lo{}, hi{};
+    index_t tot = 0;
+    for (int it = 0; it < 40; ++it) {
+      lo = count(t.sigma - r, -1.0);
+      hi = count(t.sigma + r, +1.0);
+      tot = outside(lo, hi);
+      if (tot >= k || (lo.nu == 0 && hi.nu == n_)) break;
+      r *= 2.0;
+    }
+    if (lo.s < neg.s) windows.push_back({lo, hi.s < neg.s ? hi : neg});
+    if (hi.s > pos.s) windows.push_back({lo.s > pos.s ? lo : pos, hi});
+    if (windows.empty()) HS_THROW(Internal, "windowed nearest: the disk lies inside the zero band");
+    rep.zero_modes_filtered = tot >= 0 ? (hi.nu - lo.nu) - tot : 0;
+    rep.certificate.lower = lo.s;
+    rep.certificate.upper = hi.s;
   } else {
     // Smallest: window (-inf, U] with nu(U) >= k; largest: [L, +inf) with n - nu(L) >= k. The
     // search stops refining once the extra pairs cost less than another count (slack).
@@ -1017,6 +1076,10 @@ Solution<T> WindowSolver<T>::solve() {
   // ---- 5. Output: target order and selection, applied to the pool in place.
   std::stable_sort(in.begin(), in.end(), [&](index_t p, index_t q) { return pool_.lambda[p] < pool_.lambda[q]; });
   if (mode == TargetMode::Largest) std::reverse(in.begin(), in.end());
+  if (mode == TargetMode::Nearest)
+    std::stable_sort(in.begin(), in.end(), [&](index_t p, index_t q) {
+      return std::abs(pool_.lambda[p] - t.sigma) < std::abs(pool_.lambda[q] - t.sigma);
+    });
   if (mode != TargetMode::Interval && static_cast<index_t>(in.size()) > k) in.resize(static_cast<std::size_t>(k));
   std::vector<index_t> perm = in;
   {
@@ -1054,7 +1117,25 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   // Work not inside a Factor / Iterate scope (refinement, residuals, rescue, certificate
   // bookkeeping) is verification.
   PhaseScope phase(c.clock, Phase::Verify);
-  if (c.cfg.target.mode == TargetMode::Nearest) return solve_nearest(c, pencil, fac, n2a, n2b, scale);
+  if (c.cfg.target.mode == TargetMode::Nearest) {
+    double r0 = -1.0;
+    Solution<T> sol = solve_nearest(c, pencil, fac, n2a, n2b, scale, &r0);
+    if (!(r0 > 0)) return sol;
+    // The zero band interferes: k nearest outside it from windows [sigma - r, sigma + r] minus the
+    // band (slices with shifts kept away from the band), r from inertia counts.
+    warn(c, "zero band |lambda| <= " + fmt(c.cfg.zero_filter_tol * scale) +
+                " reaches the nearest window: windowed solve with radius from inertia counts");
+    const index_t restarts = c.rep.restarts, applies = c.rep.op_applies;
+    c.rep.pairs.clear();
+    c.rep.certificate = InertiaCertificate{};
+    c.rep.zero_modes_filtered = 0;
+    WindowSolver<T> ws(c, pencil, fac, n2a, n2b, scale, spectrum);
+    ws.set_nearest_radius(r0);
+    sol = ws.solve();
+    c.rep.restarts += restarts;
+    c.rep.op_applies += applies;
+    return sol;
+  }
   if (c.cfg.inertia_check == Toggle::Off)
     warn(c, "inertia_check=off ignored: interval / smallest / largest targets are built on inertia counts");
   WindowSolver<T> ws(c, pencil, fac, n2a, n2b, scale, spectrum);

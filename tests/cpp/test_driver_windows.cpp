@@ -340,6 +340,26 @@ TEST(DriverTargets, SmallestAcrossTheZeroBandFromBothSides) {
   expect_same_set(l.eigenvalues, {2.0, 1.5, 0.25, -0.1, -0.2, -0.3}, 1e-10);
 }
 
+TEST(DriverTargets, NearestNextToAFilteredNullSpace) {
+  // Positive semidefinite with an 80-dimensional null space; sigma just above (or inside) the zero
+  // band. A single shift there converges copies of the null space; the driver must switch to
+  // windows sigma +- r minus the band, certified by inertia, and return the 5 nearest nonzero.
+  std::vector<double> lam(80, 0.0);
+  for (int i = 1; i <= 300; ++i) lam.push_back(0.3 + 0.01 * i);
+  auto a = hs::test::prescribed_spectrum<double>(lam, 4, 39);
+  for (double sigma : {0.01, 0.0}) {
+    auto cfg = base_cfg();
+    cfg.target.sigma = sigma;
+    cfg.target.k = 5;
+    cfg.zero_filter_tol = 1e-6;
+    auto sol = hs::solve(a, nullptr, cfg);
+    expect_window_ok(sol);
+    expect_same_set(sol.eigenvalues, {0.31, 0.32, 0.33, 0.34, 0.35}, 1e-10);
+    EXPECT_EQ(sol.report.zero_modes_filtered, 80) << sigma;
+    EXPECT_TRUE(std::is_sorted(sol.eigenvalues.begin(), sol.eigenvalues.end()));  // nearest first
+  }
+}
+
 TEST(DriverTargets, IndefiniteBSupportsNearestOnly) {
   const index_t n = 50;
   auto a = hs::test::laplacian_1d<double>(n);
