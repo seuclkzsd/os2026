@@ -3,7 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <random>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "hsolve/dense.hpp"
@@ -271,6 +274,205 @@ TEST(SparseCsr, ToComplex) {
   c.validate();
   ASSERT_EQ(c.nnz(), a.nnz());
   for (index_t p = 0; p < a.nnz(); ++p) EXPECT_EQ(c.values[p], cplx(a.values[p], 0.0));
+  // The consuming overload gives the same matrix and leaves an empty, valid source.
+  auto moved_from = a;
+  auto d = hs::to_complex(std::move(moved_from));
+  EXPECT_EQ(d.rowptr, c.rowptr);
+  EXPECT_EQ(d.colind, c.colind);
+  EXPECT_EQ(d.values, c.values);
+  EXPECT_EQ(moved_from.nrows, 0);
+  EXPECT_NO_THROW(moved_from.validate());
+}
+
+// ------------------------------------------- symmetrize_from_triangle / hermitian_part
+
+// The formulations these functions had before the single-pass rewrite (via an explicit
+// transpose and add), kept as references: results must agree bitwise.
+template <class T>
+CsrMatrix<T> reference_symmetrize(const CsrMatrix<T>& tri, bool upper) {
+  CsrMatrix<T> strict = hs::triangle(tri, upper);
+  std::vector<index_t> r, c;
+  std::vector<T> v;
+  for (index_t i = 0; i < strict.nrows; ++i)
+    for (index_t p = strict.rowptr[i]; p < strict.rowptr[i + 1]; ++p)
+      if (strict.colind[p] != i) {
+        r.push_back(i);
+        c.push_back(strict.colind[p]);
+        v.push_back(strict.values[p]);
+      }
+  const CsrMatrix<T> s = hs::csr_from_coo<T>(tri.nrows, tri.ncols, r, c, v, false);
+  return hs::add(T(1), tri, T(1), hs::conj_transpose(s));
+}
+
+template <class T>
+CsrMatrix<T> reference_hermitian_part(const CsrMatrix<T>& a) {
+  return hs::add(T(0.5), a, T(0.5), hs::conj_transpose(a));
+}
+
+template <class T>
+void expect_bitwise_equal(const CsrMatrix<T>& got, const CsrMatrix<T>& want) {
+  EXPECT_NO_THROW(got.validate());
+  EXPECT_EQ(got.nrows, want.nrows);
+  EXPECT_EQ(got.ncols, want.ncols);
+  EXPECT_EQ(got.rowptr, want.rowptr);
+  EXPECT_EQ(got.colind, want.colind);
+  ASSERT_EQ(got.values.size(), want.values.size());
+  if (!got.values.empty()) {
+    EXPECT_EQ(std::memcmp(got.values.data(), want.values.data(), got.values.size() * sizeof(T)), 0);
+  }
+}
+
+// Random one-triangle matrix with some empty rows and missing diagonal entries (diagonal of
+// complex T made real only when `real_diag`).
+template <class T>
+CsrMatrix<T> random_triangle(index_t n, double density, bool upper, std::uint64_t seed) {
+  std::mt19937_64 g(seed);
+  std::uniform_real_distribution<double> u(0.0, 1.0);
+  std::vector<index_t> r, c;
+  std::vector<T> v;
+  for (index_t i = 0; i < n; ++i) {
+    if (i % 7 == 3) continue;  // empty row
+    for (index_t j = upper ? i : 0; j < (upper ? n : i + 1); ++j) {
+      if (j == i ? (i % 5 == 1) : u(g) > density) continue;  // every 5th diagonal missing
+      r.push_back(i);
+      c.push_back(j);
+      v.push_back(rand_scalar<T>(g));
+    }
+  }
+  return hs::csr_from_coo<T>(n, n, r, c, v);
+}
+
+template <class T>
+class SparseSymmetrize : public ::testing::Test {};
+using Scalars = ::testing::Types<double, cplx>;
+TYPED_TEST_SUITE(SparseSymmetrize, Scalars);
+
+TYPED_TEST(SparseSymmetrize, MatchesReferenceForBothTrianglesAndOverloads) {
+  using T = TypeParam;
+  for (const bool upper : {true, false}) {
+    for (const double density : {0.02, 0.2, 1.0}) {
+      SCOPED_TRACE(std::string(upper ? "upper" : "lower") + " density " + std::to_string(density));
+      const CsrMatrix<T> tri = random_triangle<T>(61, density, upper, 100 + static_cast<int>(density * 10));
+      const CsrMatrix<T> want = reference_symmetrize(tri, upper);
+      expect_bitwise_equal(hs::symmetrize_from_triangle(tri), want);
+      CsrMatrix<T> consumed = tri;
+      expect_bitwise_equal(hs::symmetrize_from_triangle(std::move(consumed)), want);
+      EXPECT_EQ(consumed.nrows, 0);
+      EXPECT_NO_THROW(consumed.validate());
+    }
+  }
+}
+
+TYPED_TEST(SparseSymmetrize, RestoresAHermitianMatrixFromEitherTriangle) {
+  using T = TypeParam;
+  const CsrMatrix<T> h = random_sparse<T>(40, 0.15, true, 21);
+  for (const bool upper : {true, false}) {
+    const CsrMatrix<T> tri = hs::triangle(h, upper);
+    expect_bitwise_equal(hs::symmetrize_from_triangle(tri), h);
+    expect_bitwise_equal(hs::symmetrize_from_triangle(CsrMatrix<T>(tri)), h);
+  }
+}
+
+TYPED_TEST(SparseSymmetrize, EdgeCases) {
+  using T = TypeParam;
+  // Empty 0 x 0, 1 x 1 and diagonal-only matrices come back unchanged (both overloads).
+  CsrMatrix<T> empty;
+  expect_bitwise_equal(hs::symmetrize_from_triangle(empty), empty);
+  expect_bitwise_equal(hs::symmetrize_from_triangle(CsrMatrix<T>(empty)), empty);
+  CsrMatrix<T> diag = hs::identity<T>(5);
+  diag.values[2] = T(-3);
+  expect_bitwise_equal(hs::symmetrize_from_triangle(diag), diag);
+  expect_bitwise_equal(hs::symmetrize_from_triangle(CsrMatrix<T>(diag)), diag);
+  CsrMatrix<T> zero_rows;  // 4 x 4 without entries
+  zero_rows.nrows = zero_rows.ncols = 4;
+  zero_rows.rowptr.assign(5, 0);
+  expect_bitwise_equal(hs::symmetrize_from_triangle(zero_rows), zero_rows);
+  // A single strict entry, no diagonal at all: (0, 3) = v mirrors to (3, 0) = conj(v).
+  const std::vector<index_t> r{0}, c{3};
+  std::mt19937_64 g(5);
+  const T v = rand_scalar<T>(g);
+  const CsrMatrix<T> one = hs::csr_from_coo<T>(4, 4, r, c, {v});
+  for (const CsrMatrix<T>& full : {hs::symmetrize_from_triangle(one), hs::symmetrize_from_triangle(CsrMatrix<T>(one))}) {
+    EXPECT_EQ(full.rowptr, (std::vector<index_t>{0, 1, 1, 1, 2}));
+    EXPECT_EQ(full.colind, (std::vector<std::int32_t>{3, 0}));
+    EXPECT_EQ(full.values, (std::vector<T>{v, hs::conj_if(v)}));
+  }
+  // Both triangles, or a non-square matrix: InvalidInput, also for the consuming overload.
+  const CsrMatrix<T> both = random_sparse<T>(9, 0.4, true, 22);
+  EXPECT_THROW(hs::symmetrize_from_triangle(both), hs::Error);
+  EXPECT_THROW(hs::symmetrize_from_triangle(CsrMatrix<T>(both)), hs::Error);
+  CsrMatrix<T> wide;
+  wide.nrows = 2;
+  wide.ncols = 3;
+  wide.rowptr.assign(3, 0);
+  EXPECT_THROW(hs::symmetrize_from_triangle(wide), hs::Error);
+  EXPECT_THROW(hs::symmetrize_from_triangle(CsrMatrix<T>(wide)), hs::Error);
+}
+
+template <class T>
+class SparseHermitianPart : public ::testing::Test {};
+TYPED_TEST_SUITE(SparseHermitianPart, Scalars);
+
+TYPED_TEST(SparseHermitianPart, MatchesReferenceOnAsymmetricPatterns) {
+  using T = TypeParam;
+  for (const double density : {0.01, 0.1, 0.5}) {
+    SCOPED_TRACE(density);
+    // General square matrices: many entries without a stored mirror, empty rows and rows whose
+    // Hermitian-part row consists of inserted entries only.
+    const CsrMatrix<T> a = random_sparse<T>(53, density, false, 300 + static_cast<int>(density * 100));
+    const CsrMatrix<T> want = reference_hermitian_part(a);
+    expect_bitwise_equal(hs::hermitian_part(a), want);
+    CsrMatrix<T> consumed = a;
+    expect_bitwise_equal(hs::hermitian_part(std::move(consumed)), want);
+    EXPECT_EQ(consumed.nrows, 0);
+    EXPECT_EQ(hs::hermitian_defect(want), 0.0);
+  }
+  // One triangle only: every off-diagonal entry is missing its mirror.
+  const CsrMatrix<T> up = random_triangle<T>(30, 0.3, true, 31);
+  expect_bitwise_equal(hs::hermitian_part(up), reference_hermitian_part(up));
+  expect_bitwise_equal(hs::hermitian_part(CsrMatrix<T>(up)), reference_hermitian_part(up));
+}
+
+TYPED_TEST(SparseHermitianPart, SymmetricPatternIsUpdatedInPlace) {
+  using T = TypeParam;
+  CsrMatrix<T> a = random_sparse<T>(47, 0.2, true, 41);
+  // Rounding-level asymmetry and (complex) non-real diagonal on an unchanged pattern.
+  for (index_t p = 0; p < a.nnz(); ++p) a.values[p] *= 1.0 + 1e-13 * static_cast<double>(p % 7 - 3);
+  if constexpr (hs::is_complex_v<T>) a.values[a.rowptr[5]] += T(0.0, 1e-9);
+  const CsrMatrix<T> want = reference_hermitian_part(a);
+  expect_bitwise_equal(hs::hermitian_part(a), want);
+  CsrMatrix<T> consumed = a;
+  const T* storage = consumed.values.data();
+  const CsrMatrix<T> got = hs::hermitian_part(std::move(consumed));
+  expect_bitwise_equal(got, want);
+  EXPECT_EQ(got.values.data(), storage);  // no new value storage
+  EXPECT_EQ(hs::hermitian_defect(got), 0.0);
+}
+
+TYPED_TEST(SparseHermitianPart, EdgeCases) {
+  using T = TypeParam;
+  CsrMatrix<T> empty;
+  expect_bitwise_equal(hs::hermitian_part(empty), empty);
+  expect_bitwise_equal(hs::hermitian_part(CsrMatrix<T>(empty)), empty);
+  CsrMatrix<T> zero_rows;
+  zero_rows.nrows = zero_rows.ncols = 3;
+  zero_rows.rowptr.assign(4, 0);
+  expect_bitwise_equal(hs::hermitian_part(zero_rows), zero_rows);
+  expect_bitwise_equal(hs::hermitian_part(CsrMatrix<T>(zero_rows)), zero_rows);
+  // Single orphan (2, 0) in an otherwise empty matrix.
+  const std::vector<index_t> r{2}, c{0};
+  const CsrMatrix<T> one = hs::csr_from_coo<T>(3, 3, r, c, {T(4)});
+  for (const CsrMatrix<T>& h : {hs::hermitian_part(one), hs::hermitian_part(CsrMatrix<T>(one))}) {
+    EXPECT_EQ(h.rowptr, (std::vector<index_t>{0, 1, 1, 2}));
+    EXPECT_EQ(h.colind, (std::vector<std::int32_t>{2, 0}));
+    EXPECT_EQ(h.values, (std::vector<T>{T(2), T(2)}));
+  }
+  CsrMatrix<T> wide;
+  wide.nrows = 2;
+  wide.ncols = 3;
+  wide.rowptr.assign(3, 0);
+  EXPECT_THROW(hs::hermitian_part(wide), hs::Error);
+  EXPECT_THROW(hs::hermitian_part(CsrMatrix<T>(wide)), hs::Error);
 }
 
 TEST(SparseEmbedding, InertiaDoublesAndSpectrumDuplicates) {

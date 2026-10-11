@@ -50,19 +50,36 @@ CsrMatrix<T> identity(index_t n);
 template <class T>
 CsrMatrix<T> triangle(const CsrMatrix<T>& a, bool upper);
 
-/// Restore full Hermitian storage from one stored triangle: U + U^H - diag(U).
-/// Precondition: `tri` holds only one triangle (plus diagonal). O(nnz).
+/// Restore full Hermitian storage from one stored triangle: U + U^H - diag(U) (mirrored values
+/// conjugated). Throws InvalidInput if `tri` is not square or stores entries in both strict
+/// triangles; a diagonal-only matrix is returned unchanged. One counting pass, then the result is
+/// allocated once and filled: memory = input + result. O(nnz).
 template <class T>
 CsrMatrix<T> symmetrize_from_triangle(const CsrMatrix<T>& tri);
+/// Same, consuming `tri` (left as an empty 0 x 0 matrix): its arrays are released as soon as they
+/// are no longer needed, so the peak is ~1.2x (real) / ~1.3x (complex) the result instead of 1.5x.
+template <class T>
+CsrMatrix<T> symmetrize_from_triangle(CsrMatrix<T>&& tri);
 
 /// Exact Hermitian part (A + A^H) / 2 on the union pattern of A and A^H (diagonal of a complex
 /// matrix becomes real). Used to make "Hermitian within tolerance" input exactly Hermitian so
 /// that factorization (one triangle), operators and residuals all see the same matrix.
+/// Computed as add(0.5, A, 0.5, A^H) would (bitwise), without forming A^H: entries whose mirror
+/// is not stored are found by binary search. Memory: input + result (+ the list of missing
+/// mirrors). O(nnz log(row length)); OpenMP over rows. Square A only (InvalidInput otherwise).
 template <class T>
 CsrMatrix<T> hermitian_part(const CsrMatrix<T>& a);
+/// Same values, consuming `a` (left as an empty 0 x 0 matrix). A structurally symmetric A (the
+/// usual case: rounding-level asymmetry) is updated in place, with no allocation; otherwise the
+/// peak is ~1.7x (real) / ~1.8x (complex) the result instead of ~3x.
+template <class T>
+CsrMatrix<T> hermitian_part(CsrMatrix<T>&& a);
 
 /// Promote a real matrix to complex (needed when A is complex and B is real, or vice versa).
 CsrMatrix<cplx> to_complex(const CsrMatrix<double>& a);
+/// Same, consuming `a` (left as an empty 0 x 0 matrix): the row pointers and column indices move
+/// over instead of being copied, and the real values are released on return.
+CsrMatrix<cplx> to_complex(CsrMatrix<double>&& a);
 
 /// Frobenius norm. O(nnz).
 template <class T>
