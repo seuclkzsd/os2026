@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <vector>
 
 #include "hsolve/error.hpp"
@@ -147,6 +148,38 @@ TYPED_TEST(OpsKernelPaths, ShiftInvertResultsUnchangedAcrossPaths) {
       EXPECT_LE(std::abs(op.refinement_steps() - ref_steps), 1) << "with_b=" << with_b;
     }
   }
+}
+
+// An unattainable rel_tol with a double factor near an eigenvalue: the P1 policy computes
+// corrections until one is rejected; stopping at the rounding level (componentwise backward error
+// <= 8 eps) computes no more of them than that, and returns a residual as small (both are at the
+// attainable accuracy).
+TYPED_TEST(OpsKernelPaths, RefinementStopsAtTheRoundingLevel) {
+  using T = TypeParam;
+  const index_t nx = 40, ny = 41, n = nx * ny, p = 3;
+  const auto a = hs::test::laplacian_2d<T>(nx, ny);
+  const auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
+  const double sigma = w[n / 3] + 1e-7 * w.back();  // ill-conditioned, not singular
+  f->analyze(pencil, 1.0, -sigma);
+  ASSERT_TRUE(f->factorize(1.0, -sigma));
+  const auto x = random_block<T>(n, p, n, 31);
+  std::vector<T> y1(static_cast<std::size_t>(n * p)), y2(y1.size());
+  hs::SolveRefinement p4;
+  p4.max_steps = 10;
+  p4.rel_tol = 1e-16;  // unattainable
+  hs::SolveRefinement p1 = p4;
+  p1.stop_at_rounding_level = false;
+  hs::ShiftInvertOperator<T> old_policy(*f, pencil, sigma, p1), new_policy(*f, pencil, sigma, p4);
+  old_policy.apply(x.data(), n, y1.data(), n, p);
+  new_policy.apply(x.data(), n, y2.data(), n, p);
+  EXPECT_GE(old_policy.refinement_steps(), 1);
+  EXPECT_LE(new_policy.refinement_steps(), old_policy.refinement_steps());
+  EXPECT_LT(new_policy.refinement_steps(), p4.max_steps);
+  EXPECT_LE(new_policy.last_backward_error(), 8 * std::numeric_limits<double>::epsilon());
+  EXPECT_LE(new_policy.last_relative_residual(), 4 * old_policy.last_relative_residual() + 1e-300);
+  EXPECT_LE(max_rel_diff(n, p, y2.data(), n, y1.data(), n), 1e-6);
 }
 
 TYPED_TEST(OpsKernelPaths, UnavailablePathIsRefusedAtConstruction) {

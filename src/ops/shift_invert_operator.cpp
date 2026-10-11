@@ -24,6 +24,16 @@ void apply_b(const CsrMatrix<T>* b, index_t n, const T* x, index_t ldx, T* y, in
   for (index_t k = 0; k < p; ++k) std::copy(x + k * ldx, x + k * ldx + n, y + k * ldy);
 }
 
+// A residual column whose componentwise backward error (shifted_residual) is at most this is
+// rounding noise of its own evaluation: a correction computed from it cannot reduce it, so the
+// column is not refined further. Measured (bench/solvephase_profile.cpp, 4 threads, p = 1, 4,
+// 16): one correction of a double MUMPS solve leaves 1.2-2.2 eps on the six 1e5 test cases,
+// while a plain solve has 9 .. 2.5e5 eps. Before P4 a column that cannot meet rel_tol
+// (syn-near-singular-complex-1e5: ||r|| / ||Bx|| stalls at 5e-11 > 1e-12) kept computing
+// corrections until one was rejected: 3-5 block solves per apply instead of 1 (2.3-6.3x the
+// apply time).
+constexpr double kRoundingLevel = 8.0 * std::numeric_limits<double>::epsilon();
+
 // The factor must hold a usable factorization (the operators' construction check).
 template <class T>
 void check_usable(const SparseFactorization<T>& factor, const char* who) {
@@ -57,11 +67,13 @@ ShiftInvertOperator<T>::ShiftInvertOperator(SparseFactorization<T>& factor,
 }
 
 template <class T>
-void ShiftInvertOperator<T>::residual(const T* x, index_t ldx, const T* y, index_t ldy, index_t p) {
+void ShiftInvertOperator<T>::residual(const T* x, index_t ldx, const T* y, index_t ldy, index_t p,
+                                      double* omega) {
   // r = Bx - (A y - sigma B y) = B (x + sigma y) - A y: one sweep over A and B (B x is
-  // recomputed rather than stored, against a block solve per step, to keep the workspace small).
+  // recomputed rather than stored, against a block solve per step, to keep the workspace small),
+  // with the componentwise backward error of every column.
   shifted_residual(pencil_->a(), pencil_->b(), sigma_, x, ldx, y, ldy, residual_.data(), size(), p,
-                   KernelOptions{kernels_, &scratch_});
+                   KernelOptions{kernels_, &scratch_}, omega);
 }
 
 template <class T>
@@ -85,7 +97,8 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
   // eigenvalue for the factor's precision) corrections make things worse, and at the attainable
   // accuracy they merely stagnate. Hence every column keeps its best iterate: a correction is
   // first applied to a candidate copy and only accepted if it reduces that column's residual;
-  // otherwise the column is frozen at its previous iterate (and residual).
+  // otherwise the column is frozen at its previous iterate (and residual). A column whose residual
+  // is at the rounding level of its own evaluation (kRoundingLevel) is not refined at all.
   const std::size_t len = static_cast<std::size_t>(n * p);
   if (residual_.size() < len) {
     residual_.resize(len);
@@ -102,13 +115,15 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
   };
 
   factor_->solve(y, p, ldy);
-  residual(x, ldx, y, ldy, p);
+  std::vector<double> omega(static_cast<std::size_t>(p)), candidate_omega(omega.size());
+  residual(x, ldx, y, ldy, p, omega.data());
   std::vector<double> rel(static_cast<std::size_t>(p));
   std::vector<char> active(static_cast<std::size_t>(p));
+  const double floor = refinement_.stop_at_rounding_level ? kRoundingLevel : -1.0;
   index_t remaining = 0;
   for (index_t k = 0; k < p; ++k) {
     rel[k] = relative(k);
-    active[k] = rel[k] > refinement_.rel_tol;
+    active[k] = rel[k] > refinement_.rel_tol && omega[k] > floor;
     remaining += active[k];
   }
   for (int step = 0; step < refinement_.max_steps && remaining > 0; ++step) {
@@ -125,20 +140,23 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
     factor_->solve(c, p, n);
     ++refinement_steps_;
     for (index_t k = 0; k < p; ++k) linalg::axpy(n, T(1), y + k * ldy, c + k * n);
-    residual(x, ldx, c, n, p);
+    residual(x, ldx, c, n, p, candidate_omega.data());
     for (index_t k = 0; k < p; ++k) {
       if (!active[k]) continue;
       const double candidate_rel = relative(k);
       if (candidate_rel < rel[k]) {
         std::copy(c + k * n, c + (k + 1) * n, y + k * ldy);
         rel[k] = candidate_rel;
-        if (candidate_rel > refinement_.rel_tol) continue;  // still refining this column
+        omega[k] = candidate_omega[k];
+        // Still refining this column unless converged or at the rounding level.
+        if (candidate_rel > refinement_.rel_tol && omega[k] > floor) continue;
       }
-      active[k] = false;  // converged, or the correction was rejected (best iterate kept)
+      active[k] = false;  // converged, at the rounding level, or the correction was rejected
       --remaining;
     }
   }
   last_rel_residual_ = p > 0 ? *std::max_element(rel.begin(), rel.end()) : 0.0;
+  last_backward_error_ = p > 0 ? *std::max_element(omega.begin(), omega.end()) : 0.0;
 }
 
 template <class T>

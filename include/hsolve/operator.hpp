@@ -36,13 +36,17 @@ class CsrOperator final : public LinearOperator<T> {
 
 /// Iterative-refinement policy for shift-invert solves (docs/DESIGN.md §3.4b), with the residual
 /// r_j = (B x)_j - K y_j of column j computed in double precision. Column j is refined until
-/// ||r_j|| <= rel_tol * ||(B x)_j||, or until a correction fails to reduce ||r_j|| (stagnation at
-/// the attainable accuracy, or divergence when eps_factor * cond(K) >= 1, i.e. sigma is too close
-/// to an eigenvalue for the factor's precision): that correction is discarded, so every column
-/// returns its best iterate. At most max_steps block corrections are computed per apply.
+/// ||r_j|| <= rel_tol * ||(B x)_j||, until r_j is at the rounding level of its own evaluation
+/// (componentwise backward error max_i |r_ij| / (|B| |x_j + sigma y_j| + |A| |y_j|)_i <= 8 eps,
+/// see shifted_residual: no correction could reduce it, so none is computed), or until a
+/// correction fails to reduce ||r_j|| (stagnation at the attainable accuracy, or divergence when
+/// eps_factor * cond(K) >= 1, i.e. sigma is too close to an eigenvalue for the factor's
+/// precision): that correction is discarded, so every column returns its best iterate. At most
+/// max_steps block corrections are computed per apply.
 struct SolveRefinement {
   int max_steps = 0;     ///< 0 = off. Needed with single-precision or BLR factorizations.
   double rel_tol = 0.0;  ///< column j is done when ||r_j|| <= rel_tol * ||(B x)_j||
+  bool stop_at_rounding_level = true;  ///< false: ignore the backward-error test (P1 behaviour)
 };
 
 /// Op = K^{-1} * B with K = A - sigma*B (B = I when the pencil has no B), where `factor` holds
@@ -84,13 +88,17 @@ class ShiftInvertOperator final : public LinearOperator<T> {
   /// max_j ||r_j|| / ||(B x)_j|| of the block returned by the last apply, r = Bx - K y computed
   /// in double precision for the returned Y (0 if refinement is off).
   double last_relative_residual() const noexcept { return last_rel_residual_; }
+  /// max_j componentwise backward error of the block returned by the last apply (0 if refinement
+  /// is off); a few eps means Op x is as accurate as double precision allows for this K.
+  double last_backward_error() const noexcept { return last_backward_error_; }
 
  protected:
   void do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) override;
 
  private:
-  /// residual_ = B X - K Y for p columns (leading dimension n).
-  void residual(const T* x, index_t ldx, const T* y, index_t ldy, index_t p);
+  /// residual_ = B X - K Y for p columns (leading dimension n), omega = their componentwise
+  /// backward errors.
+  void residual(const T* x, index_t ldx, const T* y, index_t ldy, index_t p, double* omega);
 
   SparseFactorization<T>* factor_;
   const ShiftedPencil<T>* pencil_;
@@ -100,6 +108,7 @@ class ShiftInvertOperator final : public LinearOperator<T> {
   index_t factorization_id_;
   index_t refinement_steps_ = 0;
   double last_rel_residual_ = 0.0;
+  double last_backward_error_ = 0.0;
   std::vector<T> residual_;   ///< refinement workspace: residuals (n x p)
   std::vector<T> candidate_;  ///< refinement workspace: corrected candidate iterates (n x p)
   std::vector<double> scratch_;  ///< sparse-kernel scratch (interleaved copies)
