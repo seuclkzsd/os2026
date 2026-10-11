@@ -844,7 +844,19 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   } else if (type == ProblemType::Auto) {
     Timer tb;
     Inertia ib;
-    if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
+    // A diagonal B (e.g. lumped/Yee mass matrices) is HPD iff its diagonal is positive: no
+    // factorization needed. Otherwise count the inertia of B on the main analysis.
+    bool diagonal = b->nnz() <= n;
+    for (index_t i = 0; diagonal && i < n; ++i)
+      diagonal = (b->rowptr[i + 1] - b->rowptr[i] == 0) || (b->rowptr[i + 1] - b->rowptr[i] == 1 && b->colind[b->rowptr[i]] == i);
+    if (diagonal) {
+      ib.neg = ib.zero = ib.pos = 0;
+      for (index_t i = 0; i < n; ++i) {
+        const double d = (b->rowptr[i + 1] > b->rowptr[i]) ? std::real(b->values[b->rowptr[i]]) : 0.0;
+        (d > 0.0 ? ib.pos : d < 0.0 ? ib.neg : ib.zero)++;
+      }
+      ib.valid = true;
+    } else if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
       if (fac->factorize(0.0, 1.0)) ib = fac->inertia();  // false: B singular -> not HPD
     } else {
       ib = compute_inertia(pencil, 0.0, 1.0, fopts);  // forces an exact double factorization
