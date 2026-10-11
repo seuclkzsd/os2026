@@ -387,21 +387,6 @@ struct DotPortable {
   }
 };
 
-struct DotAvx512 {
-  HS_AVX512 static double dot(const double* x, const double* y, fint len) {
-    __m512d acc = _mm512_setzero_pd();
-    fint j = 0;
-    for (; j + 8 <= len; j += 8)
-      acc = _mm512_fmadd_pd(_mm512_loadu_pd(x + j), _mm512_loadu_pd(y + j), acc);
-    if (j < len) {
-      const __mmask8 tail = static_cast<__mmask8>((1u << (len - j)) - 1u);
-      acc = _mm512_fmadd_pd(_mm512_maskz_loadu_pd(tail, x + j), _mm512_maskz_loadu_pd(tail, y + j),
-                            acc);
-    }
-    return _mm512_reduce_add_pd(acc);
-  }
-};
-
 template <class Dot, bool kUnit>
 inline __attribute__((always_inline)) void trsm_small_body(bool upper, bool trans, fint m, fint n,
                                                            const double* a, fint lda, double* b,
@@ -446,12 +431,89 @@ void trsm_small_portable(bool upper, bool trans, bool unit, fint m, fint n, cons
     trsm_small_body<DotPortable, false>(upper, trans, m, n, a, lda, b, ldb);
 }
 
+// AVX-512 forms of the two loop orders, up to 4 right-hand sides per pass so that every chunk of
+// the triangle is loaded once for all of them (MUMPS solves 2 or 4 at a time).
+// op(A) = A: x_j for the columns of the group, then rows [i0, i1) of each column updated with the
+// column j of A (b_i -= a_ij x_j, one FMA per element).
+template <bool kUnit>
+HS_AVX512 void trsm_col_avx512(bool upper, fint m, fint n, const double* a, fint lda, double* b,
+                               fint ldb) {
+  for (fint c0 = 0; c0 < n; c0 += 4) {
+    const int nc = static_cast<int>(std::min<fint>(4, n - c0));
+    double* bc[4];
+    for (int q = 0; q < nc; ++q) bc[q] = b + static_cast<idx>(c0 + q) * ldb;
+    for (fint step = 0; step < m; ++step) {
+      const fint j = upper ? m - 1 - step : step;
+      const double* aj = a + static_cast<idx>(j) * lda;
+      __m512d xs[4];
+      for (int q = 0; q < nc; ++q) {
+        double x = bc[q][j];
+        if (!kUnit) x /= aj[j];
+        bc[q][j] = x;
+        xs[q] = _mm512_set1_pd(x);
+      }
+      const fint i0 = upper ? 0 : j + 1;
+      const fint i1 = upper ? j : m;
+      for (fint i = i0; i < i1; i += 8) {
+        const __mmask8 mk = i + 8 <= i1 ? static_cast<__mmask8>(0xFF)
+                                        : static_cast<__mmask8>((1u << (i1 - i)) - 1u);
+        const __m512d av = _mm512_maskz_loadu_pd(mk, aj + i);
+        for (int q = 0; q < nc; ++q) {
+          const __m512d bv = _mm512_maskz_loadu_pd(mk, bc[q] + i);
+          _mm512_mask_storeu_pd(bc[q] + i, mk, _mm512_fnmadd_pd(av, xs[q], bv));
+        }
+      }
+    }
+  }
+}
+
+// op(A) = A^T: x_i = (b_i - A(j-range, i) . x(j-range)) / a_ii, the dot products of a group
+// computed together and reduced with reduce4.
+template <bool kUnit>
+HS_AVX512 void trsm_dot_avx512(bool upper, fint m, fint n, const double* a, fint lda, double* b,
+                               fint ldb) {
+  for (fint c0 = 0; c0 < n; c0 += 4) {
+    const int nc = static_cast<int>(std::min<fint>(4, n - c0));
+    double* bc[4];
+    for (int q = 0; q < nc; ++q) bc[q] = b + static_cast<idx>(c0 + q) * ldb;
+    alignas(32) double sums[4];
+    for (fint step = 0; step < m; ++step) {
+      const fint i = upper ? step : m - 1 - step;
+      const double* ai = a + static_cast<idx>(i) * lda;
+      const fint j0 = upper ? 0 : i + 1;
+      const fint j1 = upper ? i : m;
+      __m512d acc[4] = {_mm512_setzero_pd(), _mm512_setzero_pd(), _mm512_setzero_pd(),
+                        _mm512_setzero_pd()};
+      for (fint j = j0; j < j1; j += 8) {
+        const __mmask8 mk = j + 8 <= j1 ? static_cast<__mmask8>(0xFF)
+                                        : static_cast<__mmask8>((1u << (j1 - j)) - 1u);
+        const __m512d av = _mm512_maskz_loadu_pd(mk, ai + j);
+        for (int q = 0; q < nc; ++q)
+          acc[q] = _mm512_fmadd_pd(av, _mm512_maskz_loadu_pd(mk, bc[q] + j), acc[q]);
+      }
+      _mm256_store_pd(sums, reduce4(acc[0], acc[1], acc[2], acc[3]));
+      for (int q = 0; q < nc; ++q) {
+        double x = bc[q][i] - sums[q];
+        if (!kUnit) x /= ai[i];
+        bc[q][i] = x;
+      }
+    }
+  }
+}
+
 HS_AVX512 void trsm_small_avx512(bool upper, bool trans, bool unit, fint m, fint n,
                                  const double* a, fint lda, double* b, fint ldb) {
-  if (unit)
-    trsm_small_body<DotAvx512, true>(upper, trans, m, n, a, lda, b, ldb);
-  else
-    trsm_small_body<DotAvx512, false>(upper, trans, m, n, a, lda, b, ldb);
+  if (trans) {
+    if (unit)
+      trsm_dot_avx512<true>(upper, m, n, a, lda, b, ldb);
+    else
+      trsm_dot_avx512<false>(upper, m, n, a, lda, b, ldb);
+  } else {
+    if (unit)
+      trsm_col_avx512<true>(upper, m, n, a, lda, b, ldb);
+    else
+      trsm_col_avx512<false>(upper, m, n, a, lda, b, ldb);
+  }
 }
 
 #undef HS_AVX512
