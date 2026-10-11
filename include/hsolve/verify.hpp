@@ -238,8 +238,9 @@ struct ExclusionRunSize {
   /// scalars + 3 krylov_vectors^2 scalars (projected matrices).
   double bytes = 0.0;
 };
-ExclusionRunSize exclusion_run_size(index_t n, index_t deflated, index_t block_steps, index_t block_size,
-                                    index_t max_new_pairs, bool complex_scalars);
+ExclusionRunSize exclusion_run_size(index_t n, index_t deflated, index_t block_steps,
+                                    index_t block_size, index_t max_new_pairs,
+                                    bool complex_scalars);
 
 /// The randomized exclusion check (header comment). op = (A - sigma B)^{-1} B, self-adjoint and
 /// positive-definite-inner-product-compatible with b_inner = B (nullptr: B = I); x = n x m found
@@ -351,30 +352,46 @@ SingleCertificate single_precision_certificate(InertiaCounter<T>& counter,
 //              the check's resource budget is chosen (+inf when none fits).
 // Default ratios measured at 2 threads (bench/certpar_inertia.cpp, bench/certfast_measure.cpp).
 //
-// Measured (bench/certfast_measure.cpp: 2 threads on the shared machine, X = hsolve's own
-// solution via the CLI, the driver's ordering and window, medians of 3 interleaved repetitions;
-// seconds). exact: driver path (refactorize the main object at both ends) / InertiaCounter double
-// pair / single pair (whether the rule of (2) certifies it). randomized: the faster of p = 1, 4
-// and of the pass radii "window" (the driver's mid-gap window) and "hint" (r' = r + 0.9 (d - r),
-// d the next Ritz hint), including the block application of Op to X.
-//   case (k; gap d/r; B)                       exact driver/counter/single    randomized 1e-6 / 1e-12
-//   syn-mem27-46 (12; 387; I)                   3.51 / 3.18 / 1.95 cert        0.60 / 0.57   (5.6x)
-//   yee-pec-cube-32 (12; 4.0; I)                2.83 / 2.42 / 1.31 cert        0.86 / 0.99   (2.4x)
-//   yee-pec-box-1e5 (10; 1.36; diagonal)        3.55 / 3.19 / 1.75 cert        1.92 / 2.64
-//   ss-qa8fk-qa8fm (10; 1.34; general)          1.52 / 1.29 / 0.75 not cert    1.57 / 2.23
-//   syn-multiplicity-real-1e4 (14; 1.16; I)     0.025 / 0.023 / invalid        0.092 / 0.130
-//   syn-multiplicity-complex-1e4 (14; 1.16; I)  0.083 / 0.086 / invalid        0.204 / 0.244
-//   syn-ghep-multiplicity-real-1e4 (22; 6.0; g) 0.027 / 0.026 / not cert       0.054 / 0.063
-// A repetition of the first two cases under a heavier machine load moved every time by up to 30%
-// (exact counter 4.14 / 2.45 s, randomized 0.59 / 0.67 and 0.92 / 1.29 s), not the ordering.
-// Every complete X passed (no false alarm) and every X with one copy of the largest found multiplet
-// (6-, 6-, 2-, 12-, 12-, 12-fold) or the found eigenvalue farthest from sigma removed was detected,
-// in every repetition, delta and p (the new Ritz value within 3e-11 of the removed eigenvalue).
-// So the check pays off where factorizations are expensive (3-D fill) AND the gap d/r is wide; a
-// narrow gap (yee-pec-box, qa8: eps 0.15-0.24 -> 20-70 block steps) or a cheap factorization (the
-// 1e4 cases) favours exact counts, and single counts win where their rule holds (yee-pec-box).
-// certificate_cost with the measured inputs recommended the measured fastest method in all seven
-// cases (its randomized estimate within 20% of the measurement).
+// Measured (bench/certfast_measure.cpp: 2 threads on cores 30,33 of the shared machine, X =
+// hsolve's own solution via the CLI, the driver's ordering and window, medians of 5 interleaved
+// repetitions; seconds). exact: driver path (refactorize the main object at both window ends) /
+// InertiaCounter double pair / single pair (whether the rule of (2) certifies it). randomized:
+// the driver's pass radius r' = the half-width of its certificate window (ends mid-gap to the
+// next Ritz hint, the nearer side; eps follows), the default p = 4 [p = 1], including the block
+// application of Op to X. d/r: distance of the next Ritz hint over the claim radius.
+// case                            k d/r  B    eps   exact drv/cnt/single    rand 1e-6/1e-12 [p=1]
+// syn-mem27-46                   12 387  I    0.995 3.10/2.86/1.62 cert     0.50/0.50 [0.50/0.59]
+// yee-pec-cube-32                12 4.0  I    0.60  2.80/2.56/1.37 cert     1.04/1.03 [1.07/1.93]
+// yee-pec-box-1e5                10 1.36 diag 0.15  3.12/2.76/1.59 cert     2.31/3.31 [2.64/4.58]
+// ss-qa8fk-qa8fm                 10 1.34 gen* 0.14  1.34/1.10/0.64 not cert 2.03/2.61 [1.97/2.95]
+// syn-multiplicity-real-1e4      14 1.16 I    0.073 0.025/0.024/invalid     0.13/0.18 [0.09/0.17]
+// syn-multiplicity-complex-1e4   14 1.16 I    0.073 0.081/0.075/invalid     0.27/0.34 [0.17/0.26]
+// syn-ghep-multiplicity-real-1e4 22 6.0  gen* 0.71  0.027/0.027/not cert    0.07/0.08 [0.05/0.06]
+// gen*: a general B whose kappa start_scaling_for only estimates (2.6e3, 1.3e4): the randomized
+// result there is a screening result, not a certificate (ExclusionResult::rigorous = false).
+// Every complete X passed (no false alarm) and every X with one copy of the largest found
+// multiplet removed (6-, 6-, 2-, -, 12-, 12-, 12-fold; qa8 has no multiple found eigenvalue) or
+// the found eigenvalue farthest from sigma removed was detected, in every repetition, delta and p
+// (the new Ritz value within 4e-12 of the removed eigenvalue). Against the fastest exact option
+// that certifies (single counts where their rule holds, else the counter pair) the check wins on
+// syn-mem27-46 (3.3x at both deltas; 5.8x against the counter pair) and yee-pec-cube-32 (1.3x),
+// and loses everywhere else: on yee-pec-box-1e5 (narrow gap: eps 0.15, 20-26 block steps of 4)
+// it is 1.5x / 2.1x slower than the certified single counts and at 1e-12 slower even than the
+// double counter pair (3.31 vs 2.76 s); the 1e4 cases have cheap factorizations. So the check pays
+// off only where factorizations are expensive (3-D fill) AND the gap d/r is wide. Against the
+// earlier 3-repetition run of the same bench the medians moved by up to 26% (shared machine),
+// not the ordering.
+// The bench's second pass radius "hint", r' = r + 0.9 (d_hint - r), is an experiment, not what
+// the driver does: it widens eps (box 0.24, qa8 0.23) and measured 1.86 / 2.55 s on
+// yee-pec-box-1e5 and 1.57 / 1.96 s on ss-qa8fk-qa8fm (p = 4), up to 38% faster on the 1e4 cases
+// and within 5% on syn-mem27-46 and yee-pec-cube-32 - still slower than the single counts on the
+// box. A Ritz value under-estimates |theta| (Cauchy interlacing), so d_hint >= d_next and an
+// unconverged hint can put r' beyond the next eigenvalue, which is then Detected: a false alarm
+// costing the check plus the exact fallback. It passed on all seven X here; nothing more is
+// validated.
+// certificate_cost with the measured inputs (window policy) recommended the measured fastest
+// certifying method in all seven cases; its randomized estimate was within 26% of the measurement
+// on the four 1e5 cases and up to 55% above it on the 1e4 cases (not changing the choice).
 
 enum class CertificateMethod { Exact, ExactSingle, Randomized };
 const char* certificate_method_name(CertificateMethod m);
