@@ -1,5 +1,5 @@
 // MUMPS-backed SparseFactorization (docs/DESIGN.md §3.4). See include/hsolve/factor.hpp for the
-// contract and the MUMPS facts it relies on.
+// contract and the MUMPS facts it relies on; the class is declared in mumps_factorization.hpp.
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -7,6 +7,8 @@
 #include <memory>
 #include <type_traits>
 #include <vector>
+
+#include "factor/mumps_factorization.hpp"
 
 #include "factor/mumps_api.hpp"
 #include "factor/mumps_input.hpp"
@@ -76,47 +78,16 @@ int grown_relaxation(int pct) {
            "MUMPS " << phase << " failed: INFO(1)=" << info1 << ", INFO(2)=" << info2);
 }
 
-/// T: pencil scalar (double / cplx); U: MUMPS arithmetic (double = dmumps, float = smumps).
+}  // namespace
+
+namespace mumps {
+
 template <class T, class U>
-class MumpsFactorization final : public SparseFactorization<T> {
- public:
-  // options_ is declared (and validated) before the MUMPS instance is created.
-  explicit MumpsFactorization(const FactorOptions& options)
-      : options_(validated(options)), relax_pct_(options.mem_relax_pct) {
-    configure_static_controls();
-  }
-  MumpsFactorization(const MumpsFactorization&) = delete;
-  MumpsFactorization& operator=(const MumpsFactorization&) = delete;
-
-  void analyze(const ShiftedPencil<T>& pencil, double alpha, double beta) override;
-  FactorEstimate estimate() const override;
-  bool factorize(double alpha, double beta) override;
-  void solve(T* b, index_t nrhs, index_t ldb) override;
-  Inertia inertia() const override { return inertia_; }
-  void set_out_of_core(bool on) override { options_.out_of_core = on; }
-  void set_null_pivot_detection(bool on) override { null_pivot_detection_ = on; }
-  const FactorStats& stats() const override { return stats_; }
-  const FactorOptions& options() const override { return options_; }
-  index_t order() const override { return pencil_ ? pencil_->order() : 0; }
-
- private:
-  // Order of K and of the matrix MUMPS factorizes (2n for the embedding of a complex K).
-  static constexpr int kEmbeddingFactor = is_complex_v<T> ? 2 : 1;
-
-  void configure_static_controls();
-  bool read_factorization_info(bool mumps_singular);
-
-  FactorOptions options_;
-  mumps::Instance<U> mumps_;
-  const ShiftedPencil<T>* pencil_ = nullptr;
-  std::unique_ptr<mumps::Input<T, U>> input_;
-  FactorStats stats_;
-  Inertia inertia_;
-  bool blr_at_analysis_ = false;
-  bool factorized_ = false;
-  int relax_pct_;  ///< current ICNTL(14): grows with workspace retries and is kept afterwards
-  bool null_pivot_detection_ = true;  ///< ICNTL(24) for the next factorization
-};
+MumpsFactorization<T, U>::MumpsFactorization(const FactorOptions& options)
+    // options_ is declared (and validated) before the MUMPS instance is created.
+    : options_(validated(options)), relax_pct_(options.mem_relax_pct) {
+  configure_static_controls();
+}
 
 // Controls that never change during the object's life. ICNTL indices follow the MUMPS guide.
 template <class T, class U>
@@ -134,7 +105,7 @@ void MumpsFactorization<T, U>::configure_static_controls() {
   // INFOG(12) counts the negative pivots of fronts MUMPS factorizes itself; keep the root front
   // out of ScaLAPACK (a no-op for the sequential library, but it keeps the inertia exact).
   mumps_.icntl(13) = 1;
-  mumps_.icntl(16) = options_.threads;  // 0: leave the OpenMP setting (omp_get_max_threads()) alone
+  mumps_.icntl(16) = options_.threads;  // 0 is resolved at analyze()
   mumps_.icntl(18) = 0;                 // centralized matrix on the host
   mumps_.icntl(20) = 0;                 // dense right-hand sides
   mumps_.icntl(21) = 0;                 // centralized solution, overwrites the right-hand sides
@@ -185,13 +156,36 @@ void MumpsFactorization<T, U>::analyze(const ShiftedPencil<T>& pencil, double al
   blr_at_analysis_ = options_.blr || options_.blr_estimates;
   mumps_.icntl(35) = blr_at_analysis_ ? 2 : 0;
   mumps_.icntl(14) = relax_pct_;
+  // With L0-OpenMP (ICNTL(48)=1) a factorization must run with the thread count of its analysis
+  // (else INFO -58): threads = 0 is resolved now, so a caller that changes its OpenMP setting
+  // later does not break the factorizations. MUMPS restores the caller's setting after each call.
+  mumps_.icntl(16) = options_.threads > 0 ? options_.threads : max_threads();
+  holds_factors_ = false;
+  // ICNTL(31) is read at analysis only (inertia-only objects, see set_discard_factors()).
+  discard_at_analysis_ = discard_next_;
+  mumps_.icntl(31) = discard_at_analysis_ ? 1 : 0;
+  // A given pivot order replaces the fill-reducing ordering (PERM_IN, ICNTL(7)=1).
+  pivot_order_out_.clear();
+  if (!pivot_order_in_.empty()) {
+    if (static_cast<index_t>(pivot_order_in_.size()) != input_->order())
+      HS_THROW(InvalidInput, "SparseFactorization::analyze: pivot order of size "
+                                 << pivot_order_in_.size() << " for a MUMPS matrix of order "
+                                 << input_->order());
+    mumps_.icntl(7) = 1;
+    s.perm_in = pivot_order_in_.data();
+  } else {
+    mumps_.icntl(7) = options_.ordering;
+    s.perm_in = nullptr;
+  }
 
-  const int info1 = mumps_.run(mumps::kAnalyze);
+  const int info1 = mumps_.run(kAnalyze);
+  s.perm_in = nullptr;
   stats_.analyze_s += timer.seconds();
   ++stats_.analyses;
   stats_.last_info1 = info1;
   stats_.last_info2 = mumps_.infog(2);
   if (info1 < 0) throw_mumps_error("analysis", info1, mumps_.infog(2));
+  if (s.sym_perm) pivot_order_out_.assign(s.sym_perm, s.sym_perm + s.n);
   pencil_ = &pencil;
   stats_.estimate = estimate();
 }
@@ -241,6 +235,7 @@ bool MumpsFactorization<T, U>::factorize(double alpha, double beta) {
   if (info1 < 0 && info1 != -10)
     throw_mumps_error("factorization", info1, mumps_.infog(2), retries);
 
+  holds_factors_ = !discard_at_analysis_;
   factorized_ = !read_factorization_info(/*mumps_singular=*/info1 == -10);
   return factorized_;
 }
@@ -271,9 +266,23 @@ bool MumpsFactorization<T, U>::read_factorization_info(bool mumps_singular) {
 }
 
 template <class T, class U>
+bool MumpsFactorization<T, U>::release_factors() {
+  if (pencil_ == nullptr || !holds_factors_) return false;
+  const int info1 = mumps_.run(kFreeFactors);
+  stats_.last_info1 = info1;
+  stats_.last_info2 = mumps_.infog(2);
+  if (info1 < 0) throw_mumps_error("release of the factors (JOB=-4)", info1, mumps_.infog(2));
+  holds_factors_ = false;
+  factorized_ = false;
+  return true;
+}
+
+template <class T, class U>
 void MumpsFactorization<T, U>::solve(T* b, index_t nrhs, index_t ldb) {
   if (!factorized_)
     HS_THROW(Internal, "SparseFactorization::solve() without a valid factorization");
+  if (discard_at_analysis_)
+    HS_THROW(Internal, "SparseFactorization::solve(): the factors were discarded (inertia-only object)");
   const index_t n = pencil_->order();
   if (nrhs < 0 || ldb < n)
     HS_THROW(InvalidInput,
@@ -338,13 +347,13 @@ void MumpsFactorization<T, U>::solve(T* b, index_t nrhs, index_t ldb) {
   stats_.rhs_solved += nrhs;
 }
 
-}  // namespace
+}  // namespace mumps
 
 template <class T>
 std::unique_ptr<SparseFactorization<T>> make_mumps_factorization(const FactorOptions& options) {
   if (options.precision == FactorPrecision::Single)
-    return std::make_unique<MumpsFactorization<T, float>>(options);
-  return std::make_unique<MumpsFactorization<T, double>>(options);
+    return std::make_unique<mumps::MumpsFactorization<T, float>>(options);
+  return std::make_unique<mumps::MumpsFactorization<T, double>>(options);
 }
 
 template <class T>
@@ -356,7 +365,8 @@ Inertia compute_inertia(const ShiftedPencil<T>& pencil, double alpha, double bet
   exact.precision = FactorPrecision::Double;
   exact.blr = false;
   exact.blr_estimates = false;
-  MumpsFactorization<T, double> f(exact);
+  mumps::MumpsFactorization<T, double> f(exact);
+  f.set_discard_factors(true);  // only the pivot signs are needed (working memory only)
   f.analyze(pencil, alpha, beta);
   // A singular K is reported through inertia().valid == false, never thrown.
   static_cast<void>(f.factorize(alpha, beta));
@@ -365,6 +375,8 @@ Inertia compute_inertia(const ShiftedPencil<T>& pencil, double alpha, double bet
 
 #define HS_INSTANTIATE_FACTOR(T)                                                \
   template class SparseFactorization<T>;                                        \
+  template class mumps::MumpsFactorization<T, double>;                          \
+  template class mumps::MumpsFactorization<T, float>;                           \
   template std::unique_ptr<SparseFactorization<T>> make_mumps_factorization<T>( \
       const FactorOptions&);                                                    \
   template Inertia compute_inertia<T>(const ShiftedPencil<T>&, double, double,  \
