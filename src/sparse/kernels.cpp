@@ -331,28 +331,30 @@ void spmm_chunk_portable(const CsrMatrix<T>& a, const double* xp, index_t q, T* 
   });
 }
 
-/// R[:, 0..q) = B Wp - A Yp (Wp = X + sigma Y interleaved), or (B = I) X + sigma Y - A Yp. With
-/// bm.on(), also the row-block maxima of |r| / s (s = |B| |Wp| + |A| |Yp|, B = I: |w| + |A| |Yp|).
+/// R[:, 0..q) = B Wp - A Yp, or (B = I) Wp - A Yp (Wp = X + sigma Y, Yp = Y interleaved). With
+/// bm.on(), also the row-block maxima of |r| / s (s = |B| |Wp| + |A| |Yp|, B = I: |Wp| + |A| |Yp|).
 template <class T>
-void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
-                             index_t ldx, const T* y, index_t ldy, const double* wp,
+void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const double* wp,
                              const double* yp, index_t q, T* r, index_t ldr, BlockMax& bm) {
+  const index_t words = q * kWords<T>;
   for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
     double acc[2 * kChunk], sacc[kChunk];
     double* wmax = bm.on() ? bm.row(i0) : nullptr;
     for (index_t i = i0; i < i1; ++i) {
-      std::fill(acc, acc + q * kWords<T>, 0.0);
+      std::fill(acc, acc + words, 0.0);
       std::fill(sacc, sacc + q, 0.0);
       double* sp = wmax ? sacc : nullptr;
-      if (b) row_accumulate_portable(*b, i, wp, q, 1.0, acc, sp);
+      if (b) {
+        row_accumulate_portable(*b, i, wp, q, 1.0, acc, sp);
+      } else {
+        const double* wr = wp + i * words;
+        std::copy(wr, wr + words, acc);
+        if (sp)
+          for (index_t k = 0; k < q; ++k) sp[k] = mag(acc_value<T>(wr, k));
+      }
       row_accumulate_portable(a, i, yp, q, -1.0, acc, sp);
       for (index_t k = 0; k < q; ++k) {
-        T v = acc_value<T>(acc, k);
-        if (!b) {
-          const T wi = x[i + k * ldx] + sigma * y[i + k * ldy];
-          v = wi + v;
-          if (wmax) sacc[k] += mag(wi);
-        }
+        const T v = acc_value<T>(acc, k);
         r[i + k * ldr] = v;
         if (wmax) wmax[k] = std::max(wmax[k], ratio(mag(v), sacc[k]));
       }
@@ -486,7 +488,7 @@ HS_TARGET_AVX512 void spmm_rows_avx512(const CsrMatrix<T>& a, const double* xp, 
   const index_t words = q * kWords<T>;
   __mmask8 mask[NC];
   for (int c = 0; c < NC; ++c) mask[c] = lane_mask(words, c);
-  alignas(64) double out[2 * kChunk];
+  alignas(64) double out[2 * kChunk] = {};  // zeroed once per row block, as below
   for (index_t i = i0; i < i1; ++i) {
     if constexpr (is_complex_v<T>) {
       __m512d accr[NC], acci[NC];
@@ -508,26 +510,34 @@ HS_TARGET_AVX512 void spmm_rows_avx512(const CsrMatrix<T>& a, const double* xp, 
 
 template <class T, int NC, bool S>
 HS_TARGET_AVX512 void residual_rows_avx512(const CsrMatrix<T>& a, const CsrMatrix<T>* b,
-                                           double sigma, const T* x, index_t ldx, const T* y,
-                                           index_t ldy, const double* wp, const double* yp,
-                                           index_t q, T* r, index_t ldr, index_t i0, index_t i1,
-                                           double* wmax) {
+                                           const double* wp, const double* yp, index_t q, T* r,
+                                           index_t ldr, index_t i0, index_t i1, double* wmax) {
   const index_t words = q * kWords<T>;
   __mmask8 mask[NC];
   for (int c = 0; c < NC; ++c) mask[c] = lane_mask(words, c);
-  alignas(64) double out[2 * kChunk], sout[2 * kChunk];
+  // Zeroed once per row block (the intrinsic stores below always cover entries 0 .. q-1, which
+  // GCC cannot prove: -Wmaybe-uninitialized without -march=native).
+  alignas(64) double out[2 * kChunk] = {}, sout[2 * kChunk] = {};
   for (index_t i = i0; i < i1; ++i) {
-    __m512d sacc[NC];
-    for (int c = 0; c < NC; ++c) sacc[c] = _mm512_setzero_pd();
+    // B = I: the accumulators start from the row of Wp (and |Wp|), so that R and the backward
+    // error come from the same vector arithmetic whether or not the latter is requested.
+    __m512d start[NC], sacc[NC];
+    for (int c = 0; c < NC; ++c) {
+      start[c] = b ? _mm512_setzero_pd() : _mm512_maskz_loadu_pd(mask[c], wp + i * words + 8 * c);
+      sacc[c] = S && !b ? _mm512_abs_pd(start[c]) : _mm512_setzero_pd();
+    }
     if constexpr (is_complex_v<T>) {
       __m512d accr[NC], acci[NC];
-      for (int c = 0; c < NC; ++c) accr[c] = acci[c] = _mm512_setzero_pd();
+      for (int c = 0; c < NC; ++c) {
+        accr[c] = start[c];
+        acci[c] = _mm512_setzero_pd();
+      }
       if (b) row_complex_avx512<NC, S>(*b, i, wp, q, mask, 1.0, accr, acci, sacc);
       row_complex_avx512<NC, S>(a, i, yp, q, mask, -1.0, accr, acci, sacc);
       for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, finish_complex(accr[c], acci[c]));
     } else {
       __m512d acc[NC];
-      for (int c = 0; c < NC; ++c) acc[c] = _mm512_setzero_pd();
+      for (int c = 0; c < NC; ++c) acc[c] = start[c];
       if (b) row_real_avx512<NC, S>(*b, i, wp, q, mask, 1.0, acc, sacc);
       row_real_avx512<NC, S>(a, i, yp, q, mask, -1.0, acc, sacc);
       for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, acc[c]);
@@ -535,16 +545,12 @@ HS_TARGET_AVX512 void residual_rows_avx512(const CsrMatrix<T>& a, const CsrMatri
     if constexpr (S)
       for (int c = 0; c < NC; ++c) _mm512_store_pd(sout + 8 * c, sacc[c]);
     for (index_t k = 0; k < q; ++k) {
-      T v = acc_value<T>(out, k);
-      double sc = 0.0;
-      if constexpr (S) sc = is_complex_v<T> ? sout[2 * k] + sout[2 * k + 1] : sout[k];
-      if (!b) {
-        const T wi = x[i + k * ldx] + sigma * y[i + k * ldy];
-        v = wi + v;
-        if constexpr (S) sc += mag(wi);
-      }
+      const T v = acc_value<T>(out, k);
       r[i + k * ldr] = v;
-      if constexpr (S) wmax[k] = std::max(wmax[k], ratio(mag(v), sc));
+      if constexpr (S) {
+        const double sc = is_complex_v<T> ? sout[2 * k] + sout[2 * k + 1] : sout[k];
+        wmax[k] = std::max(wmax[k], ratio(mag(v), sc));
+      }
     }
   }
 }
@@ -586,19 +592,18 @@ void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_
 }
 
 template <class T>
-void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
-                    index_t ldx, const T* y, index_t ldy, const double* wp, const double* yp,
-                    index_t q, T* r, index_t ldr, KernelPath path, BlockMax& bm) {
+void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const double* wp,
+                    const double* yp, index_t q, T* r, index_t ldr, KernelPath path, BlockMax& bm) {
 #if HS_KERNELS_AVX512
   if (path == KernelPath::Avx512) {
     with_chunk_width<T>(q, [&](auto nc) {
       for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
         if (bm.on()) {
-          residual_rows_avx512<T, decltype(nc)::value, true>(a, b, sigma, x, ldx, y, ldy, wp, yp, q,
-                                                             r, ldr, i0, i1, bm.row(i0));
+          residual_rows_avx512<T, decltype(nc)::value, true>(a, b, wp, yp, q, r, ldr, i0, i1,
+                                                             bm.row(i0));
         } else {
-          residual_rows_avx512<T, decltype(nc)::value, false>(a, b, sigma, x, ldx, y, ldy, wp, yp,
-                                                              q, r, ldr, i0, i1, nullptr);
+          residual_rows_avx512<T, decltype(nc)::value, false>(a, b, wp, yp, q, r, ldr, i0, i1,
+                                                              nullptr);
         }
       });
     });
@@ -606,7 +611,7 @@ void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, 
   }
 #endif
   static_cast<void>(path);
-  residual_chunk_portable(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, bm);
+  residual_chunk_portable(a, b, wp, yp, q, r, ldr, bm);
 }
 
 }  // namespace
@@ -685,11 +690,12 @@ void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma
   }
   const index_t n = a.nrows;
   const index_t q_max = p == 1 ? 0 : std::min(p, kChunk);
-  // [Yp | Wp]: Y interleaved (for A), X + sigma Y interleaved (for B; B = I reads X, Y directly).
+  // [Yp | Wp]: Y interleaved (for A) and W = X + sigma Y interleaved (for B, or the start value
+  // of every row when B = I).
   const index_t block = n * q_max * kWords<T>;
-  Scratch buf(options.workspace, (b ? 2 : 1) * block);
+  Scratch buf(options.workspace, 2 * block);
   double* yp = buf.data();
-  double* wp = b ? buf.data() + block : nullptr;
+  double* wp = buf.data() + block;
   for (index_t k0 = 0; k0 < p; k0 += kChunk) {
     const index_t q = std::min(kChunk, p - k0);
     const T* xk = x + k0 * ldx;
@@ -699,8 +705,8 @@ void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma
       residual_column(a, b, sigma, xk, yk, r + k0 * ldr, bm);
     } else {
       interleave<T>(n, q, yk, ldy, 0.0, nullptr, 0, yp);
-      if (b) interleave<T>(n, q, xk, ldx, sigma, yk, ldy, wp);
-      residual_chunk(a, b, sigma, xk, ldx, yk, ldy, wp, yp, q, r + k0 * ldr, ldr, path, bm);
+      interleave<T>(n, q, xk, ldx, sigma, yk, ldy, wp);
+      residual_chunk(a, b, wp, yp, q, r + k0 * ldr, ldr, path, bm);
     }
     bm.finish();
   }
