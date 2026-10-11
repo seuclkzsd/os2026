@@ -284,6 +284,31 @@ SingleCertificate single_precision_certificate(InertiaCounter<T>& counter,
 //              t_apply(q) = t_apply1 (1 + rhs_ratio (q - 1)) and s(p) = exclusion_block_steps;
 //              the block size p in {1, 2, 4, 8} minimizing the total is chosen.
 // Default ratios measured at 2 threads (bench/certpar_inertia.cpp, bench/certfast_measure.cpp).
+//
+// Measured (bench/certfast_measure.cpp: 2 threads on the shared machine, X = hsolve's own
+// solution via the CLI, the driver's ordering and window, medians of 3 interleaved repetitions;
+// seconds). exact: driver path (refactorize the main object at both ends) / InertiaCounter double
+// pair / single pair (whether the rule of (2) certifies it). randomized: the faster of p = 1, 4
+// and of the pass radii "window" (the driver's mid-gap window) and "hint" (r' = r + 0.9 (d - r),
+// d the next Ritz hint), including the block application of Op to X.
+//   case (k; gap d/r; B)                       exact driver/counter/single    randomized 1e-6 / 1e-12
+//   syn-mem27-46 (12; 387; I)                   3.51 / 3.18 / 1.95 cert        0.60 / 0.57   (5.6x)
+//   yee-pec-cube-32 (12; 4.0; I)                2.83 / 2.42 / 1.31 cert        0.86 / 0.99   (2.4x)
+//   yee-pec-box-1e5 (10; 1.36; diagonal)        3.55 / 3.19 / 1.75 cert        1.92 / 2.64
+//   ss-qa8fk-qa8fm (10; 1.34; general)          1.52 / 1.29 / 0.75 not cert    1.57 / 2.23
+//   syn-multiplicity-real-1e4 (14; 1.16; I)     0.025 / 0.023 / invalid        0.092 / 0.130
+//   syn-multiplicity-complex-1e4 (14; 1.16; I)  0.083 / 0.086 / invalid        0.204 / 0.244
+//   syn-ghep-multiplicity-real-1e4 (22; 6.0; g) 0.027 / 0.026 / not cert       0.054 / 0.063
+// A repetition of the first two cases under a heavier machine load moved every time by up to 30%
+// (exact counter 4.14 / 2.45 s, randomized 0.59 / 0.67 and 0.92 / 1.29 s), not the ordering.
+// Every complete X passed (no false alarm) and every X with one copy of the largest found multiplet
+// (6-, 6-, 2-, 12-, 12-, 12-fold) or the found eigenvalue farthest from sigma removed was detected,
+// in every repetition, delta and p (the new Ritz value within 3e-11 of the removed eigenvalue).
+// So the check pays off where factorizations are expensive (3-D fill) AND the gap d/r is wide; a
+// narrow gap (yee-pec-box, qa8: eps 0.15-0.24 -> 20-70 block steps) or a cheap factorization (the
+// 1e4 cases) favours exact counts, and single counts win where their rule holds (yee-pec-box).
+// certificate_cost with the measured inputs recommended the measured fastest method in all seven
+// cases (its randomized estimate within 20% of the measurement).
 
 enum class CertificateMethod { Exact, ExactSingle, Randomized };
 const char* certificate_method_name(CertificateMethod m);
@@ -294,11 +319,12 @@ struct CertificateCostInputs {
   bool complex_scalars = false;
   double factorize_s = 0.0;      ///< one double numeric factorization of K (measured)
   double counter_analysis_s = 0.0;  ///< InertiaCounter analysis (PERM_IN), ~AMD analysis time
-  double count_ratio = 0.85;     ///< double count / factorize_s (InertiaCounter, measured 0.85-0.87)
-  double single_ratio = 0.55;    ///< single count / double count (3-D: 0.47-0.55; low fill: ~1)
+  double count_ratio = 0.9;      ///< double count / factorize_s (InertiaCounter; measured 0.87-0.94)
+  double single_ratio = 0.55;    ///< single count / double count (3-D: 0.54-0.61; low fill: ~1)
   bool single_valid = false;     ///< single_count_validity holds
   double apply1_s = 0.0;         ///< one single-vector application of Op (solve + B product)
-  double rhs_ratio = 0.5;        ///< marginal cost of an extra right-hand side in a block solve
+  double rhs_ratio = 0.12;       ///< marginal cost of an extra right-hand side in a block solve
+                                 ///< (measured 0.07-0.14, MUMPS, 2 threads)
   double stream_bytes_per_s = 8e9;  ///< CGS2 sweep bandwidth
   bool coupling_known = false;   ///< e supplied: no application of Op to X
   double epsilon = 0.0;          ///< relative gap of the exclusion check (ExclusionResult)

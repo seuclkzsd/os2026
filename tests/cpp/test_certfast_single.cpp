@@ -234,7 +234,7 @@ TEST(VerifyCost, RandomizedWinsWithExpensiveFactorizationsAndWideGaps) {
   const auto est = hs::certificate_cost(inputs_3d());
   EXPECT_EQ(est.recommended, hs::CertificateMethod::Randomized);
   EXPECT_LT(est.randomized_s, est.exact_s);
-  EXPECT_NEAR(est.exact_s, std::min(3.8, 0.06 + 2 * 0.85 * 1.9), 1e-12);
+  EXPECT_NEAR(est.exact_s, std::min(3.8, 0.06 + 2 * 0.9 * 1.9), 1e-12);
   EXPECT_TRUE(std::isinf(est.exact_single_s));
   EXPECT_LE(est.failure_bound, 1e-12);
   EXPECT_EQ(est.block_steps,
@@ -260,7 +260,7 @@ TEST(VerifyCost, SingleCountsWhenTheRuleHolds) {
   in.single_valid = true;
   const auto est = hs::certificate_cost(in);
   EXPECT_EQ(est.recommended, hs::CertificateMethod::ExactSingle);
-  EXPECT_NEAR(est.exact_single_s, 0.06 + 2 * 0.55 * 0.85 * 1.9, 1e-12);
+  EXPECT_NEAR(est.exact_single_s, 0.06 + 2 * 0.55 * 0.9 * 1.9, 1e-12);
 }
 
 TEST(VerifyCost, BlockSizeFollowsTheMultipleRightHandSideCost) {
