@@ -127,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cases", nargs="+", help="only these cases")
     ap.add_argument("--solvers", nargs="+", help="only these solver directories")
     ap.add_argument("--no-pool", action="store_true", help="no pooled cross-solver reference for unreferenced cases")
+    ap.add_argument("--note", action="append", default=[], help="extra line for the Notes section (repeatable)")
     args = ap.parse_args(argv)
     common.require_guard("sweep")
     docs, notes = sweep(args.run, root=args.root, eval_dir=args.eval_dir, cases=args.cases, solvers=args.solvers,
@@ -134,10 +135,11 @@ def main(argv: list[str] | None = None) -> int:
     if not docs and not notes:
         ap.error(f"no results found under {args.run}")
     out = args.out or cio.REPO_ROOT / "results" / f"eval_{args.run.name}.md"
+    where = f"`{args.eval_dir}/<case>/<solver>/{evaluate.EVAL_FILE}`" if args.eval_dir else "each result directory"
     preamble = [f"Run `{args.run}`, data root `{args.root}`; {len(docs)} evaluation(s) by "
-                f"`python -m tools.eval.sweep` (tools/eval/sweep.py)."]
+                f"`python -m tools.eval.sweep` (tools/eval/sweep.py), evaluation JSONs in {where}."]
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(report.render(docs, args.title or f"Evaluation of {args.run.name}", notes, preamble))
+    out.write_text(report.render(docs, args.title or f"Evaluation of {args.run.name}", notes + args.note, preamble))
     for solver, c in report.verdict_counts(docs).items():
         print(f"{solver}: {c['pass']} pass, {c['fail']} fail, {c['overclaim']} overclaim, {c['underclaim']} underclaim")
     print(f"{len(docs)} evaluation(s), {len(notes)} note(s) -> {out}")

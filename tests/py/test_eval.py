@@ -512,8 +512,11 @@ def test_sweep_over_a_raw_run(tmp_path, monkeypatch):
 
     md, ev = tmp_path / "eval_run.md", tmp_path / "ev"
     monkeypatch.setenv("HS_GUARDED", "1")
-    assert sweep.main([str(run), "--root", str(tmp_path), "--eval-dir", str(ev), "--out", str(md)]) == 0
+    assert sweep.main([str(run), "--root", str(tmp_path), "--eval-dir", str(ev), "--out", str(md),
+                       "--note", "p has no stored reference"]) == 0
     text = md.read_text()
+    assert f"evaluation JSONs in `{ev}/<case>/<solver>/evaluation.json`" in text
+    assert text.endswith("- p has no stored reference\n")
     assert ("**full**: 1 pass / 0 fail; **hsolve**: 1 pass / 0 fail; **late**: 1 pass / 0 fail; "
             "**short**: 0 pass / 1 fail, 1 overclaim(s)") in text
     doc = json.loads((ev / "p" / "short" / evaluate.EVAL_FILE).read_text())
