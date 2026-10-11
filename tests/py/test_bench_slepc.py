@@ -396,6 +396,28 @@ def test_tune_aggregate_and_report():
     assert tune_slepc.profile_entry({**doc, "best": None}) is None
 
 
+def test_tune_choose_best_and_rescore(tmp_path):
+    plain, blr = SlepcConfig(2, 1), SlepcConfig.make(2, 1, "none", {"st_mat_mumps_icntl_35": 2,
+                                                                    "st_mat_mumps_cntl_7": "1e-10"})
+    stats = {"1x2": {**tune_slepc.aggregate([_trial(0, 1.10)]), "config": SlepcConfig(1, 2).to_json()},
+             plain.label(): {**tune_slepc.aggregate([_trial(1, 0.570)]), "config": plain.to_json()},
+             blr.label(): {**tune_slepc.aggregate([_trial(2, 0.559)]), "config": blr.to_json()},
+             "bad": {**tune_slepc.aggregate([_trial(3, 0.3, valid=False)]), "config": SlepcConfig(2, 1, "core").to_json()}}
+    assert tune_slepc.choose_best(stats, 0.03) == plain.label()     # 2 % slower, no extra options
+    assert tune_slepc.choose_best(stats, 0.01) == blr.label()
+    assert tune_slepc.choose_best({"bad": stats["bad"]}, 0.03) is None
+    doc = {"case": "c1", "problem": "GHEP", "mode": "nearest", "target": {"mode": "nearest", "sigma": 0, "k": 2},
+           "ncores": 2, "confirm_reps": 1, "margin": 0.03, "default": "1x2",
+           "confirmation": {"configs": stats, "best": blr.label()}}
+    tune_slepc.apply_best(doc, blr.label())
+    path = tmp_path / "tune.json"
+    path.write_text(json.dumps(doc))
+    assert tune_slepc.main(["--rescore", str(path)]) == 0
+    doc = json.loads(path.read_text())
+    assert doc["best"] == plain.label() and doc["confirmation"]["best"] == plain.label()
+    assert doc["best_config"] == plain.to_json() and doc["speedup_vs_default"] == pytest.approx(1.10 / 0.570)
+
+
 def test_tune_update_profiles_derives_classes(tmp_path):
     cio.save_case("tiny", sp.identity(3, format="csr"), sp.identity(3, format="csr") * 2.0,
                   meta={"family": "test", "problem": "GHEP"}, config=cio.default_config(0.0, 1), root=tmp_path)

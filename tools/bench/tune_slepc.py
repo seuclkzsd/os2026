@@ -441,26 +441,17 @@ class Tuner:
         for c in uniq:
             rs = runs[c.label()]
             stats[c.label()] = {"config": c.to_json(), **aggregate(rs)}
-        valid = {k: s for k, s in stats.items() if s["valid"]}
-        best_label = min(valid, key=lambda k: valid[k]["median_s"]) if valid else None
-        return {"configs": stats, "best": best_label, "default": default.label()}
+        return {"configs": stats, "best": choose_best(stats, args.margin), "default": default.label()}
 
     def summary(self, default: SlepcConfig, decisions: list[dict[str, Any]], confirm: dict[str, Any]) -> dict[str, Any]:
-        stats = confirm["configs"]
-        best = confirm["best"]
-        d = stats[default.label()]
-        b = stats[best] if best else None
         doc = {"case": self.case.name, "problem": self.ctx.problem, "mode": self.mode, "target": self.target,
                "target_override": self.target_override, "cores": self.args.cores, "ncores": self.ctx.cores,
                "tol": self.ctx.tol, "n": self.case.n, "tag": self.args.tag,
                "date": datetime.datetime.now().isoformat(timespec="seconds"), "host": os.uname().nodename,
                "screen_reps": self.args.screen_reps, "confirm_reps": self.args.confirm_reps,
-               "margin": self.args.margin, "default": default.label(), "best": best,
-               "best_config": stats[best]["config"] if best else None,
-               "default_median_s": d["median_s"], "default_valid": d["valid"],
-               "best_median_s": b["median_s"] if b else None,
-               "speedup_vs_default": (d["median_s"] / b["median_s"]) if b and d["median_s"] else None,
+               "margin": self.args.margin, "default": default.label(),
                "decisions": decisions, "confirmation": confirm, "trials": self.trials}
+        apply_best(doc, confirm["best"])
         self.save(doc)
         return doc
 
@@ -470,6 +461,29 @@ class Tuner:
         if doc is None:
             doc = {"case": self.case.name, "mode": self.mode, "in_progress": True, "trials": self.trials}
         path.write_text(json.dumps(doc, indent=1) + "\n")
+
+
+def choose_best(stats: dict[str, dict[str, Any]], margin: float) -> str | None:
+    """The confirmation's winner (label): among the configurations valid in every repetition whose
+    median is within `margin` of the fastest median, the one with the fewest options (then the
+    fastest) - the rule pick() applies to screening. None when none is valid."""
+    valid = {k: s for k, s in stats.items() if s["valid"] and s["median_s"] is not None}
+    if not valid:
+        return None
+    fastest = min(s["median_s"] for s in valid.values())
+    near = [k for k, s in valid.items() if s["median_s"] <= fastest * (1.0 + margin)]
+    return min(near, key=lambda k: (len(SlepcConfig.from_json(valid[k]["config"]).options), valid[k]["median_s"]))
+
+
+def apply_best(doc: dict[str, Any], best: str | None) -> dict[str, Any]:
+    """Set the best-dependent fields of a tune.json document for the confirmation winner `best`."""
+    stats = doc["confirmation"]["configs"]
+    d, b = stats[doc["default"]], (stats[best] if best else None)
+    doc["confirmation"]["best"] = best
+    doc.update(best=best, best_config=b["config"] if b else None, default_median_s=d["median_s"],
+               default_valid=d["valid"], best_median_s=b["median_s"] if b else None,
+               speedup_vs_default=(d["median_s"] / b["median_s"]) if b and d["median_s"] else None)
+    return doc
 
 
 def pick(results: list[dict[str, Any]], margin: float) -> dict[str, Any] | None:
@@ -573,6 +587,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--profiles-file", default=str(PROFILE_FILE),
                     help=f"profile file (default {PROFILE_FILE.relative_to(REPO)})")
     ap.add_argument("--report", nargs="+", type=Path, help="render these tune.json files as markdown and exit")
+    ap.add_argument("--rescore", nargs="+", type=Path,
+                    help="re-select the confirmation winner of these tune.json files with the current rule "
+                         "(choose_best, their own margin), rewrite them (and the profiles with --write-profiles)")
     return ap
 
 
@@ -610,6 +627,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.report:
         docs = [json.loads(p.read_text()) for p in args.report]
         print(report_markdown([d for d in docs if not d.get("in_progress")]), end="")
+        return 0
+    if args.rescore:
+        docs = []
+        for p in args.rescore:
+            doc = json.loads(p.read_text())
+            if doc.get("in_progress"):
+                continue
+            apply_best(doc, choose_best(doc["confirmation"]["configs"], float(doc.get("margin", args.margin))))
+            p.write_text(json.dumps(doc, indent=1) + "\n")
+            docs.append(doc)
+        if args.write_profiles:
+            update_profiles(args.profiles_file, docs, args.root)
+        print(report_markdown(docs), end="")
         return 0
     if not args.cases:
         raise SystemExit("tune_slepc: no cases given")
