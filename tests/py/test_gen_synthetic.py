@@ -1,5 +1,6 @@
 """Tests for tools/gen/synthetic.py: exact spectra against dense eigensolvers on small sizes."""
 import json
+import re
 
 import numpy as np
 import pytest
@@ -174,6 +175,18 @@ def test_spectrum_presets_have_their_features():
     assert w.min() >= 1e-6 and w.max() <= 1e6 and w.max() / w.min() > 1e10
     with pytest.raises(ValueError):
         syn.spectrum_preset("nope", 10, 0)
+
+
+@pytest.mark.parametrize("kind", syn.SPECTRUM_KINDS)
+def test_target_descriptions_quote_no_eigenvalues(kind):
+    """meta.json carries no reference values (docs/FORMATS.md section 1): no number in a target's
+    'why' may reproduce an eigenvalue (the near-singular and multiplicity presets quoted them)."""
+    spec = syn.spectrum_preset(kind, 1000, seed=4)
+    w = spec.eigenvalues
+    for t in spec.targets:
+        for number in re.findall(r"\d*\.?\d+(?:[eE][-+]?\d+)?", t["why"]):
+            x = float(number)
+            assert not np.any(np.abs(np.abs(w) - x) <= 1e-5 * np.abs(w)), (t["why"], number)
 
 
 def test_magnitude_grouping_keeps_rows_local():

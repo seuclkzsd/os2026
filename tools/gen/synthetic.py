@@ -118,7 +118,8 @@ def target_between_levels(eigenvalues, level: int, k_min: int, why: str, *, frac
 def target_at(eigenvalues, sigma: float, k_min: int, why: str, *, k_max: int = 500,
               cond_b: float = 1.0) -> dict[str, Any]:
     """A 'nearest k' target at a given sigma with the smallest decidable k >= k_min (for a pencil
-    with cond(B) <= cond_b)."""
+    with cond(B) <= cond_b). `why` goes to meta.json and must not quote eigenvalues: case
+    metadata carries no reference values (docs/FORMATS.md section 1)."""
     k = nearest_k_closed(eigenvalues, sigma, k_min, cond_b=cond_b)
     if k > k_max:
         raise ValueError(f"target at sigma={sigma:.6g} needs k={k} > {k_max} to be decidable")
@@ -490,8 +491,7 @@ def spectrum_preset(kind: str, n: int, seed: int, *, cond_b: float = 1.0) -> Spe
         top = int(np.argmax(mults))
         level = int(np.searchsorted(lev, values[top]))
         targets = [target_between_levels(w, level, mults[top] + 2,
-                                         f"next to a {mults[top]}-fold eigenvalue {values[top]:.6g}",
-                                         cond_b=cond_b),
+                                         "just above the spectrum's largest multiplet", cond_b=cond_b),
                    target_at(w, 0.0, 40, "several multiplets around sigma=0", cond_b=cond_b)]
         return Spectrum(kind, w, targets, ["multiplicity"], "random",
                         f"{len(values)} multiplets (multiplicity 2..12) covering {filled} eigenvalues",
@@ -502,7 +502,7 @@ def spectrum_preset(kind: str, n: int, seed: int, *, cond_b: float = 1.0) -> Spe
         for anchor in (0.3, -0.7):
             lam_i = float(w[np.argmin(np.abs(w - anchor))])
             targets.append(target_at(w, lam_i * (1 + 1e-12), 10,
-                                     f"sigma = lambda_i (1 + 1e-12), lambda_i = {lam_i:.17g}",
+                                     f"sigma = lambda_i (1 + 1e-12) for the eigenvalue nearest {anchor:g}",
                                      cond_b=cond_b))
         return Spectrum(kind, w, targets, ["near-singular"], "random",
                         "simple spectrum uniform in [-1, 1]; targets within 1e-12 (relative) of an eigenvalue")
