@@ -59,19 +59,33 @@ using ApplyBlockFn = std::function<void(const T* x, index_t ldx, T* y, index_t l
 /// When the CGS routines run their second projection pass.
 enum class Reorth {
   /// Always two passes (classical CGS2, "twice is enough": the result is orthogonal to working
-  /// precision whenever w is numerically independent of span(V)).
+  /// precision whenever w is numerically independent of span(V)). Two passes also correct for a
+  /// V that is only approximately M-orthonormal: with ||V^H M V - I|| = delta, V^H M w keeps a
+  /// relative size O(delta^2) after two passes (O(delta) after one).
   Always,
   /// Daniel-Gragg-Kaufman-Stewart criterion: skip pass 2 when pass 1 removed little of w, i.e.
   /// ||w after pass 1||_M >= eta * ||w before||_M. Rounding in pass 1 leaves a component in
   /// span(V) of relative size O(eps ||w_before|| / ||w_after||) <= O(eps / eta), so the loss of
   /// orthogonality stays at the CGS2 level; heavier cancellation triggers pass 2.
+  /// Requires, beyond the general preconditions:
+  ///   * V M-orthonormal to working precision (||V^H M V - I|| = O(eps)). A skipped pass leaves
+  ///     V^H M w = -(V^H M V - I) c1: for a V that is orthonormal only to delta (e.g. an
+  ///     externally supplied block accepted with a looser tolerance) the result is M-orthogonal
+  ///     only to O(delta), against O(delta^2) with Always. Use Always for such a V.
+  ///   * stored mode: bw == M*w on entry, as the test is computed from Re(w^H bw).
   IfNeeded,
+  /// The default: IfNeeded in Euclidean and recompute mode, where the routine forms the norms of
+  /// the test itself; Always in stored mode, where they would come from the caller's bw (callers
+  /// that keep bw only as scratch, with content unrelated to M*w, stay correct: the projections
+  /// never read bw).
+  Auto,
 };
 
 struct OrthoOptions {
-  Reorth reorth = Reorth::IfNeeded;
-  /// DGKS threshold in [0, 1] (1/sqrt(2), as in ARPACK and SLEPc). 1 makes IfNeeded equivalent to
-  /// Always except for a w that is exactly orthogonal already; 0 never runs pass 2 for a nonzero w.
+  Reorth reorth = Reorth::Auto;
+  /// DGKS threshold in [0, 1] (1/sqrt(2), as in ARPACK and SLEPc), used wherever the DGKS test
+  /// runs (IfNeeded; Auto outside stored mode). 1 makes it equivalent to Always except for a w
+  /// that is exactly orthogonal already; 0 never runs pass 2 for a nonzero w.
   double eta = 0.70710678118654752;
   /// Recompute mode only: false declares that the caller does not need bw == M*w on exit (e.g.
   /// bw is mere workspace). The norms are then taken from the Pythagorean relation
@@ -99,17 +113,22 @@ struct OrthoInfo {
 ///                        keeps the absolute rounding error O(eps ||M w_entry||): after heavy
 ///                        cancellation bw and the returned norm are inaccurate relative to the
 ///                        result (the projections are not affected). Recompute M*w before
-///                        storing it as a basis column.
+///                        storing it as a basis column. The projections use BV and w only: a
+///                        caller that discards bw and the norm may pass any bw (scratch) with
+///                        the default options (Reorth::Auto runs two passes in this mode), but
+///                        not with Reorth::IfNeeded, whose test reads bw.
 ///   * Recompute:         bv == nullptr, apply_m != nullptr, bw = workspace (n); M*w is
 ///                        recomputed after every pass, so every norm (and the DGKS test) uses
 ///                        the M*w of the current w: 2 applications of M with one pass, 3 with two.
-/// options.reorth selects the second pass (default IfNeeded: DGKS with eta = 1/sqrt(2)); Always
-/// forces two passes. On exit bw == M*w (stored/recompute modes; see options.mw_on_exit for the
-/// exception). h (length k, may be nullptr)
+/// options.reorth selects the second pass (default Auto: DGKS with eta = 1/sqrt(2) in Euclidean
+/// and recompute mode, two passes in stored mode); Always forces two passes, IfNeeded runs the
+/// DGKS test in every mode (see Reorth for its preconditions). On exit bw == M*w
+/// (stored/recompute modes; see options.mw_on_exit for the exception). h (length k, may be nullptr)
 /// receives the accumulated coefficients V^H M w. Returns the M-norm sqrt(Re(w^H M w)) (0 if not
 /// positive, also for NaN) or ||w||_2 (NaN propagates) of the result; info (may be nullptr)
 /// receives the pass count and the norms before / after each pass.
-/// Precondition: the columns of V are M-orthonormal; w, bw must not alias V, BV.
+/// Precondition: the columns of V are M-orthonormal (to working precision where the DGKS test
+/// runs, see Reorth); w, bw must not alias V, BV.
 /// Cost (a sweep reads the n x k operand once, 4nk flops per pass): two passes take 3 sweeps
 /// over V (Euclidean), 1 over BV + 2 over [V BV] (stored), 4 over V + 3 applications of M
 /// (recompute); one pass takes 2, 1 + 1, 2 sweeps (+ 2 applications of M). The second pass's
@@ -129,12 +148,13 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
 /// (bv = M*V with ld ldbv, bw = M*W on entry with ld ldbw, updated by subtraction with the same
 /// accuracy caveat) and recompute (apply_m != nullptr, bw = n x p workspace with ld ldbw, M*W
 /// recomputed after every pass). On exit bw == M*W (stored/recompute modes).
-/// DGKS per block: with Reorth::IfNeeded the second pass runs (on the whole block) unless every
-/// column keeps ||w_j after pass 1||_M >= eta * ||w_j before||_M (a zero column forces it).
+/// DGKS per block: wherever the DGKS test runs (Reorth::IfNeeded; Auto outside stored mode, as
+/// for orthogonalize_cgs2) the second pass runs (on the whole block) unless every column keeps
+/// ||w_j after pass 1||_M >= eta * ||w_j before||_M (a zero column forces it).
 /// h (k x p, ld ldh, may be nullptr) receives the accumulated V^H M W. norms_before / norms_after
 /// (length p each, may be nullptr) receive the column norms on entry / exit, computed as in
 /// OrthoInfo. Returns the number of passes: 0 when k == 0 or p == 0, else 1 or 2.
-/// Preconditions: V M-orthonormal; W, BW do not alias V, BV. Cost: the sweeps of
+/// Preconditions: V M-orthonormal (as for orthogonalize_cgs2); W, BW do not alias V, BV. Cost: the sweeps of
 /// orthogonalize_cgs2 with p columns each (the reads of V are shared by the p columns; 4nkp flops
 /// per pass). Workspace: O(k p) scalars per reduction slot, at most ~2 MB of slots.
 /// Deterministic for any thread count as long as the single-threaded BLAS gemm is (it is called on

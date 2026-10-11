@@ -199,6 +199,16 @@ struct OrthoSetup {
   }
 };
 
+/// Fills s with s.cap random M-orthonormal columns.
+template <class T>
+void fill_random_basis(OrthoSetup<T>& s, std::uint64_t seed) {
+  std::vector<T> x(static_cast<std::size_t>(s.n));
+  while (s.k < s.cap) {
+    la::fill_random(x.data(), s.n, seed, static_cast<std::uint64_t>(s.k));
+    s.append(x, policy(la::Reorth::Always));
+  }
+}
+
 template <class T>
 class LinalgDenseOpsCgs : public ::testing::Test {};
 TYPED_TEST_SUITE(LinalgDenseOpsCgs, Scalars);
@@ -411,13 +421,111 @@ TYPED_TEST(LinalgDenseOpsCgs, EtaControlsTheSecondPass) {
   EXPECT_EQ(passes(policy(la::Reorth::IfNeeded, 0.0)), 1);
   EXPECT_EQ(passes(policy(la::Reorth::IfNeeded, 1.0)), 2);
   EXPECT_EQ(passes(policy(la::Reorth::Always, 0.0)), 2);
-  // The defaults: DGKS with 1/sqrt(2).
-  EXPECT_EQ(la::OrthoOptions{}.reorth, la::Reorth::IfNeeded);
+  // The defaults: DGKS with 1/sqrt(2) outside stored mode (Auto, see StoredModeDefaultIgnoresBw).
+  EXPECT_EQ(la::OrthoOptions{}.reorth, la::Reorth::Auto);
   EXPECT_DOUBLE_EQ(la::OrthoOptions{}.eta, 1.0 / std::sqrt(2.0));
+  EXPECT_EQ(passes(la::OrthoOptions{}), 2);
+  EXPECT_EQ(passes(policy(la::Reorth::Auto, 0.4)), 1);
   std::vector<T> w = w0;
   EXPECT_THROW(s.orthogonalize(w.data(), nullptr, nullptr, policy(la::Reorth::IfNeeded, 1.5), nullptr), hs::Error);
   EXPECT_THROW(s.orthogonalize(w.data(), nullptr, nullptr, policy(la::Reorth::IfNeeded, std::nan("")), nullptr),
                hs::Error);
+}
+
+/// max_j |v_j^H M w| / ||w||_M over the k columns of s.v (M w recomputed exactly).
+template <class T>
+double relative_projection(const OrthoSetup<T>& s, const std::vector<T>& w) {
+  std::vector<T> mw(static_cast<std::size_t>(s.n));
+  s.apply(w.data(), mw.data());
+  const double nrm = std::sqrt(std::real(la::dot(s.n, w.data(), mw.data())));
+  double worst = 0.0;
+  for (index_t j = 0; j < s.k; ++j) worst = std::max(worst, std::abs(la::dot(s.n, s.v.col(j), mw.data())));
+  return worst / nrm;
+}
+
+// Regression (review of the DGKS default): thick-restart Lanczos with store_bv passes a bw that
+// is scratch (zeros or a stale M*v of an earlier cycle), which the projections never read. The
+// DGKS test would read it, so the default (Reorth::Auto) keeps two passes in stored mode.
+TYPED_TEST(LinalgDenseOpsCgs, StoredModeDefaultIgnoresBw) {
+  using T = TypeParam;
+  const index_t n = 3000, k = 20;
+  OrthoSetup<T> s(n, k, Mode::Stored);
+  fill_random_basis(s, 71);
+  std::vector<T> y(static_cast<std::size_t>(k)), r(static_cast<std::size_t>(n)), br(static_cast<std::size_t>(n));
+  la::fill_random(y.data(), k, 72, 0);
+  for (double delta : {1.0, 1e-4, 1e-7, 1e-10}) {
+    // w0 = V y + delta r: ||w0 after projection||_M / ||w0||_M ~ delta (heavy cancellation).
+    std::vector<T> w0(static_cast<std::size_t>(n));
+    la::fill_random(r.data(), n, 73, static_cast<std::uint64_t>(-std::log10(delta)));
+    if (delta < 1.0) la::multiply(n, k, 1, s.v.data(), n, y.data(), k, w0.data(), n);
+    la::axpy(n, T(delta), r.data(), w0.data());
+    // Reference: bw == M w0, the documented contract.
+    std::vector<T> w_ref = w0, bw(static_cast<std::size_t>(n)), h_ref(static_cast<std::size_t>(k));
+    s.apply(w_ref.data(), bw.data());
+    la::OrthoInfo info;
+    s.orthogonalize(w_ref.data(), bw.data(), h_ref.data(), la::OrthoOptions{}, &info);
+    EXPECT_EQ(info.passes, 2) << "delta=" << delta;
+    EXPECT_LE(relative_projection(s, w_ref), 1e-14) << "delta=" << delta;
+    // Scratch bw: zeros, a stale column of M V, garbage of the wrong scale.
+    for (int kind = 0; kind < 3; ++kind) {
+      std::vector<T> w = w0, h(static_cast<std::size_t>(k));
+      if (kind == 0) std::fill(bw.begin(), bw.end(), T(0));
+      if (kind == 1) std::copy(s.bv.col(3), s.bv.col(3) + n, bw.begin());
+      if (kind == 2) la::fill_random(bw.data(), n, 74, 0);
+      s.orthogonalize(w.data(), bw.data(), h.data(), la::OrthoOptions{}, &info);
+      EXPECT_EQ(info.passes, 2) << "delta=" << delta << " kind=" << kind;
+      // Same iterate and coefficients as with a valid bw: only the (discarded) norm differs.
+      EXPECT_TRUE(bitwise_equal(w, w_ref)) << "delta=" << delta << " kind=" << kind;
+      EXPECT_TRUE(bitwise_equal(h, h_ref)) << "delta=" << delta << " kind=" << kind;
+    }
+  }
+  // Auto is IfNeeded in the other modes: a w independent of span(V) takes one pass.
+  for (Mode mode : {Mode::Euclidean, Mode::Recompute}) {
+    OrthoSetup<T> e(n, k, mode);
+    fill_random_basis(e, 75);
+    std::vector<T> w(static_cast<std::size_t>(n)), bw(static_cast<std::size_t>(n));
+    la::fill_random(w.data(), n, 76, 0);
+    la::OrthoInfo info;
+    e.orthogonalize(w.data(), mode == Mode::Euclidean ? nullptr : bw.data(), nullptr, la::OrthoOptions{}, &info);
+    EXPECT_EQ(info.passes, 1) << mode_name(mode);
+    EXPECT_LE(relative_projection(e, w), 1e-14) << mode_name(mode);
+  }
+}
+
+// The DGKS precondition: V M-orthonormal to working precision. For a V orthonormal only to delta
+// (as an externally supplied deflation block may be), two passes square delta, one pass does not.
+TYPED_TEST(LinalgDenseOpsCgs, ApproximatelyOrthonormalBasisNeedsTwoPasses) {
+  using T = TypeParam;
+  const index_t n = 3000, k = 12;
+  for (Mode mode : kModes) {
+    OrthoSetup<T> s(n, k, mode);
+    fill_random_basis(s, 81);
+    // Tilt every column towards the next one: |V^H M V - I| ~ delta.
+    const double delta = 1e-9;
+    hs::DenseMatrix<T> v0 = s.v;
+    for (index_t j = 0; j < k; ++j)
+      for (index_t i = 0; i < n; ++i) s.v(i, j) = v0(i, j) + T(delta) * v0(i, (j + 1) % k);
+    for (index_t j = 0; j < k; ++j) s.apply(s.v.col(j), s.bv.col(j));
+    const double dev = s.loss_of_orthogonality();
+    ASSERT_GT(dev, 0.5 * delta);
+    ASSERT_LT(dev, 3.0 * delta);
+    std::vector<T> w0(static_cast<std::size_t>(n));
+    la::fill_random(w0.data(), n, 82, 0);
+    for (index_t j = 0; j < k; ++j) la::axpy(n, T(0.5), s.v.col(j), w0.data());  // ratio ~1: no cancellation
+    for (la::Reorth reorth : {la::Reorth::Always, la::Reorth::IfNeeded}) {
+      std::vector<T> w = w0, bw(static_cast<std::size_t>(n));
+      if (mode == Mode::Stored) s.apply(w.data(), bw.data());
+      la::OrthoInfo info;
+      s.orthogonalize(w.data(), mode == Mode::Euclidean ? nullptr : bw.data(), nullptr, policy(reorth), &info);
+      const double proj = relative_projection(s, w);
+      if (reorth == la::Reorth::Always) {
+        EXPECT_LE(proj, 1e-14) << mode_name(mode);  // O(delta^2 + eps)
+      } else {
+        EXPECT_EQ(info.passes, 1) << mode_name(mode);
+        EXPECT_LE(proj, 10.0 * delta) << mode_name(mode);  // O(delta): documented, use Always
+      }
+    }
+  }
 }
 
 TYPED_TEST(LinalgDenseOpsCgs, EmptyBasisAndNonFiniteInput) {
@@ -533,16 +641,6 @@ int block_orthogonalize(const OrthoSetup<T>& s, index_t p, T* w, T* bw, T* h, do
   return -1;
 }
 
-/// Fills s with s.cap random M-orthonormal columns.
-template <class T>
-void fill_random_basis(OrthoSetup<T>& s, std::uint64_t seed) {
-  std::vector<T> x(static_cast<std::size_t>(s.n));
-  while (s.k < s.cap) {
-    la::fill_random(x.data(), s.n, seed, static_cast<std::uint64_t>(s.k));
-    s.append(x, policy(la::Reorth::Always));
-  }
-}
-
 /// W (n x p): column j = V y_j + ratio_j-weighted component outside span(V) (ratio 1: random).
 template <class T>
 hs::DenseMatrix<T> block_input(const OrthoSetup<T>& s, const std::vector<double>& ratios, std::uint64_t seed) {
@@ -624,6 +722,29 @@ TYPED_TEST(LinalgDenseOpsBlockCgs, AgreesWithColumnwiseCgsInAllModes) {
         }
       }
   }
+}
+
+TYPED_TEST(LinalgDenseOpsBlockCgs, StoredModeDefaultIgnoresBw) {
+  using T = TypeParam;
+  const index_t n = 3000, k = 16, p = 3;
+  OrthoSetup<T> s(n, k, Mode::Stored);
+  fill_random_basis(s, 91);
+  // Every column independent of span(V): DGKS would skip pass 2 on a valid BW.
+  const hs::DenseMatrix<T> w0 = block_input(s, {1.0, 1.0, 1.0}, 92);
+  hs::DenseMatrix<T> w_ref = w0, bw(n, p), h_ref(k, p);
+  for (index_t j = 0; j < p; ++j) s.apply(w_ref.col(j), bw.col(j));
+  EXPECT_EQ(block_orthogonalize(s, p, w_ref.data(), bw.data(), h_ref.data(), nullptr, nullptr,
+                                policy(la::Reorth::IfNeeded)),
+            1);
+  w_ref = w0;
+  for (index_t j = 0; j < p; ++j) s.apply(w_ref.col(j), bw.col(j));
+  EXPECT_EQ(block_orthogonalize(s, p, w_ref.data(), bw.data(), h_ref.data(), nullptr, nullptr, la::OrthoOptions{}), 2);
+  // Scratch BW (zeros): same passes, iterates and coefficients.
+  hs::DenseMatrix<T> w = w0, h(k, p);
+  std::fill(bw.data(), bw.data() + n * p, T(0));
+  EXPECT_EQ(block_orthogonalize(s, p, w.data(), bw.data(), h.data(), nullptr, nullptr, la::OrthoOptions{}), 2);
+  EXPECT_TRUE(std::equal(w.data(), w.data() + n * p, w_ref.data()));
+  EXPECT_TRUE(std::equal(h.data(), h.data() + k * p, h_ref.data()));
 }
 
 TYPED_TEST(LinalgDenseOpsBlockCgs, EdgeCases) {

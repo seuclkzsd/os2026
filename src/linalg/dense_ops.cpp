@@ -331,6 +331,12 @@ void run_sweep(index_t n, index_t k, const Sweep& s, double* proj, double* norm)
 /// sqrt of a squared norm, keeping NaN (std::max returns its first argument for NaN).
 inline double root(double m2) { return std::sqrt(std::max(m2, 0.0)); }
 
+/// Whether the DGKS test may skip the second pass. Reorth::Auto excludes stored mode, where the
+/// test would read the caller's bw (see the header: existing callers pass it as scratch).
+inline bool dgks_enabled(const OrthoOptions& options, bool stored) {
+  return options.reorth == Reorth::IfNeeded || (options.reorth == Reorth::Auto && !stored);
+}
+
 // ---- block CGS (BLAS3 on row blocks) ---------------------------------------------------------
 // gemm is called on fixed row blocks from inside an OpenMP parallel region (also with a single
 // slot), where an OpenMP BLAS runs single-threaded: the partial products then depend on the block
@@ -482,6 +488,7 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
   constexpr bool cx = is_complex_v<T>;
   constexpr index_t d = kDoubles<T>;
   const index_t kd = k * d;
+  const bool dgks = dgks_enabled(options, stored);
   if (h) std::fill(h, h + k, T(0));
   OrthoInfo inf;
   const double* wd = dbl(static_cast<const T*>(w));
@@ -554,7 +561,7 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
   const bool pythagoras = recompute && !options.mw_on_exit;
   if (recompute) {
     run_sweep<cx>(n, k, upd, nullptr, nullptr);
-    if (pythagoras && options.reorth == Reorth::IfNeeded) {
+    if (pythagoras && dgks) {
       const double est = m0 - sq_coefficients(c1);
       if (est > 0.0 && std::sqrt(est) >= options.eta * inf.norm_before) {
         inf.norm_pass1 = root(est);
@@ -574,8 +581,7 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
   }
   inf.norm_pass1 = root(m1);
   // DGKS: no significant cancellation in pass 1 => w is orthogonal to working precision.
-  const bool skip = options.reorth == Reorth::IfNeeded && inf.norm_pass1 > 0.0 &&
-                    inf.norm_pass1 >= options.eta * inf.norm_before;
+  const bool skip = dgks && inf.norm_pass1 > 0.0 && inf.norm_pass1 >= options.eta * inf.norm_before;
   if (skip) return finish(m1);
 
   // Pass 2.
@@ -687,7 +693,7 @@ int orthogonalize_block_cgs2(index_t n, index_t k, index_t p, const T* v, index_
   }
   export_norms(m0, norms_before);
   // DGKS per block: skip pass 2 only if no column lost more than 1 - eta of its norm.
-  bool skip = options.reorth == Reorth::IfNeeded;
+  bool skip = dgks_enabled(options, stored);
   for (index_t j = 0; skip && j < p; ++j) {
     const double before = root(m0[static_cast<std::size_t>(j)]), after = root(m1[static_cast<std::size_t>(j)]);
     skip = after > 0.0 && after >= options.eta * before;
