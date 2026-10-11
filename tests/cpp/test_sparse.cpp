@@ -384,8 +384,33 @@ TEST(SparseCsr, ToComplex) {
 
 // ------------------------------------------- symmetrize_from_triangle / hermitian_part
 
+// U + U^H - diag(U) entry by entry: every stored entry, plus conj of each strict one at the
+// mirrored position. No arithmetic touches a value, so this is exact, signed zeros included, and
+// symmetrize_from_triangle must agree with it bitwise.
+template <class T>
+CsrMatrix<T> exact_symmetrize(const CsrMatrix<T>& tri) {
+  std::vector<index_t> r, c;
+  std::vector<T> v;
+  for (index_t i = 0; i < tri.nrows; ++i)
+    for (index_t p = tri.rowptr[i]; p < tri.rowptr[i + 1]; ++p) {
+      const index_t j = tri.colind[p];
+      r.push_back(i);
+      c.push_back(j);
+      v.push_back(tri.values[p]);
+      if (j != i) {
+        r.push_back(j);
+        c.push_back(i);
+        v.push_back(hs::conj_if(tri.values[p]));
+      }
+    }
+  return hs::csr_from_coo<T>(tri.nrows, tri.ncols, r, c, v, false);
+}
+
 // The formulations these functions had before the single-pass rewrite (via an explicit
-// transpose and add), kept as references: results must agree bitwise.
+// transpose and add), kept as references. hermitian_part must agree with its reference bitwise.
+// The symmetrize reference adds 1 * conj(u_ij) in complex arithmetic, which turns the imaginary
+// part -0 of the conjugate of a real-valued u_ij into +0 (for real parts >= 0): it agrees with
+// symmetrize_from_triangle by value only.
 template <class T>
 CsrMatrix<T> reference_symmetrize(const CsrMatrix<T>& tri, bool upper) {
   CsrMatrix<T> strict = hs::triangle(tri, upper);
@@ -420,24 +445,32 @@ void expect_bitwise_equal(const CsrMatrix<T>& got, const CsrMatrix<T>& want) {
   }
 }
 
-// Random one-triangle matrix with some empty rows and missing diagonal entries (diagonal of
-// complex T made real only when `real_diag`).
+// Random one-triangle matrix with some empty rows and missing diagonal entries. For complex T,
+// every 4th strict entry has imaginary part +0 and every 4th (shifted) -0: their conjugates carry
+// the other signed zero, which the mirrored entries must keep.
 template <class T>
 CsrMatrix<T> random_triangle(index_t n, double density, bool upper, std::uint64_t seed) {
   std::mt19937_64 g(seed);
   std::uniform_real_distribution<double> u(0.0, 1.0);
   std::vector<index_t> r, c;
   std::vector<T> v;
+  std::size_t strict = 0;
   for (index_t i = 0; i < n; ++i) {
     if (i % 7 == 3) continue;  // empty row
     for (index_t j = upper ? i : 0; j < (upper ? n : i + 1); ++j) {
       if (j == i ? (i % 5 == 1) : u(g) > density) continue;  // every 5th diagonal missing
+      T x = rand_scalar<T>(g);
+      if constexpr (hs::is_complex_v<T>) {
+        if (j != i && strict % 4 == 0) x = T(x.real(), 0.0);
+        if (j != i && strict % 4 == 2) x = T(x.real(), -0.0);
+      }
+      strict += j != i;
       r.push_back(i);
       c.push_back(j);
-      v.push_back(rand_scalar<T>(g));
+      v.push_back(x);
     }
   }
-  return hs::csr_from_coo<T>(n, n, r, c, v);
+  return hs::csr_from_coo<T>(n, n, r, c, v, false);
 }
 
 template <class T>
@@ -450,12 +483,18 @@ TYPED_TEST(SparseSymmetrize, MatchesReferenceForBothTrianglesAndOverloads) {
     for (const double density : {0.02, 0.2, 1.0}) {
       SCOPED_TRACE(std::string(upper ? "upper" : "lower") + " density " + std::to_string(density));
       const CsrMatrix<T> tri = random_triangle<T>(61, density, upper, 100 + static_cast<int>(density * 10));
-      const CsrMatrix<T> want = reference_symmetrize(tri, upper);
-      expect_bitwise_equal(hs::symmetrize_from_triangle(tri), want);
+      const CsrMatrix<T> want = exact_symmetrize(tri);
+      const CsrMatrix<T> got = hs::symmetrize_from_triangle(tri);
+      expect_bitwise_equal(got, want);
       CsrMatrix<T> consumed = tri;
       expect_bitwise_equal(hs::symmetrize_from_triangle(std::move(consumed)), want);
       EXPECT_EQ(consumed.nrows, 0);
       EXPECT_NO_THROW(consumed.validate());
+      // The previous formulation gives the same matrix by value (signed zeros may differ).
+      const CsrMatrix<T> old = reference_symmetrize(tri, upper);
+      EXPECT_EQ(got.rowptr, old.rowptr);
+      EXPECT_EQ(got.colind, old.colind);
+      EXPECT_EQ(got.values, old.values);  // operator==: -0 == +0
     }
   }
 }
