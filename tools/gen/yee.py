@@ -77,7 +77,7 @@ class YeeGrid:
             raise ValueError("Bloch phases require boundary='bloch'")
         object.__setattr__(self, "cells", tuple(int(c) for c in self.cells))
         object.__setattr__(self, "lengths", tuple(float(x) for x in self.lengths))
-        object.__setattr__(self, "phases", tuple(float(np.mod(p, 2 * np.pi)) for p in self.phases))
+        object.__setattr__(self, "phases", tuple(_reduce_phase(p) for p in self.phases))
 
     @property
     def spacing(self) -> tuple[float, float, float]:
@@ -111,6 +111,17 @@ class YeeGrid:
         if self.boundary == "pec":
             return self.node_count
         return self.node_count + (2 if all(p == 0.0 for p in self.phases) else 0)
+
+
+def _reduce_phase(phase: float) -> float:
+    """phase modulo 2 pi in [0, 2 pi).
+
+    np.mod rounds a tiny negative phase (e.g. -1e-17 on a k-path through Gamma) up to exactly
+    2 pi; _wrap_factor would then snap exp(2 pi i) to 1 and assemble the k = 0 matrix, while the
+    spectrum formula and the null-space count still saw k != 0. Such a phase is 0 to rounding.
+    """
+    p = float(np.mod(phase, 2 * np.pi))
+    return 0.0 if p >= 2 * np.pi else p
 
 
 def _wrap_factor(phase: float) -> float | complex:
