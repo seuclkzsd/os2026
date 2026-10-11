@@ -171,12 +171,15 @@ def run_presets(presets: dict[str, Callable[[Path], Path]], argv: Sequence[str] 
 
 
 def case_summary(path: Path, root: str | Path) -> dict[str, Any]:
-    """n, nnz, problem, dtype and on-disk size of a written case (+ its reference)."""
+    """n, nnz, problem, dtype and on-disk sizes of a written case and of its reference."""
     c = case.load_case(path)
-    files = [p for d in (path, Path(root) / "refs" / c.name) if d.exists() for p in d.iterdir()]
+
+    def size(d: Path) -> int:
+        return int(sum(p.stat().st_size for p in d.iterdir())) if d.exists() else 0
+
     return {"case": c.name, "problem": c.meta["problem"], "dtype": c.meta["dtype"], "n": c.n,
             "nnz_A": int(c.A.nnz), "nnz_B": int(c.B.nnz) if c.B is not None else 0,
-            "disk_bytes": int(sum(p.stat().st_size for p in files))}
+            "case_bytes": size(path), "ref_bytes": size(Path(root) / "refs" / c.name)}
 
 
 # ====================================================== (a, d) tensor-product (Kronecker) operators

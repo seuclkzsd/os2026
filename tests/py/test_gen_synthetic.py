@@ -208,7 +208,7 @@ def test_cli_lists_and_builds(tmp_path, capsys):
     assert syn.run_presets(presets, ["all", "--root", str(tmp_path)], prog="p", description="d") == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["case"] == "t-cli" and summary["n"] == 20 and summary["problem"] == "HEP"
-    assert summary["disk_bytes"] > 0 and summary["nnz_B"] == 0
+    assert summary["case_bytes"] > 0 and summary["ref_bytes"] > 0 and summary["nnz_B"] == 0
     with pytest.raises(SystemExit):
         syn.run_presets(presets, ["missing"], prog="p", description="d")
     assert {"syn-lap3d-22", "syn-mem125-46", "syn-ghep-near-singular-real-1e5"} <= set(syn.PRESETS)
