@@ -589,7 +589,10 @@ struct Hierarchy {
   const Graph& top(const Graph& base) const { return coarse.empty() ? base : coarse.back(); }
 
   // Contracts until the top has at most `target` vertices, `max_levels` contractions were done
-  // or a contraction removes less than 10% of the vertices.
+  // or a contraction removes less than 10% of the vertices - and at least one: below 10
+  // vertices n / 10 is 0, and a graph whose vertices cannot be matched (isolated, or heavier
+  // than max_vwgt) contracts to itself, which would be pushed forever (coarsen_to < 10 on a
+  // graph with more components than that).
   void build(const Graph& base, Random& rng, std::int64_t max_vwgt, std::int32_t target,
              int max_levels) {
     while (static_cast<int>(coarse.size()) < max_levels) {
@@ -597,7 +600,7 @@ struct Hierarchy {
       if (cur.n <= target) break;
       std::vector<std::int32_t> cmap;
       Graph c = coarsen_once(cur, rng, max_vwgt, cmap);
-      if (c.n > cur.n - cur.n / 10) break;
+      if (c.n > cur.n - std::max<std::int32_t>(1, cur.n / 10)) break;
       coarse.push_back(std::move(c));
       cmaps.push_back(std::move(cmap));
     }
