@@ -98,12 +98,78 @@
 // factorize() cannot certify a Single factor. Whether it is usable (eps_s * cond(K) < 1) shows in
 // the refinement residual ShiftInvertOperator::last_relative_residual(), which callers of Single
 // (and BLR) factors must check.
+//
+// Orderings and the symbolic phase (P4; bench/analysis_orderings.cpp, 2 threads on the shared
+// 6336Y node, medians of 3 interleaved one-process runs). Per ordering: JOB=1 wall time [s] /
+// RINFOG(1) [GFlop] / numeric factorization [s] (L0-OpenMP); hsolve ND: analysis with 1 thread,
+// then with 2 threads / GFlop / factorization:
+//   case (n, nnz upper)       AMD             METIS           SCOTCH          hsolve ND (1|2 thr)
+//   syn-mem27-46 (97k, 1.3M)  0.07/212/4.31   1.11/65/1.67    1.51/71/1.80    1.50|0.85/66/1.78
+//   yee-pec-box-1e5 (110k)    0.10/487/8.99   1.22/73/1.95    1.47/72/1.95    1.38|0.75/81/2.17
+//   ss-qa8fk-qa8fm (66k)      0.09/73/1.91    0.72/20/0.69    1.00/23/0.76    0.95|0.55/18/0.61
+//   wg-square-1e5 (99k)       0.06/1.2/0.19   0.70/0.55/0.15  0.72/0.59/0.15  0.82|0.47/0.59/0.14
+//   cav2d-rect-pert-1e5       0.03/0.17/0.09  0.46/0.13/0.08  0.36/0.15/0.09  0.54|0.32/0.15/0.09
+//   wg-square-1e6 (998k)      0.72/55/2.55    8.54/19/1.64    7.30/18/1.62    9.98|5.85/19/1.66
+// (AMF: about half of AMD's flops at AMD's cost on 3-D; PORD: 0.5-0.8 s and 1.0-2x METIS' flops;
+// QAMD = AMD here.) Facts behind the options:
+//   * The fill-reducing ordering is 90-97% of a METIS/SCOTCH analysis: the same analysis given
+//     the resulting order (PERM_IN) takes 0.03-0.08 s at n ~ 1e5 and 0.5-0.6 s at n = 1e6 - the
+//     floor of any analysis (input checks, symbolic factorization, tree, mapping, estimates); AMD
+//     costs little more than that floor.
+//   * Inside MUMPS the orderings are serial: SCOTCH_PTHREAD_NUMBER=1 or 2 changed nothing (MUMPS
+//     sets SCOTCH threads only for BLR clustering), METIS/SCOTCH cannot be linked directly here
+//     (they come in only as dependencies of libdmumps; ld refuses indirect DSOs, and dlopen needs
+//     libdl, absent from the link line with the glibc 2.28 sysroot), and METIS 5.1 draws from libc
+//     rand(), so concurrent METIS calls would not be reproducible. Hence hsolve's own nested
+//     dissection (kOrderingNestedDissection, compute_ordering): same scheme, counter-based random
+//     numbers, OpenMP tasks. Its flops are within -7..+12% of METIS (table), its order does not
+//     depend on the thread count, and its serial work W and critical path C (longest chain of
+//     dependent separators, measured with 1 thread) bound the wall time on p threads by
+//     W/p + C (Brent): W, C = 1.41, 0.29 s (syn-mem27-46), 1.23, 0.22 (yee-pec-box-1e5), 0.90,
+//     0.18 (ss-qa8fk-qa8fm), 0.74, 0.13 (wg-square-1e5), 9.6, 1.4 (wg-square-1e6) - at 16 threads
+//     <= 0.38, 0.30, 0.24, 0.17, 2.0 s plus the PERM_IN analysis, vs METIS' serial 1.11, 1.22,
+//     0.72, 0.70, 8.5 s. The critical path is the chain of top-level separators (the first one:
+//     0.12-0.14 s on syn-mem27-46, 0.6-0.8 s on wg-square-1e6, 70-90% of it coarsening).
+//   * End to end an order is paid once, its fill many times: the driver pays A + F*f + S*s
+//     (analysis, F factorizations with the order - the main one and the two certificate endpoint
+//     counts, which refactorize the analysed object or reuse its order in an InertiaCounter, so
+//     F >= 3 - and S solves). bench/analysis_fix_pipeline.cpp, 2 threads, medians of 3
+//     interleaved one-process runs; A+f / A+3f / A+f+InertiaCounter pair [s] / 1-RHS solve [ms]:
+//       case                 METIS               SCOTCH              hsolve ND (2 thr)
+//       syn-mem27-46         2.80/6.39/5.73/61   3.62/7.92/7.00/78   2.52/5.82/5.71/64
+//       yee-pec-box-1e5      3.15/6.94/6.26/75   3.34/7.05/6.52/71   2.75/6.59/6.47/76
+//       ss-qa8fk-qa8fm       1.52/2.90/2.79/38   1.81/3.36/3.18/44   1.26/2.65/2.54/37
+//       wg-square-1e5        0.86/1.14/1.14/21   0.85/1.11/1.13/19   0.63/0.94/0.92/22
+//       cav2d-rect-pert-1e5  0.58/0.80/0.81/21   0.46/0.63/0.65/16   0.44/0.66/0.68/24
+//       wg-square-1e6        11.1/15.5/15.2/260  9.46/13.2/13.5/298  8.32/12.2/12.4/292
+//     (AMD on the 2-D cases: 0.23/0.57/0.56/22, 0.12/0.28/0.29/16, 3.82/9.87/9.11/275.) ND's
+//     analysis gain over METIS (0.14-0.47 s at n ~ 1e5, 2.9 s at 1e6) shrinks by its extra fill
+//     where it has any: on yee-pec-box-1e5 (+12% flops, +6% entries) it is 0.40 s for A+f,
+//     0.35 s for A+3f, and ND loses 0.22 s with the InertiaCounter counts - break-even at 2
+//     threads; syn-mem27-46: gains 0.28, 0.57, 0.02 s. A solve costs ND 0.95-1.16x METIS' time
+//     (1.12x on wg-square-1e6: about 100 solves eat its A+3f gain). On 2-D cases AMD wins
+//     outright. Only the analysis gains from more threads (METIS/SCOTCH stay serial), so whether
+//     ND pays as a default must be measured at the judged thread count.
+//   * ICNTL(58) (symbolic factorization): the default 2 (column counts) is the fast one; 1 made
+//     the given-order analysis 1.7x (n = 1e6) to 4x (syn-mem27-46) slower. ICNTL(6) = 0 changed
+//     nothing (no maximum transversal at analysis with ICNTL(12) = 1, the effective value in
+//     every run); ICNTL(12)/(13)/(14) do not touch the ordering. Scaling ICNTL(8) = 7 is computed
+//     at factorization, so it costs the analysis nothing.
+//   * Block analysis (block_analysis, ICNTL(15) = 1 with blocks {i, n+i} of the complex
+//     embedding): MUMPS then orders the n-vertex graph of K. syn-near-singular-complex-1e5 (every
+//     coupling complex): AMD analysis 0.37 -> 0.28 s, SCOTCH 3.0 -> 0.30 s at equal or lower
+//     flops (3.5e8 -> 3.3e8); factorization time within the noise for SCOTCH, +3..20% for AMD in
+//     two A/B series. On a Bloch-periodic Yee cell (n = 1e5, 3% of the couplings complex: the
+//     embedding nearly decouples) blocks cost flops with METIS (2.24e12 -> 2.69e12): hence the
+//     auto rule (on from 50% complex couplings, kCompressedFraction in src/factor). The same rule
+//     picks between the compressed and the full embedding graph in compute_ordering.
 #pragma once
 
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
@@ -112,9 +178,21 @@ namespace hs {
 
 enum class FactorPrecision { Double, Single };
 
+/// FactorOptions::ordering value selecting hsolve's own multithreaded nested dissection
+/// (compute_ordering below), handed to MUMPS as its pivot order (PERM_IN, ICNTL(7) = 1).
+inline constexpr int kOrderingNestedDissection = 10;
+
 struct FactorOptions {
   FactorPrecision precision = FactorPrecision::Double;  ///< Single: s/cmumps (pair with SolveRefinement)
-  int ordering = 7;           ///< ICNTL(7): 7 auto, 5 METIS, 3 SCOTCH, 4 PORD, 0 AMD
+  int ordering = 7;           ///< ICNTL(7): 7 auto, 5 METIS, 3 SCOTCH, 4 PORD, 0 AMD, 6 QAMD,
+                              ///< 2 AMF; or kOrderingNestedDissection (hsolve, multithreaded)
+  int ordering_threads = 0;   ///< threads of compute_ordering for kOrderingNestedDissection;
+                              ///< 0 = `threads` (the ordering itself does not depend on it)
+  int block_analysis = 0;     ///< complex T with a MUMPS ordering: declare the embedding's pairs
+                              ///< {i, n+i} as blocks (ICNTL(15) = 1), so that MUMPS orders the
+                              ///< n-vertex graph of K. 1 on, 0 off, -1 auto (on when at least
+                              ///< half of the off-diagonal couplings are complex). Measured: see
+                              ///< the block-analysis note in the header comment
   int scaling = 7;            ///< ICNTL(8): 7 = recomputed at every factorization (shift-independent)
   int threads = 0;            ///< ICNTL(16) OpenMP threads; 0 = omp_get_max_threads()
   int mem_relax_pct = 35;     ///< ICNTL(14) initial value; on a workspace error it is doubled (at
@@ -163,6 +241,8 @@ struct FactorEstimate {
 struct FactorStats {
   index_t analyses = 0;      ///< successful + failed analyze() calls
   double analyze_s = 0.0;    ///< accumulated over all analyze() calls
+  double ordering_s = 0.0;   ///< part of analyze_s spent in compute_ordering (hsolve orderings)
+  bool block_analysis = false;  ///< the last analysis declared the embedding's 2x2 blocks
   double factorize_s = 0.0;  ///< accumulated over all factorize() calls
   double solve_s = 0.0;      ///< accumulated over all solve() calls
   index_t factorizations = 0;    ///< successful + failed factorize() calls
@@ -377,5 +457,65 @@ class InertiaCounter {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
+
+// ------------------------------------------------------------------ hsolve's own orderings
+
+/// Options of compute_ordering (nested dissection). The defaults follow METIS_NodeND.
+struct OrderingOptions {
+  int threads = 0;              ///< OpenMP threads; 0 = omp_get_max_threads(). The ordering does
+                                ///< NOT depend on it (bitwise the same for every thread count)
+  index_t leaf_size = 120;      ///< subgraphs of at most this many vertices: minimum degree
+                                ///< (1..2048: the largest subgraph minimum degree is run on)
+  double imbalance = 1.2;       ///< each half of a separator weighs at most imbalance * |V| / 2;
+                                ///< in [1, 1.5] (above, the halves may be so unequal that the
+                                ///< dissection degenerates: 1.6-5x the flops at 1.9, natural
+                                ///< order from 2 on; see kMaxImbalance in src/factor)
+  index_t coarsen_to = 100;     ///< multilevel separators coarsen down to this many vertices (>= 2)
+  int init_tries = 7;           ///< greedy-growing attempts for the coarsest separator
+  int refine_passes = 10;       ///< node-FM refinement passes per level (stop early without gain)
+  std::uint64_t seed = 2026;    ///< seed of the (counter-based, thread-independent) random choices
+  /// Complex T only. Compressed: order the n-vertex graph of K, then eliminate the two embedding
+  /// variables of every vertex back to back (half the graph; right when most couplings are
+  /// complex). Full: order the 2n-vertex graph of the embedding itself, which can exploit
+  /// couplings without imaginary part (if Im K vanishes on most of them, the embedding nearly
+  /// decouples into two copies of Re K: measured 2.95e12 vs 2.24e12 flops for METIS on the 2n
+  /// graph on a Bloch-periodic Yee cell, n = 1e5). Auto: Compressed when at least half of the
+  /// off-diagonal couplings have an imaginary part, else Full.
+  enum class Embedding { Auto, Compressed, Full };
+  Embedding embedding = Embedding::Auto;
+};
+
+struct OrderingStats {
+  double seconds = 0.0;         ///< wall time of compute_ordering (graph construction included)
+  int threads = 0;              ///< OpenMP threads used
+  index_t vertices = 0;         ///< vertices of the ordered graph (n; 2n for a Full embedding)
+  double complex_fraction = 0;  ///< complex T: share of off-diagonal couplings with Im != 0
+  bool compressed = false;      ///< complex T: the n-vertex graph of K was ordered
+  std::int64_t edges = 0;       ///< its undirected edges
+  index_t separators = 0;       ///< separators computed (nonleaf subgraphs)
+  index_t leaves = 0;           ///< subgraphs ordered by minimum degree
+  index_t top_separator = 0;    ///< vertices of the first separator
+};
+
+/// Fill-reducing pivot order of the matrix MUMPS factorizes for pencil (K for real T, its real
+/// embedding E of order 2n for complex T) by nested dissection: multilevel vertex separators
+/// (sorted heavy-edge matching, greedy growing, one-sided node FM refinement) applied
+/// recursively, the two halves of every separator ordered concurrently as OpenMP tasks, leaves by
+/// minimum degree. Complex T: either the n-vertex graph of K is ordered and expanded so that the
+/// two embedding variables i and n+i of every vertex are eliminated one after the other, or the
+/// embedding's own 2n-vertex graph (couplings whose real or imaginary part is zero in A and B
+/// left out, as in the factorization) is ordered - see OrderingOptions::embedding.
+/// Returns PERM_IN for ICNTL(7) = 1: entry v is the 1-based pivot position of variable v (size n,
+/// or 2n). Deterministic: a function of the pencil's pattern and `options` (threads excluded).
+/// Thread-safe (no shared state). Always runs in an OpenMP parallel region of its own, also for
+/// threads = 1, and waits for all its tasks: it may be called from inside a parallel region
+/// (without nested parallelism it then runs on one thread, with the same result). O(nnz log n)
+/// work. Throws InvalidInput (options outside the documented ranges), Unsupported (order above
+/// the 32-bit MUMPS range).
+/// Scalar set: T in {double, cplx}.
+template <class T>
+std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil,
+                                  const OrderingOptions& options = {},
+                                  OrderingStats* stats = nullptr);
 
 }  // namespace hs

@@ -12,6 +12,7 @@
 
 #include "factor/mumps_api.hpp"
 #include "factor/mumps_input.hpp"
+#include "factor/ordering_detail.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
 #include "hsolve/util.hpp"
@@ -27,9 +28,13 @@ constexpr int kMinRelaxIncrease = 10;
 
 // Returns `o` after checking every field MUMPS would otherwise misinterpret (InvalidInput).
 const FactorOptions& validated(const FactorOptions& o) {
-  if (o.ordering < 0 || o.ordering > 7 || o.ordering == 1)
-    HS_THROW(InvalidInput, "FactorOptions.ordering (ICNTL(7)) must be one of 0,2,3,4,5,6,7, got "
-                               << o.ordering << " (1 = user permutation is not supported)");
+  if ((o.ordering < 0 || o.ordering > 7 || o.ordering == 1) && o.ordering != kOrderingNestedDissection)
+    HS_THROW(InvalidInput, "FactorOptions.ordering must be an ICNTL(7) value 0,2,3,4,5,6,7 or "
+                           "kOrderingNestedDissection ("
+                               << kOrderingNestedDissection << "), got " << o.ordering
+                               << " (1 = user permutation is not supported)");
+  if (o.ordering_threads < 0)
+    HS_THROW(InvalidInput, "FactorOptions.ordering_threads must be >= 0, got " << o.ordering_threads);
   static constexpr int kScalings[] = {-2, 0, 1, 3, 4, 7, 8, 77};
   if (std::find(std::begin(kScalings), std::end(kScalings), o.scaling) == std::end(kScalings))
     HS_THROW(InvalidInput, "FactorOptions.scaling (ICNTL(8)) must be one of -2,0,1,3,4,7,8,77, got "
@@ -52,6 +57,8 @@ const FactorOptions& validated(const FactorOptions& o) {
   if (o.ooc_dir.size() >= sizeof(DMUMPS_STRUC_C::ooc_tmpdir))
     HS_THROW(InvalidInput, "FactorOptions.ooc_dir is longer than MUMPS allows ("
                                << sizeof(DMUMPS_STRUC_C::ooc_tmpdir) - 1 << " characters)");
+  if (o.block_analysis < -1 || o.block_analysis > 1)
+    HS_THROW(InvalidInput, "FactorOptions.block_analysis must be -1, 0 or 1, got " << o.block_analysis);
   if (o.verbosity < 0)
     HS_THROW(InvalidInput, "FactorOptions.verbosity must be >= 0, got " << o.verbosity);
   return o;
@@ -100,7 +107,7 @@ void MumpsFactorization<T, U>::configure_static_controls() {
   mumps_.icntl(3) = stream;                                // global information
   mumps_.icntl(4) = std::min(options_.verbosity, 4);       // print level
   mumps_.icntl(5) = 0;                                     // assembled input
-  mumps_.icntl(7) = options_.ordering;
+  mumps_.icntl(7) = mumps_ordering();
   mumps_.icntl(8) = options_.scaling;
   // INFOG(12) counts the negative pivots of fronts MUMPS factorizes itself; keep the root front
   // out of ScaLAPACK (a no-op for the sequential library, but it keeps the inertia exact).
@@ -164,19 +171,56 @@ void MumpsFactorization<T, U>::analyze(const ShiftedPencil<T>& pencil, double al
   // ICNTL(31) is read at analysis only (inertia-only objects, see set_discard_factors()).
   discard_at_analysis_ = discard_next_;
   mumps_.icntl(31) = discard_at_analysis_ ? 1 : 0;
-  // A given pivot order replaces the fill-reducing ordering (PERM_IN, ICNTL(7)=1).
+  // A given pivot order replaces the fill-reducing ordering (PERM_IN, ICNTL(7)=1); so does
+  // hsolve's own ordering, computed here.
   pivot_order_out_.clear();
-  if (!pivot_order_in_.empty()) {
-    if (static_cast<index_t>(pivot_order_in_.size()) != input_->order())
+  std::vector<int> computed_order;
+  if (pivot_order_in_.empty() && options_.ordering == kOrderingNestedDissection) {
+    OrderingOptions oo;
+    oo.threads = options_.ordering_threads > 0 ? options_.ordering_threads : mumps_.icntl(16);
+    Timer ordering_timer;
+    computed_order = compute_ordering(pencil, oo);
+    stats_.ordering_s += ordering_timer.seconds();
+  }
+  std::vector<int>& given = pivot_order_in_.empty() ? computed_order : pivot_order_in_;
+  if (!given.empty()) {
+    if (static_cast<index_t>(given.size()) != input_->order())
       HS_THROW(InvalidInput, "SparseFactorization::analyze: pivot order of size "
-                                 << pivot_order_in_.size() << " for a MUMPS matrix of order "
-                                 << input_->order());
+                                 << given.size() << " for a MUMPS matrix of order " << input_->order());
     mumps_.icntl(7) = 1;
-    s.perm_in = pivot_order_in_.data();
+    s.perm_in = given.data();
   } else {
-    mumps_.icntl(7) = options_.ordering;
+    mumps_.icntl(7) = mumps_ordering();
     s.perm_in = nullptr;
   }
+  // Complex T with a MUMPS ordering: the embedding's pairs {i, n+i} as blocks (ICNTL(15)=1), so
+  // that MUMPS orders the n-vertex graph of K (FactorOptions::block_analysis).
+  bool blocks = false;
+  if constexpr (kEmbeddingFactor == 2) {
+    if (given.empty() && options_.block_analysis != 0)
+      blocks = options_.block_analysis > 0 ||
+               ordering::complex_coupling_fraction(pencil) >= ordering::kCompressedFraction;
+  }
+  if (blocks) {
+    const int n = static_cast<int>(pencil.order());
+    blkptr_.resize(static_cast<std::size_t>(n) + 1);
+    blkvar_.resize(static_cast<std::size_t>(2 * n));
+    for (int b = 0; b <= n; ++b) blkptr_[b] = 2 * b + 1;
+    for (int b = 0; b < n; ++b) {
+      blkvar_[2 * b] = b + 1;          // Re part of vertex b
+      blkvar_[2 * b + 1] = n + b + 1;  // Im part
+    }
+    mumps_.icntl(15) = 1;
+    s.nblk = n;
+    s.blkptr = blkptr_.data();
+    s.blkvar = blkvar_.data();
+  } else {
+    mumps_.icntl(15) = 0;
+    s.nblk = 0;
+    s.blkptr = nullptr;
+    s.blkvar = nullptr;
+  }
+  stats_.block_analysis = blocks;
 
   const int info1 = mumps_.run(kAnalyze);
   s.perm_in = nullptr;
