@@ -13,14 +13,20 @@ Kinds written here:
           to what was computed. complete=False (ARPACK offers no completeness guarantee); window =
           [sigma - r, sigma + r], r the largest distance found. Every pair must pass a backward-error
           check before anything is written.
-Exact references (analytic, discrete-exact, partial-analytic, or an unlabelled one) are never replaced
-unless --force; a dense reference replaces a solver one, never the other way round.
+Replacement policy: exact references (analytic, discrete-exact, or an unlabelled one) are never replaced
+unless --force. Continuum-model references (partial-analytic, common.CONTINUUM_KINDS) are not
+eigenvalues of the matrix pencil, so a case holding only one "lacks an exact one" and gets a discrete
+reference; the replaced files are first archived to refs/<case>/superseded/<kind>/ (load_ref ignores
+subdirectories) so the generator's continuum data is kept. A dense reference replaces a solver one,
+never the other way round.
 """
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import scipy.linalg as la
@@ -31,8 +37,10 @@ from tools.eval import common, evaluate, shift_invert
 SOLVER_TOL = 1e-14          # ARPACK accuracy for solver references
 VERIFY_TOL = 1e-11          # max backward error accepted for a solver reference pair
 INFINITE_FACTOR = 1e12
+# Usefulness for judging a solver; kinds not listed (analytic, discrete-exact, unlabelled) are exact.
+KIND_RANK = {**{k: -1 for k in common.CONTINUUM_KINDS}, "solver": 0, "dense": 1}
 EXACT_RANK = 2
-KIND_RANK = {"solver": 0, "dense": 1}   # analytic / discrete-exact / partial-analytic: EXACT_RANK
+REF_FILES = ("eigenvalues.npy", "eigenvectors.npy", "ref.json")
 
 
 @dataclass
@@ -100,6 +108,15 @@ def solver_reference(c: cio.Case, problem: str, tgt: dict, *, ctol: float, seed:
     return RefData(w, V, "solver", False, (sigma - r, sigma + r), note)
 
 
+def _archive(ref_dir: Path, kind: str) -> None:
+    """Copy the current reference files to ref_dir/superseded/<kind>/ before they are replaced."""
+    dest = ref_dir / "superseded" / kind
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in REF_FILES:
+        if (ref_dir / name).exists():
+            shutil.copy2(ref_dir / name, dest / name)
+
+
 def build_reference(name: str, root=cio.DEFAULT_ROOT, *, force: bool = False,
                     dense_max: int = common.DENSE_MAX, extra: int | None = None) -> str:
     """Write the best reference this tool can produce for case `name`; returns a status line."""
@@ -107,15 +124,16 @@ def build_reference(name: str, root=cio.DEFAULT_ROOT, *, force: bool = False,
     problem = common.problem_type(c)
     kind = "dense" if c.n <= dense_max else "solver"
     existing = cio.load_ref(c.name, root=root)
-    if existing is not None and not force:
-        old = existing.info.get("kind")
-        if KIND_RANK.get(old, EXACT_RANK) >= KIND_RANK[kind]:
-            return f"{c.name}: kept existing {old or 'unlabelled'} reference (use --force to replace)"
+    old = existing.info.get("kind") if existing is not None else None
+    if existing is not None and not force and KIND_RANK.get(old, EXACT_RANK) >= KIND_RANK[kind]:
+        return f"{c.name}: kept existing {old or 'unlabelled'} reference (use --force to replace)"
     if kind == "dense":
         data = dense_reference(c, problem, ctol=common.complex_tol(c), dense_max=dense_max)
     else:
         data = solver_reference(c, problem, common.target(c), ctol=common.complex_tol(c),
                                 seed=common.seed(c), extra=extra)
+    if old in common.CONTINUUM_KINDS:   # archive only once the replacement exists
+        _archive(Path(root) / "refs" / c.name, old)
     cio.save_ref(c.name, data.eigenvalues, kind=data.kind, note=data.note, complete=data.complete,
                  window=data.window, eigenvectors=data.eigenvectors, root=root)
     return f"{c.name}: wrote {data.kind} reference ({data.eigenvalues.size} eigenvalues) - {data.note}"

@@ -297,6 +297,23 @@ def test_solver_reference_then_dense_upgrade(tmp_path):
     assert cio.load_ref("lap", tmp_path).info["kind"] == "dense"
 
 
+def test_continuum_reference_is_not_compared_and_gets_replaced(tmp_path):
+    ref = _hermitian_case(tmp_path, "c")
+    w, V = _nearest(ref, SIGMA, 4)
+    # continuum-model values: the discrete eigenvalues are O(h^2) = 1e-3 away
+    cio.save_ref("c", ref.eigenvalues + 1e-3, kind="partial-analytic", complete=True, root=tmp_path)
+    doc = evaluate.evaluate("c", _save(tmp_path / "res", w, V), root=tmp_path)
+    assert doc["reference"]["kind"] == "partial-analytic" and not doc["reference"]["comparable"]
+    assert doc["verdict"] == "pass" and doc["completeness"]["status"] == "unknown"
+    assert all(p["ref_index"] is None for p in doc["pairs"])
+    assert "wrote dense" in reference.build_reference("c", tmp_path)
+    archived = tmp_path / "refs/c/superseded/partial-analytic"
+    assert json.loads((archived / "ref.json").read_text())["kind"] == "partial-analytic"
+    assert np.load(archived / "eigenvalues.npy") == pytest.approx(ref.eigenvalues + 1e-3)
+    doc = evaluate.evaluate("c", tmp_path / "res", root=tmp_path)
+    assert doc["reference"]["comparable"] and doc["completeness"]["status"] == "complete"
+
+
 def test_norm_estimate_eigsh_is_a_tight_lower_bound():
     rng = np.random.default_rng(2)
     M = sp.random(300, 300, density=0.05, random_state=rng) - 0.5 * sp.random(300, 300, density=0.05, random_state=rng)

@@ -20,6 +20,10 @@ DEFAULT_TOL = 1e-10
 DEFAULT_COMPLEX_TOL = 1e-8
 DEFAULT_SEED = 2026
 DEFAULT_TARGET: dict[str, Any] = {"mode": "nearest", "sigma": 0.0, "k": 6, "lower": 0.0, "upper": 0.0}
+# Reference kinds holding values of the continuous model rather than eigenvalues of the matrix pencil:
+# they differ by the discretization error (O(h^2), stated only in the ref note), so they cannot be
+# compared at solver accuracy and are replaceable by a discrete reference.
+CONTINUUM_KINDS = ("partial-analytic",)
 # meta.json problem names -> SolveReport::problem enum strings (snake_case, docs/FORMATS.md §2).
 PROBLEM_ENUM = {"HEP": "standard", "GHEP": "generalized_definite", "GHIEP": "generalized_indefinite"}
 

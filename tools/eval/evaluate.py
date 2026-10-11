@@ -13,7 +13,9 @@ spectrum, so it is a LOWER bound of ||.||_2 and eta is over-estimated (conservat
 optimistic. Only if ARPACK fails do we fall back to the 1-norm, an upper bound (optimistic eta) -
 reported in norm_method.
 
-Comparison with the reference (data/refs/<case>, any kind):
+Comparison with the reference (data/refs/<case>). Continuum-model references (kind partial-analytic,
+common.CONTINUUM_KINDS) are O(h^2) away from the matrix eigenvalues: they are reported with
+comparable=false and not used below; build a discrete one with tools/eval/reference.py.
   * matching: one-to-one, |lambda - mu| <= match_rtol * (|mu| + scale), scale = ||A||_2/||B||_2;
     maximal number of matches first, then minimal total normalized distance (Hungarian algorithm).
     The (|mu| + scale) yardstick is the eigenvalue error a backward-stable solver can guarantee:
@@ -354,7 +356,9 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
     tol = common.tol(c) if tol is None else float(tol)
     res = cio.load_result(result_dir)
     data_root = _data_root(c, root)
-    ref = cio.load_ref(c.name, root=data_root)
+    stored_ref = cio.load_ref(c.name, root=data_root)
+    comparable = stored_ref is not None and stored_ref.info.get("kind") not in common.CONTINUUM_KINDS
+    ref = stored_ref if comparable else None
     norms = estimate_norms(c.A, c.B, dense_max)
     scale = norms.scale
 
@@ -430,7 +434,7 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
         "case": c.name,
         "solver": solver or report.get("solver") or Path(result_dir).name,
         "inputs": {"case": str(c.path), "result": str(Path(result_dir)),
-                   "reference": str(data_root / "refs" / c.name) if ref is not None else None},
+                   "reference": str(data_root / "refs" / c.name) if stored_ref is not None else None},
         "problem": problem, "n": n, "nnz_a": int(c.A.nnz), "nnz_b": int(c.B.nnz) if c.B is not None else 0,
         "complex_scalars": common.is_complex(c),
         "config": c.config, "target": tgt, "tol": tol,
@@ -439,9 +443,10 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
         "solver_success": report.get("success"),
         "norms": {"norm2_a": norms.norm2_a, "norm2_b": norms.norm2_b, "scale": scale,
                   "norm_method": {"A": norms.method_a, "B": norms.method_b}},
-        "reference": None if ref is None else {
-            "kind": ref.info.get("kind"), "complete": ref.info.get("complete"), "window": ref.info.get("window"),
-            "count": int(ref.eigenvalues.size), "has_eigenvectors": ref.eigenvectors is not None},
+        "reference": None if stored_ref is None else {
+            "kind": stored_ref.info.get("kind"), "comparable": comparable, "complete": stored_ref.info.get("complete"),
+            "window": stored_ref.info.get("window"), "count": int(stored_ref.eigenvalues.size),
+            "has_eigenvectors": stored_ref.eigenvectors is not None},
         "pairs": pairs,
         "duplicates": dups,
         "completeness": completeness,
