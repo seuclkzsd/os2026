@@ -40,8 +40,9 @@ confirmation runs the default, the descent's start (--from-profile: the stored p
 and up to --confirm-top runners-up --confirm-reps times INTERLEAVED (rotating order) and compares
 MEDIANS; a configuration is valid only if every confirmation run passes the evaluation.
 Randomly failing cases: when a configuration of the case was valid in some runs and invalid in
-others - in this tuning, or recorded as "flaky" in the case's stored profile (multi-rank MUMPS is
-not deterministic; SLEPc's GHIEP Krylov-Schur on wg-square-1e5 misses eigenvalues in some runs) -
+others - in this tuning, or recorded as "flaky" in a stored profile of the case and target mode at
+any core count (multi-rank MUMPS is not deterministic; SLEPc's GHIEP Krylov-Schur on
+wg-square-1e5 misses eigenvalues in some runs, with 1 and with 2 ranks) -
 every configuration still valid after the regular confirmation gets further interleaved runs up to
 --flaky-confirm-reps (default 20), all of which it must pass. 5 passing runs cannot tell a
 configuration that fails in a quarter of its runs from a sound one (it passes 5 of 5 with
@@ -278,9 +279,10 @@ class Tuner:
         self.dir = REPO / "results/raw" / args.tag / (case_name + ("" if self.mode == "nearest" else f"@{self.mode}"))
         self.trials: list[dict[str, Any]] = []
         self.cache: dict[str, list[dict[str, Any]]] = {}
-        stored = self.stored_profile()
-        # random failures recorded by an earlier tuning of this case: confirm with the long series at once
-        self.flaky = bool(stored and stored[1].get("tuned", {}).get("flaky"))
+        # random failures recorded by an earlier tuning of this case and target mode, at any core
+        # count (they come from the solver, not the layout): confirm with the long series at once
+        self.flaky = any(p["scope"] == "case" and p["name"] == c.name and p["mode"] == self.mode
+                         and p.get("tuned", {}).get("flaky") for p in load_profiles(args.profiles_file))
         t0 = time.perf_counter()
         self.norms = evaluate.estimate_norms(c.A, c.B)
         self.norm_time = time.perf_counter() - t0

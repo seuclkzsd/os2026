@@ -109,12 +109,13 @@ class SlepcConfig:
         return SlepcConfig(ranks, threads, self.bind if bind is None else bind, self.options)
 
     def fitted(self) -> "SlepcConfig":
-        """Copy without the options its layout cannot use: parallel analysis ICNTL(28)/(29) on one
-        rank, and spectrum-slicing partitions that do not divide the rank count (SLEPc rejects them:
-        EPSKrylovSchurSetPartitions 'Argument out of range')."""
+        """Copy without the options its layout cannot use: parallel analysis ICNTL(28)/(29) and the
+        root-node parallelism ICNTL(13) on one rank (a no-op there), and spectrum-slicing partitions
+        that do not divide the rank count (SLEPc rejects them: EPSKrylovSchurSetPartitions 'Argument
+        out of range')."""
         drop: dict[str, None] = {}
         if self.ranks == 1:
-            drop.update({MUMPS + "icntl_28": None, MUMPS + "icntl_29": None})
+            drop.update({MUMPS + "icntl_28": None, MUMPS + "icntl_29": None, MUMPS + "icntl_13": None})
         parts = self.option("eps_krylovschur_partitions")
         if parts is not None and (not parts.isdigit() or int(parts) < 1 or self.ranks % int(parts)):
             drop["eps_krylovschur_partitions"] = None

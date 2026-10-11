@@ -288,7 +288,7 @@ def test_profile_lookup_matches_the_tuned_interval():
 
 def test_config_fitted_drops_options_the_layout_cannot_use():
     c = SlepcConfig.make(1, 2, "none", {"eps_krylovschur_partitions": 2, "st_mat_mumps_icntl_28": 2,
-                                        "st_mat_mumps_icntl_29": 1, "eps_ncv": "2k"})
+                                        "st_mat_mumps_icntl_29": 1, "st_mat_mumps_icntl_13": 1, "eps_ncv": "2k"})
     assert c.fitted().label() == "1x2 eps_ncv=2k"
     four = c.with_layout(4, 1)
     assert four.fitted() == four                                             # 2 partitions of 4 ranks
@@ -595,6 +595,13 @@ def test_tune_confirmation_includes_the_stored_profile_and_its_flaky_flag(tmp_pa
     assert conf["start"] == stored.label() and stored.label() in conf["configs"]
     # the stored flag alone extends the confirmation of every valid configuration
     assert all(s["n"] == 3 for s in conf["configs"].values()) and len(conf["configs"]) == 3
+    # random failures come from the solver: a flag recorded at another core count counts too
+    slepc_profile.save_profiles([{**_profile("case", "tiny", cores=16), "tuned": {"valid": True, "flaky": True}}],
+                                args.profiles_file)
+    assert _SyntheticTuner(lambda cfg, n: (1.0, True), "tiny", args).flaky
+    slepc_profile.save_profiles([{**_profile("case", "tiny", mode="interval"), "tuned": {"valid": True, "flaky": True}}],
+                                args.profiles_file)
+    assert not _SyntheticTuner(lambda cfg, n: (1.0, True), "tiny", args).flaky
 
 
 # ------------------------------------------------------------------------------------ compare
