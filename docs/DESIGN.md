@@ -194,7 +194,8 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     逐位可复现；**driver 默认 `SolverConfig::deterministic = false`**（ICNTL(48)=1，L0-OpenMP 子树
     并行：三角回代约快 1.75×，结果只在容差内可复现，574d114）。L0-OpenMP 下分解必须用其分析时的
     线程数，否则 INFO(1) = −58：`analyze()` 固定 ICNTL(16)（threads = 0 取分析时的
-    `omp_get_max_threads()`）。逐位复现还需固定排序（下条与 §3.6-3b）。
+    `omp_get_max_threads()`）。逐位复现还需可复现的排序（P4 起 driver 的 `deterministic = true`
+    自动满足：排序决策确定、嵌套剖分用 METIS，§3.6-3b；显式 SCOTCH 不可复现，见下）。
   - ICNTL(24)=1 时 MUMPS 不报错而是修补零主元（INFOG(28)），之后的回代会丢掉该方向 ⇒
     **INFO(1)==−10 或 INFOG(28)>0 一律视为奇异：`factorize` 返回 false**，`solve` 拒绝执行，
     `inertia().valid=false`（计数仍填），对象保持已分析状态以便扰动位移后重分解。
