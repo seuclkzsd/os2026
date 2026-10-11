@@ -282,12 +282,15 @@ def _pencil(grid: YeeGrid, form: str, eps=1.0, mu=1.0) -> tuple[sp.csr_matrix, s
     return (standard_form(a, b), None, "HEP") if form == "standard" else (a, b, "GHEP")
 
 
-def _meta(grid: YeeGrid, problem: str, description: str, params: dict[str, Any]) -> dict[str, Any]:
+def _meta(grid: YeeGrid, problem: str, description: str, params: dict[str, Any],
+          homogeneous: bool) -> dict[str, Any]:
+    """Case metadata. The null-space dimension (hence the inertia) is topological and holds for
+    any material; the TE/TM pair degeneracy ('multiplicity') only for homogeneous media."""
     n, null = grid.edge_count, grid.null_space_dimension()
     inertia: dict[str, list[int]] = {"A": [0, null, n - null]}
     if problem == "GHEP":
         inertia.update(B=[0, 0, n], pencil=[0, null, n - null])
-    scenarios = ["zero-cluster", "multiplicity"]
+    scenarios = ["zero-cluster"] + (["multiplicity"] if homogeneous else [])
     if grid.is_complex:
         scenarios.append("complex-hermitian")
     if n >= 100_000:
@@ -311,7 +314,7 @@ def make_homogeneous_case(name: str, grid: YeeGrid, form: str, root: str | Path)
     w = exact_eigenvalues(grid)
     what = "PEC cavity" if grid.boundary == "pec" else "Bloch-periodic cell"
     meta = _meta(grid, problem, f"empty {what} {grid.cells} cells, curl-curl ({form} form)",
-                 {"form": form, "eps": 1.0, "mu": 1.0})
+                 {"form": form, "eps": 1.0, "mu": 1.0}, homogeneous=True)
     return write_case(name, a, b, meta=meta, targets=_exact_targets(w), root=root, eigenvalues=w,
                       ref_note=("discrete Yee/FIT spectrum: sum_d (2/h_d sin(theta_d))^2 with TE/TM "
                                 "multiplicities and the gradient null space; exact up to assembly rounding"))
@@ -331,7 +334,7 @@ def make_photonic_case(name: str, grid: YeeGrid, form: str, shape: str, radius: 
     meta = _meta(grid, problem, f"photonic crystal ({shape}, eps={eps_in:g}, r={radius:g}) unit cell, "
                                 f"{grid.cells} cells ({form} form)",
                  {"form": form, "shape": shape, "radius": radius, "eps_in": eps_in, "eps_out": 1.0,
-                  "mu": 1.0, "eps_avg": eps_avg})
+                  "mu": 1.0, "eps_avg": eps_avg}, homogeneous=False)
     return write_case(name, a, b, meta=meta, targets=targets, root=root)
 
 

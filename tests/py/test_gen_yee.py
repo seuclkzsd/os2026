@@ -132,7 +132,7 @@ def test_case_writers(tmp_path):
     case.save_ref("t-phc", [1.0], kind="dense", root=tmp_path)    # stale reference must disappear
     c = case.load_case(yee.make_photonic_case("t-phc", gp, "generalized", "spheres", 0.25, 13.0, tmp_path))
     assert case.load_ref("t-phc", root=tmp_path) is None
-    assert c.meta["dtype"] == "complex128" and "complex-hermitian" in c.meta["scenarios"]
+    assert c.meta["dtype"] == "complex128" and c.meta["scenarios"] == ["zero-cluster", "complex-hermitian"]
     assert c.meta["targets"][0]["sigma"] > 0 and c.meta["inertia"]["B"] == [0, 0, c.n]
     assert set(yee.PRESETS) >= {"yee-pec-cube-16", "yee-pec-box-1e5", "yee-bloch-1e4",
                                 "yee-photonic-spheres-1e4"}
