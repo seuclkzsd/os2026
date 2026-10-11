@@ -218,9 +218,9 @@ TEST(DriverBlocks, BlockWidthShrinksToTheMemoryBudget) {
 
 // A six-fold eigenvalue at the edge of the wanted set, single-vector first run: rounding cannot
 // bring its other copies within the run (they dominate the unwanted part of the operator only by
-// a factor 1.4), so the certificate finds copies missing, and one deflated rerun of width >= the
-// missing copies brings them all (a random start block has components in every copy), instead of
-// one copy per rerun.
+// a factor 1.4), so the certificate finds copies missing (4 of them), and one deflated rerun of
+// width >= the missing copies (rerun_block_size(1, 4) = 4) brings them all (a random start block
+// has components in every copy), instead of one copy per rerun.
 TEST(DriverBlocks, DeflatedRerunFindsAllMissingCopiesAtOnce) {
   std::vector<double> w;
   for (int i = 0; i < 6; ++i) w.push_back(1.0);
@@ -240,7 +240,7 @@ TEST(DriverBlocks, DeflatedRerunFindsAllMissingCopiesAtOnce) {
   expect_same_set(sol.eigenvalues, nearest(w, 1.103, 10), 1e-10);
   index_t reruns = 0;
   for (const auto& m : sol.report.warnings) reruns += m.find("deflated rerun") != std::string::npos;
-  EXPECT_EQ(reruns, 1);  // the first run (p = 1) misses copies; the rerun (p = 6) has them all
+  EXPECT_EQ(reruns, 1);  // the first run (p = 1) misses 4 copies; the rerun (p = 4) has them all
   // Interval target around the multiplet, one slice with p = 1: its reruns as well.
   cfg.target.mode = hs::TargetMode::Interval;
   cfg.target.lower = 0.93;

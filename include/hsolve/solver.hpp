@@ -65,9 +65,13 @@ struct SolverConfig {
   index_t ncv = 0;                  ///< 0 = auto
   index_t block_size = 0;           ///< Krylov block width p of the shift-invert Lanczos runs (HEP /
                                     ///< GHEP, incl. slices; KrylovSchurOptions::block_size): 0 = auto
-                                    ///< (driver rule from the factor estimate and nev, see
-                                    ///< internal.hpp choose_block_size), 1 = single vector. Deflated
-                                    ///< certificate reruns use max(p, missing rounded up to even).
+                                    ///< (src/driver/internal.hpp block_size_for: p = 4 for runs of
+                                    ///< >= 8 wanted pairs, else 1; depends on nev only), 1 = single
+                                    ///< vector. A deflated certificate rerun missing m pairs uses
+                                    ///< max(p, min(4, m rounded up to even)) (rerun_block_size), so
+                                    ///< it gets all missing copies of a multiple eigenvalue by
+                                    ///< construction only up to that width. p is halved (warning)
+                                    ///< while the block basis does not fit the memory budget.
                                     ///< GHIEP runs are single-vector.
   index_t slice_size = 0;           ///< spectrum slicing (interval / smallest / largest, B HPD): at
                                     ///< most this many eigenvalues per shift; 0 = auto (cost model)

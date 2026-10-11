@@ -279,9 +279,10 @@ template <class T>
 index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p);
 
 /// Block width of a deflated rerun that misses `missing` pairs after a run with width p:
-/// max(p, missing rounded up to even, at most kMaxAutoBlockSize), so that a random start block has
+/// max(p, min(kMaxAutoBlockSize, missing rounded up to even)), so that a random start block has
 /// components in every missing copy of a multiple eigenvalue of multiplicity up to that width and
-/// one run finds them all (eigen.hpp, block mode); see steps.cpp for why it is capped.
+/// one run finds them all (eigen.hpp, block mode). More missing copies than the width are left to
+/// rounding and further reruns; see steps.cpp for why it is capped.
 index_t rerun_block_size(index_t p, index_t missing);
 
 /// Ritz estimates of the ends of the spectrum of the pencil (from inside): lowest two and
