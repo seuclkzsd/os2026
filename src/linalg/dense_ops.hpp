@@ -7,7 +7,8 @@
 // thread sums a block in a fixed order (explicit lane accumulators, no reassociation), block sums
 // are added in block order into at most 256 slots, and the slots are added serially. The results
 // are therefore bitwise identical for every OpenMP thread count and from run to run (the CGS
-// kernels are hand-written for that reason, not BLAS gemv).
+// kernels are hand-written for that reason, not BLAS gemv). This holds for one binary: another
+// compiler, flags (e.g. FMA contraction) or BLAS may change the last bits.
 // The summation order differs from a plain left-to-right sum; the accuracy is the usual
 // O(eps * sum |x_i y_i|) of a blocked sum.
 //

@@ -54,9 +54,15 @@ inline double ddot(index_t len, const double* x, const double* y) {
   return lane_sum(a);
 }
 
+/// Imaginary part of a conjugated complex dot product from the cross-lane accumulators b
+/// (b[l] += x[t + l] * y[t + (l ^ 1)]): + even lanes (x_re y_im), - odd lanes (x_im y_re).
+inline double cross_sum(const double* b) {
+  return ((b[0] - b[1]) + (b[4] - b[5])) + ((b[2] - b[3]) + (b[6] - b[7]));
+}
+
 /// x^H y over len complex entries stored as interleaved doubles: re = sum_t x[t] y[t] and
-/// im = sum_i (x_re y_im - x_im y_re), the latter from lane products x[t] * y[t ^ 1] with the odd
-/// lanes subtracted (len * 2 is even, so the remainder holds whole pairs).
+/// im = sum_i (x_re y_im - x_im y_re) from the cross-lane products (len * 2 is even, so the
+/// remainder holds whole pairs).
 inline void zdotc(index_t len, const double* x, const double* y, double& re, double& im) {
   const index_t m = 2 * len;
   double a[kLanes] = {}, b[kLanes] = {};
@@ -71,7 +77,7 @@ inline void zdotc(index_t len, const double* x, const double* y, double& re, dou
     b[l] += x[t + l] * y[t + (l ^ 1)];
   }
   re = lane_sum(a);
-  im = ((b[0] - b[1]) + (b[4] - b[5])) + ((b[2] - b[3]) + (b[6] - b[7]));
+  im = cross_sum(b);
 }
 
 /// Fixed partition of [0, n) into blocks of `block` rows grouped into slots.
@@ -123,15 +129,10 @@ constexpr index_t kDoubles = is_complex_v<T> ? 2 : 1;
 
 // ---- CGS kernels on one row block --------------------------------------------------------------
 // All operate on `len` doubles of each column (len = rows, or 2 * rows interleaved for complex
-// data) with column stride ldp / ldv in doubles. Columns are processed in register groups (four
-// real or two complex); every column is summed with the same lane structure whichever group it
-// falls in.
-
-/// Imaginary part of a conjugated complex dot product from the cross-lane accumulators b
-/// (b[l] += p[t + l] * x[t + (l ^ 1)]): + even lanes (p_re x_im), - odd lanes (p_im x_re).
-inline double cross_sum(const double* b) {
-  return ((b[0] - b[1]) + (b[4] - b[5])) + ((b[2] - b[3]) + (b[6] - b[7]));
-}
+// data) with column stride ldp / ldv in doubles, the columns in register groups (projections:
+// 8, 4, 1 real / 4, 1 complex; updates: 8, 4, 1 real / 2, 1 complex). A projection sums every
+// column with the same lane structure whichever group it falls in; an update subtracts the sum
+// over its group. Either way the arithmetic depends on k only.
 
 // The kernels below were tuned on Ice Lake (bench/ortho_kernels): two-dimensional accumulator
 // arrays a[column][lane] over restrict pointers vectorize well with GCC, separately named arrays
