@@ -177,6 +177,7 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
   if (c.ncv < 0 || c.max_restarts < 1 || c.threads < 0 || c.max_shift_retries < 0)
     HS_THROW(InvalidInput, "config: ncv, threads, max_shift_retries must be >= 0 and max_restarts >= 1");
   if (!(c.memory_budget_gb > 0.0)) HS_THROW(InvalidInput, "config: memory_budget_gb must be > 0");
+  if (c.ordering < -1 || c.ordering > 7) HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive) or a MUMPS ICNTL(7) value 0..7");
   return c;
 }
 

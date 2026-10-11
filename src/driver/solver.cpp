@@ -113,7 +113,7 @@ void append_columns(DenseMatrix<T>& dst, const DenseMatrix<T>& src) {
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
   FactorOptions o;
   o.precision = cfg.factor_precision;
-  o.ordering = cfg.ordering;
+  o.ordering = cfg.ordering < 0 ? 7 : cfg.ordering;  // adaptive (-1) is resolved by adaptive_analysis
   o.deterministic = cfg.deterministic;
   o.threads = cfg.threads > 0 ? cfg.threads : max_threads();
   o.blr = cfg.blr == Toggle::On;
@@ -225,8 +225,9 @@ double initial_shift(const Target& t, const driver::NormEstimate& na, double sca
 // Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3): in-core if the
 // estimate fits the cap, else out-of-core if allowed and fitting, else OutOfMemoryBudget.
 template <class T>
-void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0) {
-  fac.analyze(pencil, 1.0, -sigma0);
+void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
+                           bool already_analyzed = false) {
+  if (!already_analyzed) fac.analyze(pencil, 1.0, -sigma0);
   const FactorEstimate est = fac.estimate();
   event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
                         {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
@@ -241,6 +242,47 @@ void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPen
                                                                     << cap_mb << " MB");
     }
   }
+}
+
+// Adaptive fill-reducing ordering (DESIGN §3.6-3b). Nested dissection (SCOTCH) minimises fill but
+// its analysis costs ~7x an AMD analysis; on 2-D-like graphs AMD's extra fill is cheap. Probe with
+// AMD (fast), predict what nested dissection could save on the run's factorizations and solves,
+// and pay for it only when the predicted saving exceeds its predicted analysis cost.
+// Cost model (calibrated on the 2x Xeon 6336Y node, P3 measurements; only ratios matter):
+//   t_factorize ~ 6e-7 n + flops / (12 GF/s * threads),  t_solve ~ 16 B * entries / 12 GB/s,
+//   nested dissection keeps (flops, entries) >= (0.35, 0.6) of AMD's on 3-D-like graphs (AMD fill
+//   ratio entries/nnz(K) > 20) and >= (0.6, 0.85) otherwise.
+template <class T>
+std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
+                                                          const ShiftedPencil<T>& pencil, double sigma0,
+                                                          index_t expected_factorizations, index_t expected_solves) {
+  FactorOptions amd = fopts;
+  amd.ordering = 0;
+  auto fac = make_mumps_factorization<T>(amd);
+  Timer t;
+  fac->analyze(pencil, 1.0, -sigma0);
+  const double t_amd = t.seconds();
+  const FactorEstimate e = fac->estimate();
+  const double threads = std::max(1, fopts.threads);
+  const double n = static_cast<double>(pencil.order()) * (is_complex_v<T> ? 2.0 : 1.0);
+  const double t_f = 6e-7 * n + e.flops / (12e9 * threads);
+  const double t_s = 16.0 * static_cast<double>(e.factor_entries) / 12e9;
+  const double fill_ratio = static_cast<double>(e.factor_entries) / std::max<double>(1.0, pencil.nnz());
+  const bool three_d_like = fill_ratio > 20.0;
+  const double keep_f = three_d_like ? 0.35 : 0.6, keep_e = three_d_like ? 0.6 : 0.85;
+  const double saving = expected_factorizations * t_f * (1.0 - keep_f) + expected_solves * t_s * (1.0 - keep_e);
+  const double nd_cost = 7.0 * t_amd;
+  const bool use_nd = saving > nd_cost;
+  event(c, "ordering", {{"amd_analyze_s", t_amd}, {"amd_flops", e.flops},
+                        {"amd_entries", static_cast<std::int64_t>(e.factor_entries)}, {"fill_ratio", fill_ratio},
+                        {"predicted_saving_s", saving}, {"predicted_nd_cost_s", nd_cost},
+                        {"choice", std::string(use_nd ? "scotch" : "amd")}});
+  if (!use_nd) return fac;
+  FactorOptions nd = fopts;
+  nd.ordering = 3;  // SCOTCH: measured faster analysis than METIS at equal or better total time
+  auto fac_nd = make_mumps_factorization<T>(nd);
+  fac_nd->analyze(pencil, 1.0, -sigma0);
+  return fac_nd;
 }
 
 // --------------------------------------------------------------------------- definite path
@@ -830,12 +872,20 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     HS_THROW(OutOfMemoryBudget, "matrices and Krylov basis alone exceed memory_budget_gb = " << cfg.memory_budget_gb);
   const FactorOptions fopts = factor_options_from(cfg, cap_mb);
   rep.factor_options = fopts;
-  auto fac = make_mumps_factorization<T>(fopts);
-
   // 3. One analysis serves every factorization on the pencil's pattern: the B-definiteness test,
-  //    K(sigma), certificate endpoints and reruns.
+  //    K(sigma), certificate endpoints and reruns. ordering < 0 selects it adaptively.
   const double sigma0 = initial_shift(cfg.target, na, scale, b != nullptr);
-  analyze_within_budget(c, *fac, pencil, sigma0);
+  std::unique_ptr<SparseFactorization<T>> fac;
+  if (cfg.ordering < 0) {
+    const index_t kk = cfg.target.mode == TargetMode::Interval ? 32 : cfg.target.k;
+    const bool cert = cfg.inertia_check != Toggle::Off;
+    fac = adaptive_analysis(c, fopts, pencil, sigma0, 1 + (cert ? 2 : 0) + (b ? 1 : 0), std::max<index_t>(40, 3 * kk));
+    analyze_within_budget(c, *fac, pencil, sigma0, /*already_analyzed=*/true);
+  } else {
+    fac = make_mumps_factorization<T>(fopts);
+    analyze_within_budget(c, *fac, pencil, sigma0);
+  }
+  rep.factor_options = fac->options();
 
   // 4. Problem type: B is HPD iff its exact LDL^T has no negative or zero pivots (Sylvester).
   ProblemType type = cfg.problem;

@@ -155,6 +155,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    变成 INFO=−19 而不是被系统杀掉）。超预算依次：BLR（需重新分析一次以获得估计）→ 单精度 +
    迭代修正 → out-of-core；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。
    Interval 模式先用惯性求出区间内个数 m，再定 nev/ncv，n·m·sizeof(T)·3 超限则切片或拒绝。
+3b. **自适应排序**（`ordering=-1`，默认）：先做 AMD 分析探测（极快），按代价模型预估嵌套剖分
+   （SCOTCH）在本次运行的分解与回代上能省的时间，超过其额外分析代价（≈7×AMD 分析）才改用
+   SCOTCH。模型：t_分解 ≈ 6e-7·n + flops/(12 GF/s·线程)，t_回代 ≈ 16 B·条目/12 GB/s；AMD 填充比
+   >20 视为三维型（ND 保留 0.35 flops、0.6 条目），否则（0.6、0.85）。实测（8 线程）：二维波导 1e5
+   1.65→1.20 s，二维腔 1.17→0.47 s；三维问题选 SCOTCH（比 METIS 分析快 35–50%）。
 4. **近奇异位移**：`factorize` 返回 false 时 σ ← σ + δ（δ 从 1e-8·scale 起每次 ×10，最多
    `max_shift_retries` 次），记入报告；「最近 k 个」的选择始终相对原始 σ。
 5. **迭代求解**：内层容差 = tol × inner_tol_factor；θ → λ = σ + 1/θ。
