@@ -30,6 +30,11 @@
 // GHIEP supports target mode 'nearest' only: interval / smallest / largest need eigenvalue counts,
 // which Sylvester inertia does not give for indefinite B.
 //
+// Block runs. Every Krylov-Schur run uses krylov_schur_general's block mode with the block size of
+// ghiep_block_size (multi-RHS solves are much cheaper per vector than single ones); the one-sided
+// runs keep the cluster at their unwanted end whatever the block size (p cluster directions enter
+// a block Krylov space, none is wanted).
+//
 // Memory (DESIGN §3.6-3). A run keeps only its Schur basis (its Ritz vectors span the same space
 // and are dropped at once); the factorization is released before every refinement (idle there; a
 // later run sits at another shift, or is a rerun whose own solves outweigh one refactorization);
@@ -82,6 +87,50 @@ constexpr double kStripConfirm = 1e-2;
 /// so spmm streams A and B once per batch (real T: 2 * kBatch real columns, the width spmm
 /// streams at once). Batch memory: 6 kBatch n-vectors of T.
 constexpr index_t kBatch = 4;
+/// Block-size rule of the GHIEP runs (ghiep_block_size): blocks only for orders from kBlockMinOrder
+/// on (below, the solves are cheap next to the basis work: measured gains < 10-18% at n = 1e4),
+/// p = 4 from kBlock4MinNev wanted pairs on, p = 2 from kBlock2MinNev on (a block of p needs
+/// enough wanted pairs to fill it; probes with nev = 2 stay single-vector).
+constexpr index_t kBlockMinOrder = 20000;
+constexpr index_t kBlock4MinNev = 8;
+constexpr index_t kBlock2MinNev = 4;
+
+// SolverConfig::block_size once the field exists (interface request of module ghiep: index_t, 0 =
+// auto, 1 = single-vector), detected at compile time; until then every run uses the automatic
+// rule.
+template <class C>
+auto configured_block_size(const C& cfg, int) -> decltype(static_cast<index_t>(cfg.block_size)) {
+  return static_cast<index_t>(cfg.block_size);
+}
+template <class C>
+index_t configured_block_size(const C&, long) {
+  return 0;
+}
+
+/// Largest configured block size used: wider blocks only add basis work, and a block too wide for
+/// the space makes krylov_schur_general fall back to one exact cycle over all of it.
+constexpr index_t kMaxConfiguredBlock = 64;
+
+/// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil: the
+/// configured value if positive (at most kMaxConfiguredBlock and n / 16), else the measured rule
+/// above. One multi-RHS solve of p columns costs much less than p single solves (2 threads,
+/// wg-square-1e5: 21 / 12.9 / 8.8 / 6.2 ms per vector for p = 1 / 2 / 4 / 8; wg-square-1e6:
+/// 248 / 155 / 114 / 72 ms), while a block Krylov space needs more vectors for distinct
+/// eigenvalues (wg-square-1e5, k = 18: 57 / 62 / 84 / 128 applications; wg-halfslab-1e5, k = 28:
+/// 87 / 88-96 / 132 / 216). End to end (bench/ghiep_block.cpp e2e, 2 threads, medians of 3):
+/// wg-square-1e5 2.46 / 1.85 / 1.85 / 1.99 s, wg-halfslab-1e5 3.12 / 2.07 / 2.20 / 2.57 s; on
+/// five synthetic GHIEP pencils (n = 2e4 .. 1e5, zero cluster, complex pairs) p = 4 was 1.14 -
+/// 1.89x and p = 2 1.26 - 1.39x faster than p = 1 (geometric means over these seven cases: 1.38x
+/// and 1.35x, within noise of each other); n ~ 1e4 gained <= 7% (p = 2) or lost (p >= 4).
+index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev) {
+  const index_t configured = configured_block_size(cfg, 0);
+  if (configured > 0) return std::max<index_t>(1, std::min({configured, kMaxConfiguredBlock, n / 16}));
+  if (n < kBlockMinOrder) return 1;
+  if (nev >= kBlock4MinNev) return 4;
+  if (nev >= kBlock2MinNev) return 2;
+  return 1;
+}
+
 template <class T>
 struct KsRun {
   double sigma = 0.0;
@@ -115,12 +164,14 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   ko.max_restarts = max_restarts;
   ko.tol = tol > 0 ? tol : cfg.tol * cfg.inner_tol_factor;
   ko.seed = cfg.seed;
+  ko.block_size = ghiep_block_size(cfg, pencil.order(), ko.nev);
   {
     PhaseScope phase(c.clock, Phase::Iterate);
     run.res = krylov_schur_general<T>(op, which, ko);
   }
   run.res.vectors = DenseMatrix<cplx>();
   event(c, "krylov_schur", {{"sigma", run.sigma}, {"nev", static_cast<std::int64_t>(ko.nev)},
+                            {"block_size", static_cast<std::int64_t>(ko.block_size)},
                             {"nconv", static_cast<std::int64_t>(run.res.nconv)},
                             {"restarts", static_cast<std::int64_t>(run.res.restarts)},
                             {"op_applies", static_cast<std::int64_t>(run.res.op_applies)}});
