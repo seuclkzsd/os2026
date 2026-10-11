@@ -106,11 +106,13 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
 
 /// The pencil K(alpha, beta) = alpha*A + beta*B (B = I when b == nullptr) for REAL alpha, beta,
 /// stored as the index-only UPPER-triangle pattern of the union of A and B (the only part a
-/// Hermitian LDL^T backend reads), plus scatter maps from A and B into it.
+/// Hermitian LDL^T backend reads).
 ///  * One pattern serves every shift: K(sigma) = 1*A + (-sigma)*B, B alone = 0*A + 1*B, so a
 ///    factorization analyses once and refactorizes for each (alpha, beta).
 ///  * assemble() writes values straight into the caller's (backend's) array: the full K is
-///    never materialised. Memory: rowptr (n+1) + colind (nnz) + maps (~nnz(A)/2 + nnz(B)/2).
+///    never materialised. Memory: rowptr (8 (n+1) bytes) + colind (4 nnz bytes) + 1 byte per row;
+///    assemble() merges the upper rows of A and B into the pattern rows on the fly (no scatter
+///    maps), with the same arithmetic as before, i.e. bitwise the same values.
 /// A and B must be square, of equal order, exactly Hermitian (see hermitian_part) and outlive
 /// the pencil.
 template <class T>
@@ -144,11 +146,10 @@ class ShiftedPencil {
   const CsrMatrix<T>* b_;
   std::vector<index_t> rowptr_;
   std::vector<std::int32_t> colind_;
-  std::vector<index_t> a_first_upper_;  ///< per row: first entry of A with col >= row
-  std::vector<index_t> a_dst_;          ///< pattern position of each upper entry of A (row order)
-  bool a_identity_ = false;             ///< upper(A) pattern == union pattern: a_dst_ unused
-  std::vector<index_t> b_first_upper_;  ///< same for B (unused when b_ == nullptr)
-  std::vector<index_t> b_dst_;          ///< pattern position of each upper entry of B / of each diagonal
+  /// Per row: bit 0 (1) if the upper part of A's row is the whole pattern row, bit 1 (2) the same
+  /// for B. Such rows are assembled by a plain copy; the others by merging the sorted rows (no
+  /// scatter maps: they cost 8 bytes per upper entry of A and B, 3.5x this pattern).
+  std::vector<std::uint8_t> whole_rows_;
 };
 
 /// Real symmetric embedding of a complex Hermitian matrix K (order n):

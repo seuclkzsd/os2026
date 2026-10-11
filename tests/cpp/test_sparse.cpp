@@ -39,6 +39,8 @@ T rand_scalar(std::mt19937_64& g) {
   }
 }
 
+using Scalars = ::testing::Types<double, cplx>;
+
 // Random sparse matrix (optionally Hermitian) of order n with ~density*n*n entries.
 template <class T>
 CsrMatrix<T> random_sparse(index_t n, double density, bool hermitian, std::uint64_t seed) {
@@ -241,6 +243,102 @@ TEST(SparsePencil, MissingDiagonalIsAdded) {
   check_pencil<double, double>(pencil, 1.0, -1.0, 1e-15);
 }
 
+// Reference assembly of one pattern row: each upper entry of A, then of B, is added at its column
+// (found by binary search) in a T accumulator, rounded once to U: the arithmetic the pencil
+// promises, so the comparison is bitwise.
+template <class T, class U>
+std::vector<U> reference_assemble(const hs::ShiftedPencil<T>& pencil, double alpha, double beta) {
+  std::vector<U> out(static_cast<std::size_t>(pencil.nnz()));
+  const T ta = T(alpha), tb = T(beta);
+  for (index_t i = 0; i < pencil.order(); ++i) {
+    const index_t r0 = pencil.rowptr()[i], r1 = pencil.rowptr()[i + 1];
+    std::vector<T> acc(static_cast<std::size_t>(r1 - r0), T(0));
+    const auto add = [&](const CsrMatrix<T>& m, const T& s) {
+      for (index_t p = m.rowptr[i]; p < m.rowptr[i + 1]; ++p) {
+        if (m.colind[p] < i) continue;
+        const auto* b = pencil.colind().data() + r0;
+        const auto* it = std::lower_bound(b, pencil.colind().data() + r1, m.colind[p]);
+        acc[it - b] += s * m.values[p];
+      }
+    };
+    if (alpha != 0.0) add(pencil.a(), ta);
+    if (beta != 0.0) {
+      if (pencil.b()) {
+        add(*pencil.b(), tb);
+      } else {
+        acc[0] += tb;
+      }
+    }
+    for (std::size_t k = 0; k < acc.size(); ++k) {
+      if constexpr (hs::is_complex_v<T>) {
+        using R = hs::real_t<U>;
+        out[r0 + k] = U(static_cast<R>(acc[k].real()), static_cast<R>(acc[k].imag()));
+      } else {
+        out[r0 + k] = static_cast<U>(acc[k]);
+      }
+    }
+  }
+  return out;
+}
+
+template <class T, class U>
+void expect_assembly_bitwise(const hs::ShiftedPencil<T>& pencil, double alpha, double beta) {
+  std::vector<U> got(static_cast<std::size_t>(pencil.nnz()));
+  pencil.assemble(alpha, beta, got.data());
+  const std::vector<U> want = reference_assemble<T, U>(pencil, alpha, beta);
+  ASSERT_EQ(got.size(), want.size());
+  EXPECT_EQ(std::memcmp(got.data(), want.data(), got.size() * sizeof(U)), 0);
+}
+
+// Keeps a random subset of the entries of a Hermitian matrix, symmetrically, dropping some
+// diagonal entries and emptying some rows entirely.
+template <class T>
+CsrMatrix<T> thinned(const CsrMatrix<T>& h, double keep, std::uint64_t seed) {
+  std::mt19937_64 g(seed);
+  std::uniform_real_distribution<double> u(0.0, 1.0);
+  std::vector<index_t> r, c;
+  std::vector<T> v;
+  for (index_t i = 0; i < h.nrows; ++i)
+    for (index_t p = h.rowptr[i]; p < h.rowptr[i + 1]; ++p) {
+      const index_t j = h.colind[p];
+      if (j < i || i % 9 == 4 || j % 9 == 4) continue;  // rows/columns 4, 13, ... stay empty
+      if (j == i ? i % 6 == 0 : u(g) > keep) continue;
+      r.push_back(i);
+      c.push_back(j);
+      v.push_back(h.values[p]);
+      if (j != i) {
+        r.push_back(j);
+        c.push_back(i);
+        v.push_back(hs::conj_if(h.values[p]));
+      }
+    }
+  return hs::csr_from_coo<T>(h.nrows, h.ncols, r, c, v);
+}
+
+template <class T>
+class SparsePencilAssembly : public ::testing::Test {};
+TYPED_TEST_SUITE(SparsePencilAssembly, Scalars);
+
+TYPED_TEST(SparsePencilAssembly, IsBitwiseTheRowMergeOfAAndB) {
+  using T = TypeParam;
+  using F = hs::rebind_t<T, float>;
+  const CsrMatrix<T> full = random_sparse<T>(70, 0.2, true, 51);
+  const CsrMatrix<T> sparse = thinned(full, 0.3, 52);  // pattern subset, missing diagonals
+  const CsrMatrix<T> other = random_sparse<T>(70, 0.1, true, 53);
+  // A's rows are whole pattern rows and B is sparser (copy + merge), the reverse (waveguide-like
+  // B containing A's pattern), unrelated patterns, B = I, and A without some diagonals alone.
+  const std::vector<std::pair<const CsrMatrix<T>*, const CsrMatrix<T>*>> pairs{
+      {&full, &sparse}, {&sparse, &full}, {&full, &other}, {&sparse, nullptr}, {&full, nullptr}};
+  for (const auto& [a, b] : pairs) {
+    const hs::ShiftedPencil<T> pencil(*a, b);
+    for (const auto& [alpha, beta] : std::vector<std::pair<double, double>>{{1.0, -0.37}, {0.0, 1.0}, {1.0, 0.0}}) {
+      SCOPED_TRACE(std::to_string(alpha) + ", " + std::to_string(beta) + (b ? "" : ", B = I"));
+      expect_assembly_bitwise<T, T>(pencil, alpha, beta);
+      expect_assembly_bitwise<T, F>(pencil, alpha, beta);
+    }
+  }
+}
+
 TEST(SparsePencil, SinglePrecisionAssemble) {
   auto a = random_sparse<cplx>(20, 0.2, true, 12);
   auto b = random_sparse<cplx>(20, 0.2, true, 13);
@@ -344,7 +442,6 @@ CsrMatrix<T> random_triangle(index_t n, double density, bool upper, std::uint64_
 
 template <class T>
 class SparseSymmetrize : public ::testing::Test {};
-using Scalars = ::testing::Types<double, cplx>;
 TYPED_TEST_SUITE(SparseSymmetrize, Scalars);
 
 TYPED_TEST(SparseSymmetrize, MatchesReferenceForBothTrianglesAndOverloads) {

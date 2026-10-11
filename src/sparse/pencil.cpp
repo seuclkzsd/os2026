@@ -26,6 +26,38 @@ index_t first_upper(const CsrMatrix<T>& m, index_t i) {
   return m.rowptr[i] + (std::lower_bound(b, e, static_cast<std::int32_t>(i)) - b);
 }
 
+// True when the upper part of row i of m is the whole pattern row (length len): the pattern row
+// starts with the diagonal and contains m's upper row, so it suffices that the entry len places
+// before the end of m's row is the diagonal. O(1).
+template <class T>
+bool upper_row_is_pattern(const CsrMatrix<T>& m, index_t i, index_t len) {
+  const index_t p0 = m.rowptr[i + 1] - len;
+  return p0 >= m.rowptr[i] && m.colind[p0] == i;
+}
+
+// Adds scale * m(i, j) for the upper entries of row i of m into acc, where acc[k] belongs to
+// pattern column pcol[k], k < len. `whole`: upper_row_is_pattern (the common case for A, and for
+// B when B's pattern contains A's), a plain copy. Otherwise both rows are sorted and the pattern
+// row contains every upper column of m, so one forward merge finds every slot (no stored scatter
+// map); it is branch-free, as rows of m that are much sparser than the pattern are its use case.
+template <class T>
+void add_upper_row(const CsrMatrix<T>& m, index_t i, const T& scale, const std::int32_t* pcol, index_t len,
+                   bool whole, T* acc) {
+  const index_t last = m.rowptr[i + 1];
+  const T* v = m.values.data();
+  if (whole) {
+    for (index_t k = 0, p0 = last - len; k < len; ++k) acc[k] += scale * v[p0 + k];
+    return;
+  }
+  const std::int32_t* col = m.colind.data();
+  for (index_t p = first_upper(m, i), o = 0; p < last; ++o) {
+    const bool hit = pcol[o] == col[p];
+    const T sum = acc[o] + scale * v[p];
+    acc[o] = hit ? sum : acc[o];
+    p += hit;
+  }
+}
+
 }  // namespace
 
 template <class T>
@@ -36,19 +68,15 @@ ShiftedPencil<T>::ShiftedPencil(const CsrMatrix<T>& a, const CsrMatrix<T>* b) : 
                                                   << a.ncols);
   n_ = a.nrows;
   rowptr_.assign(static_cast<std::size_t>(n_) + 1, 0);
-  a_first_upper_.resize(static_cast<std::size_t>(n_));
-  if (b) b_first_upper_.resize(static_cast<std::size_t>(n_));
 
   // Pass 1: size of each upper union row (A upper ∪ B upper ∪ {diagonal}).
 #pragma omp parallel for schedule(dynamic, 512)
   for (index_t i = 0; i < n_; ++i) {
     const index_t pa0 = first_upper(a, i), pa1 = a.rowptr[i + 1];
-    a_first_upper_[i] = pa0;
     index_t pb0 = 0, pb1 = 0;
     if (b) {
       pb0 = first_upper(*b, i);
       pb1 = b->rowptr[i + 1];
-      b_first_upper_[i] = pb0;
     }
     index_t cnt = 0, p = pa0, q = pb0;
     std::int32_t last = -1;
@@ -77,7 +105,7 @@ ShiftedPencil<T>::ShiftedPencil(const CsrMatrix<T>& a, const CsrMatrix<T>* b) : 
   for (index_t i = 0; i < n_; ++i) {
     index_t o = rowptr_[i];
     colind_[o++] = static_cast<std::int32_t>(i);
-    index_t p = a_first_upper_[i], q = b ? b_first_upper_[i] : 0;
+    index_t p = first_upper(a, i), q = b ? first_upper(*b, i) : 0;
     const index_t pa1 = a.rowptr[i + 1], pb1 = b ? b->rowptr[i + 1] : 0;
     std::int32_t last = static_cast<std::int32_t>(i);
     while (p < pa1 || q < pb1) {
@@ -95,43 +123,20 @@ ShiftedPencil<T>::ShiftedPencil(const CsrMatrix<T>& a, const CsrMatrix<T>* b) : 
     HS_ASSERT(o == rowptr_[i + 1], "pattern fill mismatch in row " << i);
   }
 
-  // Scatter maps. A: identity when upper(A) already equals the union pattern row by row.
-  bool identity = true;
-  for (index_t i = 0; i < n_ && identity; ++i)
-    identity = (a.rowptr[i + 1] - a_first_upper_[i]) == (rowptr_[i + 1] - rowptr_[i]);
-  a_identity_ = identity;
-  auto build_map = [this](const CsrMatrix<T>& m, const std::vector<index_t>& first,
-                          std::vector<index_t>& dst) {
-    std::vector<index_t> ptr(static_cast<std::size_t>(n_) + 1, 0);
-    for (index_t i = 0; i < n_; ++i) ptr[i + 1] = ptr[i] + (m.rowptr[i + 1] - first[i]);
-    dst.resize(static_cast<std::size_t>(ptr[n_]));
-#pragma omp parallel for schedule(dynamic, 512)
-    for (index_t i = 0; i < n_; ++i) {
-      index_t o = rowptr_[i];
-      for (index_t p = first[i]; p < m.rowptr[i + 1]; ++p) {
-        while (colind_[o] != m.colind[p]) ++o;
-        dst[ptr[i] + (p - first[i])] = o;
-      }
-    }
-  };
-  if (!a_identity_) build_map(a, a_first_upper_, a_dst_);
-  if (b) build_map(*b, b_first_upper_, b_dst_);
+  // Rows whose upper part of A (bit 0) or B (bit 1) is the whole pattern row: assembled by a
+  // plain copy, without reading the column indices of A or B.
+  whole_rows_.resize(static_cast<std::size_t>(n_));
+#pragma omp parallel for schedule(static)
+  for (index_t i = 0; i < n_; ++i) {
+    const index_t len = rowptr_[i + 1] - rowptr_[i];
+    whole_rows_[i] = static_cast<std::uint8_t>((upper_row_is_pattern(a, i, len) ? 1 : 0) |
+                                               (b && upper_row_is_pattern(*b, i, len) ? 2 : 0));
+  }
 }
 
 template <class T>
 template <class U>
 void ShiftedPencil<T>::assemble(double alpha, double beta, U* vals) const {
-  const CsrMatrix<T>& a = *a_;
-  // Prefix offsets into a_dst_/b_dst_ (cheap: n additions).
-  std::vector<index_t> aptr, bptr;
-  if (!a_identity_) {
-    aptr.assign(static_cast<std::size_t>(n_) + 1, 0);
-    for (index_t i = 0; i < n_; ++i) aptr[i + 1] = aptr[i] + (a.rowptr[i + 1] - a_first_upper_[i]);
-  }
-  if (b_) {
-    bptr.assign(static_cast<std::size_t>(n_) + 1, 0);
-    for (index_t i = 0; i < n_; ++i) bptr[i + 1] = bptr[i] + (b_->rowptr[i + 1] - b_first_upper_[i]);
-  }
   const T ta = T(alpha), tb = T(beta);
 #pragma omp parallel
   {
@@ -139,17 +144,13 @@ void ShiftedPencil<T>::assemble(double alpha, double beta, U* vals) const {
 #pragma omp for schedule(dynamic, 512)
     for (index_t i = 0; i < n_; ++i) {
       const index_t r0 = rowptr_[i], len = rowptr_[i + 1] - r0;
+      const std::int32_t* pcol = colind_.data() + r0;
       acc.assign(static_cast<std::size_t>(len), T(0));
-      if (alpha != 0.0) {
-        for (index_t p = a_first_upper_[i]; p < a.rowptr[i + 1]; ++p) {
-          const index_t dst = a_identity_ ? r0 + (p - a_first_upper_[i]) : a_dst_[aptr[i] + (p - a_first_upper_[i])];
-          acc[dst - r0] += ta * a.values[p];
-        }
-      }
+      const std::uint8_t whole = whole_rows_[i];
+      if (alpha != 0.0) add_upper_row(*a_, i, ta, pcol, len, (whole & 1) != 0, acc.data());
       if (beta != 0.0) {
         if (b_) {
-          for (index_t p = b_first_upper_[i]; p < b_->rowptr[i + 1]; ++p)
-            acc[b_dst_[bptr[i] + (p - b_first_upper_[i])] - r0] += tb * b_->values[p];
+          add_upper_row(*b_, i, tb, pcol, len, (whole & 2) != 0, acc.data());
         } else {
           acc[0] += tb;  // identity: the diagonal is the first upper entry
         }
