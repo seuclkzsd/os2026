@@ -8,9 +8,11 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <functional>
 #include <limits>
 #include <vector>
 
+#include "eigen/block_general.hpp"
 #include "eigen/general_krylov_schur.hpp"
 #include "eigen/general_schur.hpp"
 #include "hsolve/eigen.hpp"
@@ -233,9 +235,20 @@ void check_contract(hs::LinearOperator<T>& op, const hs::GeneralEigResult<T>& r,
   EXPECT_TRUE(r.nconv == m || r.history.back().max_estimate > tol);
 
   // ritz_all: all ncv Ritz values of the final basis (auto ncv rule of eigen.hpp), in ranking
-  // order, conjugate partners adjacent; theta is taken from them.
+  // order, conjugate partners adjacent; theta is taken from them. Block mode: the final basis is
+  // between nev + 1 and the layout's ncv vectors (whole blocks, early stop), or the whole space.
   const index_t basis = std::min(n, opt.ncv == 0 ? std::max(2 * nev + 1, nev + 16) : opt.ncv);
-  ASSERT_EQ(static_cast<index_t>(r.ritz_all.size()), basis);
+  const auto layout = opt.block_size > 1
+                          ? hs::eigen_detail::block_general_layout(n, nev, basis, opt.ncv == 0,
+                                                                   opt.block_size,
+                                                                   hs::is_complex_v<T>)
+                          : hs::eigen_detail::BlockGeneralLayout{};
+  if (!layout.feasible) {
+    ASSERT_EQ(static_cast<index_t>(r.ritz_all.size()), opt.block_size > 1 ? n : basis);
+  } else {
+    ASSERT_GT(static_cast<index_t>(r.ritz_all.size()), nev);
+    ASSERT_LE(static_cast<index_t>(r.ritz_all.size()), layout.ncv);
+  }
   for (std::size_t i = 0; i < r.ritz_all.size(); ++i) {
     if (i + 1 < r.ritz_all.size()) {
       EXPECT_LE(rank_key(r.ritz_all[i], which), rank_key(r.ritz_all[i + 1], which)) << i;
@@ -1144,6 +1157,376 @@ TYPED_TEST(KrylovSchurGeneralTyped, PhaseTimesAccountForTheRun) {
   EXPECT_GT(times.total_s, 0.0);
   EXPECT_LE(times.apply_s + times.orthogonalize_s + times.projected_s + times.update_s,
             times.total_s * (1.0 + 1e-9));
+}
+
+// ------------------------------------------------------------------------------ block mode
+
+/// Block sizes exercised by the block-mode tests (p = 1 is the single-vector solver above).
+const std::vector<index_t> kBlockSizes{2, 4, 8};
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockKnownSpectrumMatchesDenseReference) {
+  // Every block size finds the same wanted set as the dense reference (real T: conjugate pairs
+  // never split, m = nev + 1 when one straddles), in whole blocks of operator applications.
+  using T = TypeParam;
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(150), &all), 11);
+  for (const Which which :
+       {Which::LargestMagnitude, Which::LargestAlgebraic, Which::SmallestAlgebraic}) {
+    const index_t nev = which == Which::LargestMagnitude ? 9 : 5;
+    for (const index_t p : kBlockSizes) {
+      hs::test::DenseOperator<T> op(a);
+      hs::KrylovSchurOptions<T> opt;
+      opt.nev = nev;
+      opt.tol = 1e-12;
+      opt.block_size = p;
+      const auto r = hs::krylov_schur_general(op, which, opt);
+      ASSERT_TRUE(r.converged) << "p=" << p;
+      EXPECT_EQ(r.op_applies, op.applications());
+      EXPECT_EQ(r.op_applies % p, 0) << "p=" << p;
+      expect_same_values(r.theta, expected_wanted(all, which, nev, !hs::is_complex_v<T>), 1e-10);
+      check_contract(op, r, which, opt, frobenius(a));
+    }
+  }
+}
+
+TEST(KrylovSchurGeneral, BlockConjugatePairAtNevBoundaryGivesNevPlusOne) {
+  std::vector<cplx> values{{10, 0}, {-9, 0}, {8, 0}, {7, 2}, {5, 0}, {-4.5, 0}, {3, 1}};
+  for (index_t i = 0; i < 80; ++i)
+    values.emplace_back((i % 2 ? -1.0 : 1.0) * (2.0 - 0.02 * i), 0.0);
+  std::vector<cplx> all;
+  const DenseMatrix<double> a = similar_to(block_diagonal<double>(values, &all), 13);
+  for (const index_t p : kBlockSizes) {
+    hs::test::DenseOperator<double> op(a);
+    hs::KrylovSchurOptions<double> opt;
+    opt.nev = 4;
+    opt.block_size = p;
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    ASSERT_TRUE(r.converged) << "p=" << p;
+    ASSERT_EQ(r.theta.size(), 5u);
+    EXPECT_NEAR(r.theta[3].real(), 7.0, 1e-10);
+    EXPECT_NEAR(r.theta[3].imag(), 2.0, 1e-10);
+    EXPECT_EQ(r.theta[4], std::conj(r.theta[3]));
+    check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+  }
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockFindsEveryCopyOfAMultipleEigenvalue) {
+  // The dominant eigenvalue 1 has multiplicity 3 (non-defective: A = X D X^{-1}). A single-vector
+  // Krylov space holds one copy in exact arithmetic (further ones only through rounding); a start
+  // block of p >= 3 random columns has generic components in all three eigenvectors, so the
+  // block solver returns three copies whose Schur vectors span the 3-dimensional eigenspace
+  // (check_contract: orthonormal Schur basis, invariant leading block with spectrum theta).
+  using T = TypeParam;
+  std::vector<cplx> values{{1, 0}, {1, 0}, {1, 0}, {0.9, 0}, {-0.8, 0}};
+  for (index_t i = 0; i < 120; ++i)
+    values.emplace_back((i % 2 ? -1.0 : 1.0) * (0.6 - 0.004 * static_cast<double>(i)), 0.0);
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(values, &all), 17);
+  for (const index_t p : {index_t{4}, index_t{8}}) {
+    hs::test::DenseOperator<T> op(a);
+    hs::KrylovSchurOptions<T> opt;
+    opt.nev = 5;
+    opt.tol = 1e-12;
+    opt.block_size = p;
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    ASSERT_TRUE(r.converged) << "p=" << p;
+    expect_same_values(r.theta, {cplx(1), cplx(1), cplx(1), cplx(0.9), cplx(-0.8)}, 1e-10);
+    check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+  }
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockGhiepShiftInvertMatchesDenseReference) {
+  using T = TypeParam;
+  const index_t n = 240;
+  const DenseMatrix<T> a = hs::test::to_dense(hs::test::random_hermitian<T>(n, 1.0, 21));
+  DenseMatrix<T> b = hs::test::to_dense(hs::test::random_hermitian<T>(n, 1.0, 22));
+  for (index_t j = 0; j < n; ++j) {
+    for (index_t i = 0; i < n; ++i) b(i, j) *= 0.15;
+    b(j, j) += T((j % 3 == 0 ? -1.0 : 1.0) * (1.0 + 0.01 * j));
+  }
+  const double sigma = 0.137;
+  const std::vector<cplx> ref = general_eigenvalues(solve(b, a));
+  double scale = 0.0;
+  for (const cplx& l : ref) scale = std::max(scale, std::abs(l));
+  for (const index_t p : kBlockSizes) {
+    hs::test::DenseShiftInvertOperator<T> op(a, &b, sigma);
+    hs::KrylovSchurOptions<T> opt;
+    opt.nev = 10;
+    opt.tol = 1e-12;
+    opt.block_size = p;
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    ASSERT_TRUE(r.converged) << "p=" << p;
+    expect_nearest(to_lambda(r.theta, sigma), ref, sigma, opt.nev, 1e-9 * scale);
+    check_contract(op, r, Which::LargestMagnitude, opt, shift_invert_norm(a, b, sigma));
+  }
+}
+
+TEST(KrylovSchurGeneral, BlockWaveguideNeverConvergesClusterCopies) {
+  // The driver's zero-cluster placements (DESIGN §3.6-9) with blocks: a shift inside the nonzero
+  // spectrum (LargestMagnitude) and one-sided runs at sigma+ > 0 (LargestAlgebraic) and sigma- < 0
+  // (SmallestAlgebraic), where the cluster's theta = -1/sigma sits at the unwanted end. A block of
+  // p vectors carries p independent components of the 48-dimensional null space, but no cluster
+  // copy may appear among the returned (wanted) values, which must be the reference ones.
+  const Waveguide w = waveguide_pencil(8, 6, 2.0);
+  const WaveguideReference ref = waveguide_reference(w);
+  std::vector<double> positive, negative;
+  for (const cplx& l : ref.nonzero) (l.real() > 0.0 ? positive : negative).push_back(l.real());
+  std::sort(positive.begin(), positive.end());
+  std::sort(negative.begin(), negative.end(), std::greater<>());
+  ASSERT_GE(positive.size(), 12u);
+  ASSERT_GE(negative.size(), 4u);
+  struct Run {
+    double sigma;
+    Which which;
+    index_t nev;
+    std::vector<double> want;  // the nev wanted eigenvalues
+  };
+  const double mid = 0.5 * (positive[9] + positive[10]);
+  const std::vector<cplx> near = sorted_by_distance(ref.nonzero, mid);
+  std::vector<double> near6;
+  for (index_t i = 0; i < 6; ++i) near6.push_back(near[i].real());
+  const std::vector<Run> runs{{mid, Which::LargestMagnitude, 6, near6},
+                              {0.5 * positive[0], Which::LargestAlgebraic, 4,
+                               std::vector<double>(positive.begin(), positive.begin() + 4)},
+                              {0.5 * negative[0], Which::SmallestAlgebraic, 3,
+                               std::vector<double>(negative.begin(), negative.begin() + 3)}};
+  for (const Run& run : runs) {
+    for (const index_t p : {index_t{1}, index_t{4}, index_t{8}}) {
+      hs::test::DenseShiftInvertOperator<double> op(w.a, &w.b, run.sigma);
+      hs::KrylovSchurOptions<double> opt;
+      opt.nev = run.nev;
+      opt.block_size = p;
+      const auto r = hs::krylov_schur_general(op, run.which, opt);
+      ASSERT_TRUE(r.converged) << "sigma=" << run.sigma << " p=" << p;
+      const std::vector<cplx> lambda = to_lambda(r.theta, run.sigma);
+      for (const cplx& l : lambda) {
+        EXPECT_GT(std::abs(l), 1e-6 * ref.scale) << "cluster copy, sigma=" << run.sigma
+                                                 << " p=" << p;
+        EXPECT_LE(std::abs(l.imag()), 1e-12 * ref.scale) << l;
+      }
+      std::vector<cplx> want;
+      for (const double x : run.want) want.emplace_back(x);
+      expect_same_values(lambda, want, 1e-10 * ref.scale);
+      check_contract(op, r, run.which, opt, shift_invert_norm(w.a, w.b, run.sigma));
+    }
+  }
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockBreakdownInInvariantStartBlockRecovers) {
+  // Diagonal operator and a start block of 4 columns inside the 3-dimensional invariant subspace
+  // span(e2, e10, e30): the start block itself is rank deficient and its first block step is
+  // dependent on the basis; both are continued with random replacements.
+  using T = TypeParam;
+  const index_t n = 80;
+  std::vector<T> diag(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) diag[i] = T(1.0 + 0.5 * i);
+  hs::test::DiagonalOperator<T> op(diag);
+  DenseMatrix<T> start(n, 4);
+  for (index_t c = 0; c < 4; ++c) {
+    const double x = static_cast<double>(c);
+    start(2, c) = T(1.0 + x);
+    start(10, c) = T(-2.0 + 0.5 * x);
+    start(30, c) = T(0.5 - 0.25 * x * x);
+  }
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 5;
+  opt.ncv = 12;
+  opt.initial = &start;
+  opt.block_size = 4;
+  const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r.converged);
+  for (index_t i = 0; i < opt.nev; ++i) {
+    EXPECT_NEAR(r.theta[i].real(), 1.0 + 0.5 * static_cast<double>(n - 1 - i), 1e-10);
+    EXPECT_NEAR(r.theta[i].imag(), 0.0, hs::is_complex_v<T> ? 1e-12 : 0.0);
+  }
+  check_contract(op, r, Which::LargestMagnitude, opt, 1.0 + 0.5 * static_cast<double>(n));
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockSpaceTooSmallIsOneExactCycle) {
+  // n < 2 (ncv + p) (and p > n / 8): one single-vector cycle over the whole space.
+  using T = TypeParam;
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(32), &all), 52);
+  const index_t n = a.rows();
+  for (const index_t p : {index_t{8}, std::numeric_limits<index_t>::max()}) {
+    hs::test::DenseOperator<T> op(a);
+    hs::KrylovSchurOptions<T> opt;
+    opt.nev = 4;
+    opt.block_size = p;
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    ASSERT_TRUE(r.converged);
+    EXPECT_EQ(r.restarts, 0);
+    EXPECT_EQ(r.op_applies, n);
+    expect_same_values(
+        r.theta,
+        expected_wanted(all, Which::LargestMagnitude, opt.nev, !hs::is_complex_v<T>), 1e-10);
+    check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+  }
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockInvalidOptionsThrow) {
+  using T = TypeParam;
+  hs::test::DiagonalOperator<T> op(std::vector<T>(64, T(1)));
+  auto expect_invalid = [&op](const hs::KrylovSchurOptions<T>& o) {
+    try {
+      hs::krylov_schur_general(op, Which::LargestMagnitude, o);
+      ADD_FAILURE() << "expected InvalidInput";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+    }
+  };
+  hs::KrylovSchurOptions<T> o;
+  o.nev = 3;
+  for (const index_t p : {index_t{0}, index_t{-3}}) {
+    auto bad = o;
+    bad.block_size = p;
+    expect_invalid(bad);
+  }
+  // Block mode uses the first min(p, cols) start columns: a NaN in column 1 is rejected with
+  // p = 2 and ignored with p = 1 (only column 0 is used).
+  DenseMatrix<T> start(64, 2);
+  start(0, 0) = T(1);
+  start(5, 1) = T(std::nan(""));
+  auto bad = o;
+  bad.initial = &start;
+  bad.block_size = 2;
+  expect_invalid(bad);
+  EXPECT_EQ(op.applications(), 0);
+  bad.block_size = 1;
+  EXPECT_NO_THROW(hs::krylov_schur_general(op, Which::LargestMagnitude, bad));
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockNonFiniteOperatorOutputThrows) {
+  using T = TypeParam;
+  for (const double value : {std::nan(""), std::numeric_limits<double>::infinity()}) {
+    for (const index_t bad_at : {index_t{1}, index_t{5}}) {
+      PoisonedOperator<T> op(60, value, bad_at);
+      hs::KrylovSchurOptions<T> opt;
+      opt.nev = 4;
+      opt.ncv = 12;
+      opt.block_size = 2;
+      try {
+        hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+        ADD_FAILURE() << "value " << value << " at application " << bad_at << " not detected";
+      } catch (const hs::Error& e) {
+        EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+      }
+      EXPECT_EQ(op.applications(), (bad_at + 1) / 2 * 2);  // the whole block holding it
+    }
+  }
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockDeterministicAndMagnitudeIndependent) {
+  using T = TypeParam;
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(90), &all), 31);
+  const index_t n = a.rows();
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 6;
+  opt.block_size = 4;
+  SingleThreadedOpenMP serial;  // bitwise comparisons
+  hs::test::DenseOperator<T> op1(a), op2(a);
+  const auto r1 = hs::krylov_schur_general(op1, Which::LargestMagnitude, opt);
+  const auto r2 = hs::krylov_schur_general(op2, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r1.converged);
+  EXPECT_EQ(r1.theta, r2.theta);
+  EXPECT_EQ(r1.estimate, r2.estimate);
+  EXPECT_EQ(r1.op_applies, r2.op_applies);
+  for (index_t j = 0; j < r1.vectors.cols(); ++j)
+    for (index_t i = 0; i < n; ++i) ASSERT_EQ(r1.vectors(i, j), r2.vectors(i, j));
+  // 2^e Op is the same iteration bit for bit, scaled back exactly.
+  for (const int e : {-560, 520}) {
+    const double s = std::ldexp(1.0, e);
+    ScaledOperator<T> op(a, s);
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    ASSERT_EQ(r.theta.size(), r1.theta.size());
+    EXPECT_EQ(r.op_applies, r1.op_applies);
+    for (std::size_t i = 0; i < r.theta.size(); ++i) {
+      EXPECT_EQ(r.theta[i], s * r1.theta[i]) << e << " " << i;
+      EXPECT_EQ(r.estimate[i], s * r1.estimate[i]) << e << " " << i;
+    }
+    for (index_t j = 0; j < r.vectors.cols(); ++j)
+      for (index_t i = 0; i < n; ++i) ASSERT_EQ(r.vectors(i, j), r1.vectors(i, j));
+  }
+  // Another seed, or a user start column (the rest of the block random), reach the same values.
+  opt.seed = 7;
+  hs::test::DenseOperator<T> op3(a);
+  const auto r3 = hs::krylov_schur_general(op3, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r3.converged);
+  expect_same_values(r3.theta, r1.theta, 1e-10);
+  DenseMatrix<T> start = random_matrix<T>(n, 1, 5);
+  hs::linalg::scal(n, T(1e200), start.data());  // its norm alone would overflow
+  opt.initial = &start;
+  hs::test::DenseOperator<T> op4(a);
+  const auto r4 = hs::krylov_schur_general(op4, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r4.converged);
+  expect_same_values(r4.theta, r1.theta, 1e-10);
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockEveryStopSatisfiesTheContract) {
+  // As EveryStopSatisfiesTheContract, in block mode: partial results after each restart count
+  // (probes end cycles early in between) keep the certified prefix on top of S.
+  using T = TypeParam;
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(120), &all), 12);
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 6;
+  opt.ncv = 16;
+  opt.block_size = 4;
+  hs::test::DenseOperator<T> full_op(a);
+  const auto full = hs::krylov_schur_general(full_op, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(full.converged);
+  ASSERT_GT(full.restarts, 0) << "the sweep needs restarts";
+  for (index_t stop = 0; stop <= full.restarts; ++stop) {
+    hs::test::DenseOperator<T> op(a);
+    opt.max_restarts = stop;
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    EXPECT_EQ(r.converged, stop == full.restarts) << "stop " << stop;
+    check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+  }
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockPhaseTimesAccountForTheRun) {
+  using T = TypeParam;
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(100), &all), 61);
+  hs::test::DenseOperator<T> op(a);
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.block_size = 4;
+  hs::eigen_detail::GeneralPhaseTimes times;
+  const auto r =
+      hs::eigen_detail::krylov_schur_general_timed(op, Which::LargestMagnitude, opt, &times);
+  ASSERT_TRUE(r.converged);
+  for (double t : {times.apply_s, times.orthogonalize_s, times.projected_s, times.update_s})
+    EXPECT_GE(t, 0.0);
+  EXPECT_GT(times.total_s, 0.0);
+  EXPECT_LE(times.apply_s + times.orthogonalize_s + times.projected_s + times.update_s,
+            times.total_s * (1.0 + 1e-9));
+}
+
+TEST(KrylovSchurGeneral, BlockLayoutRules) {
+  using hs::eigen_detail::block_general_layout;
+  // Real T, nev = 18, auto ncv (single-vector 37), p = 8: spare = 20 -> 24, base = 40, + 4 blocks.
+  auto lay = block_general_layout(100000, 18, 37, true, 8, false);
+  EXPECT_TRUE(lay.feasible);
+  EXPECT_EQ(lay.ncv, 72);
+  EXPECT_EQ(lay.first_probe, 40);
+  EXPECT_EQ(lay.keep, 40);  // 18 + 54 / 2 = 45 -> 40
+  // Requested ncv: rounded up to whole blocks, at least spare + 2p.
+  lay = block_general_layout(100000, 18, 20, false, 4, true);
+  EXPECT_EQ(lay.ncv, 28);  // complex: spare = 19 -> 20, + 2 blocks
+  lay = block_general_layout(100000, 4, 30, false, 4, false);
+  EXPECT_EQ(lay.ncv, 32);
+  EXPECT_EQ(lay.keep, 16);  // 4 + 28 / 2 = 18 -> 16
+  // Small spaces: the auto ncv keeps 2 (ncv + p) <= n; infeasible below.
+  lay = block_general_layout(100, 4, 20, true, 4, false);
+  EXPECT_TRUE(lay.feasible);
+  EXPECT_LE(2 * (lay.ncv + 4), 100);
+  EXPECT_FALSE(block_general_layout(40, 4, 20, true, 8, false).feasible);
+  EXPECT_FALSE(block_general_layout(60, 4, 60, false, 2, false).feasible);  // ncv == n: exact
+  EXPECT_FALSE(
+      block_general_layout(1000, 4, 20, true, std::numeric_limits<index_t>::max(), false).feasible);
 }
 
 // ------------------------------------------------------------- projected-problem helpers
