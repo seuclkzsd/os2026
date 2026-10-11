@@ -9,7 +9,7 @@ import pytest
 import scipy.sparse as sp
 
 from tools import case as cio
-from tools.eval import baseline_scipy, common, evaluate, reference, report, sweep
+from tools.eval import baseline_scipy, bench_norms, common, evaluate, reference, report, sweep
 
 TRIPLE = 1.0                  # eigenvalue of multiplicity 3 in the prescribed spectra
 SIGMA = -0.3                  # 4 nearest: -0.6, 0.2, -1.0, 0.7 (no tie); the 5th is the triple
@@ -608,6 +608,10 @@ def test_norm_estimate_eigsh_is_a_tight_lower_bound():
     est, method_est = evaluate.hermitian_norm2(M, dense_max=100)
     assert (method, method_est) == ("dense", "eigsh")
     assert est <= exact * (1 + 1e-12) and est == pytest.approx(exact, rel=1e-7)
+    # tools/eval/bench_norms.py measures exactly this estimate (and the replaced settings)
+    new = bench_norms.measure(M, **bench_norms.SETTINGS["new"])
+    old = bench_norms.measure(M, **bench_norms.SETTINGS["old"])
+    assert new["norm2"] == est and new["products"] > 0 and old["norm2"] == pytest.approx(exact, rel=1e-7)
 
 
 def test_dense_refuses_large_matrices():

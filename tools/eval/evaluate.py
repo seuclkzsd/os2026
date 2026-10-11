@@ -11,12 +11,15 @@ Norms: exact (dense eigvalsh, max |eigenvalue|) for n <= DENSE_MAX. Above that, 
 Ritz value of ARPACK eigsh(which='LM'): for a Hermitian matrix every Ritz value lies inside the
 spectrum, so it is a LOWER bound of ||.||_2 and eta is over-estimated (conservative), never
 optimistic. Only if ARPACK fails do we fall back to the 1-norm, an upper bound (optimistic eta) -
-reported in norm_method. ARPACK runs with tol=NORM_TOL, ncv=NORM_NCV: measured on five 1e5 cases
-(A and B of syn-zero-cluster-real-1e5, wg-square-1e5, wg-halfslab-1e5, ss-qa8fk-qa8fm,
-yee-pec-box-1e5) it agrees with scipy's default ncv at tol=1e-8 to <= 1.4e-10 relative and needs up
-to 4.4x fewer products (4901 -> 1121, 23.8 s -> 7.0 s on the zero-cluster Laplacian, whose dense
-upper spectrum made the norm estimate the dominant cost of an evaluation); the one increase is a
-diagonal B converging at once (21 -> 41 products: ncv is the minimum).
+reported in norm_method. ARPACK runs with tol=NORM_TOL, ncv=NORM_NCV: measured with
+tools/eval/bench_norms.py on five 1e5 cases (A and B of syn-zero-cluster-real-1e5, wg-square-1e5,
+wg-halfslab-1e5, ss-qa8fk-qa8fm, yee-pec-box-1e5) it agrees with scipy's default ncv at tol=1e-8 to
+<= 1.4e-10 relative and needs up to 4.4x fewer products (4901 -> 1121 on the zero-cluster
+Laplacian, whose dense upper spectrum made the norm estimate the dominant cost of an evaluation);
+the one increase is a diagonal B converging at once (21 -> 41 products: ncv is the minimum). Wall
+time (2 cores of the shared machine, 2026-10-11): 55.7 s -> 14.1 s on that Laplacian, 93.6 s ->
+49.3 s summed over the nine matrices; elsewhere fewer products do not always mean less time, as a
+restart with ncv=40 costs more (wg-square-1e5 A: 1501 -> 601 products, 7.4 s -> 7.9 s).
 
 Comparison with the reference (data/refs/<case>). Continuum-model references (kind partial-analytic,
 common.CONTINUUM_KINDS) are O(h^2) away from the matrix eigenvalues: they are reported with
