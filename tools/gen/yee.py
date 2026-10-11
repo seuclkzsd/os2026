@@ -316,8 +316,10 @@ def _exact_targets(w: np.ndarray, cond_b: float) -> list[dict[str, Any]]:
     """Low modes (between the 3rd and 4th nonzero levels; level 0 is the null space) and a
     higher band (25th level): both far from the gradient null space relative to their k.
     cond_b = cond(B) of the stored pencil (1 for the standard form) sets the decidable k."""
-    return [target_between_levels(w, 3, 10, "lowest resonances above the gradient null space", cond_b=cond_b),
-            target_between_levels(w, 25, 20, "higher band, many polarization-degenerate pairs", cond_b=cond_b)]
+    return [target_between_levels(w, 3, 10, "lowest resonances above the gradient null space",
+                                  cond_b=cond_b),
+            target_between_levels(w, 25, 20, "higher band, many polarization-degenerate pairs",
+                                  cond_b=cond_b)]
 
 
 def make_homogeneous_case(name: str, grid: YeeGrid, form: str, root: str | Path) -> Path:

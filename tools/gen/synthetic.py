@@ -68,7 +68,8 @@ def distinct_levels(eigenvalues, rtol: float = 1e-9) -> tuple[np.ndarray, np.nda
     return w[starts], counts
 
 
-def eigenvalue_error_bound(lam, spectral_radius: float, cond_b: float = 1.0, tol: float = DEFAULT_TOL):
+def eigenvalue_error_bound(lam, spectral_radius: float, cond_b: float = 1.0,
+                           tol: float = DEFAULT_TOL) -> np.ndarray | float:
     """Largest eigenvalue error the acceptance test admits near eigenvalue lam (DESIGN 4.5).
 
     A pair accepted at backward error eta <= tol has a residual r = A x - lam B x with
@@ -465,7 +466,8 @@ def spectrum_preset(kind: str, n: int, seed: int, *, cond_b: float = 1.0) -> Spe
     if kind == "zero-cluster":
         nc = max(20, n // 10)
         if n < 2 * nc:
-            raise ValueError(f"zero-cluster needs n >= 40 (a cluster of >= 20 eigenvalues and a regular part), got {n}")
+            raise ValueError(f"zero-cluster needs n >= 40 (a cluster of >= 20 eigenvalues and a "
+                             f"regular part), got {n}")
         # rho <= 1, so this spacing is at least the required gap SEPARATION * error bound at 0;
         # a gap that wide then follows about every third eigenvalue (exponential spacings).
         h = nc * SEPARATION * eigenvalue_error_bound(0.0, 1.0, cond_b)
@@ -511,8 +513,8 @@ def spectrum_preset(kind: str, n: int, seed: int, *, cond_b: float = 1.0) -> Spe
         targets = [target_at(w, 1.0, 10, "|lambda| ~ 1, six decades below ||A||", cond_b=cond_b),
                    target_at(w, -1e3, 10, "negative part, |lambda| ~ 1e3", cond_b=cond_b)]
         return Spectrum(kind, w, targets, ["clustered"], "magnitude",
-                        "|lambda| log-uniform in [1e-6, 1e6] with random signs (12 decades); the "
-                        "smallest are resolved only to ~1e-4 at the default tolerance, so no target lies there")
+                        "|lambda| log-uniform in [1e-6, 1e6] with random signs (12 decades); the smallest "
+                        "are resolved only to ~1e-4 at the default tolerance, so no target lies there")
     raise ValueError(f"unknown spectrum kind {kind!r}; choose from {SPECTRUM_KINDS}")
 
 
