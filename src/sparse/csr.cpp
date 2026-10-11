@@ -20,6 +20,165 @@ bool is_zero(const T& v) {
   return v == T(0);
 }
 
+template <class V>
+void release(std::vector<V>& v) {
+  std::vector<V>().swap(v);
+}
+
+// Position of column j in (sorted) row i of a, or -1 if absent. O(log(row length)).
+template <class T>
+index_t find_entry(const CsrMatrix<T>& a, index_t i, index_t j) {
+  const std::int32_t* b = a.colind.data() + a.rowptr[i];
+  const std::int32_t* e = a.colind.data() + a.rowptr[i + 1];
+  const std::int32_t* it = std::lower_bound(b, e, static_cast<std::int32_t>(j));
+  return it != e && *it == j ? a.rowptr[i] + (it - b) : -1;
+}
+
+// ---- symmetrize_from_triangle: U + U^H - diag(U) after one counting pass.
+// Row i of the result holds its own stored entries plus the mirror images of the strict entries
+// stored in column i. For upper storage the mirrored entries have columns < i and come first, for
+// lower storage they come last; visiting the source rows in increasing order appends them sorted.
+
+// Which strict triangle holds entries: +1 upper, -1 lower, 0 neither (diagonal only). Rows are
+// sorted, so the first and last entries of a row decide. Throws InvalidInput when both do.
+template <class T>
+int stored_triangle(const CsrMatrix<T>& tri) {
+  bool lower = false, upper = false;
+#pragma omp parallel for reduction(|| : lower, upper) schedule(static)
+  for (index_t i = 0; i < tri.nrows; ++i) {
+    const index_t b = tri.rowptr[i], e = tri.rowptr[i + 1];
+    if (b == e) continue;
+    lower = lower || tri.colind[b] < i;
+    upper = upper || tri.colind[e - 1] > i;
+  }
+  if (lower && upper)
+    HS_THROW(InvalidInput, "symmetrize_from_triangle: input holds entries in both triangles");
+  return upper ? 1 : (lower ? -1 : 0);
+}
+
+// Row pointers of the full matrix: own entries plus mirrored strict entries per row. O(nnz).
+template <class T>
+std::vector<index_t> mirrored_rowptr(const CsrMatrix<T>& tri) {
+  const index_t n = tri.nrows;
+  std::vector<index_t> rp(static_cast<std::size_t>(n) + 1, 0);
+  for (index_t i = 0; i < n; ++i) {
+    rp[i + 1] += tri.rowptr[i + 1] - tri.rowptr[i];
+    for (index_t p = tri.rowptr[i]; p < tri.rowptr[i + 1]; ++p)
+      if (tri.colind[p] != i) ++rp[tri.colind[p] + 1];
+  }
+  std::partial_sum(rp.begin(), rp.end(), rp.begin());
+  return rp;
+}
+
+// dst[own position of entry p] = src[p] for every stored entry (OpenMP over rows).
+template <class T, class V>
+void copy_own(const CsrMatrix<T>& tri, const std::vector<index_t>& rp, bool upper, const V* src,
+              V* dst) {
+#pragma omp parallel for schedule(dynamic, 512)
+  for (index_t i = 0; i < tri.nrows; ++i) {
+    const index_t b = tri.rowptr[i], len = tri.rowptr[i + 1] - b;
+    std::copy(src + b, src + b + len, dst + (upper ? rp[i + 1] - len : rp[i]));
+  }
+}
+
+// put(position, p, j) for the mirror image of every strict entry p = (j, c), which lands in
+// row c. Sequential in j, which keeps the mirrored block of every row sorted.
+template <class T, class Put>
+void scatter_mirrored(const CsrMatrix<T>& tri, const std::vector<index_t>& rp, bool upper, Put&& put) {
+  const index_t n = tri.nrows;
+  // Offset of the next mirrored entry within its row (rows hold fewer than 2^31 entries).
+  std::vector<std::int32_t> next(static_cast<std::size_t>(n));
+  for (index_t c = 0; c < n; ++c)
+    next[c] = upper ? 0 : static_cast<std::int32_t>(tri.rowptr[c + 1] - tri.rowptr[c]);
+  for (index_t j = 0; j < n; ++j)
+    for (index_t p = tri.rowptr[j]; p < tri.rowptr[j + 1]; ++p) {
+      const index_t c = tri.colind[p];
+      if (c != j) put(rp[c] + next[c]++, p, j);
+    }
+}
+
+// ---- hermitian_part: (A + A^H)/2 on the union pattern of A and A^H without forming A^H.
+// An entry a_ij (i != j) whose mirror a_ji is not stored (an "orphan") adds the entry (j, i).
+// Values use exactly the arithmetic of add(0.5, A, 0.5, A^H), so every variant agrees bitwise.
+
+struct Insertions {
+  index_t total = 0;
+  std::vector<index_t> ptr;       ///< n + 1 row pointers (empty when total == 0)
+  std::vector<std::int32_t> col;  ///< inserted columns of each row, ascending
+};
+
+template <class T>
+Insertions orphan_mirrors(const CsrMatrix<T>& a) {
+  const index_t n = a.nrows;
+  const auto orphan = [&a](index_t i, index_t p) {
+    const index_t j = a.colind[p];
+    return j != i && find_entry(a, j, i) < 0;
+  };
+  std::vector<std::int32_t> per_row(static_cast<std::size_t>(n));  // orphans stored in row i
+  index_t total = 0;
+#pragma omp parallel for reduction(+ : total) schedule(dynamic, 512)
+  for (index_t i = 0; i < n; ++i) {
+    std::int32_t cnt = 0;
+    for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p) cnt += orphan(i, p);
+    per_row[i] = cnt;
+    total += cnt;
+  }
+  Insertions ins;
+  if (total == 0) return ins;
+  ins.total = total;
+  ins.ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+  for (index_t i = 0; i < n; ++i)
+    if (per_row[i] > 0)
+      for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p)
+        if (orphan(i, p)) ++ins.ptr[a.colind[p] + 1];
+  std::partial_sum(ins.ptr.begin(), ins.ptr.end(), ins.ptr.begin());
+  ins.col.resize(static_cast<std::size_t>(total));
+  // ptr[j] serves as the fill cursor of row j and is shifted back afterwards; increasing source
+  // rows i keep every row of insertions sorted.
+  for (index_t i = 0; i < n; ++i)
+    if (per_row[i] > 0)
+      for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p)
+        if (orphan(i, p)) ins.col[ins.ptr[a.colind[p]]++] = static_cast<std::int32_t>(i);
+  for (index_t j = n; j > 0; --j) ins.ptr[j] = ins.ptr[j - 1];
+  ins.ptr[0] = 0;
+  return ins;
+}
+
+template <class T>
+std::vector<index_t> union_rowptr(const CsrMatrix<T>& a, const Insertions& ins) {
+  const index_t n = a.nrows;
+  std::vector<index_t> rp(static_cast<std::size_t>(n) + 1, 0);
+  for (index_t i = 0; i < n; ++i)
+    rp[i + 1] = rp[i] + (a.rowptr[i + 1] - a.rowptr[i]) + (ins.ptr[i + 1] - ins.ptr[i]);
+  return rp;
+}
+
+// Walks row i of the union pattern, starting at output position o: visit(position, column,
+// value) in column order, value = c_ij computed as add(0.5, A, 0.5, A^H) does: 0.5*a_ij +
+// 0.5*conj(a_ji) when both are stored, 0.5*a_ij or 0.5*conj(a_ji) when only one is.
+template <class T, class Visit>
+void union_row(const CsrMatrix<T>& a, const Insertions& ins, index_t i, index_t o, Visit&& visit) {
+  const T half(0.5);
+  index_t p = a.rowptr[i], q = 0, qe = 0;
+  const index_t pe = a.rowptr[i + 1];
+  if (ins.total > 0) {
+    q = ins.ptr[i];
+    qe = ins.ptr[i + 1];
+  }
+  while (p < pe || q < qe) {
+    if (q >= qe || (p < pe && a.colind[p] < ins.col[q])) {
+      const index_t j = a.colind[p];
+      const index_t r = j == i ? p : find_entry(a, j, i);
+      visit(o++, a.colind[p],
+            r >= 0 ? half * a.values[p] + half * conj_if(a.values[r]) : half * a.values[p]);
+      ++p;
+    } else {
+      visit(o++, ins.col[q], half * conj_if(a.values[find_entry(a, ins.col[q], i)]));
+      ++q;
+    }
+  }
+}
+
 }  // namespace
 
 template <class T>
@@ -231,42 +390,124 @@ CsrMatrix<T> triangle(const CsrMatrix<T>& a, bool upper) {
 template <class T>
 CsrMatrix<T> symmetrize_from_triangle(const CsrMatrix<T>& tri) {
   if (!tri.square()) HS_THROW(InvalidInput, "symmetrize_from_triangle: matrix is not square");
-  bool has_lower = false, has_upper = false;
-  for (index_t i = 0; i < tri.nrows; ++i)
-    for (index_t p = tri.rowptr[i]; p < tri.rowptr[i + 1]; ++p) {
-      has_lower |= tri.colind[p] < i;
-      has_upper |= tri.colind[p] > i;
-    }
-  if (has_lower && has_upper)
-    HS_THROW(InvalidInput, "symmetrize_from_triangle: input holds entries in both triangles");
-  // U + (U - diag U)^H: the transpose of the strict part fills the other triangle.
-  CsrMatrix<T> strict = triangle(tri, /*upper=*/has_lower ? false : true);
-  {
-    CsrMatrix<T> s;
-    s.nrows = s.ncols = strict.nrows;
-    s.rowptr.assign(static_cast<std::size_t>(s.nrows) + 1, 0);
-    for (index_t i = 0; i < strict.nrows; ++i) {
-      index_t cnt = 0;
-      for (index_t p = strict.rowptr[i]; p < strict.rowptr[i + 1]; ++p) cnt += strict.colind[p] != i;
-      s.rowptr[i + 1] = s.rowptr[i] + cnt;
-    }
-    s.colind.reserve(static_cast<std::size_t>(s.rowptr[s.nrows]));
-    s.values.reserve(static_cast<std::size_t>(s.rowptr[s.nrows]));
-    for (index_t i = 0; i < strict.nrows; ++i)
-      for (index_t p = strict.rowptr[i]; p < strict.rowptr[i + 1]; ++p)
-        if (strict.colind[p] != i) {
-          s.colind.push_back(strict.colind[p]);
-          s.values.push_back(strict.values[p]);
-        }
-    strict = std::move(s);
+  const int side = stored_triangle(tri);
+  if (side == 0) return tri;
+  const bool upper = side > 0;
+  CsrMatrix<T> full;
+  full.nrows = full.ncols = tri.nrows;
+  full.rowptr = mirrored_rowptr(tri);
+  const auto nnz = static_cast<std::size_t>(full.rowptr[tri.nrows]);
+  full.colind.resize(nnz);
+  full.values.resize(nnz);
+  copy_own(tri, full.rowptr, upper, tri.colind.data(), full.colind.data());
+  copy_own(tri, full.rowptr, upper, tri.values.data(), full.values.data());
+  scatter_mirrored(tri, full.rowptr, upper, [&](index_t dst, index_t p, index_t j) {
+    full.colind[dst] = static_cast<std::int32_t>(j);
+    full.values[dst] = conj_if(tri.values[p]);
+  });
+  return full;
+}
+
+template <class T>
+CsrMatrix<T> symmetrize_from_triangle(CsrMatrix<T>&& tri) {
+  if (!tri.square()) HS_THROW(InvalidInput, "symmetrize_from_triangle: matrix is not square");
+  const int side = stored_triangle(tri);
+  CsrMatrix<T> full;
+  if (side == 0) {
+    full = std::move(tri);
+    tri = CsrMatrix<T>();
+    return full;
   }
-  return add(T(1), tri, T(1), conj_transpose(strict));
+  const bool upper = side > 0;
+  full.nrows = full.ncols = tri.nrows;
+  full.rowptr = mirrored_rowptr(tri);
+  const auto nnz = static_cast<std::size_t>(full.rowptr[tri.nrows]);
+  // Values first; the stored values are released before the full pattern is allocated. This
+  // order never holds both value arrays together with the full pattern: the peak is
+  // colind(tri) + values(tri) + values(full), about 1.17x (real) / 1.3x (complex) the result.
+  full.values.resize(nnz);
+  copy_own(tri, full.rowptr, upper, tri.values.data(), full.values.data());
+  scatter_mirrored(tri, full.rowptr, upper,
+                   [&](index_t dst, index_t p, index_t) { full.values[dst] = conj_if(tri.values[p]); });
+  release(tri.values);
+  full.colind.resize(nnz);
+  copy_own(tri, full.rowptr, upper, tri.colind.data(), full.colind.data());
+  scatter_mirrored(tri, full.rowptr, upper, [&](index_t dst, index_t, index_t j) {
+    full.colind[dst] = static_cast<std::int32_t>(j);
+  });
+  tri = CsrMatrix<T>();
+  return full;
 }
 
 template <class T>
 CsrMatrix<T> hermitian_part(const CsrMatrix<T>& a) {
   if (!a.square()) HS_THROW(InvalidInput, "hermitian_part: matrix is not square");
-  return add(T(0.5), a, T(0.5), conj_transpose(a));
+  const Insertions ins = orphan_mirrors(a);
+  CsrMatrix<T> c;
+  c.nrows = c.ncols = a.nrows;
+  c.rowptr = ins.total > 0 ? union_rowptr(a, ins) : a.rowptr;
+  const auto nnz = static_cast<std::size_t>(c.rowptr[a.nrows]);
+  c.colind.resize(nnz);
+  c.values.resize(nnz);
+#pragma omp parallel for schedule(dynamic, 512)
+  for (index_t i = 0; i < a.nrows; ++i)
+    union_row(a, ins, i, c.rowptr[i], [&](index_t o, std::int32_t j, const T& v) {
+      c.colind[o] = j;
+      c.values[o] = v;
+    });
+  return c;
+}
+
+template <class T>
+CsrMatrix<T> hermitian_part(CsrMatrix<T>&& a) {
+  if (!a.square()) HS_THROW(InvalidInput, "hermitian_part: matrix is not square");
+  const index_t n = a.nrows;
+  const Insertions ins = orphan_mirrors(a);
+  CsrMatrix<T> c;
+  if (ins.total == 0) {
+    // Structurally symmetric: update each off-diagonal pair in place, by the thread that owns
+    // the row of its upper entry (no value is touched by two threads).
+    const T half(0.5);
+#pragma omp parallel for schedule(dynamic, 512)
+    for (index_t i = 0; i < n; ++i) {
+      for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p) {
+        const index_t j = a.colind[p];
+        if (j < i) continue;
+        if (j == i) {
+          a.values[p] = half * a.values[p] + half * conj_if(a.values[p]);
+          continue;
+        }
+        const index_t q = find_entry(a, j, i);
+        const T aij = a.values[p], aji = a.values[q];
+        a.values[p] = half * aij + half * conj_if(aji);
+        a.values[q] = half * aji + half * conj_if(aij);
+      }
+    }
+    c = std::move(a);
+    a = CsrMatrix<T>();
+    return c;
+  }
+  // New entries are needed. Values first (they read the stored pattern and values), then the
+  // stored values are released and the union pattern is built: peak = A + values(result),
+  // about 1.7x (real) / 1.8x (complex) the result.
+  c.nrows = c.ncols = n;
+  c.rowptr = union_rowptr(a, ins);
+  const auto nnz = static_cast<std::size_t>(c.rowptr[n]);
+  c.values.resize(nnz);
+#pragma omp parallel for schedule(dynamic, 512)
+  for (index_t i = 0; i < n; ++i)
+    union_row(a, ins, i, c.rowptr[i], [&](index_t o, std::int32_t, const T& v) { c.values[o] = v; });
+  release(a.values);
+  c.colind.resize(nnz);
+#pragma omp parallel for schedule(dynamic, 512)
+  for (index_t i = 0; i < n; ++i) {
+    index_t p = a.rowptr[i], q = ins.ptr[i], o = c.rowptr[i];
+    const index_t pe = a.rowptr[i + 1], qe = ins.ptr[i + 1];
+    while (p < pe || q < qe)
+      c.colind[o++] = (q >= qe || (p < pe && a.colind[p] < ins.col[q])) ? a.colind[p++] : ins.col[q++];
+  }
+  a = CsrMatrix<T>();
+  return c;
 }
 
 CsrMatrix<cplx> to_complex(const CsrMatrix<double>& a) {
@@ -276,6 +517,17 @@ CsrMatrix<cplx> to_complex(const CsrMatrix<double>& a) {
   c.rowptr = a.rowptr;
   c.colind = a.colind;
   c.values.assign(a.values.begin(), a.values.end());
+  return c;
+}
+
+CsrMatrix<cplx> to_complex(CsrMatrix<double>&& a) {
+  CsrMatrix<cplx> c;
+  c.nrows = a.nrows;
+  c.ncols = a.ncols;
+  c.rowptr = std::move(a.rowptr);
+  c.colind = std::move(a.colind);
+  c.values.assign(a.values.begin(), a.values.end());
+  a = CsrMatrix<double>();
   return c;
 }
 
@@ -383,7 +635,9 @@ CsrMatrix<double> real_embedding(const CsrMatrix<cplx>& k) {
   template CsrMatrix<T> identity<T>(index_t);                                                      \
   template CsrMatrix<T> triangle<T>(const CsrMatrix<T>&, bool);                                    \
   template CsrMatrix<T> symmetrize_from_triangle<T>(const CsrMatrix<T>&);                          \
+  template CsrMatrix<T> symmetrize_from_triangle<T>(CsrMatrix<T>&&);                               \
   template CsrMatrix<T> hermitian_part<T>(const CsrMatrix<T>&);                                    \
+  template CsrMatrix<T> hermitian_part<T>(CsrMatrix<T>&&);                                         \
   template double norm_fro<T>(const CsrMatrix<T>&);                                                \
   template double norm_one<T>(const CsrMatrix<T>&);                                                \
   template double hermitian_defect<T>(const CsrMatrix<T>&);

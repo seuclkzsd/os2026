@@ -50,19 +50,36 @@ CsrMatrix<T> identity(index_t n);
 template <class T>
 CsrMatrix<T> triangle(const CsrMatrix<T>& a, bool upper);
 
-/// Restore full Hermitian storage from one stored triangle: U + U^H - diag(U).
-/// Precondition: `tri` holds only one triangle (plus diagonal). O(nnz).
+/// Restore full Hermitian storage from one stored triangle: U + U^H - diag(U) (mirrored values
+/// conjugated). Throws InvalidInput if `tri` is not square or stores entries in both strict
+/// triangles; a diagonal-only matrix is returned unchanged. One counting pass, then the result is
+/// allocated once and filled: memory = input + result. O(nnz).
 template <class T>
 CsrMatrix<T> symmetrize_from_triangle(const CsrMatrix<T>& tri);
+/// Same, consuming `tri` (left as an empty 0 x 0 matrix): its arrays are released as soon as they
+/// are no longer needed, so the peak is ~1.2x (real) / ~1.3x (complex) the result instead of 1.5x.
+template <class T>
+CsrMatrix<T> symmetrize_from_triangle(CsrMatrix<T>&& tri);
 
 /// Exact Hermitian part (A + A^H) / 2 on the union pattern of A and A^H (diagonal of a complex
 /// matrix becomes real). Used to make "Hermitian within tolerance" input exactly Hermitian so
 /// that factorization (one triangle), operators and residuals all see the same matrix.
+/// Computed as add(0.5, A, 0.5, A^H) would (bitwise), without forming A^H: entries whose mirror
+/// is not stored are found by binary search. Memory: input + result (+ the list of missing
+/// mirrors). O(nnz log(row length)); OpenMP over rows. Square A only (InvalidInput otherwise).
 template <class T>
 CsrMatrix<T> hermitian_part(const CsrMatrix<T>& a);
+/// Same values, consuming `a` (left as an empty 0 x 0 matrix). A structurally symmetric A (the
+/// usual case: rounding-level asymmetry) is updated in place, with no allocation; otherwise the
+/// peak is ~1.7x (real) / ~1.8x (complex) the result instead of ~3x.
+template <class T>
+CsrMatrix<T> hermitian_part(CsrMatrix<T>&& a);
 
 /// Promote a real matrix to complex (needed when A is complex and B is real, or vice versa).
 CsrMatrix<cplx> to_complex(const CsrMatrix<double>& a);
+/// Same, consuming `a` (left as an empty 0 x 0 matrix): the row pointers and column indices move
+/// over instead of being copied, and the real values are released on return.
+CsrMatrix<cplx> to_complex(CsrMatrix<double>&& a);
 
 /// Frobenius norm. O(nnz).
 template <class T>
@@ -89,11 +106,13 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
 
 /// The pencil K(alpha, beta) = alpha*A + beta*B (B = I when b == nullptr) for REAL alpha, beta,
 /// stored as the index-only UPPER-triangle pattern of the union of A and B (the only part a
-/// Hermitian LDL^T backend reads), plus scatter maps from A and B into it.
+/// Hermitian LDL^T backend reads).
 ///  * One pattern serves every shift: K(sigma) = 1*A + (-sigma)*B, B alone = 0*A + 1*B, so a
 ///    factorization analyses once and refactorizes for each (alpha, beta).
 ///  * assemble() writes values straight into the caller's (backend's) array: the full K is
-///    never materialised. Memory: rowptr (n+1) + colind (nnz) + maps (~nnz(A)/2 + nnz(B)/2).
+///    never materialised. Memory: rowptr (8 (n+1) bytes) + colind (4 nnz bytes) + 1 byte per row;
+///    assemble() merges the upper rows of A and B into the pattern rows on the fly (no scatter
+///    maps), with the same arithmetic as before, i.e. bitwise the same values.
 /// A and B must be square, of equal order, exactly Hermitian (see hermitian_part) and outlive
 /// the pencil.
 template <class T>
@@ -127,11 +146,11 @@ class ShiftedPencil {
   const CsrMatrix<T>* b_;
   std::vector<index_t> rowptr_;
   std::vector<std::int32_t> colind_;
-  std::vector<index_t> a_first_upper_;  ///< per row: first entry of A with col >= row
-  std::vector<index_t> a_dst_;          ///< pattern position of each upper entry of A (row order)
-  bool a_identity_ = false;             ///< upper(A) pattern == union pattern: a_dst_ unused
-  std::vector<index_t> b_first_upper_;  ///< same for B (unused when b_ == nullptr)
-  std::vector<index_t> b_dst_;          ///< pattern position of each upper entry of B / of each diagonal
+  /// Per row: bit 0 (1) if the upper part of A's row is the whole pattern row, bit 1 (2) the same
+  /// for B. Such rows are assembled by a plain copy; the others by merging the sorted rows. (The
+  /// former int64 scatter maps took 8 bytes per upper entry of A and of B: with them the pencil
+  /// of the n = 1e6 waveguide case held 112 MB instead of 33 MB; bench/memio_pencil.cpp.)
+  std::vector<std::uint8_t> whole_rows_;
 };
 
 /// Real symmetric embedding of a complex Hermitian matrix K (order n):

@@ -28,7 +28,9 @@ struct MtxMatrix {
 /// Real values below the double range (e.g. 1e-400) read as signed zeros, as with strtod and
 /// scipy.io.mmread; values above it throw Io.
 /// Throws Io for malformed text (with the line number), InvalidInput for skew-symmetric,
-/// non-square or non-'matrix' objects. Streams the file in 4 MiB chunks.
+/// non-square or non-'matrix' objects. Streams the file in 4 MiB chunks; coordinate files are read
+/// twice (row counts, then entries placed straight into the CSR arrays), so the peak is the result
+/// plus the chunk buffer.
 MtxMatrix read_matrix_market(const std::filesystem::path& path, bool drop_zeros);
 
 }  // namespace hs::io

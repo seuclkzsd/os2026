@@ -139,8 +139,13 @@ struct LoadedMatrix {
 /// conj(a_ji), compared by value; the defect is then > 0) replace A by hermitian_part(A) and
 /// record it in notes, so every module sees the same exactly-Hermitian matrix. Complex input
 /// whose imaginary parts are all exactly 0 is returned as real (noted). Throws hs::Error.
-/// Memory: npz payloads whose dtype matches the result type are inflated straight into the CSR
-/// arrays; peak ~1x the result for full storage with zero defect (see src/io/load.cpp).
+/// Memory (peak / result, real / complex; measured by bench/memio_load.cpp at 26 entries per row
+/// and bench/memio_fix_rows.cpp at 1 and 3; byte formulas in src/io/load.cpp): npz csr 1.0x (any
+/// dtypes); npz csc/coo 1.34x / 1.20x (diagonal 1.22x); MatrixMarket coordinate 1.0x + 4 MiB;
+/// one stored triangle 1.22x / 1.34x (tridiagonal 1.55x / 1.59x); Hermitian part of a
+/// structurally asymmetric input 1.70x / 1.82x. The coo/csc and one-triangle ratios grow as rows
+/// get sparser (their row indices and per-row arrays weigh more next to fewer entries). A file
+/// whose headers claim more data than it holds fails (Io) before anything is allocated for it.
 LoadedMatrix load_matrix(const std::filesystem::path& path, const LoadOptions& options = {});
 
 }  // namespace hs

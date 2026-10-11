@@ -1,13 +1,16 @@
 // Internal to src/io: canonical CSR from the index/value arrays stored in matrix files, without
 // widening them. Inputs reach ~1e8 entries: hs::csr_from_coo takes int64 triplets and a
 // (column, value) workspace (~40 bytes per complex entry on top of the input), whereas these
-// routines work on the stored int32 indices and assemble in place, keeping the peak near the
-// size of the result. Also the Hermitian check of the loader (scale-safe defect, Hermitian part in
-// place). T in {double, cplx}.
+// routines work on the stored int32 indices and place entries straight into the result, keeping
+// the peak near the size of the result. Also the scale-safe Hermitian defect of the loader.
+// T in {double, cplx}.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
@@ -19,6 +22,44 @@ struct AssemblyStats {
   index_t zeros_dropped = 0;      ///< exact zeros removed (after summation)
 };
 
+/// Checks the index arrays of a compressed layout as read from a file (CSR: ptr = row pointers,
+/// idx = column indices; csc: column pointers and row indices): ptr has outer + 1 entries, starts
+/// at 0 and never decreases; idx.size() == nvals; ptr[outer] <= idx.size(); idx[0, ptr[outer]) lies
+/// in [0, inner). Throws InvalidInput naming the layout. Returns ptr[outer]: entries behind it are
+/// unused storage (scipy permits it). OpenMP for the index range check.
+index_t check_compressed(const std::vector<index_t>& ptr, index_t outer,
+                         const std::vector<std::int32_t>& idx, std::size_t nvals, index_t inner,
+                         bool csc);
+
+/// Throws InvalidInput naming the first 0-based coordinate entry outside nrows x ncols.
+void check_coordinates(index_t nrows, index_t ncols, const std::int32_t* rows,
+                       const std::int32_t* cols, std::size_t nnz);
+
+/// Counting-sort placement of coordinate entries into CSR order. Built from the (range-checked)
+/// row index of every entry; next(r) then hands out the positions of row r in turn, so entries
+/// placed in input order keep that order within their row and canonicalize_csr sums duplicates in
+/// input order. A pass is one next() call per counted entry. rewind() (after a complete pass)
+/// restarts the hand-out for another array placed in the same order (e.g. the values after the
+/// column indices); take_rowptr() (after a complete pass) returns the row pointers. Memory:
+/// 8 bytes per row (the row pointers double as the cursors).
+class RowSlots {
+ public:
+  RowSlots(index_t nrows, const std::int32_t* rows, std::size_t count);
+  index_t next(std::int32_t row) { return cursor_[row]++; }
+  void rewind();
+  index_t total() const { return cursor_.back(); }
+  /// The row pointers of the placed entries (leaves the object unusable).
+  std::vector<index_t> take_rowptr() {
+    rewind();
+    return std::move(cursor_);
+  }
+
+ private:
+  /// cursor_[r]: next position of row r, from its first slot up to the first slot of row r + 1
+  /// once the pass is complete; cursor_[nrows] = total.
+  std::vector<index_t> cursor_;
+};
+
 /// Brings raw CSR arrays (nrows/ncols set; rowptr/colind/values as read from a file) to the
 /// canonical form CsrMatrix::validate() demands: checks rowptr and column ranges (InvalidInput),
 /// drops unused storage after rowptr[nrows] (scipy permits it), sorts each row (stable, so
@@ -27,16 +68,13 @@ struct AssemblyStats {
 template <class T>
 AssemblyStats canonicalize_csr(CsrMatrix<T>& a, bool drop_zeros);
 
-/// Canonical CSR from 0-based int32 triplets (scipy coo, MatrixMarket); duplicates are summed in
-/// input order. Throws InvalidInput for indices outside nrows x ncols. Memory: input + result.
+/// Canonical CSR from 0-based int32 triplets (MatrixMarket array format, tests); duplicates are
+/// summed in input order. Throws InvalidInput for indices outside nrows x ncols. Memory: input +
+/// result.
 template <class T>
 CsrMatrix<T> csr_from_triplets(index_t nrows, index_t ncols, const std::int32_t* rows,
                                const std::int32_t* cols, const T* vals, std::size_t nnz,
                                bool drop_zeros, AssemblyStats& stats);
-
-/// Plain transpose A^T (no conjugation): the CSC arrays of A are the CSR arrays of A^T.
-template <class T>
-CsrMatrix<T> transpose(const CsrMatrix<T>& a);
 
 struct HermitianDefect {
   /// a_ij == conj(a_ji) for every i, j (a structurally absent entry counts as 0): decided by
@@ -57,13 +95,5 @@ struct HermitianDefect {
 /// depend on the number of threads.
 template <class T>
 HermitianDefect hermitian_defect_scaled(const CsrMatrix<T>& a);
-
-/// Replaces a canonical square A by (A + A^H)/2 in place when its pattern is structurally
-/// symmetric (the usual case: assembled matrices with rounding-level asymmetry), using exactly the
-/// arithmetic of hs::hermitian_part, so the result is bitwise identical. Returns false and leaves
-/// A untouched otherwise (the union pattern then needs new storage: use hermitian_part).
-/// O(nnz log(row length)); OpenMP over rows.
-template <class T>
-bool hermitian_part_in_place(CsrMatrix<T>& a);
 
 }  // namespace hs::io

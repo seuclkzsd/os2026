@@ -1,14 +1,29 @@
 // load_matrix: format readers (scipy npz, dense npy, MatrixMarket) feeding one post-processing
 // pipeline (include/hsolve/io.hpp).
 //
-// Memory (nnz entries, order n, final CSR = 8(n+1) + 12 nnz bytes real / 20 nnz complex):
-//   * npz csr whose dtypes match (f8/c16 data, i4 indices): every array is inflated straight
-//     into the CSR vectors, one member at a time -> peak ~1x the result (measured 1.06x at
-//     2.1e7 nnz). Mismatching dtypes (f4, int64 indices, ...) add one raw member at a time.
-//   * csc: + one transpose (2x); coo: input triplets + result (~2.3x).
-//   * Triangular storage: symmetrize_from_triangle (~2.5x the result, transient).
-//   * Hermitian defect > 0 with a structurally symmetric pattern: fixed in place (0 extra);
-//     otherwise hermitian_part (~3x, transient).
+// Memory. With n rows, N entries stored in the file, s = 8 (real) or 16 (complex) bytes per value,
+// the result takes R = 8 (n+1) + (4 + s) nnz bytes. Peaks, as formula and as peak / R measured
+// by bench/memio_load.cpp (27-point stencil, n = 343000, 26 entries per row) and
+// bench/memio_fix_rows.cpp (n = 3e6, diagonal / tridiagonal), real / complex:
+//   * npz csr: every array is inflated straight into the CSR vectors, one member at a time;
+//     non-native dtypes (f4/c8 values, int64 indices) are converted in 1 MiB chunks. Peak R plus
+//     one chunk: 1.00x at any row density.
+//   * npz coo / csc: the row indices are held, the column indices and then the values (streamed
+//     from the archive) are placed into their CSR slots. Peak (8 + s) N + 8n (csc: at least
+//     8N + 16n while the column pointers are held): 26/row 1.34x / 1.20x, diagonal 1.22x,
+//     tridiagonal 1.28x / 1.18x (was 2.0x / 2.35x before the streaming readers).
+//   * MatrixMarket coordinate: two passes over the file (row counts, then placement): R plus the
+//     4 MiB line buffer, 1.0x-1.14x (was 2.5x); about 30% slower than one pass.
+//   * One stored triangle of N_t entries: symmetrize_from_triangle(&&), peak
+//     20n + (4 + s) N_t + s nnz: 26/row 1.22x / 1.34x, tridiagonal 1.55x / 1.59x (was 2.5x).
+//   * Hermitian defect > 0: hermitian_part(&&), in place for a structurally symmetric pattern
+//     (no extra memory), otherwise 1.70x / 1.82x at 26/row (was 3.0x).
+//   * Complex input with zero imaginary parts: + the real values while converting (<= 1.4x).
+// Per-row arrays weigh most for sparse rows (a diagonal B: 20 bytes per row of result). The
+// readers and canonicalize_csr keep none besides the result's row pointers (csc: plus its column
+// pointers): RowSlots and the MatrixMarket placement use the row pointers as cursors, and
+// canonicalize_csr keeps the new length of a shrunk row in the row's freed last slot.
+// symmetrize_from_triangle keeps 12 bytes per row (input row pointers, a 4-byte cursor).
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -97,6 +112,44 @@ std::string decode_format(const NpyArray& a, const std::string& source) {
   return s;
 }
 
+template <class V>
+void release(std::vector<V>& v) {
+  std::vector<V>().swap(v);
+}
+
+// Coordinate (coo) and compressed-column (csc) files are assembled by placing entries straight
+// into their CSR slots (io::RowSlots): first the column indices, then the values, which are
+// streamed from the archive and never held as a whole. Peak: row indices + result (+ the column
+// indices while the CSR pattern is built), (8 + s) N + 8n bytes (see the top of this file),
+// instead of input + result (coo ~2.3x) or CSC + transpose (csc ~2x).
+
+// Streams `key` into m.values at the slots handed out for `rows` (in stream order); entries at or
+// behind `count` (unused csc storage) are skipped.
+template <class T>
+void scatter_values(const io::NpzFile& npz, const std::string& key, const std::vector<std::int32_t>& rows,
+                    std::size_t count, io::RowSlots& slots, CsrMatrix<T>& m) {
+  m.values.resize(count);
+  slots.rewind();
+  npz.read_chunks<T>(key, [&](const T* v, std::size_t first, std::size_t len) {
+    const std::size_t last = std::min(first + len, count);
+    for (std::size_t k = first; k < last; ++k) m.values[slots.next(rows[k])] = v[k - first];
+  });
+}
+
+// Error precedence. The entries are checked before the 'data' member is streamed, whereas every
+// member used to be read whole (dtype, length and CRC checked) before any entry was looked at. So
+// that the same error is reported as before, a failed entry check first reads 'data' through and
+// reports its error, if it has one. Only the error path pays for that extra read.
+template <class T, class F>
+auto data_errors_first(const io::NpzFile& npz, F&& check) -> decltype(check()) {
+  try {
+    return check();
+  } catch (const Error&) {
+    npz.read_chunks<T>("data", [](const T*, std::size_t, std::size_t) {});
+    throw;
+  }
+}
+
 template <class T>
 CsrMatrix<T> read_scipy_coo(const io::NpzFile& npz, index_t n, bool drop_zeros,
                             io::AssemblyStats& stats) {
@@ -106,42 +159,96 @@ CsrMatrix<T> read_scipy_coo(const io::NpzFile& npz, index_t n, bool drop_zeros,
     rows = npz.read_as<std::int32_t>("row");
     cols = npz.read_as<std::int32_t>("col");
   } else if (npz.contains("coords")) {  // n-D coo arrays (and future 2-D ones): shape (ndim, nnz)
-    io::NpyHeader h;
-    std::vector<std::int32_t> coords = npz.read_as<std::int32_t>("coords", &h);
-    if (h.shape.size() != 2 || h.shape[0] != 2)
-      HS_THROW(InvalidInput, source << ": 'coords' must have shape (2, nnz)");
-    const std::size_t nnz = h.shape[1];
-    rows.resize(nnz);
-    cols.resize(nnz);
-    for (std::size_t k = 0; k < nnz; ++k) {  // element (d, k): C order d*nnz + k, Fortran 2k + d
-      rows[k] = h.fortran_order ? coords[2 * k] : coords[k];
-      cols[k] = h.fortran_order ? coords[2 * k + 1] : coords[nnz + k];
-    }
+    const io::NpyHeader h = npz.header("coords");
+    // Only shape (2, nnz) can be split, but the member is read through either way, so its own
+    // errors (dtype, length, CRC) come first, as when it was read whole. rows/cols are sized on
+    // the first chunk: read_chunks has then checked the payload against the header's shape, so
+    // a corrupt shape cannot make them allocate more than the member holds.
+    const bool two_rows = h.shape.size() == 2 && h.shape[0] == 2;
+    const std::size_t nnz = two_rows ? h.shape[1] : 0;
+    // Element (d, k) is at d*nnz + k in C order and at 2k + d in Fortran order.
+    npz.read_chunks<std::int32_t>("coords", [&](const std::int32_t* v, std::size_t first, std::size_t len) {
+      if (!two_rows) return;
+      if (first == 0) {
+        rows.resize(nnz);
+        cols.resize(nnz);
+      }
+      for (std::size_t e = first; e < first + len; ++e) {
+        const std::int32_t x = v[e - first];
+        if (h.fortran_order) {
+          (e % 2 == 0 ? rows : cols)[e / 2] = x;
+        } else {
+          (e < nnz ? rows[e] : cols[e - nnz]) = x;
+        }
+      }
+    });
+    if (!two_rows) HS_THROW(InvalidInput, source << ": 'coords' must have shape (2, nnz)");
   } else {
     HS_THROW(InvalidInput, source << ": coo npz has neither 'row'/'col' nor 'coords'");
   }
-  const std::vector<T> data = npz.read_as<T>("data");
-  if (rows.size() != data.size() || cols.size() != data.size())
-    HS_THROW(InvalidInput, source << ": coo arrays differ in length (row " << rows.size()
-                                  << ", col " << cols.size() << ", data " << data.size() << ")");
-  return naming_source(source, [&] {
-    return io::csr_from_triplets<T>(n, n, rows.data(), cols.data(), data.data(), data.size(),
-                                    drop_zeros, stats);
+  const std::size_t nnz = npz.header("data").count;
+  data_errors_first<T>(npz, [&] {
+    if (rows.size() != nnz || cols.size() != nnz)
+      HS_THROW(InvalidInput, source << ": coo arrays differ in length (row " << rows.size()
+                                    << ", col " << cols.size() << ", data " << nnz << ")");
+    naming_source(source, [&] { io::check_coordinates(n, n, rows.data(), cols.data(), nnz); });
   });
+
+  CsrMatrix<T> m;
+  m.nrows = m.ncols = n;
+  io::RowSlots slots(n, rows.data(), nnz);
+  m.colind.resize(nnz);
+  for (std::size_t k = 0; k < nnz; ++k) m.colind[slots.next(rows[k])] = cols[k];
+  release(cols);
+  scatter_values(npz, "data", rows, nnz, slots, m);
+  release(rows);
+  m.rowptr = slots.take_rowptr();
+  stats = naming_source(source, [&] { return io::canonicalize_csr(m, drop_zeros); });
+  return m;
+}
+
+// csc: column pointers, row indices and values of A in column order. Visiting the columns in
+// order (which is stream order) appends each column index to its row, so every CSR row comes out
+// sorted, with duplicates adjacent in file order; canonicalize_csr then sums them as it would
+// have summed them in the file's columns.
+template <class T>
+CsrMatrix<T> read_scipy_csc(const io::NpzFile& npz, index_t n, bool drop_zeros,
+                            io::AssemblyStats& stats) {
+  const std::string source = npz.path().string();
+  std::vector<index_t> colptr = npz.read_as<index_t>("indptr");
+  std::vector<std::int32_t> rows = npz.read_as<std::int32_t>("indices");
+  const std::size_t nvals = npz.header("data").count;
+  const auto nz = static_cast<std::size_t>(data_errors_first<T>(npz, [&] {
+    return naming_source(
+        source, [&] { return io::check_compressed(colptr, n, rows, nvals, n, /*csc=*/true); });
+  }));
+
+  CsrMatrix<T> m;
+  m.nrows = m.ncols = n;
+  io::RowSlots slots(n, rows.data(), nz);
+  m.colind.resize(nz);
+  for (index_t j = 0; j < n; ++j)
+    for (index_t k = colptr[j]; k < colptr[j + 1]; ++k)
+      m.colind[slots.next(rows[k])] = static_cast<std::int32_t>(j);
+  release(colptr);
+  scatter_values(npz, "data", rows, nz, slots, m);
+  release(rows);
+  m.rowptr = slots.take_rowptr();
+  stats = naming_source(source, [&] { return io::canonicalize_csr(m, drop_zeros); });
+  return m;
 }
 
 template <class T>
-CsrMatrix<T> read_scipy_compressed(const io::NpzFile& npz, bool csc, index_t n, bool drop_zeros,
-                                   io::AssemblyStats& stats) {
-  // csc stores A^T in CSR layout: read it as such, canonicalise, then transpose.
+CsrMatrix<T> read_scipy_csr(const io::NpzFile& npz, index_t n, bool drop_zeros,
+                            io::AssemblyStats& stats) {
+  // Every array is read straight into the CSR vectors (converted in chunks if its dtype differs).
   CsrMatrix<T> m;
   m.nrows = m.ncols = n;
   m.rowptr = npz.read_as<index_t>("indptr");
   m.colind = npz.read_as<std::int32_t>("indices");
   m.values = npz.read_as<T>("data");
   stats = naming_source(npz.path().string(), [&] { return io::canonicalize_csr(m, drop_zeros); });
-  if (csc) return io::transpose(m);
-  return m;  // not `csc ? transpose(m) : m`: the conditional operator would copy m
+  return m;
 }
 
 RawMatrix read_scipy_npz(const std::filesystem::path& path, bool drop_zeros) {
@@ -176,10 +283,12 @@ RawMatrix read_scipy_npz(const std::filesystem::path& path, bool drop_zeros) {
   if (fmt == "coo") {
     raw.matrix = is_cplx ? AnyCsr(read_scipy_coo<cplx>(npz, n, drop_zeros, stats))
                          : AnyCsr(read_scipy_coo<double>(npz, n, drop_zeros, stats));
+  } else if (fmt == "csc") {
+    raw.matrix = is_cplx ? AnyCsr(read_scipy_csc<cplx>(npz, n, drop_zeros, stats))
+                         : AnyCsr(read_scipy_csc<double>(npz, n, drop_zeros, stats));
   } else {
-    const bool csc = fmt == "csc";
-    raw.matrix = is_cplx ? AnyCsr(read_scipy_compressed<cplx>(npz, csc, n, drop_zeros, stats))
-                         : AnyCsr(read_scipy_compressed<double>(npz, csc, n, drop_zeros, stats));
+    raw.matrix = is_cplx ? AnyCsr(read_scipy_csr<cplx>(npz, n, drop_zeros, stats))
+                         : AnyCsr(read_scipy_csr<double>(npz, n, drop_zeros, stats));
   }
   note_assembly(stats, raw.notes);
 
@@ -373,7 +482,7 @@ void finish(CsrMatrix<T>&& a, io::MtxSymmetry declared, const LoadOptions& opt,
   const Storage stored = resolve_storage(tri, opt.storage, declared, source);
   out.detected_storage = stored;
   if (stored != Storage::Full && (tri.lower || tri.upper)) {
-    a = symmetrize_from_triangle(a);
+    a = symmetrize_from_triangle(std::move(a));
     std::string why;
     if (declared != io::MtxSymmetry::General) {
       why = std::string("declared by the MatrixMarket '") + symmetry_name(declared) + "' banner";
@@ -415,7 +524,7 @@ void finish(CsrMatrix<T>&& a, io::MtxSymmetry declared, const LoadOptions& opt,
                                     << defect.relative
                                     << " exceeds hermitian_tol = " << opt.hermitian_tol);
     if (!defect.exact) {
-      if (!io::hermitian_part_in_place(a)) a = hermitian_part(a);
+      a = hermitian_part(std::move(a));  // in place when the pattern is structurally symmetric
       out.notes.push_back("hermitian: relative defect " + format_double(defect.relative) +
                           " <= hermitian_tol; A replaced by its Hermitian part (A + A^H)/2");
     }

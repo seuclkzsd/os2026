@@ -547,6 +547,13 @@ TEST_F(IoZip, ValidatesSizesAndOffsetsFromTheCentralDirectory) {
             "io");
   EXPECT_EQ(error_code_of([&] { hs::read_npz(patch_central("csr_matrix_f8.npz", 20, real + 1, 4)); }),
             "io");
+  // An uncompressed size beyond what deflate can expand the member to (1032:1) is rejected when
+  // the archive is opened, before any reader sizes a buffer from it.
+  const auto huge = hs::io_test::error_of(
+      [&] { hs::io::NpzFile(patch_central("csr_matrix_f8.npz", 20, 0x7FFFFFFF, 4)); });
+  EXPECT_EQ(huge.code, "io");
+  EXPECT_NE(huge.message.find("declares 2147483647 uncompressed bytes"), std::string::npos)
+      << huge.message;
 }
 
 // Little-endian field of a hand-built zip record.

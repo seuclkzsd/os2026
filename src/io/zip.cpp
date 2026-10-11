@@ -29,6 +29,7 @@ constexpr std::uint16_t kFlagEncrypted = 0x0001;
 constexpr std::uint16_t kFlagStrongEncryption = 0x0040;
 constexpr std::uint16_t kMethodStored = 0;
 constexpr std::uint16_t kMethodDeflate = 8;
+constexpr std::uint64_t kMaxDeflateRatio = 1032;  // deflate's largest expansion (zlib FAQ)
 constexpr std::uint32_t kSat32 = 0xFFFFFFFF;  // "value is in the zip64 extra field"
 constexpr std::uint16_t kSat16 = 0xFFFF;
 constexpr std::size_t kInputChunk = std::size_t{1} << 20;
@@ -371,6 +372,13 @@ ZipArchive::ZipArchive(const std::filesystem::path& path) : path_(path) {
       HS_THROW(Io, name << ": stored member '" << e.name << "' has different compressed ("
                         << e.compressed_size << ") and uncompressed (" << e.uncompressed_size
                         << ") sizes");
+    // Readers size their buffers from the uncompressed size, so a corrupt claim must not get
+    // past here: deflate expands at most 1032:1 (a 258-byte match coded in 2 bits), and the
+    // compressed size is bounded by the file (checked when the member is opened).
+    if (e.method == kMethodDeflate && e.uncompressed_size / kMaxDeflateRatio > e.compressed_size)
+      HS_THROW(Io, name << ": member '" << e.name << "' declares " << e.uncompressed_size
+                        << " uncompressed bytes, more than its " << e.compressed_size
+                        << " deflate bytes can hold (corrupt archive)");
     if (e.local_header_offset >= data_end_)
       HS_THROW(Io, name << ": member '" << e.name << "' starts inside the central directory");
     entries_.push_back(std::move(e));

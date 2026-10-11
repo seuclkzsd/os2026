@@ -410,15 +410,56 @@ TYPED_TEST(IoAssembly, TripletsAgreeWithCsrFromCoo) {
             "invalid_input");
 }
 
-TYPED_TEST(IoAssembly, TransposeDoesNotConjugate) {
-  using T = TypeParam;
-  const std::vector<index_t> r{0, 0, 1, 2}, c{1, 2, 0, 2};
-  const std::vector<T> v{scalar<T>(1, 2), scalar<T>(3, -4), scalar<T>(5, 6), scalar<T>(7, 0)};
-  const CsrMatrix<T> a = hs::csr_from_coo<T>(3, 3, r, c, v);
-  const CsrMatrix<T> t = hs::io::transpose(a);
-  const auto da = hs::test::to_dense(a), dt = hs::test::to_dense(t);
-  for (index_t i = 0; i < 3; ++i)
-    for (index_t j = 0; j < 3; ++j) EXPECT_EQ(dt(j, i), da(i, j));
+TEST(IoAssemblyChecks, CompressedArraysAreValidatedWithTheirLayoutsWording) {
+  const auto message = [](std::vector<index_t> ptr, std::vector<std::int32_t> idx, std::size_t nvals,
+                          bool csc) {
+    return hs::io_test::error_of([&] { hs::io::check_compressed(ptr, 2, idx, nvals, 3, csc); }).message;
+  };
+  EXPECT_NE(message({0, 2, 1}, {0, 1}, 2, true).find("CSC index pointer decreases at column 1"),
+            std::string::npos);
+  EXPECT_NE(message({0, 1, 2}, {0, 3}, 2, true).find("CSC row index 3 at position 1"), std::string::npos);
+  EXPECT_NE(message({0, 1, 2}, {0, 3}, 2, false).find("CSR column index 3 at position 1"),
+            std::string::npos);
+  EXPECT_NE(message({0, 1, 2}, {0, 1}, 3, false).find("CSR has 2 indices but 3 values"),
+            std::string::npos);
+  // Unused storage behind ptr[outer] is neither checked nor counted.
+  EXPECT_EQ(hs::io::check_compressed({0, 1, 1}, 2, {2, -7, 99}, 3, 3, true), 1);
+}
+
+TEST(IoAssemblyChecks, CoordinatesAndRowSlots) {
+  const std::vector<std::int32_t> rows{2, 0, 2, 1, 2}, cols{0, 1, 1, 2, 0};
+  EXPECT_NO_THROW(hs::io::check_coordinates(3, 3, rows.data(), cols.data(), rows.size()));
+  const std::string msg = hs::io_test::error_of([&] {
+                            hs::io::check_coordinates(3, 2, rows.data(), cols.data(), rows.size());
+                          }).message;
+  EXPECT_NE(msg.find("entry 3 at (1, 2) lies outside the 3 x 2 matrix"), std::string::npos) << msg;
+  // Slots: row 0 gets [0, 1), row 1 [1, 2), row 2 [2, 5), handed out in input order; rewind()
+  // repeats the same sequence.
+  hs::io::RowSlots slots(3, rows.data(), rows.size());
+  EXPECT_EQ(slots.total(), 5);
+  std::vector<index_t> first, second;
+  for (const std::int32_t r : rows) first.push_back(slots.next(r));
+  slots.rewind();
+  for (const std::int32_t r : rows) second.push_back(slots.next(r));
+  EXPECT_EQ(first, (std::vector<index_t>{2, 0, 3, 1, 4}));
+  EXPECT_EQ(second, first);
+  EXPECT_EQ(slots.take_rowptr(), (std::vector<index_t>{0, 1, 2, 5}));
+  // Empty first, middle and last rows (the row pointers double as cursors and are restored after
+  // every complete pass), and no rows at all.
+  const std::vector<std::int32_t> sparse_rows{3, 1, 3, 1};
+  hs::io::RowSlots gaps(5, sparse_rows.data(), sparse_rows.size());
+  for (int pass = 0; pass < 3; ++pass) {
+    std::vector<index_t> got;
+    if (pass > 0) gaps.rewind();
+    for (const std::int32_t r : sparse_rows) got.push_back(gaps.next(r));
+    EXPECT_EQ(got, (std::vector<index_t>{2, 0, 3, 1}));
+  }
+  EXPECT_EQ(gaps.total(), 4);
+  EXPECT_EQ(gaps.take_rowptr(), (std::vector<index_t>{0, 0, 2, 2, 4, 4}));
+  hs::io::RowSlots none(0, nullptr, 0);
+  EXPECT_EQ(none.total(), 0);
+  none.rewind();
+  EXPECT_EQ(none.take_rowptr(), (std::vector<index_t>{0}));
 }
 
 TYPED_TEST(IoAssembly, ScaledHermitianDefectAgreesWithSparseModule) {
@@ -471,30 +512,6 @@ TYPED_TEST(IoAssembly, ScaledHermitianDefectIsScaleInvariant) {
   const hs::io::HermitianDefect d = hs::io::hermitian_defect_scaled(tiny);
   EXPECT_FALSE(d.exact);
   EXPECT_EQ(d.relative, std::numeric_limits<double>::min());
-}
-
-TYPED_TEST(IoAssembly, HermitianPartInPlaceMatchesSparseModuleBitwise) {
-  using T = TypeParam;
-  CsrMatrix<T> a = hs::test::random_hermitian<T>(400, 0.05, 7);
-  // Rounding-level asymmetry on an unchanged (symmetric) pattern.
-  for (index_t p = 0; p < a.nnz(); ++p) a.values[p] *= 1.0 + 1e-13 * static_cast<double>(p % 7 - 3);
-  ASSERT_GT(hs::hermitian_defect(a), 0.0);
-  const CsrMatrix<T> want = hs::hermitian_part(a);
-  ASSERT_TRUE(hs::io::hermitian_part_in_place(a));
-  EXPECT_EQ(a.rowptr, want.rowptr);
-  EXPECT_EQ(a.colind, want.colind);
-  EXPECT_EQ(a.values, want.values);
-  EXPECT_EQ(hs::hermitian_defect(a), 0.0);
-}
-
-TYPED_TEST(IoAssembly, HermitianPartInPlaceDeclinesAsymmetricPatterns) {
-  using T = TypeParam;
-  const std::vector<index_t> r{0, 1, 1, 2}, c{0, 1, 2, 2};  // (1,2) without (2,1)
-  const std::vector<T> v{T(1), T(2), scalar<T>(1e-14, 1e-14), T(3)};
-  CsrMatrix<T> a = hs::csr_from_coo<T>(3, 3, r, c, v);
-  const CsrMatrix<T> before = a;
-  EXPECT_FALSE(hs::io::hermitian_part_in_place(a));
-  EXPECT_EQ(a.values, before.values);
 }
 
 }  // namespace
