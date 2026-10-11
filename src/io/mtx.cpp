@@ -278,12 +278,29 @@ void read_entries(LineReader& lr, const Banner& b, index_t n, std::uint64_t expe
     HS_THROW(Io, lr.name() << ": file ends after " << count << " of " << expected << " entries");
 }
 
+// Order-independent fingerprint of the row indices of a sequence of entries: their number and a
+// sum of hashed row indices (mod 2^64). Pass 2 compares it with pass 1's to detect a file that
+// changed in between, which would leave the rows with other entry counts than pass 1 reserved.
+struct RowFingerprint {
+  std::uint64_t count = 0;
+  std::uint64_t sum = 0;
+  void add(index_t row) {
+    std::uint64_t x = static_cast<std::uint64_t>(row) + 0x9E3779B97F4A7C15ull;  // splitmix64
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    sum += x ^ (x >> 31);
+    ++count;
+  }
+  bool operator==(const RowFingerprint& o) const { return count == o.count && sum == o.sum; }
+};
+
 // Pass 1 over a coordinate file: row pointers from the row tokens of the first `expected` entry
 // lines alone. A line whose row token cannot be read is not counted, and an error of the line
 // reader (a line too long for its buffer) ends the counting: pass 2 meets either in file order,
 // after every earlier line has been checked, and reports the first error exactly as a single pass
 // would.
-std::vector<index_t> count_rows(LineReader& lr, index_t n, std::uint64_t expected) {
+std::vector<index_t> count_rows(LineReader& lr, index_t n, std::uint64_t expected,
+                                RowFingerprint& fingerprint) {
   std::vector<index_t> rowptr(static_cast<std::size_t>(n) + 1, 0);
   std::uint64_t count = 0;
   std::string_view line;
@@ -296,7 +313,10 @@ std::vector<index_t> count_rows(LineReader& lr, index_t n, std::uint64_t expecte
       std::int64_t i = 0;
       const char* last = tok.data() + tok.size();
       const auto [end, ec] = std::from_chars(tok.data(), last, i);
-      if (ec == std::errc() && end == last && i >= 1 && i <= n) ++rowptr[i];  // row i - 1
+      if (ec == std::errc() && end == last && i >= 1 && i <= n) {
+        ++rowptr[i];  // row i - 1
+        fingerprint.add(i - 1);
+      }
     }
   } catch (const Error&) {  // reported by pass 2 (see above)
   }
@@ -332,26 +352,33 @@ CsrMatrix<T> read_values(LineReader& lr, const Banner& b, index_t n, std::uint64
   // cost 16-24 bytes per entry on top of the result). Pass 1 counts the entries of every row,
   // pass 2 parses and checks every line in file order and places each entry into the next slot
   // of its row; rows keep the file order, so canonicalize_csr sums duplicates exactly as
-  // csr_from_triplets would. Peak: the result plus the line buffer.
+  // csr_from_triplets would. Peak: the result plus the line buffer (no per-row cursor array:
+  // rowptr[i] itself is the cursor of row i and is shifted back afterwards).
   const std::uint64_t header_lines = lr.line_number();
   CsrMatrix<T> m;
   m.nrows = m.ncols = n;
-  m.rowptr = count_rows(lr, n, expected);
-  m.colind.resize(static_cast<std::size_t>(m.rowptr[n]));
-  m.values.resize(static_cast<std::size_t>(m.rowptr[n]));
+  RowFingerprint counted, placed;
+  m.rowptr = count_rows(lr, n, expected, counted);
+  const index_t total = m.rowptr[n];
+  m.colind.resize(static_cast<std::size_t>(total));
+  m.values.resize(static_cast<std::size_t>(total));
   lr.rewind();
   std::string_view skipped;
   for (std::uint64_t k = 0; k < header_lines; ++k) lr.next(skipped);
-  std::vector<index_t> filled(static_cast<std::size_t>(n), 0);
   const auto changed = [&lr] { HS_THROW(Io, lr.name() << ": the file changed while it was read"); };
   read_entries<T>(lr, b, n, expected, [&](index_t i, index_t j, const T& v) {
-    const index_t dst = m.rowptr[i] + filled[i]++;
-    if (dst >= m.rowptr[i + 1]) changed();
+    const index_t dst = m.rowptr[i]++;
+    // In bounds whatever the file holds now; a row that got more entries than pass 1 counted
+    // spills into the next row, which the fingerprint comparison below detects.
+    if (dst >= total) changed();
+    placed.add(i);
     m.colind[dst] = static_cast<std::int32_t>(j);
     m.values[dst] = v;
   });
-  for (index_t i = 0; i < n; ++i)
-    if (filled[i] != m.rowptr[i + 1] - m.rowptr[i]) changed();
+  if (!(placed == counted)) changed();
+  // Every row is complete, so the cursor of row i stands at the start of row i + 1.
+  std::copy_backward(m.rowptr.begin(), m.rowptr.end() - 1, m.rowptr.end());
+  m.rowptr[0] = 0;
   stats = canonicalize_csr(m, drop_zeros);
   return m;
 }

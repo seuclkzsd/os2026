@@ -444,6 +444,22 @@ TEST(IoAssemblyChecks, CoordinatesAndRowSlots) {
   EXPECT_EQ(first, (std::vector<index_t>{2, 0, 3, 1, 4}));
   EXPECT_EQ(second, first);
   EXPECT_EQ(slots.take_rowptr(), (std::vector<index_t>{0, 1, 2, 5}));
+  // Empty first, middle and last rows (the row pointers double as cursors and are restored after
+  // every complete pass), and no rows at all.
+  const std::vector<std::int32_t> sparse_rows{3, 1, 3, 1};
+  hs::io::RowSlots gaps(5, sparse_rows.data(), sparse_rows.size());
+  for (int pass = 0; pass < 3; ++pass) {
+    std::vector<index_t> got;
+    if (pass > 0) gaps.rewind();
+    for (const std::int32_t r : sparse_rows) got.push_back(gaps.next(r));
+    EXPECT_EQ(got, (std::vector<index_t>{2, 0, 3, 1}));
+  }
+  EXPECT_EQ(gaps.total(), 4);
+  EXPECT_EQ(gaps.take_rowptr(), (std::vector<index_t>{0, 0, 2, 2, 4, 4}));
+  hs::io::RowSlots none(0, nullptr, 0);
+  EXPECT_EQ(none.total(), 0);
+  none.rewind();
+  EXPECT_EQ(none.take_rowptr(), (std::vector<index_t>{0}));
 }
 
 TYPED_TEST(IoAssembly, ScaledHermitianDefectAgreesWithSparseModule) {

@@ -1,18 +1,29 @@
 // load_matrix: format readers (scipy npz, dense npy, MatrixMarket) feeding one post-processing
 // pipeline (include/hsolve/io.hpp).
 //
-// Memory, as peak / final CSR (8(n+1) + 12 nnz bytes real, + 20 nnz complex), measured by
-// bench/memio_load.cpp (n = 343000, nnz = 9.0e6, real / complex):
+// Memory. With n rows, N entries stored in the file, s = 8 (real) or 16 (complex) bytes per value,
+// the result takes R = 8 (n+1) + (4 + s) nnz bytes. Peaks, as formula and as peak / R measured
+// by bench/memio_load.cpp (27-point stencil, n = 343000, 26 entries per row) and
+// bench/memio_fix_rows.cpp (n = 3e6, diagonal / tridiagonal), real / complex:
 //   * npz csr: every array is inflated straight into the CSR vectors, one member at a time;
-//     non-native dtypes (f4/c8 values, int64 indices) are converted in 1 MiB chunks -> 1.02x.
-//   * npz csc / coo: the row indices are held, the column indices and then the values (streamed
-//     from the archive) are placed into their CSR slots -> 1.36x / 1.22x (was 2.0x / 2.35x).
-//   * MatrixMarket coordinate: two passes over the file (row counts, then placement) -> ~1.0x
-//     plus the 4 MiB line buffer (was 2.5x); about 30% slower than one pass.
-//   * One stored triangle: symmetrize_from_triangle(&&) -> 1.22x / 1.34x (was 2.5x).
+//     non-native dtypes (f4/c8 values, int64 indices) are converted in 1 MiB chunks. Peak R plus
+//     one chunk: 1.00x at any row density.
+//   * npz coo / csc: the row indices are held, the column indices and then the values (streamed
+//     from the archive) are placed into their CSR slots. Peak (8 + s) N + 8n (csc: at least
+//     8N + 16n while the column pointers are held): 26/row 1.34x / 1.20x, diagonal 1.22x,
+//     tridiagonal 1.28x / 1.18x (was 2.0x / 2.35x before the streaming readers).
+//   * MatrixMarket coordinate: two passes over the file (row counts, then placement): R plus the
+//     4 MiB line buffer, 1.0x-1.14x (was 2.5x); about 30% slower than one pass.
+//   * One stored triangle of N_t entries: symmetrize_from_triangle(&&), peak
+//     20n + (4 + s) N_t + s nnz: 26/row 1.22x / 1.34x, tridiagonal 1.55x / 1.59x (was 2.5x).
 //   * Hermitian defect > 0: hermitian_part(&&), in place for a structurally symmetric pattern
-//     (no extra memory), otherwise 1.70x / 1.82x (was 3.0x).
+//     (no extra memory), otherwise 1.70x / 1.82x at 26/row (was 3.0x).
 //   * Complex input with zero imaginary parts: + the real values while converting (<= 1.4x).
+// Per-row arrays weigh most for sparse rows (a diagonal B: 20 bytes per row of result). The
+// readers and canonicalize_csr keep none besides the result's row pointers (csc: plus its column
+// pointers): RowSlots and the MatrixMarket placement use the row pointers as cursors, and
+// canonicalize_csr keeps the new length of a shrunk row in the row's freed last slot.
+// symmetrize_from_triangle keeps 12 bytes per row (input row pointers, a 4-byte cursor).
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -109,8 +120,8 @@ void release(std::vector<V>& v) {
 // Coordinate (coo) and compressed-column (csc) files are assembled by placing entries straight
 // into their CSR slots (io::RowSlots): first the column indices, then the values, which are
 // streamed from the archive and never held as a whole. Peak: row indices + result (+ the column
-// indices while the CSR pattern is built), ~1.33x the result for real and ~1.2x for complex
-// values, instead of input + result (coo ~2.3x) or CSC + transpose (csc ~2x).
+// indices while the CSR pattern is built), (8 + s) N + 8n bytes (see the top of this file),
+// instead of input + result (coo ~2.3x) or CSC + transpose (csc ~2x).
 
 // Streams `key` into m.values at the slots handed out for `rows` (in stream order); entries at or
 // behind `count` (unused csc storage) are skipped.

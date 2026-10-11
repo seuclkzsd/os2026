@@ -38,20 +38,26 @@ void check_coordinates(index_t nrows, index_t ncols, const std::int32_t* rows,
 /// Counting-sort placement of coordinate entries into CSR order. Built from the (range-checked)
 /// row index of every entry; next(r) then hands out the positions of row r in turn, so entries
 /// placed in input order keep that order within their row and canonicalize_csr sums duplicates in
-/// input order. rewind() restarts the hand-out for another array placed in the same order (e.g.
-/// the values after the column indices). Memory: 16 bytes per row.
+/// input order. A pass is one next() call per counted entry. rewind() (after a complete pass)
+/// restarts the hand-out for another array placed in the same order (e.g. the values after the
+/// column indices); take_rowptr() (after a complete pass) returns the row pointers. Memory:
+/// 8 bytes per row (the row pointers double as the cursors).
 class RowSlots {
  public:
   RowSlots(index_t nrows, const std::int32_t* rows, std::size_t count);
-  index_t next(std::int32_t row) { return rowptr_[row] + filled_[row]++; }
-  void rewind() { std::fill(filled_.begin(), filled_.end(), 0); }
-  index_t total() const { return rowptr_.back(); }
+  index_t next(std::int32_t row) { return cursor_[row]++; }
+  void rewind();
+  index_t total() const { return cursor_.back(); }
   /// The row pointers of the placed entries (leaves the object unusable).
-  std::vector<index_t> take_rowptr() { return std::move(rowptr_); }
+  std::vector<index_t> take_rowptr() {
+    rewind();
+    return std::move(cursor_);
+  }
 
  private:
-  std::vector<index_t> rowptr_;
-  std::vector<index_t> filled_;
+  /// cursor_[r]: next position of row r, from its first slot up to the first slot of row r + 1
+  /// once the pass is complete; cursor_[nrows] = total.
+  std::vector<index_t> cursor_;
 };
 
 /// Brings raw CSR arrays (nrows/ncols set; rowptr/colind/values as read from a file) to the
