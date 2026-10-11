@@ -9,6 +9,7 @@
 
 #include "hsolve/error.hpp"
 #include "hsolve/solver.hpp"
+#include "hsolve/util.hpp"
 
 namespace hs {
 
@@ -243,6 +244,8 @@ std::string SolveReport::to_json(int indent) const {
                         {"passed", sl.passed}});
   }
   json j = {{"schema_version", 1},
+            {"solver", "hsolve"},
+            {"version", hs::version()},
             {"n", n},
             {"nnz_a", nnz_a},
             {"nnz_b", nnz_b},

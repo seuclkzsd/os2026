@@ -170,9 +170,12 @@ int main(int argc, char** argv) {
 
     const bool complex_problem = la.is_complex() || (lb && lb->is_complex());
     if (complex_problem) {
-      hs::CsrMatrix<hs::cplx> a = la.is_complex() ? std::get<1>(std::move(la.matrix)) : hs::to_complex(std::get<0>(la.matrix));
+      // A real A or B is promoted by the rvalue overload of to_complex, which frees the real copy.
+      hs::CsrMatrix<hs::cplx> a = la.is_complex() ? std::get<1>(std::move(la.matrix))
+                                                  : hs::to_complex(std::get<0>(std::move(la.matrix)));
       hs::CsrMatrix<hs::cplx> b;
-      if (lb) b = lb->is_complex() ? std::get<1>(std::move(lb->matrix)) : hs::to_complex(std::get<0>(lb->matrix));
+      if (lb)
+        b = lb->is_complex() ? std::get<1>(std::move(lb->matrix)) : hs::to_complex(std::get<0>(std::move(lb->matrix)));
       return run<hs::cplx>(a, lb ? &b : nullptr, cfg, log, out_dir, notes, quiet);
     }
     const auto& a = std::get<0>(la.matrix);
