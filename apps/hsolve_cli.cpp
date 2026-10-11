@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
   long long k = 0, smallest = 0, largest = 0, slice_size = 0, block_size = 0;
   std::vector<double> interval;
   int threads = -1;
-  std::string precision;
+  std::string precision, certificate;
   bool verbose = false, quiet = false, version = false;
 
   app.add_option("--A", a_path, "matrix A (.npz scipy sparse, .npy dense, .mtx)")->required();
@@ -112,6 +112,9 @@ int main(int argc, char** argv) {
   auto* o_block = app.add_option("--block-size", block_size,
                                  "Krylov block width of the HEP/GHEP runs (0 = auto, 1 = single vector)");
   auto* o_zero = app.add_option("--zero-filter-tol", zero_filter, "drop |lambda| <= TOL*scale (zero modes); < 0 off");
+  auto* o_cert = app.add_option("--certificate", certificate,
+                                "completeness check of nearest targets: exact|randomized|auto|off")
+                     ->check(CLI::IsMember({"exact", "randomized", "auto", "off"}));
   app.add_option("--log", log_path, "JSON-lines event log file");
   app.add_flag("-v,--verbose", verbose, "debug output");
   app.add_flag("-q,--quiet", quiet, "no summary on stdout");
@@ -148,6 +151,7 @@ int main(int argc, char** argv) {
     if (*o_block) cfg.block_size = static_cast<hs::index_t>(block_size);
     if (*o_zero) cfg.zero_filter_tol = zero_filter;
     if (*o_prec) cfg = hs::parse_config("{\"factor_precision\": \"" + precision + "\"}", cfg);
+    if (*o_cert) cfg = hs::parse_config("{\"certificate\": \"" + certificate + "\"}", cfg);
     // Re-validate the merged configuration (overrides bypass parse_config's checks otherwise).
     cfg = hs::parse_config(hs::config_to_json(cfg));
 
