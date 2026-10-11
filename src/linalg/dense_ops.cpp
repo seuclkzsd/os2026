@@ -139,9 +139,9 @@ constexpr index_t kDoubles = is_complex_v<T> ? 2 : 1;
 // The kernels use GCC/Clang vector extensions: every accumulator is a local vector value, which
 // the compiler keeps in a register. The previous form, two-dimensional accumulator arrays
 // a[column][lane], was vectorized by GCC 13 (-march=native, Ice Lake) with half of the
-// accumulators in stack memory (a load-FMA-store chain per iteration): about 32 GB/s per core on
-// L2-resident blocks against 60 GB/s now for the complex projection (46 vs 36 real), which made
-// the fused sweeps slower than BLAS gemv when the basis fits in cache (complex, n ~ 1e4; see
+// accumulators in stack memory (a load-FMA-store chain per iteration): one thread projected
+// L2-resident blocks at 25 GB/s (complex) / 38 GB/s (real) against 61 GB/s now, which made the
+// fused sweeps slower than BLAS gemv when the basis fits in cache (complex, n ~ 1e4; measured with
 // bench/ortho_fix_kernels.cpp). The projection lanes are unchanged, so the projections are
 // bitwise those of the array form. Vector extensions lower to whatever SIMD the target has
 // (SSE2 in the portable build); no intrinsics.
