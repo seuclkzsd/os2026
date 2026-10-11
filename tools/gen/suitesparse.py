@@ -1,0 +1,531 @@
+"""Curated SuiteSparse Matrix Collection cases (electromagnetics and related indefinite problems).
+
+Pipeline per matrix (archives are untrusted data):
+  1. download https://sparse.tamu.edu/MM/<Group>/<Name>.tar.gz into a NEW empty directory
+     <root>/downloads/<Name>/ (socket timeout, overall deadline, size cap; offline or HTTP errors
+     raise Skipped with the reason). A finished download is recorded in download.json (url,
+     bytes, sha256) and reused on later runs; anything else in the directory is never trusted:
+     an incomplete directory is only replaced with --refresh.
+  2. verify the gzip stream (CRC-32 and length, which tarfile alone never checks) and the unpacked
+     size, extract with tarfile filter='data' (no absolute paths, links out of the tree, devices)
+     and pick <Name>.mtx or an auxiliary member such as
+     <Name>_M.mtx (the Guettel TEM archives ship the pencil (C, M): curl-curl and mass matrix).
+  3. scipy.io.mmread (integer files become float64); explicit zeros are dropped, then a 'general'
+     file holding a single triangle is symmetrized; the matrix must be Hermitian (complex-symmetric
+     matrices are rejected: they are not valid cases); an O(eps) defect is removed by taking the
+     Hermitian part.
+  4. the file must match the collection index (field, n, nnz; spd of a pencil's B) - the only
+     integrity check available, as the collection publishes no checksums.
+     Problem by inspection: one matrix -> HEP; a pair -> GHEP when B is proven HPD by a symmetric
+     diagonal-pivoting factorization (Sylvester inertia), GHIEP otherwise.
+  5. targets: sigma inside the spectrum from a cheap Rayleigh-Ritz estimate (never from reference
+     solutions): Krylov Ritz values of a Hermitian pencil with HPD B lie in [lambda_min, lambda_max]
+     (Courant-Fischer), so any sigma between the extreme Ritz values is inside the spectrum.
+  6. tools.case.save_case with license CC-BY 4.0 and the collection's citation. No reference is
+     written (none is known).
+
+Usage (from the repository root):
+    python -m tools.gen.suitesparse --list
+    python -m tools.gen.suitesparse ss-tem27623 ss-qa8fk-qa8fm [--root DIR] [--max-mb 200] [--refresh]
+"""
+from __future__ import annotations
+
+import argparse
+import gzip
+import hashlib
+import http.client
+import json
+import shutil
+import tarfile
+import time
+import urllib.error
+import urllib.request
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Sequence
+
+import numpy as np
+import scipy.io
+import scipy.linalg
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+from tools import case
+from tools.gen.synthetic import case_summary, hermitian_part
+
+FAMILY = "suitesparse"
+BASE_URL = "https://sparse.tamu.edu/MM"
+LICENSE = "CC-BY 4.0"
+CITATION = ("T. A. Davis and Y. Hu, The University of Florida Sparse Matrix Collection, ACM "
+            "Transactions on Mathematical Software 38(1), 1:1-1:25, 2011, doi:10.1145/2049662.2049663")
+HERMITIAN_TOL = 1e-12     # relative Frobenius defect accepted (then removed) as rounding
+UNPACK_FACTOR = 20        # unpacked archive may be at most this many times the download cap
+
+
+class Skipped(Exception):
+    """A matrix or case was skipped: offline, over a size cap, unsafe archive or not Hermitian."""
+
+
+@dataclass(frozen=True)
+class Matrix:
+    """A collection matrix: the primary matrix of archive <group>/<name>.tar.gz or, when `member`
+    is set, an auxiliary matrix shipped in the same archive (e.g. the mass matrix TEM27623_M).
+
+    n, nnz, field and spd are the collection index values (ssstats.csv, 2023-10; n/nnz None where
+    the index has no entry, as for auxiliary members; nnz counts both triangles without explicit
+    zeros). fetch_case checks the downloaded file against them (check_index; spd where a pencil's B
+    is tested for definiteness anyway). archive_mb is the size of the (possibly shared) archive.
+    """
+    group: str
+    name: str
+    n: int | None
+    nnz: int | None
+    field: str
+    spd: bool
+    archive_mb: float
+    notes: str
+    member: str = ""
+
+    @property
+    def key(self) -> str:
+        """Registry key and .mtx file stem inside the archive."""
+        return self.member or self.name
+
+
+@dataclass(frozen=True)
+class CaseSpec:
+    """A case built from registry matrix `a` (and `b` for a pencil)."""
+    a: str
+    b: str | None = None
+    notes: str = ""
+
+
+_TEM_NOTES = ("Nedelec FE curl-curl matrix C (symmetric positive semidefinite: gradient null space) of "
+              "3-D transient electromagnetic modelling (Boerner, Ernst, Guettel, GJI 2015)")
+_TEM_MASS = "Nedelec FE mass matrix M (SPD per the collection notes), pencil partner of C"
+
+REGISTRY: dict[str, Matrix] = {m.key: m for m in (
+    Matrix("Guettel", "TEM27623", 27623, 439469, "real", False, 6.2, _TEM_NOTES),
+    Matrix("Guettel", "TEM27623", None, None, "real", True, 6.2, _TEM_MASS, member="TEM27623_M"),
+    Matrix("Guettel", "TEM152078", 152078, 6459326, "real", False, 80.3, _TEM_NOTES),
+    Matrix("Guettel", "TEM152078", None, None, "real", True, 80.3, _TEM_MASS, member="TEM152078_M"),
+    Matrix("Guettel", "TEM181302", 181302, 7839010, "real", False, 98.7, _TEM_NOTES),
+    Matrix("Guettel", "TEM181302", None, None, "real", True, 98.7, _TEM_MASS, member="TEM181302_M"),
+    Matrix("Um", "2cubes_sphere", 101492, 1647264, "real", True, 11.8,
+           "electromagnetics FE model (two cubes inside a sphere), symmetric positive definite: "
+           "interior sigma makes A - sigma I indefinite"),
+    Matrix("Um", "offshore", 259789, 4242673, "real", True, 33.6,
+           "electromagnetics FE model of an offshore (marine) EM survey, symmetric positive definite"),
+    Matrix("Dziekonski", "gsm_106857", 589446, 21758924, "real", False, 152.7,
+           "electromagnetics FE model (Dziekonski), real symmetric indefinite; large (589k)"),
+    Matrix("Cunningham", "qa8fk", 66127, 1660579, "real", False, 4.9,
+           "3-D acoustics FE stiffness matrix; pairs with the mass matrix qa8fm"),
+    Matrix("Cunningham", "qa8fm", 66127, 1660579, "real", True, 4.4,
+           "3-D acoustics FE mass matrix (SPD) belonging to qa8fk"),
+    Matrix("GHS_indef", "helm3d01", 32226, 428444, "real", False, 3.0,
+           "3-D Helmholtz operator, symmetric indefinite"),
+    Matrix("GHS_indef", "helm2d03", 392257, 2741935, "real", False, 9.4,
+           "2-D Helmholtz operator, symmetric indefinite"),
+    Matrix("PARSEC", "Si34H36", 97569, 5156379, "real", False, 15.6,
+           "real-space DFT Hamiltonian (PARSEC), symmetric indefinite, interior spectrum of interest"),
+    Matrix("PARSEC", "Ge87H76", 112985, 7892195, "real", False, 34.8,
+           "real-space DFT Hamiltonian (PARSEC), symmetric indefinite"),
+    Matrix("PARSEC", "Ga10As10H30", 113081, 6115633, "real", False, 24.7,
+           "real-space DFT Hamiltonian (PARSEC), symmetric indefinite"),
+    Matrix("Sinclair", "3Dspectralwave2", 292008, 12935272, "complex", False, 61.7,
+           "3-D spectral-element elastic wave modelling in the frequency domain (C. Sinclair); "
+           "stored as complex Hermitian (checked 2026-10: the collection moved the original "
+           "imaginary diagonal to aux 'shift'); 1.39M explicit zeros are dropped"),
+)}
+
+_TEM_CASE = "electromagnetic curl-curl/mass pencil C x = lambda M x"
+
+CASES: dict[str, CaseSpec] = {
+    "ss-tem27623": CaseSpec("TEM27623", "TEM27623_M", _TEM_CASE),
+    "ss-tem152078": CaseSpec("TEM152078", "TEM152078_M", _TEM_CASE),
+    "ss-tem181302": CaseSpec("TEM181302", "TEM181302_M", _TEM_CASE),
+    "ss-2cubes_sphere": CaseSpec("2cubes_sphere"),
+    "ss-offshore": CaseSpec("offshore"),
+    "ss-gsm_106857": CaseSpec("gsm_106857"),
+    "ss-qa8fk-qa8fm": CaseSpec("qa8fk", "qa8fm", "acoustic stiffness/mass pencil K x = lambda M x"),
+    "ss-helm3d01": CaseSpec("helm3d01"),
+    "ss-helm2d03": CaseSpec("helm2d03"),
+    "ss-si34h36": CaseSpec("Si34H36"),
+    "ss-ge87h76": CaseSpec("Ge87H76"),
+    "ss-ga10as10h30": CaseSpec("Ga10As10H30"),
+    "ss-3dspectralwave2": CaseSpec("3Dspectralwave2"),
+}
+
+
+# ================================================================================ download
+
+
+def _download(url: str, dest: Path, *, max_bytes: int, timeout: float, max_seconds: float) -> dict[str, Any]:
+    """Stream url to dest under a size cap; returns {url, bytes, sha256}. Raises Skipped."""
+    req = urllib.request.Request(url, headers={"User-Agent": "hsolve-testgen/1"})
+    deadline = time.monotonic() + max_seconds
+    digest, total = hashlib.sha256(), 0
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
+            length = resp.headers.get("Content-Length")
+            if length is not None and int(length) > max_bytes:
+                raise Skipped(f"{url}: {int(length) / 1e6:.1f} MB exceeds the {max_bytes / 1e6:.1f} MB cap")
+            while chunk := resp.read(1 << 20):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise Skipped(f"{url}: more than the {max_bytes / 1e6:.1f} MB cap")
+                if time.monotonic() > deadline:
+                    raise Skipped(f"{url}: download exceeded {max_seconds:.0f} s")
+                digest.update(chunk)
+                out.write(chunk)
+            if length is not None and total != int(length):
+                raise Skipped(f"{url}: truncated transfer ({total} of {int(length)} bytes)")
+    except Skipped:
+        dest.unlink(missing_ok=True)
+        raise
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
+        dest.unlink(missing_ok=True)
+        raise Skipped(f"{url}: download failed ({exc}); offline?") from exc
+    return {"url": url, "bytes": total, "sha256": digest.hexdigest()}
+
+
+def _extract(archive: Path, dest: Path, max_unpacked: int) -> None:
+    """Extract the archive into dest with filter='data' after verifying it.
+
+    The gzip stream is first decompressed to its end, because only there are its CRC-32 and
+    length checked: tarfile stops reading at the tar end-of-archive marker, so a corrupted
+    payload (e.g. a changed byte in a stored deflate block) would otherwise be extracted
+    silently. That pass stops after max_unpacked bytes (decompression bomb); the member sizes
+    are checked as well, since a sparse member unpacks to more than the data stored for it.
+    Truncated or corrupt streams (EOFError, zlib.error, gzip.BadGzipFile) raise Skipped.
+    """
+    over_cap = Skipped(f"{archive.name}: unpacks to more than the {max_unpacked / 1e6:.0f} MB cap")
+    try:
+        streamed = 0
+        with gzip.open(archive, "rb") as stream:
+            while chunk := stream.read(1 << 20):
+                streamed += len(chunk)
+                if streamed > max_unpacked:
+                    raise over_cap
+        with tarfile.open(archive, "r:gz") as tf:
+            if sum(m.size for m in tf.getmembers() if m.isfile()) > max_unpacked:
+                raise over_cap
+            tf.extractall(dest, filter="data")
+    except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
+        raise Skipped(f"{archive.name}: unusable archive ({exc})") from exc
+
+
+def find_mtx(extract_dir: Path, stem: str) -> Path:
+    """The unique <stem>.mtx below an extracted archive."""
+    found = sorted(p for p in extract_dir.rglob(f"{stem}.mtx") if p.is_file())
+    if len(found) != 1:
+        raise Skipped(f"{extract_dir}: expected exactly one {stem}.mtx, found {len(found)}")
+    return found[0]
+
+
+def obtain(matrix: Matrix, downloads: Path, *, base_url: str = BASE_URL, max_mb: float = 200.0,
+           timeout: float = 60.0, max_seconds: float = 1800.0,
+           refresh: bool = False) -> tuple[Path, dict[str, Any]]:
+    """Download and extract the archive of `matrix` into downloads/<Name>/; returns
+    (extraction directory, download record {url, bytes, sha256}).
+
+    The directory must be new and empty; a completed earlier download (download.json, written
+    last) is reused; refresh=True deletes the directory and starts over. A fresh download that
+    fails in any way (including an interrupt) removes the directory it created, so a rerun
+    starts clean.
+    """
+    folder = downloads / matrix.name
+    extract_dir = folder / "extract"
+    record_path = folder / "download.json"
+    if folder.exists() and refresh:
+        shutil.rmtree(folder)
+    if folder.exists():
+        if not record_path.is_file() or not extract_dir.is_dir():
+            raise Skipped(f"{folder} exists without a completed download; rerun with --refresh")
+        return extract_dir, json.loads(record_path.read_text())
+    folder.mkdir(parents=True)
+    try:
+        url = f"{base_url}/{matrix.group}/{matrix.name}.tar.gz"
+        archive = folder / f"{matrix.name}.tar.gz"
+        max_bytes = int(max_mb * 1e6)
+        record = _download(url, archive, max_bytes=max_bytes, timeout=timeout, max_seconds=max_seconds)
+        _extract(archive, extract_dir, UNPACK_FACTOR * max_bytes)
+        record_path.write_text(json.dumps(record, indent=2) + "\n")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return extract_dir, record
+
+
+# ============================================================================== conversion
+
+
+def _restore_triangle(a: sp.csr_matrix) -> tuple[sp.csr_matrix, str | None]:
+    """Full Hermitian storage from a matrix holding a single triangle (same rule as src/io's
+    Storage::Auto: one strict triangle empty, the other not)."""
+    lower, upper = sp.tril(a, -1, format="csr"), sp.triu(a, 1, format="csr")
+    if lower.nnz and not upper.nnz:
+        strict, kind = lower, "lower"
+    elif upper.nnz and not lower.nnz:
+        strict, kind = upper, "upper"
+    else:
+        return a, None
+    full = strict + strict.conj().T + sp.diags(a.diagonal())
+    return full.tocsr(), f"'general' file stores only the {kind} triangle: symmetrized"
+
+
+def read_hermitian(path: Path) -> tuple[sp.csr_matrix, dict[str, Any]]:
+    """Read a MatrixMarket file as a full Hermitian CSR matrix (float64 or complex128). Raises
+    Skipped otherwise, also for malformed files.
+
+    Explicit zeros are dropped before the storage rule is applied: a 'general' file that stores
+    one triangle plus explicit zeros in the other still stores a single triangle numerically.
+    Returns (A, info) with info = {mm_header, notes}.
+    """
+    try:
+        rows, cols, entries, fmt, field, symmetry = scipy.io.mminfo(path)
+    except ValueError as exc:
+        raise Skipped(f"{path.name}: not a MatrixMarket file ({exc})") from exc
+    header = {"rows": rows, "cols": cols, "entries": entries, "format": fmt, "field": field,
+              "symmetry": symmetry}
+    if rows != cols:
+        raise Skipped(f"{path.name}: not square ({rows} x {cols})")
+    if field == "pattern" or symmetry == "skew-symmetric":
+        raise Skipped(f"{path.name}: {field}/{symmetry} matrix is not a Hermitian operator")
+    try:
+        a = sp.csr_matrix(scipy.io.mmread(path, spmatrix=False))
+    except ValueError as exc:
+        raise Skipped(f"{path.name}: unreadable MatrixMarket data ({exc})") from exc
+    notes = []
+    if field == "integer":
+        a = a.astype(np.float64)   # the case format stores float64 or complex128 only
+        notes.append("integer file stored as float64")
+    a.sum_duplicates()
+    stored = a.nnz
+    a.eliminate_zeros()
+    if a.nnz < stored:
+        notes.append(f"dropped {stored - a.nnz} explicit zeros")
+    if symmetry == "general":
+        a, note = _restore_triangle(a)
+        if note:
+            notes.append(note)
+    defect = case.hermitian_defect(a)
+    if defect > HERMITIAN_TOL:
+        if np.iscomplexobj(a.data) and spla.norm(a - a.T) <= HERMITIAN_TOL * spla.norm(a):
+            raise Skipped(f"{path.name}: complex symmetric (A = A^T), not Hermitian; not a valid case")
+        raise Skipped(f"{path.name}: not Hermitian (relative defect {defect:.2e})")
+    if defect > 0:
+        a = hermitian_part(a)
+        notes.append(f"Hermitian defect {defect:.2e} removed (Hermitian part)")
+    if np.iscomplexobj(a.data) and not np.any(a.data.imag):
+        a = sp.csr_matrix(a.real)
+        notes.append("complex file with zero imaginary parts: stored as real")
+    return a, {"mm_header": header, "notes": notes}
+
+
+def check_index(matrix: Matrix, a: sp.csr_matrix, header: dict[str, Any]) -> None:
+    """Require the converted file to be the matrix the collection index describes: its field and,
+    where the index has them, n and nnz (full storage without explicit zeros, as read_hermitian
+    returns it). Archives come from a plain-HTTP mirror without published checksums, so these
+    facts are the integrity check left against a wrong, stale or substituted archive."""
+    found = {"field": header["field"], "n": a.shape[0], "nnz": a.nnz}
+    expected = {"field": matrix.field, "n": matrix.n, "nnz": matrix.nnz}
+    wrong = [f"{k}={found[k]} (index: {v})" for k, v in expected.items() if v is not None and found[k] != v]
+    if wrong:
+        raise Skipped(f"{matrix.key}.mtx does not match the collection index: {', '.join(wrong)}")
+
+
+# ============================================================================== inspection
+
+
+def is_hpd(b: sp.spmatrix) -> bool:
+    """Whether a Hermitian matrix is positive definite, decided by LU with symmetric diagonal
+    pivoting (a sparse LDL^H / Cholesky in disguise).
+
+    SuperLU in SymmetricMode with diag_pivot_thresh=0 pivots on the diagonal whenever it is
+    nonzero, so perm_r == perm_c and P^T B P = L U with U = D L^H: B is HPD iff all pivots are
+    positive (Sylvester). For HPD B this elimination is as stable as Cholesky; a pivot <= 0, an
+    off-diagonal pivot (forced by a zero diagonal pivot) or an exactly singular factor all prove
+    that B is not HPD. Pivot counts are not reported as inertia: without 2x2 pivoting the
+    elimination of an indefinite matrix is not backward stable.
+    """
+    try:
+        lu = spla.splu(sp.csc_matrix(b), permc_spec="MMD_AT_PLUS_A", diag_pivot_thresh=0.0,
+                       options={"SymmetricMode": True})
+    except RuntimeError:  # exactly singular
+        return False
+    return bool(np.array_equal(lu.perm_r, lu.perm_c) and np.all(lu.U.diagonal().real > 0))
+
+
+def ritz_interval(a: sp.spmatrix, b: sp.spmatrix | None = None, steps: int = 40,
+                  seed: int = 0) -> tuple[float, float]:
+    """Extreme Ritz values of the pencil (A, B), B HPD (None = I), on a Krylov subspace.
+
+    Basis: K_m(D^{-1} A, v0) with D = diag(B) (Jacobi-preconditioned, so no solve with B is needed),
+    orthonormalized by CGS2; Rayleigh-Ritz on (V^H A V, V^H B V). By Courant-Fischer every Ritz
+    value lies in [lambda_min, lambda_max] for ANY subspace, so the returned (lo, hi) satisfy
+    lambda_min <= lo <= hi <= lambda_max up to rounding (an extreme Ritz value may converge to its
+    eigenvalue): points strictly between them are inside the spectrum. Cost:
+    `steps` products with A and O(n steps^2) orthogonalization.
+    """
+    n = a.shape[0]
+    cplx = np.iscomplexobj(a.data) or (b is not None and np.iscomplexobj(b.data))
+    dtype = complex if cplx else float
+    diag = None if b is None else b.diagonal().real
+    rng = np.random.default_rng(seed)
+    v = rng.standard_normal(n) + (1j * rng.standard_normal(n) if cplx else 0.0)
+    # Only vector-matrix products touch the n x m blocks: with n >> m, numpy's complex
+    # (m x n) @ (n x m) product was measured ~1000x slower than m vector products here.
+    basis = np.empty((n, min(steps, n)), dtype=dtype, order="F")
+    a_basis = np.empty_like(basis)  # A q_j, reused by the Rayleigh-Ritz projection
+    m = 0
+    while m < basis.shape[1]:
+        scale = np.linalg.norm(v)
+        q = basis[:, :m]
+        for _ in range(2):  # CGS2: two passes keep the basis orthonormal to working precision
+            v = v - q @ _project(q, v)
+        nv = np.linalg.norm(v)
+        if nv <= 1e-10 * scale:  # invariant subspace reached
+            break
+        basis[:, m] = v / nv
+        a_basis[:, m] = a @ basis[:, m]
+        v = a_basis[:, m] / diag if diag is not None else a_basis[:, m].copy()
+        m += 1
+    q = basis[:, :m]
+    ah = np.stack([_project(q, a_basis[:, j]) for j in range(m)], axis=1)
+    bh = np.eye(m) if b is None else np.stack([_project(q, b @ q[:, j]) for j in range(m)], axis=1)
+    theta = scipy.linalg.eigh((ah + ah.conj().T) / 2, (bh + bh.conj().T) / 2, eigvals_only=True)
+    return float(theta[0]), float(theta[-1])
+
+
+def _project(q: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Q^H y as conj(conj(y)^T Q): a vector-matrix product without conjugating the n x m block."""
+    return (y.conj() @ q).conj()
+
+
+def gershgorin_interval(a: sp.spmatrix) -> tuple[float, float]:
+    """Gershgorin bounds [min(a_ii - r_i), max(a_ii + r_i)] of a Hermitian matrix."""
+    a = sp.csr_matrix(a)
+    d = a.diagonal().real
+    r = np.asarray(abs(a).sum(axis=1)).ravel() - np.abs(d)
+    return float(np.min(d - r)), float(np.max(d + r))
+
+
+def choose_targets(a: sp.spmatrix, b: sp.spmatrix | None, problem: str,
+                   k: int = 10) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Targets inside the spectrum from Ritz bounds; returns (targets, selection record)."""
+    if problem == "GHIEP":
+        return ([{"sigma": 0.0, "k": k, "why": "B indefinite: no Courant-Fischer bounds; origin"}],
+                {"method": "convention (B indefinite)"})
+    lo, hi = ritz_interval(a, b)
+    targets = []
+    if lo < 0.0 < hi:
+        targets.append({"sigma": 0.0, "k": k, "why": "indefinite: sigma=0 lies between the extreme Ritz values"})
+    targets.append({"sigma": lo + 0.01 * (hi - lo), "k": k, "why": "low end: 1% into the Ritz interval"})
+    targets.append({"sigma": lo + 0.5 * (hi - lo), "k": k, "why": "deep interior: middle of the Ritz interval"})
+    record: dict[str, Any] = {"method": "Rayleigh-Ritz on a 40-step Krylov space (Courant-Fischer)",
+                              "ritz_interval": [lo, hi]}
+    if b is None:
+        record["gershgorin_interval"] = list(gershgorin_interval(a))
+    return targets, record
+
+
+# ================================================================================== cases
+
+
+def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[str, CaseSpec] = CASES,
+               registry: dict[str, Matrix] = REGISTRY, base_url: str = BASE_URL, max_mb: float = 200.0,
+               timeout: float = 60.0, max_seconds: float = 1800.0, refresh: bool = False) -> Path:
+    """Download, convert, inspect and save one case; returns the case directory. Raises Skipped.
+
+    Each archive is obtained once per call (a pencil may take both matrices from one archive, and
+    refresh must not discard the archive the first matrix came from).
+    """
+    spec = cases[name]
+    downloads = Path(root) / "downloads"
+    archives: dict[str, tuple[Path, dict[str, Any]]] = {}
+    mats, sources = [], []
+    for key in filter(None, (spec.a, spec.b)):
+        matrix = registry[key]
+        if matrix.name not in archives:
+            archives[matrix.name] = obtain(matrix, downloads, base_url=base_url, max_mb=max_mb,
+                                           timeout=timeout, max_seconds=max_seconds, refresh=refresh)
+        extract_dir, record = archives[matrix.name]
+        m, info = read_hermitian(find_mtx(extract_dir, matrix.key))
+        check_index(matrix, m, info["mm_header"])
+        mats.append(m)
+        sources.append({"group": matrix.group, "name": matrix.name, "file": f"{matrix.key}.mtx",
+                        "url": record["url"], "archive_bytes": record["bytes"],
+                        "archive_sha256": record["sha256"], "collection_notes": matrix.notes, **info})
+    a = mats[0]
+    b = mats[1] if len(mats) > 1 else None
+    inertia: dict[str, list[int]] = {}
+    if b is None:
+        problem = "HEP"
+    else:
+        if b.shape != a.shape:
+            raise Skipped(f"{name}: A is {a.shape}, B is {b.shape}")
+        hpd = is_hpd(b)
+        if hpd != registry[spec.b].spd:
+            raise Skipped(f"{name}: B is {'' if hpd else 'not '}HPD by factorization, but the "
+                          f"collection index says spd={registry[spec.b].spd}")
+        if hpd:
+            problem = "GHEP"
+            inertia["B"] = [0, 0, b.shape[0]]
+        else:
+            problem = "GHIEP"
+    targets, selection = choose_targets(a, b, problem)
+    complex_ = np.iscomplexobj(a.data) or (b is not None and np.iscomplexobj(b.data))
+    scenarios = [s for s, on in (("complex-hermitian", complex_), ("indefinite-B", problem == "GHIEP"),
+                                 ("large", a.shape[0] >= 100_000)) if on]
+    description = "; ".join(filter(None, [spec.notes, registry[spec.a].notes]))
+    meta = {"family": FAMILY, "problem": problem, "description": description,
+            "params": {"source": "SuiteSparse Matrix Collection", "matrices": sources,
+                       "target_selection": selection},
+            "targets": targets, "scenarios": scenarios, "license": LICENSE,
+            "citation": f"{CITATION}; matrices: " + ", ".join(sorted({f"{s['group']}/{s['name']}" for s in sources}))}
+    if inertia:
+        meta["inertia"] = inertia
+    return case.save_case(name, a, b, meta=meta, config=case.default_config(targets[0]["sigma"], targets[0]["k"]),
+                          root=root)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="python -m tools.gen.suitesparse",
+                                 description="Download SuiteSparse matrices and convert them to cases.")
+    ap.add_argument("cases", nargs="*", help="case names (see --list)")
+    ap.add_argument("--list", action="store_true", help="list cases with archive sizes and exit")
+    ap.add_argument("--root", type=Path, default=case.DEFAULT_ROOT, help="data root")
+    ap.add_argument("--base-url", default=BASE_URL, help="collection (or mirror) MM/ URL")
+    ap.add_argument("--max-mb", type=float, default=200.0, help="size cap per archive (MB)")
+    ap.add_argument("--timeout", type=float, default=60.0, help="socket timeout (s)")
+    ap.add_argument("--max-seconds", type=float, default=1800.0, help="deadline per download (s)")
+    ap.add_argument("--refresh", action="store_true", help="discard earlier downloads and fetch again")
+    args = ap.parse_args(argv)
+    if args.list or not args.cases:
+        for cname, spec in CASES.items():
+            mats = [REGISTRY[k] for k in filter(None, (spec.a, spec.b))]
+            mb = sum({m.name: m.archive_mb for m in mats}.values())   # shared archives count once
+            print(f"{cname:22s} {'+'.join(f'{m.group}/{m.key}' for m in mats):40s} {mb:7.1f} MB")
+        return 0
+    unknown = [c for c in args.cases if c not in CASES]
+    if unknown:
+        ap.error(f"unknown cases {unknown}; see --list")
+    failures = 0
+    for cname in args.cases:
+        t0 = time.perf_counter()
+        try:
+            path = fetch_case(cname, root=args.root, base_url=args.base_url, max_mb=args.max_mb,
+                              timeout=args.timeout, max_seconds=args.max_seconds, refresh=args.refresh)
+        except Skipped as exc:
+            failures += 1
+            print(json.dumps({"case": cname, "skipped": str(exc)}), flush=True)
+            continue
+        summary = case_summary(path, args.root) | {"seconds": round(time.perf_counter() - t0, 2)}
+        print(json.dumps(summary), flush=True)
+    return 1 if failures == len(args.cases) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -5,6 +5,7 @@ option(HSOLVE_NATIVE "Optimize for the build machine (-march=native)" ON)
 option(HSOLVE_BUILD_TESTS "Build unit tests" ON)
 option(HSOLVE_BUILD_APPS "Build command-line applications" ON)
 option(HSOLVE_WERROR "Treat compiler warnings as errors" OFF)
+option(HSOLVE_BUILD_BENCH "Build benchmark/measurement programs (bench/*.cpp)" ON)
 set(HSOLVE_SANITIZE "" CACHE STRING "Sanitizers for debug builds, e.g. address,undefined")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -62,6 +63,17 @@ if(HSOLVE_BUILD_APPS)
   add_executable(hsolve_cli apps/hsolve_cli.cpp)
   set_target_properties(hsolve_cli PROPERTIES OUTPUT_NAME hsolve)
   target_link_libraries(hsolve_cli PRIVATE hsolve CLI11::CLI11 nlohmann_json::nlohmann_json)
+endif()
+
+# ---- benchmarks: one executable per bench/*.cpp (reproducible measurements, run via guard.py) ----
+if(HSOLVE_BUILD_BENCH)
+  file(GLOB HSOLVE_BENCH_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/bench/*.cpp")
+  foreach(src IN LISTS HSOLVE_BENCH_SOURCES)
+    get_filename_component(name "${src}" NAME_WE)
+    add_executable(bench_${name} "${src}")
+    target_include_directories(bench_${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp")
+    target_link_libraries(bench_${name} PRIVATE hsolve LAPACK::LAPACK BLAS::BLAS MUMPS::MUMPS nlohmann_json::nlohmann_json)
+  endforeach()
 endif()
 
 # ---- tests: one executable per tests/cpp/test_*.cpp ----

@@ -1,0 +1,99 @@
+// Tests for config.json parsing/serialization and report.json serialization (src/driver).
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <limits>
+
+#include <nlohmann/json.hpp>
+
+#include "hsolve/error.hpp"
+#include "hsolve/solver.hpp"
+
+namespace {
+
+TEST(DriverConfig, ParsesDocumentedExample) {
+  const char* doc = R"({
+    "target": {"mode": "nearest", "sigma": -2.5e5, "k": 10},
+    "tol": 1e-11, "problem": "generalized_indefinite", "method": "shift_invert_krylov_schur",
+    "ncv": 40, "seed": 7, "threads": 8, "memory_budget_gb": 28.5, "factor_precision": "single",
+    "blr": "on", "out_of_core": "off", "inertia_check": "auto", "zero_filter_tol": 1e-6,
+    "complex_tol": 1e-9, "hermitian_tol": 1e-12, "max_shift_retries": 3, "inner_tol_factor": 0.5,
+    "ordering": 5, "max_restarts": 77})";
+  const hs::SolverConfig c = hs::parse_config(doc);
+  EXPECT_EQ(c.target.mode, hs::TargetMode::Nearest);
+  EXPECT_EQ(c.target.sigma, -2.5e5);
+  EXPECT_EQ(c.target.k, 10);
+  EXPECT_EQ(c.tol, 1e-11);
+  EXPECT_EQ(c.problem, hs::ProblemType::GeneralizedIndefinite);
+  EXPECT_EQ(c.method, hs::Method::ShiftInvertKrylovSchur);
+  EXPECT_EQ(c.ncv, 40);
+  EXPECT_EQ(c.seed, 7u);
+  EXPECT_EQ(c.threads, 8);
+  EXPECT_EQ(c.memory_budget_gb, 28.5);
+  EXPECT_EQ(c.factor_precision, hs::FactorPrecision::Single);
+  EXPECT_EQ(c.blr, hs::Toggle::On);
+  EXPECT_EQ(c.out_of_core, hs::Toggle::Off);
+  EXPECT_EQ(c.zero_filter_tol, 1e-6);
+  EXPECT_EQ(c.max_shift_retries, 3);
+  EXPECT_EQ(c.ordering, 5);
+  EXPECT_EQ(c.max_restarts, 77);
+}
+
+TEST(DriverConfig, MissingKeysKeepBaseAndRoundTrip) {
+  hs::SolverConfig base;
+  base.tol = 3e-9;
+  base.target.k = 4;
+  const auto c = hs::parse_config(R"({"target": {"mode": "interval", "lower": -1, "upper": 2}})", base);
+  EXPECT_EQ(c.tol, 3e-9);
+  EXPECT_EQ(c.target.mode, hs::TargetMode::Interval);
+  EXPECT_EQ(c.target.lower, -1.0);
+  const auto again = hs::parse_config(hs::config_to_json(c));
+  EXPECT_EQ(hs::config_to_json(again), hs::config_to_json(c));
+}
+
+TEST(DriverConfig, RejectsUnknownKeysBadTypesAndValues) {
+  auto bad = [](const char* doc) {
+    try {
+      (void)hs::parse_config(doc);
+      return false;
+    } catch (const hs::Error& e) {
+      return e.code() == hs::Error::Code::InvalidInput;
+    }
+  };
+  EXPECT_TRUE(bad(R"({"tolerance": 1e-8})"));
+  EXPECT_TRUE(bad(R"({"target": {"sigma": 0, "kk": 3}})"));
+  EXPECT_TRUE(bad(R"({"tol": "1e-8"})"));
+  EXPECT_TRUE(bad(R"({"blr": "maybe"})"));
+  EXPECT_TRUE(bad(R"({"ncv": 2.5})"));
+  EXPECT_TRUE(bad(R"({"tol": 0})"));
+  EXPECT_TRUE(bad(R"({"target": {"mode": "interval", "lower": 2, "upper": 1}})"));
+  EXPECT_TRUE(bad(R"([1, 2])"));
+  EXPECT_TRUE(bad(R"({not json)"));
+}
+
+TEST(DriverReport, JsonHasDocumentedKeysAndNullForInfiniteBounds) {
+  hs::SolveReport r;
+  r.n = 5;
+  r.problem = hs::ProblemType::GeneralizedDefinite;
+  r.method = hs::Method::ShiftInvertLanczos;
+  r.pairs.push_back({1.5, 0.0, 1e-14, 1e-15, 1e-16, true});
+  r.certificate.performed = true;
+  r.certificate.lower = -std::numeric_limits<double>::infinity();
+  r.certificate.upper = 2.0;
+  r.warnings.push_back("w");
+  const auto j = nlohmann::json::parse(r.to_json());
+  for (const char* key : {"schema_version", "n", "nnz_a", "nnz_b", "complex_scalars", "problem", "norm2_a", "norm2_b",
+                          "scale", "method", "sigma_requested", "sigma_used", "shift_retries", "factor_options",
+                          "factor_stats", "restarts", "op_applies", "time_total_s", "time_factor_s",
+                          "time_iterate_s", "time_verify_s", "peak_rss_bytes", "pairs", "certificate", "success",
+                          "warnings"})
+    EXPECT_TRUE(j.contains(key)) << key;
+  EXPECT_EQ(j["problem"], "generalized_definite");
+  EXPECT_EQ(j["method"], "shift_invert_lanczos");
+  EXPECT_TRUE(j["certificate"]["lower"].is_null());
+  EXPECT_EQ(j["certificate"]["upper"], 2.0);
+  EXPECT_EQ(j["pairs"][0]["lambda_re"], 1.5);
+  EXPECT_TRUE(j["factor_stats"].contains("estimate"));
+}
+
+}  // namespace

@@ -3,7 +3,9 @@
 // Scalar set: T in {double, cplx}.
 //
 // Definitions used throughout (docs/DESIGN.md §4.5):
-//   ||A||_2, ||B||_2 : certified upper estimates from ~20 Lanczos steps (B = I -> 1)
+//   ||A||_2, ||B||_2 : largest |Ritz value| after ~30 Lanczos steps (B = I -> 1). A Ritz value is a
+//                      LOWER bound of ||.||_2, which makes eta below an UPPER bound of the true
+//                      backward error (conservative acceptance). Typically within a few percent.
 //   scale            : ||A||_2 / ||B||_2, the natural eigenvalue magnitude of the problem
 //   backward error   : eta = ||A x - lambda B x||_2 / ((||A||_2 + |lambda| ||B||_2) ||x||_2)
 #pragma once
@@ -66,7 +68,11 @@ struct SolverConfig {
   int threads = 0;                  ///< 0 = OMP_NUM_THREADS / all available
   double memory_budget_gb = 14.0;   ///< refuse factorizations predicted to exceed this
   FactorPrecision factor_precision = FactorPrecision::Double;
-  int ordering = 7;                 ///< MUMPS ICNTL(7)
+  int ordering = -1;                ///< -1: adaptive AMD/SCOTCH by cost model (DESIGN §3.6-3b);
+                                    ///< >= 0: MUMPS ICNTL(7) (7 auto, 5 METIS, 3 SCOTCH, 0 AMD, ...)
+  bool deterministic = false;       ///< true: bitwise-reproducible factorizations/solves for a fixed
+                                    ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves);
+                                    ///< false: L0-OpenMP (results reproducible to tolerance)
   Toggle blr = Toggle::Auto;
   Toggle out_of_core = Toggle::Auto;
   Toggle inertia_check = Toggle::Auto;  ///< Auto = On for HEP/GHEP when affordable
@@ -109,7 +115,7 @@ struct SolveReport {
   index_t nnz_b = 0;
   bool complex_scalars = false;
   ProblemType problem = ProblemType::Auto;  ///< resolved type
-  double norm2_a = 0.0;          ///< certified upper estimate of ||A||_2
+  double norm2_a = 0.0;          ///< Lanczos lower bound of ||A||_2 (conservative eta)
   double norm2_b = 1.0;          ///< idem for B (1 when B = I)
   double scale = 0.0;            ///< norm2_a / norm2_b
   double hermitian_defect_a = 0.0;
@@ -154,12 +160,19 @@ struct Solution {
   SolveReport report;
 };
 
+/// Parse a config.json document (docs/FORMATS.md §2): keys are SolverConfig / Target field names,
+/// enums are snake_case strings. Keys absent from the document keep the values of `base`;
+/// unknown keys, wrong types and invalid enum strings throw InvalidInput.
+SolverConfig parse_config(const std::string& json_text, const SolverConfig& base = {});
+/// Serialize every field of cfg (round-trips through parse_config).
+std::string config_to_json(const SolverConfig& cfg, int indent = 2);
+
 /// Solve A x = lambda B x (B == nullptr -> B = I) according to cfg. A and B must be square,
 /// full storage, same order, Hermitian within cfg.hermitian_tol (symmetrized internally).
 /// Throws hs::Error on unrecoverable failure (NotHermitian, OutOfMemoryBudget, ...); a run that
 /// completes but misses the tolerance returns with report.success == false.
 template <class T>
-Solution<T> solve(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const SolverConfig& cfg,
+Solution<T> solve(const CsrMatrix<T>& a, const non_deduced_t<CsrMatrix<T>>* b, const SolverConfig& cfg,
                   Logger* log = nullptr);
 
 }  // namespace hs

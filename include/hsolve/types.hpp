@@ -62,6 +62,15 @@ constexpr real_t<T> abs2(const T& x) {
   }
 }
 
+/// Blocks template argument deduction for a parameter (C++20 std::type_identity_t), so that e.g.
+/// solve(a, nullptr, cfg) deduces T from `a` alone.
+template <class T>
+struct type_identity {
+  using type = T;
+};
+template <class T>
+using non_deduced_t = typename type_identity<T>::type;
+
 enum class ScalarKind { Real64, Complex128 };
 
 /// Explicit-instantiation policy (docs/DESIGN.md §5): every template declared in a public header

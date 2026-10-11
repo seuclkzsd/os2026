@@ -97,8 +97,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   `[[nodiscard]] bool factorize(α, β)`、`solve(b, nrhs, ldb)`（多右端一次调用）、`inertia()`、
   `set_out_of_core()`。
 - **MUMPS 实测约定**（评审用探针程序在 5.8.2 上验证）：
-  - 零主元检测需 `ICNTL(24)=1` **且** `CNTL(3)>0`（`null_pivot_tol`，默认 1e-12，相对预处理后
-    矩阵范数）；CNTL(3)=0 时 3600 阶精确奇异矩阵也会「成功」分解。
+  - 零主元检测需 `ICNTL(24)=1` **且** `CNTL(3)>0`（`null_pivot_tol`，相对预处理后矩阵范数）；
+    CNTL(3)=0 时 3600 阶精确奇异矩阵也会「成功」分解。默认值经 P1 实测标定：双精度 1e-8、单精度
+    `single_null_pivot_tol` 1e-4（单精度只能部分检测）；检测是依赖消去顺序的启发式，「近奇异但
+    非奇异」的保证相对于 ‖K‖（即 scale）而非 |λ|；漏检时分解成功、位移反演照常工作。
+    `deterministic`（ICNTL(48)=0，默认开）保证同线程数下结果可复现。复数时 INFOG(12) 为奇数视为奇异。
   - ICNTL(24)=1 时 MUMPS 不报错而是修补零主元（INFOG(28)），之后的回代会丢掉该方向 ⇒
     **INFO(1)==−10 或 INFOG(28)>0 一律视为奇异：`factorize` 返回 false**，`solve` 拒绝执行，
     `inertia().valid=false`（计数仍填），对象保持已分析状态以便扰动位移后重分解。
@@ -110,6 +113,8 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 - `scaling` 默认 ICNTL(8)=7（每次分解重算缩放），使一次分析服务不同位移。
 - `FactorEstimate`：INFOG(20)（因子条目估计）、INFOG(16/17) 内存、INFOG(26/27) 外存、
   INFOG(36/38) BLR 估计（仅当分析时启用 BLR，否则 −1）、RINFOG(1) flops。
+- 单精度 / BLR 分解的 inertia() 是舍入/压缩后矩阵的惯性，**证书不得使用**：driver 在主分解为
+  单精度或 BLR 时改用 `compute_inertia`（双精度）计数。
 - `compute_inertia(pencil, α, β)`：自建对象、强制双精度且无 BLR、奇异时返回 valid=false 不抛；
   仅用于 B 正定性检测与测试——**driver 的证书复用主分解对象**（同一模式只分析一次）。
   B 为 HPD 当且仅当 `valid && neg==0 && zero==0`。
@@ -128,8 +133,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 - 结果契约：m = theta.size()；theta/estimate/vectors 按下标一一对应；[0, nconv) 为已收敛对、
   按 which 排序，[nconv, m) 为未收敛对、同样排序；converged == (nconv ≥ nev)。
 - `lanczos_krylov_schur`：算子须在 ⟨x,y⟩_M = yᴴMx 下自伴（M = b_inner 或 I）。CGS2 全正交化
-  （默认按需重算 M·w，`store_bv` 才存 M·V），厚重启，已收敛对通过将耦合向量 b 的对应分量置零
-  实现锁定，`deflation` 块 D（M-正交）用于「延迟重启」找更多特征对。m == nev。
+  （默认按需重算 M·w，`store_bv` 才存 M·V），厚重启；**锁定只在耦合达到工作精度
+  （|b_l| ≤ ~1e-15‖Op‖）时把 b 分量置零**（按 tol 置零会让其它对的残差估计失真，P1 实测）；
+  `deflation` 块 D（M-正交）用于「延迟重启」找更多特征对——此时估计针对收缩算子 P·Op·P，Op x
+  在 span(D) 上的分量由 D 自身残差界定，driver 最后对 [D X] 做 Rayleigh–Ritz 消除。m == nev。
+  单向量 Krylov 对精确重特征值只能靠舍入得到其余副本：driver 的惯性证书 + 收缩重跑负责补齐。
 - `krylov_schur_general`：欧氏内积，实数用实 Schur 形（dgees/dtrsen），共轭对永不拆开：
   m ∈ {nev, nev+1}，共轭对相邻、正虚部在前，nconv 不拆对，schur_form 无被截断的 2×2 块，
   前 nconv 列 Schur 基张成（近似）不变子空间。**不支持 deflation**（非正规算子的不变子空间的
@@ -138,7 +146,7 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 
 ### 3.6 driver（`include/hsolve/solver.hpp`）
 1. **诊断**：规模、nnz、实/复（A 复 B 实时 `to_complex`）、厄密缺陷（超 `hermitian_tol` 抛错，
-   否则 `hermitian_part`）、‖A‖₂/‖B‖₂ 估计（~20 步 Lanczos，Ritz 值 + 残差给出有保证的上界）、
+   否则 `hermitian_part`）、‖A‖₂/‖B‖₂ 估计（~30 步 Lanczos 的最大 |Ritz 值|：它是 ‖·‖₂ 的**下界**，从而 η 是真实后向误差的**上界**，验收偏保守）、
    scale = ‖A‖₂/‖B‖₂、B 正定性（`compute_inertia(pencil, 0, 1)`）。
 2. **策略**：HEP/GHEP → 位移反演 + `lanczos_krylov_schur`（B 内积）；GHIEP → 位移反演 +
    `krylov_schur_general`；谱两端且 k 小 → 不分解，直接 Lanczos。
@@ -147,6 +155,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    变成 INFO=−19 而不是被系统杀掉）。超预算依次：BLR（需重新分析一次以获得估计）→ 单精度 +
    迭代修正 → out-of-core；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。
    Interval 模式先用惯性求出区间内个数 m，再定 nev/ncv，n·m·sizeof(T)·3 超限则切片或拒绝。
+3b. **自适应排序**（`ordering=-1`，默认）：先做 AMD 分析探测（极快），按代价模型预估嵌套剖分
+   （SCOTCH）在本次运行的分解与回代上能省的时间，超过其额外分析代价（≈7×AMD 分析）才改用
+   SCOTCH。模型：t_分解 ≈ 6e-7·n + flops/(12 GF/s·线程)，t_回代 ≈ 16 B·条目/12 GB/s；AMD 填充比
+   >20 视为三维型（ND 保留 0.35 flops、0.6 条目），否则（0.6、0.85）。实测（8 线程）：二维波导 1e5
+   1.65→1.20 s，二维腔 1.17→0.47 s；三维问题选 SCOTCH（比 METIS 分析快 35–50%）。
 4. **近奇异位移**：`factorize` 返回 false 时 σ ← σ + δ（δ 从 1e-8·scale 起每次 ×10，最多
    `max_shift_retries` 次），记入报告；「最近 k 个」的选择始终相对原始 σ。
 5. **迭代求解**：内层容差 = tol × inner_tol_factor；θ → λ = σ + 1/θ。
@@ -196,8 +209,9 @@ Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz 值|）。
 ### 4.5 残差与精度指标（报告中全部给出）
 - 绝对残差 r = ‖A x − λ B x‖₂
 - 相对残差 r / (|λ|·‖B x‖₂)（λ = 0 时退化为 r / ‖Bx‖₂）
-- **后向误差 η = r / ((‖A‖₂ + |λ|·‖B‖₂)·‖x‖₂)**，‖·‖₂ 用 Lanczos 得到的**上界**估计（使 η 偏
-  保守而非偏乐观）。driver 以 η ≤ tol 为接受标准。scale = ‖A‖₂/‖B‖₂。
+- **后向误差 η = r / ((‖A‖₂ + |λ|·‖B‖₂)·‖x‖₂)**，‖·‖₂ 取 Lanczos 最大 |Ritz 值|——它是 ‖·‖₂ 的
+  **下界**，所以算出的 η ≥ 真实 η（验收偏保守而非偏乐观；1-范数是上界，会使 η 偏乐观，故不用）。
+  driver 以 η ≤ tol 为接受标准。scale = ‖A‖₂/‖B‖₂。
 - 与参考解比较：特征值相对误差；特征向量用子空间夹角（重特征值按整个簇的子空间比较）。
 
 ## 5. 编码规范
@@ -247,5 +261,5 @@ Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz 值|）。
 | P0 | 仓库骨架、环境、资源看门狗、接口与设计文档；设计评审 v2 |
 | P1 | io / factor+ops / eigen（两种）实现与单测；测例生成器；评测工具 |
 | P2 | driver + CLI；端到端测试；测例集与首轮实验（对比 scipy 基线） |
-| P3 | 性能剖析与优化（块回代、SpMV AVX-512、MUMPS 参数、混合精度）；LOBPCG / JD；区间切片 |
+| P3 | 性能剖析与优化（块回代、SpMV AVX-512、MUMPS 参数、混合精度、正交化 DGKS/BLAS3）；LOBPCG / JD；区间切片；零簇移位放置；GHIEP 重特征值（块 Krylov） |
 | P4 | 故障场景验证矩阵、方案文档、复现材料 |

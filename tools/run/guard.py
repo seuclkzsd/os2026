@@ -221,7 +221,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[guard] killing process tree: {reason}", file=sys.stderr, flush=True)
                 kill_tree(proc)
                 break
-            time.sleep(args.interval)
+            # Wait on the child instead of sleeping, so wall_s is exact (not quantized to interval).
+            try:
+                proc.wait(timeout=args.interval)
+            except subprocess.TimeoutExpired:
+                pass
     except KeyboardInterrupt:
         reason = "interrupted"
         kill_tree(proc)

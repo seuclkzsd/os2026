@@ -2,6 +2,8 @@
 // Non-owning: every referenced object must outlive the operator (rvalue constructors deleted).
 #pragma once
 
+#include <vector>
+
 #include "hsolve/factor.hpp"
 #include "hsolve/linear_operator.hpp"
 #include "hsolve/sparse.hpp"
@@ -9,7 +11,7 @@
 
 namespace hs {
 
-/// Op = A (sparse matrix-vector product via spmm).
+/// Op = A (sparse matrix-vector product via spmm). A must be square (InvalidInput otherwise).
 template <class T>
 class CsrOperator final : public LinearOperator<T> {
  public:
@@ -24,10 +26,15 @@ class CsrOperator final : public LinearOperator<T> {
   const CsrMatrix<T>* a_;
 };
 
-/// Iterative-refinement policy for shift-invert solves (docs/DESIGN.md §3.4b).
+/// Iterative-refinement policy for shift-invert solves (docs/DESIGN.md §3.4b), with the residual
+/// r_j = (B x)_j - K y_j of column j computed in double precision. Column j is refined until
+/// ||r_j|| <= rel_tol * ||(B x)_j||, or until a correction fails to reduce ||r_j|| (stagnation at
+/// the attainable accuracy, or divergence when eps_factor * cond(K) >= 1, i.e. sigma is too close
+/// to an eigenvalue for the factor's precision): that correction is discarded, so every column
+/// returns its best iterate. At most max_steps block corrections are computed per apply.
 struct SolveRefinement {
   int max_steps = 0;     ///< 0 = off. Needed with single-precision or BLR factorizations.
-  double rel_tol = 0.0;  ///< stop when ||r_j|| <= rel_tol * ||(B x)_j|| for every column j
+  double rel_tol = 0.0;  ///< column j is done when ||r_j|| <= rel_tol * ||(B x)_j||
 };
 
 /// Op = K^{-1} * B with K = A - sigma*B (B = I when the pencil has no B), where `factor` holds
@@ -35,11 +42,19 @@ struct SolveRefinement {
 /// Self-adjoint in the B inner product when B is Hermitian positive definite.
 ///
 /// With refinement enabled each block solve is corrected in double precision against the exact
-/// K (never formed: r = Bx - (A y - sigma B y) via two spmm), so a single-precision / BLR factor
-/// still yields Op to working accuracy. Extra workspace: 2*n*p scalars per apply.
+/// K (never formed: r = Bx - (A y - sigma B y) via sparse products), so a single-precision / BLR
+/// factor still yields Op to working accuracy, provided eps_factor * cond(K) < 1. Otherwise the
+/// refinement stops early with a large last_relative_residual(): callers using a Single / BLR
+/// factor must check it, because factorize() cannot flag every shift that is too close to an
+/// eigenvalue for that precision (see factor.hpp). Each correction costs one block solve and
+/// three sparse products (B X, A Y, B Y). Extra workspace: 2*n*p scalars, kept between applies
+/// (sized by the largest block applied so far).
 ///
-/// The operator records the factorization count at construction and asserts it is unchanged
-/// on every apply (refactorizing the same object at another shift would silently change Op).
+/// Construction requires a usable factorization of matching order (factor.inertia().valid, i.e.
+/// the last factorize() succeeded), else InvalidInput. The operator records the factorization
+/// count and asserts it is unchanged on every apply (refactorizing the same object at another
+/// shift would silently change Op): violating this throws hs::Error(Internal).
+/// Not thread-safe (the factor and the workspace are shared state).
 template <class T>
 class ShiftInvertOperator final : public LinearOperator<T> {
  public:
@@ -49,15 +64,20 @@ class ShiftInvertOperator final : public LinearOperator<T> {
 
   index_t size() const override { return factor_->order(); }
   double sigma() const noexcept { return sigma_; }
-  /// Total refinement corrections applied so far (each = one extra block solve).
+  /// Refinement block corrections computed so far, over all applies (each = one extra block
+  /// solve, whether or not every column accepted its correction).
   index_t refinement_steps() const noexcept { return refinement_steps_; }
-  /// Largest relative correction residual seen on the last apply (0 if refinement is off).
+  /// max_j ||r_j|| / ||(B x)_j|| of the block returned by the last apply, r = Bx - K y computed
+  /// in double precision for the returned Y (0 if refinement is off).
   double last_relative_residual() const noexcept { return last_rel_residual_; }
 
  protected:
   void do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) override;
 
  private:
+  /// residual_ = B X - K Y for p columns (leading dimension n).
+  void residual(const T* x, index_t ldx, const T* y, index_t ldy, index_t p);
+
   SparseFactorization<T>* factor_;
   const ShiftedPencil<T>* pencil_;
   double sigma_;
@@ -65,6 +85,8 @@ class ShiftInvertOperator final : public LinearOperator<T> {
   index_t factorization_id_;
   index_t refinement_steps_ = 0;
   double last_rel_residual_ = 0.0;
+  std::vector<T> residual_;   ///< refinement workspace: residuals (n x p)
+  std::vector<T> candidate_;  ///< refinement workspace: corrected candidate iterates (n x p)
 };
 
 }  // namespace hs
