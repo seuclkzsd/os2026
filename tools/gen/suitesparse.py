@@ -294,25 +294,23 @@ def read_hermitian(path: Path) -> tuple[sp.csr_matrix, dict[str, Any]]:
 # ============================================================================== inspection
 
 
-def hpd_inertia(b: sp.spmatrix) -> list[int] | None:
-    """Exact inertia [neg, zero, pos] of a Hermitian matrix via LU with symmetric diagonal
-    pivoting, or None when the factorization had to leave the diagonal.
+def is_hpd(b: sp.spmatrix) -> bool:
+    """Whether a Hermitian matrix is positive definite, decided by LU with symmetric diagonal
+    pivoting (a sparse LDL^H / Cholesky in disguise).
 
     SuperLU in SymmetricMode with diag_pivot_thresh=0 pivots on the diagonal whenever it is
-    nonzero, so perm_r == perm_c and P^T B P = L U with U = D L^H: the signs of diag(U) give the
-    inertia (Sylvester). An HPD matrix never produces a zero diagonal pivot, hence a factorization
-    that pivots off the diagonal (or breaks down) proves B is not HPD.
+    nonzero, so perm_r == perm_c and P^T B P = L U with U = D L^H: B is HPD iff all pivots are
+    positive (Sylvester). For HPD B this elimination is as stable as Cholesky; a pivot <= 0, an
+    off-diagonal pivot (forced by a zero diagonal pivot) or an exactly singular factor all prove
+    that B is not HPD. Pivot counts are not reported as inertia: without 2x2 pivoting the
+    elimination of an indefinite matrix is not backward stable.
     """
     try:
         lu = spla.splu(sp.csc_matrix(b), permc_spec="MMD_AT_PLUS_A", diag_pivot_thresh=0.0,
                        options={"SymmetricMode": True})
     except RuntimeError:  # exactly singular
-        return None
-    if not np.array_equal(lu.perm_r, lu.perm_c):
-        return None
-    d = lu.U.diagonal().real
-    neg, zero = int(np.count_nonzero(d < 0)), int(np.count_nonzero(d == 0))
-    return [neg, zero, int(d.size) - neg - zero]
+        return False
+    return bool(np.array_equal(lu.perm_r, lu.perm_c) and np.all(lu.U.diagonal().real > 0))
 
 
 def ritz_interval(a: sp.spmatrix, b: sp.spmatrix | None = None, steps: int = 40,
@@ -422,10 +420,11 @@ def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[s
     else:
         if b.shape != a.shape:
             raise Skipped(f"{name}: A is {a.shape}, B is {b.shape}")
-        b_inertia = hpd_inertia(b)
-        problem = "GHEP" if b_inertia is not None and b_inertia[0] == b_inertia[1] == 0 else "GHIEP"
-        if b_inertia is not None:
-            inertia["B"] = b_inertia
+        if is_hpd(b):
+            problem = "GHEP"
+            inertia["B"] = [0, 0, b.shape[0]]
+        else:
+            problem = "GHIEP"
     targets, selection = choose_targets(a, b, problem)
     complex_ = np.iscomplexobj(a.data) or (b is not None and np.iscomplexobj(b.data))
     scenarios = [s for s, on in (("complex-hermitian", complex_), ("indefinite-B", problem == "GHIEP"),

@@ -181,19 +181,18 @@ def test_completed_download_is_reused_and_refresh_refetches(tmp_path):
 
 
 @pytest.mark.parametrize("complex_", [False, True])
-def test_hpd_inertia_matches_dense(complex_):
+def test_is_hpd_matches_dense(complex_):
     for seed in range(3):
         spd = _spd(40, seed)
         if complex_:
             h = _sym(40, seed, True)
             spd = (h @ h.conj().T + 40 * sp.identity(40)).tocsr()
-        assert ss.hpd_inertia(spd) == [0, 0, 40]
+        assert ss.is_hpd(spd)
         indef = _sym(40, seed + 10, complex_)
-        w = np.linalg.eigvalsh(indef.toarray())
-        inertia = ss.hpd_inertia(indef)
-        assert inertia is None or inertia == [int(np.sum(w < 0)), 0, int(np.sum(w > 0))]
-    zero_diag = sp.csr_matrix(np.array([[0.0, 1.0], [1.0, 0.0]]))
-    assert ss.hpd_inertia(zero_diag) is None                  # off-diagonal pivot: not HPD
+        assert np.linalg.eigvalsh(indef.toarray())[0] < 0 and not ss.is_hpd(indef)
+    assert not ss.is_hpd(sp.csr_matrix([[1.0, 2.0], [2.0, 1.0]]))   # positive diagonal, eigenvalue -1
+    assert not ss.is_hpd(sp.csr_matrix([[0.0, 1.0], [1.0, 0.0]]))   # zero diagonal: off-diagonal pivot
+    assert not ss.is_hpd(sp.csr_matrix([[1.0, 0.0], [0.0, 0.0]]))   # singular PSD
 
 
 @pytest.mark.parametrize("complex_", [False, True])
