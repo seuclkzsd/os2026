@@ -3,9 +3,11 @@
 // real and complex scalars, rectangular matrices with empty rows, orders that are not multiples
 // of the SIMD width, p = 1 .. 33 vectors (several 16-vector chunks), padded leading dimensions,
 // general alpha / beta; bitwise independence of the thread count; workspace reuse; the strided
-// fallback for matrices with few entries per column; the componentwise backward error of
-// shifted_residual (paths agree; rounding level for an exact solve); runtime dispatch (Auto
-// resolves to the AVX-512 path exactly when it is available, else Portable).
+// fallback for matrices with few entries per column; every compiled chunk width (p = 1 .. 19);
+// the componentwise backward error of shifted_residual (paths agree; rounding level for an exact
+// solve; infinite for a non-finite residual; bitwise independent of the thread count); runtime
+// dispatch (Auto resolves to the AVX-512 path exactly when it is available, else Portable; the
+// forced fallback is tested in test_solvephase_fix_dispatch.cpp).
 #include <gtest/gtest.h>
 #include <omp.h>
 
@@ -86,6 +88,21 @@ std::vector<double> abs_product(const CsrMatrix<T>& a, const T* x, index_t ldx, 
       for (index_t t = a.rowptr[i]; t < a.rowptr[i + 1]; ++t)
         s[i + k * a.nrows] += std::abs(a.values[t]) * std::abs(x[a.colind[t] + k * ldx]);
   return s;
+}
+
+/// max_k ||y_k - z_k||_2 / ||z_k||_2 over p columns of leading dimension ld (n rows used).
+template <class T>
+double max_column_deviation(index_t n, index_t p, const T* y, const T* z, index_t ld) {
+  double worst = 0.0;
+  for (index_t k = 0; k < p; ++k) {
+    double d = 0.0, s = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+      d += hs::abs2(y[i + k * ld] - z[i + k * ld]);
+      s += hs::abs2(z[i + k * ld]);
+    }
+    worst = std::max(worst, std::sqrt(d / s));
+  }
+  return worst;
 }
 
 std::vector<KernelPath> fast_paths() {
@@ -197,6 +214,44 @@ TYPED_TEST(SparseKernelPaths, ThreadCountAndWorkspaceDoNotChangeBits) {
       EXPECT_TRUE(y1 == y3) << name(path) << " q=" << q << ": the workspace changed the results";
       if (q > 1) {
         EXPECT_GE(ws.size(), static_cast<std::size_t>(n * q * (hs::is_complex_v<T> ? 2 : 1)));
+      }
+    }
+  }
+}
+
+// The fast paths are compiled per chunk width (Portable: every q = 1 .. 16, with vector tails of
+// every length): spmm and shifted_residual (with its backward error, B and B = I) agree with the
+// Reference path for every p = 1 .. 16 and two chunks (p = 16 + q).
+TYPED_TEST(SparseKernelPaths, EveryChunkWidthMatchesReference) {
+  using T = TypeParam;
+  const index_t n = 157, ld = n + 1;
+  const auto a = hs::test::random_hermitian<T>(n, 0.12, 25);  // ~19 entries per column
+  const auto b = hs::test::random_hpd<T>(n, 0.08, 26);
+  const double sigma = 0.6;
+  for (index_t p = 1; p <= 19; ++p) {
+    const auto x = random_block<T>(n, p, ld, 70 + static_cast<std::uint64_t>(p));
+    const auto y = random_block<T>(n, p, ld, 90 + static_cast<std::uint64_t>(p));
+    const auto scale = abs_product(a, x.data(), ld, p);
+    std::vector<T> ref(static_cast<std::size_t>(ld * p)), out(ref.size());
+    hs::spmm(a, x.data(), ld, ref.data(), ld, p, T(1), T(0), {KernelPath::Reference});
+    for (KernelPath path : fast_paths()) {
+      hs::spmm(a, x.data(), ld, out.data(), ld, p, T(1), T(0), {path});
+      for (index_t k = 0; k < p; ++k)
+        for (index_t i = 0; i < n; ++i)
+          ASSERT_LE(std::abs(out[i + k * ld] - ref[i + k * ld]), 1e-14 * scale[i + k * n] + 1e-300)
+              << "spmm " << name(path) << " p=" << p << " k=" << k << " i=" << i;
+    }
+    for (const CsrMatrix<T>* bp : {&b, static_cast<const CsrMatrix<T>*>(nullptr)}) {
+      std::vector<double> o_ref(static_cast<std::size_t>(p)), o(o_ref.size());
+      hs::shifted_residual(a, bp, sigma, x.data(), ld, y.data(), ld, ref.data(), ld, p,
+                           {KernelPath::Reference}, o_ref.data());
+      for (KernelPath path : fast_paths()) {
+        hs::shifted_residual(a, bp, sigma, x.data(), ld, y.data(), ld, out.data(), ld, p, {path},
+                             o.data());
+        EXPECT_LE(max_column_deviation(n, p, out.data(), ref.data(), ld), 1e-13)
+            << "residual " << name(path) << " p=" << p << " with_b=" << (bp != nullptr);
+        for (index_t k = 0; k < p; ++k)
+          EXPECT_NEAR(o[k], o_ref[k], 1e-12 * o_ref[k]) << name(path) << " p=" << p << " k=" << k;
       }
     }
   }

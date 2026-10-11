@@ -111,7 +111,7 @@ double hermitian_defect(const CsrMatrix<T>& a);
 enum class KernelPath {
   Auto,       ///< Avx512 when the CPU and OS support AVX-512F (checked at run time), else Portable
   Reference,  ///< the P1 loops (strided spmm, 8 vectors per pass): for tests and benchmarks
-  Portable,   ///< interleaved kernels in plain C++ (compiler-vectorized; any x86-64 / other ISA)
+  Portable,   ///< interleaved kernels in plain C++ (vector extension at the build ISA's width)
   Avx512,     ///< AVX-512F intrinsics; Unsupported (hs::Error) where AVX-512F is unavailable
 };
 

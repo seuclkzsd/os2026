@@ -6,7 +6,10 @@
 //   Portable   interleaved kernels in plain C++: X is first copied into a row-major block Xp
 //              (row j holds the q <= 16 entries x[j, k0 .. k0+q)), so a nonzero a_ij costs q
 //              contiguous multiply-adds; one pass over A per 16 vectors; explicit complex
-//              arithmetic (no NaN-recovery calls).
+//              arithmetic (no NaN-recovery calls; complex in the split form of the AVX-512 path).
+//              Compiled for every width q = 1 .. 16 with the accumulators in vector registers of
+//              the build's ISA (GCC / Clang vector extension: 2 doubles with SSE2, 4 with AVX), so
+//              it is fast on any x86-64 (or other) CPU; Auto runs it on CPUs without AVX-512F.
 //   Avx512     the same formulation with AVX-512F intrinsics: one broadcast + ceil(q/8) loads and
 //              FMAs per nonzero (complex: 2 broadcasts, ceil(2q/8) loads, 2 FMAs per load; the
 //              swap of the imaginary products is done once per row), two nonzeros in flight per
@@ -25,6 +28,7 @@
 #include <limits>
 #include <memory>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "hsolve/error.hpp"
@@ -282,38 +286,144 @@ void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, do
 
 // ------------------------------------------------------------------------------ Portable
 
-/// out[k] (k < q) += sign * sum_t v[t] * Xp[ci[t], k] over row i of m (Xp interleaved, q wide);
-/// with sacc != nullptr also sacc[k] += sum_t mag(v[t]) * mag(Xp[ci[t], k]) (magnitudes, see
-/// mag()).
-template <class T>
-inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const double* xp, index_t q,
-                                    double sign, double* acc, double* sacc = nullptr) {
+/// Calls f(std::integral_constant<int, Q>{}) with Q = q, for 1 <= q <= kChunk. The portable
+/// kernels are compiled for every chunk width so that their accumulators live in registers: with
+/// a run-time width they were memory operands (a load and a store per multiply-add) and the real
+/// spmm ran at 0.77-0.88x the Reference loop for p = 4, 8. Per width, with the vector-extension
+/// accumulators below, the Portable path is 1.4-3.0x (spmm) and 1.1-4.5x (residual) faster than
+/// Reference for p = 2 .. 16 on the six 1e5 test cases, in SSE2-only and AVX2 builds at 4
+/// threads (bench/solvephase_kernels.cpp; cases whose spmm keeps the strided loop excepted).
+template <int Q = 1, class F>
+void with_width(index_t q, F&& f) {
+  if constexpr (Q <= kChunk) {
+    if (q == Q) {
+      f(std::integral_constant<int, Q>{});
+      return;
+    }
+    with_width<Q + 1>(q, std::forward<F>(f));
+  }
+}
+
+/// kLanes doubles as one value (GCC / Clang vector extension): one register of the build's ISA,
+/// 4 doubles with AVX, 2 with SSE2 only (a wider extension vector is split into slow pieces there).
+/// Fixing the width keeps the portable accumulators in registers whatever the auto-vectorizer's
+/// cost model would pick (for complex q = 8 it chose 2-double vectors on AVX2 and spilled half of
+/// them to the stack on every nonzero).
+#if defined(__GNUC__) || defined(__clang__)
+#if defined(__AVX__)
+constexpr int kLanes = 4;
+#else
+constexpr int kLanes = 2;
+#endif
+typedef double VD __attribute__((vector_size(8 * kLanes)));
+typedef long long VI __attribute__((vector_size(8 * kLanes)));
+inline VD load_vd(const double* p) {
+  VD v;
+  std::memcpy(&v, p, sizeof v);
+  return v;
+}
+inline VD abs_vd(VD v) {
+  return (VD)((VI)v & static_cast<long long>(0x7fffffffffffffffULL));
+}
+#else
+#error "src/sparse/kernels.cpp needs the GCC / Clang vector extension (vector_size)"
+#endif
+
+/// Accumulators of one output row for Q interleaved vectors: kW = Q (real) or 2Q (complex) words,
+/// kV full VD values and kT < kLanes scalar tail words. Complex products use the split form of the
+/// AVX-512 path: re += Re(a) [xr, xi] and im += Im(a) [xr, xi] word by word, combined once per
+/// row by value(); elementwise, hence no shuffles.
+template <int Q, class T>
+struct RowAcc {
+  static constexpr bool kComplex = is_complex_v<T>;
+  static constexpr index_t kW = Q * kWords<T>;
+  static constexpr int kV = static_cast<int>(kW / kLanes), kT = static_cast<int>(kW % kLanes);
+  VD re[kV ? kV : 1] = {}, im[kComplex && kV ? kV : 1] = {}, sc[kV ? kV : 1] = {};
+  double re_t[kT ? kT : 1] = {}, im_t[kComplex && kT ? kT : 1] = {}, sc_t[kT ? kT : 1] = {};
+
+  static double word(const VD* v, const double* tail, index_t w) {
+    return w < kLanes * kV ? v[w / kLanes][w % kLanes] : tail[w - kLanes * kV];
+  }
+  /// Entry k of the row (k < Q).
+  T value(int k) const {
+    if constexpr (kComplex) {
+      return T(word(re, re_t, 2 * k) - word(im, im_t, 2 * k + 1),
+               word(re, re_t, 2 * k + 1) + word(im, im_t, 2 * k));
+    } else {
+      return word(re, re_t, k);
+    }
+  }
+  /// Scale s_k of the backward error (accumulated magnitudes).
+  double scale(int k) const {
+    if constexpr (kComplex) {
+      return word(sc, sc_t, 2 * k) + word(sc, sc_t, 2 * k + 1);
+    } else {
+      return word(sc, sc_t, k);
+    }
+  }
+  /// re = the kW words at w (and, with S, sc = their magnitudes): the B = I start of a residual
+  /// row.
+  template <bool S>
+  void start_from(const double* w) {
+    for (int c = 0; c < kV; ++c) {
+      re[c] = load_vd(w + kLanes * c);
+      if constexpr (S) sc[c] = abs_vd(re[c]);
+    }
+    for (int c = 0; c < kT; ++c) {
+      re_t[c] = w[kLanes * kV + c];
+      if constexpr (S) sc_t[c] = std::abs(re_t[c]);
+    }
+  }
+};
+
+/// acc += sign * sum_t v[t] * Xp[ci[t], :] restricted to the accumulator vectors [C0, C1) (and the
+/// tail words when C1 == kV) over row i of m; with S also the magnitudes mag(v[t]) |Xp[ci[t], :]|.
+template <int C0, int C1, int Q, bool S, class T>
+inline void row_accumulate_vectors(const CsrMatrix<T>& m, index_t i, const double* xp,
+                                   double sign, RowAcc<Q, T>& acc) {
+  using Acc = RowAcc<Q, T>;
+  constexpr int kTail = C1 == Acc::kV ? Acc::kT : 0;
   const index_t* rp = m.rowptr.data();
   const std::int32_t* ci = m.colind.data();
   const T* v = m.values.data();
   for (index_t t = rp[i]; t < rp[i + 1]; ++t) {
-    const double* xr = xp + static_cast<index_t>(ci[t]) * q * kWords<T>;
-    if constexpr (is_complex_v<T>) {
-      const double vr = sign * v[t].real(), vi = sign * v[t].imag();
-      for (index_t k = 0; k < q; ++k) {
-        const double xre = xr[2 * k], xim = xr[2 * k + 1];
-        acc[2 * k] += vr * xre - vi * xim;
-        acc[2 * k + 1] += vr * xim + vi * xre;
-      }
-      if (sacc) {
-        const double mv = mag(v[t]);
-        for (index_t k = 0; k < q; ++k)
-          sacc[k] += mv * (std::abs(xr[2 * k]) + std::abs(xr[2 * k + 1]));
-      }
+    const double* xr = xp + static_cast<index_t>(ci[t]) * Acc::kW;
+    double vr = 0.0, vi = 0.0;
+    if constexpr (Acc::kComplex) {
+      vr = sign * v[t].real();
+      vi = sign * v[t].imag();
     } else {
-      const double vv = sign * v[t];
-      for (index_t k = 0; k < q; ++k) acc[k] += vv * xr[k];
-      if (sacc) {
-        const double mv = std::abs(v[t]);
-        for (index_t k = 0; k < q; ++k) sacc[k] += mv * std::abs(xr[k]);
-      }
+      vr = sign * v[t];
+    }
+    const double mv = S ? mag(v[t]) : 0.0;
+    for (int c = C0; c < C1; ++c) {
+      const VD x = load_vd(xr + kLanes * c);
+      acc.re[c] += vr * x;
+      if constexpr (Acc::kComplex) acc.im[c] += vi * x;
+      if constexpr (S) acc.sc[c] += mv * abs_vd(x);
+    }
+    for (int c = 0; c < kTail; ++c) {
+      const double x = xr[kLanes * Acc::kV + c];
+      acc.re_t[c] += vr * x;
+      if constexpr (Acc::kComplex) acc.im_t[c] += vi * x;
+      if constexpr (S) acc.sc_t[c] += mv * std::abs(x);
     }
   }
+}
+
+/// acc += sign * sum_t v[t] * Xp[ci[t], :] over row i of m (Xp interleaved, Q wide); with S also
+/// the magnitudes. Rows wider than the register file are swept in groups of accumulator vectors
+/// (at most 12 vector registers of accumulators per sweep; the row's indices and values are
+/// re-read from L1), so that no accumulator lives on the stack.
+template <int Q, bool S, class T, int C0 = 0>
+inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const double* xp,
+                                    double sign, RowAcc<Q, T>& acc) {
+  using Acc = RowAcc<Q, T>;
+  constexpr int kArrays = 1 + (Acc::kComplex ? 1 : 0) + (S ? 1 : 0);
+  constexpr int kGroup = 12 / kArrays;
+  constexpr int C1 = C0 + kGroup < Acc::kV ? C0 + kGroup : Acc::kV;
+  row_accumulate_vectors<C0, C1, Q, S>(m, i, xp, sign, acc);
+  if constexpr (C1 < Acc::kV) row_accumulate_portable<Q, S, T, C1>(m, i, xp, sign, acc);
 }
 
 template <class T>
@@ -325,49 +435,42 @@ inline T acc_value(const double* acc, index_t k) {
   }
 }
 
-/// Y[:, 0..q) = alpha * A * Xp + beta * Y for one interleaved chunk of q <= 16 vectors.
-template <class T>
-void spmm_chunk_portable(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_t ldy,
-                         T alpha, T beta) {
+/// Y[:, 0..Q) = alpha * A * Xp + beta * Y for one interleaved chunk of Q <= 16 vectors.
+template <int Q, class T>
+void spmm_chunk_portable(const CsrMatrix<T>& a, const double* xp, T* y, index_t ldy, T alpha,
+                         T beta) {
   for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
-    double acc[2 * kChunk];
     for (index_t i = i0; i < i1; ++i) {
-      std::fill(acc, acc + q * kWords<T>, 0.0);
-      row_accumulate_portable(a, i, xp, q, 1.0, acc);
-      for (index_t k = 0; k < q; ++k) {
+      RowAcc<Q, T> acc;
+      row_accumulate_portable<Q, false>(a, i, xp, 1.0, acc);
+      for (int k = 0; k < Q; ++k) {
         T& yk = y[i + k * ldy];
-        yk = combine(alpha, acc_value<T>(acc, k), beta, yk);
+        yk = combine(alpha, acc.value(k), beta, yk);
       }
     }
   });
 }
 
-/// R[:, 0..q) = B Wp - A Yp, or (B = I) Wp - A Yp (Wp = X + sigma Y, Yp = Y interleaved). With
-/// bm.on(), also the row-block maxima of |r| / s (s = |B| |Wp| + |A| |Yp|, B = I: |Wp| + |A| |Yp|).
-template <class T>
+/// R[:, 0..Q) = B Wp - A Yp, or (B = I) Wp - A Yp (Wp = X + sigma Y, Yp = Y interleaved). With S,
+/// also the row-block maxima of |r| / s (s = |B| |Wp| + |A| |Yp|, B = I: |Wp| + |A| |Yp|).
+template <int Q, bool S, class T>
 void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const double* wp,
-                             const double* yp, index_t q, T* r, index_t ldr, BlockMax& bm) {
-  const index_t words = q * kWords<T>;
+                             const double* yp, T* r, index_t ldr, BlockMax& bm) {
+  constexpr index_t words = RowAcc<Q, T>::kW;
   for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
-    double acc[2 * kChunk], sacc[kChunk];
-    double* wmax = bm.on() ? bm.row(i0) : nullptr;
+    double* wmax = S ? bm.row(i0) : nullptr;
     for (index_t i = i0; i < i1; ++i) {
-      std::fill(acc, acc + words, 0.0);
-      std::fill(sacc, sacc + q, 0.0);
-      double* sp = wmax ? sacc : nullptr;
+      RowAcc<Q, T> acc;
       if (b) {
-        row_accumulate_portable(*b, i, wp, q, 1.0, acc, sp);
+        row_accumulate_portable<Q, S>(*b, i, wp, 1.0, acc);
       } else {
-        const double* wr = wp + i * words;
-        std::copy(wr, wr + words, acc);
-        if (sp)
-          for (index_t k = 0; k < q; ++k) sp[k] = mag(acc_value<T>(wr, k));
+        acc.template start_from<S>(wp + i * words);
       }
-      row_accumulate_portable(a, i, yp, q, -1.0, acc, sp);
-      for (index_t k = 0; k < q; ++k) {
-        const T v = acc_value<T>(acc, k);
+      row_accumulate_portable<Q, S>(a, i, yp, -1.0, acc);
+      for (int k = 0; k < Q; ++k) {
+        const T v = acc.value(k);
         r[i + k * ldr] = v;
-        if (wmax) wmax[k] = std::max(wmax[k], ratio(mag(v), sacc[k]));
+        if constexpr (S) wmax[k] = std::max(wmax[k], ratio(mag(v), acc.scale(k)));
       }
     }
   });
@@ -599,7 +702,9 @@ void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_
   }
 #endif
   static_cast<void>(path);
-  spmm_chunk_portable(a, xp, q, y, ldy, alpha, beta);
+  with_width(q, [&](auto qc) {
+    spmm_chunk_portable<decltype(qc)::value>(a, xp, y, ldy, alpha, beta);
+  });
 }
 
 template <class T>
@@ -622,7 +727,14 @@ void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const double* 
   }
 #endif
   static_cast<void>(path);
-  residual_chunk_portable(a, b, wp, yp, q, r, ldr, bm);
+  with_width(q, [&](auto qc) {
+    constexpr int kQ = decltype(qc)::value;
+    if (bm.on()) {
+      residual_chunk_portable<kQ, true>(a, b, wp, yp, r, ldr, bm);
+    } else {
+      residual_chunk_portable<kQ, false>(a, b, wp, yp, r, ldr, bm);
+    }
+  });
 }
 
 }  // namespace
