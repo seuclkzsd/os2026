@@ -119,8 +119,13 @@ def hermitian_part(m: sp.spmatrix) -> sp.csr_matrix:
     return h
 
 
-def drop_reference(name: str, root: str | Path) -> None:
-    """Remove a stale reference left by an earlier generation of the same case."""
+def drop_generated_reference(name: str, root: str | Path) -> None:
+    """Remove an exact reference written by an earlier generation of the same case (the case is
+    now generated without one). References of other kinds belong to the tools that computed them
+    (e.g. solver references for cases without an exact spectrum) and are left alone."""
+    ref = case.load_ref(name, root=root)
+    if ref is None or ref.info.get("kind") != "discrete-exact":
+        return
     ref_dir = Path(root) / "refs" / name
     for fname in ("eigenvalues.npy", "eigenvectors.npy", "ref.json"):
         (ref_dir / fname).unlink(missing_ok=True)
@@ -129,13 +134,13 @@ def drop_reference(name: str, root: str | Path) -> None:
 def write_case(name: str, A, B, *, meta: dict[str, Any], targets: list[dict[str, Any]],
                root: str | Path, eigenvalues=None, ref_note: str = "") -> Path:
     """Save a case whose default configuration is its first target; save the complete exact
-    spectrum as reference when it is known (otherwise drop any stale reference)."""
+    spectrum as reference when it is known (otherwise drop a stale exact reference)."""
     meta = dict(meta)
     meta["targets"] = targets
     config = case.default_config(targets[0]["sigma"], targets[0]["k"])
     out = case.save_case(name, A, B, meta=meta, config=config, root=root)
     if eigenvalues is None:
-        drop_reference(name, root)
+        drop_generated_reference(name, root)
     else:
         case.save_ref(name, eigenvalues, kind="discrete-exact", note=ref_note, complete=True,
                       window=None, root=root)

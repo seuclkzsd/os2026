@@ -187,15 +187,18 @@ def test_case_writers_roundtrip(tmp_path):
     assert "multiplicity" in case.load_case(paths[0]).meta["scenarios"]
 
 
-def test_write_case_without_reference_drops_stale_reference(tmp_path):
+def test_write_case_without_reference_drops_only_its_own_stale_reference(tmp_path):
     a = syn.laplacian((3, 3))
     target = [{"sigma": 0.0, "k": 2, "why": "test"}]
     meta = {"family": "synthetic", "problem": "HEP"}
     syn.write_case("t", a, None, meta=meta, targets=target, root=tmp_path,
                    eigenvalues=syn.laplacian_eigenvalues((3, 3)))
-    assert case.load_ref("t", root=tmp_path) is not None
+    assert case.load_ref("t", root=tmp_path).info["kind"] == "discrete-exact"
     syn.write_case("t", a, None, meta=meta, targets=target, root=tmp_path)
     assert case.load_ref("t", root=tmp_path) is None
+    case.save_ref("t", [1.0], kind="solver", root=tmp_path)    # another tool's reference stays
+    syn.write_case("t", a, None, meta=meta, targets=target, root=tmp_path)
+    assert case.load_ref("t", root=tmp_path).info["kind"] == "solver"
 
 
 def test_cli_lists_and_builds(tmp_path, capsys):
