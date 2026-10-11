@@ -31,7 +31,6 @@
 #include "hsolve/error.hpp"
 #include "hsolve/operator.hpp"
 #include "hsolve/util.hpp"
-#include "linalg/blas_lapack.hpp"
 #include "linalg/dense_ops.hpp"
 
 namespace hs::driver {
@@ -41,6 +40,11 @@ namespace {
 /// Pairs with a backward error above this are not counted as found (ghost / unconverged Ritz
 /// pairs); between tol and this they count but are reported as not accepted.
 constexpr double kTrustworthy = 1e-6;
+/// Rayleigh-Ritz drops directions whose B-Gram eigenvalue is below this fraction of the largest:
+/// columns that are (numerically) the same vector - an eigenvector computed twice, or columns that
+/// residual correction drove onto the same eigenvector - so that a count of computed pairs is a
+/// count of distinct B-orthonormal vectors (DESIGN §3.6-8).
+constexpr double kDependentGram = 1e-8;
 
 // Residual correction x <- x - K^{-1}(A x - rho B x), rho = Rayleigh quotient, for the columns whose
 // backward error exceeds tol (DESIGN §3.6-7). With an exact K this is inverse iteration; for any
@@ -149,8 +153,9 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
     append_columns(out.all.ax, blk.ax);
     append_columns(out.all.bx, blk.bx);
   }
-  if (!driver::rayleigh_ritz_definite(out.all.x, out.all.ax, out.all.bx, out.all.lambda))
-    warn(c, "Rayleigh-Ritz skipped: X^H B X not positive definite (degenerate subspace)");
+  const index_t m0 = out.all.size();
+  const index_t r = driver::rayleigh_ritz_definite(out.all.x, out.all.ax, out.all.bx, out.all.lambda, kDependentGram);
+  if (r < m0) event(c, "dependent_dropped", {{"columns", static_cast<std::int64_t>(m0 - r)}});
 }
 
 /// Keeps the converged pairs of run.all (backward error <= 10 tol, finite): the deflation block of
@@ -177,21 +182,25 @@ std::vector<PairMetrics> block_metrics(const Block<T>& blk, double n2a, double n
   return m;
 }
 
-/// Metrics of sel; pairs above tol get residual correction with the factorization the object
-/// holds (that of the run that produced them), then a Rayleigh-Ritz over sel (lambda ascending
-/// afterwards) and fresh metrics.
-template <class T>
+/// Metrics of sel; pairs above tol get residual correction with the factorization that
+/// prepare() makes the object hold (that of the run's shift; called only when a pair needs it),
+/// then a rank-revealing Rayleigh-Ritz over sel (lambda ascending afterwards; columns that the
+/// correction drove onto the same eigenvector are merged) and fresh metrics.
+template <class T, class Prepare>
 void verify_and_rescue(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, Block<T>& sel,
-                       std::vector<PairMetrics>& metrics, double n2a, double n2b) {
+                       std::vector<PairMetrics>& metrics, double n2a, double n2b, Prepare&& prepare) {
   metrics = block_metrics(sel, n2a, n2b);
   std::vector<index_t> failing;
   for (index_t j = 0; j < sel.size(); ++j)
     if (metrics[j].backward_error > c.cfg.tol) failing.push_back(j);
-  if (failing.empty() || !fac.inertia().valid) return;
+  if (failing.empty()) return;
+  prepare();
+  if (!fac.inertia().valid) return;
   const index_t r = rescue_pairs(fac, pencil.a(), pencil.b(), sel, failing, n2a, n2b, c.cfg.tol);
-  event(c, "rescue", {{"pairs", static_cast<std::int64_t>(r)}});
-  if (!driver::rayleigh_ritz_definite(sel.x, sel.ax, sel.bx, sel.lambda))
-    warn(c, "Rayleigh-Ritz after rescue skipped: degenerate subspace");
+  const index_t m0 = sel.size();
+  const index_t kept = driver::rayleigh_ritz_definite(sel.x, sel.ax, sel.bx, sel.lambda, kDependentGram);
+  event(c, "rescue",
+        {{"pairs", static_cast<std::int64_t>(r)}, {"dependent_dropped", static_cast<std::int64_t>(m0 - kept)}});
   metrics = block_metrics(sel, n2a, n2b);
 }
 
@@ -289,8 +298,8 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     index_t zero_dropped = 0;
     sel = take_columns(run.all, select_nearest(run.all.lambda, t.sigma, k, zero_tol, zero_dropped));
     rep.zero_modes_filtered = zero_dropped;
-    refactorize_at(c, fac, sigma, detection_off);  // rescue solves with K(sigma)
-    verify_and_rescue(c, fac, pencil, sel, metrics, n2a, n2b);
+    // rescue solves with K(sigma)
+    verify_and_rescue(c, fac, pencil, sel, metrics, n2a, n2b, [&]() { refactorize_at(c, fac, sigma, detection_off); });
     index_t zd = 0;  // restore the target order (Rayleigh-Ritz sorts ascending)
     const auto order = select_nearest(sel.lambda, t.sigma, sel.size(), -1.0, zd);
     std::vector<PairMetrics> m2;
@@ -668,8 +677,8 @@ void WindowSolver<T>::run_slice(const Slice& s, index_t id) {
       if (std::isfinite(l) && l >= s.lo.s - d_lo && l <= s.hi.s + d_hi && !in_band(l)) idx.push_back(j);
     }
     sel = take_columns(run.all, idx);
-    refactorize_at(c_, fac_, sigma, detection_off);
-    verify_and_rescue(c_, fac_, pencil_, sel, metrics, n2a_, n2b_);
+    verify_and_rescue(c_, fac_, pencil_, sel, metrics, n2a_, n2b_,
+                      [&]() { refactorize_at(c_, fac_, sigma, detection_off); });
     // Drop ghosts (Ritz pairs that are no eigenpairs at all) and count.
     std::vector<index_t> keep;
     inside = near_in = near_out = 0;
@@ -767,39 +776,14 @@ index_t WindowSolver<T>::deduplicate() {
         grp.lambda.push_back(pool_.lambda[order[i + q]]);
       }
       recompute_products(a, b, grp);
-      // B-Gram matrix and its eigen-decomposition (g is tiny).
-      DenseMatrix<T> gm(g, g);
-      linalg::gram(n_, g, grp.x.data(), n_, grp.bx.data(), n_, gm.data(), g);
-      for (index_t q = 0; q < g; ++q)
-        for (index_t r = q + 1; r < g; ++r) {
-          const T h = 0.5 * (gm(r, q) + conj_if(gm(q, r)));
-          gm(r, q) = h;
-          gm(q, r) = conj_if(h);
-        }
-      std::vector<double> mu(static_cast<std::size_t>(g));
-      lapack::heev('V', 'U', static_cast<lapack::fint>(g), gm.data(), static_cast<lapack::fint>(g), mu.data());
-      std::vector<index_t> keep;
-      for (index_t q = 0; q < g; ++q)
-        if (mu[q] > 1e-4 * mu.back()) keep.push_back(q);
-      const index_t r = static_cast<index_t>(keep.size());
+      const index_t r = driver::rayleigh_ritz_definite(grp.x, grp.ax, grp.bx, grp.lambda, 1e-4);
       if (r < g) {
-        // Y = V_keep diag(1/sqrt(mu)): X Y is B-orthonormal; Rayleigh-Ritz then sorts it out.
-        DenseMatrix<T> y(g, r);
-        for (index_t q = 0; q < r; ++q)
-          for (index_t p = 0; p < g; ++p) y(p, q) = gm(p, keep[q]) / std::sqrt(mu[keep[q]]);
-        Block<T> red;
-        red.x.resize(n_, r);
-        linalg::multiply(n_, g, r, grp.x.data(), n_, y.data(), g, red.x.data(), n_);
-        recompute_products(a, b, red);
-        red.lambda.assign(static_cast<std::size_t>(r), 0.0);
-        if (!driver::rayleigh_ritz_definite(red.x, red.ax, red.bx, red.lambda))
-          HS_THROW(Internal, "de-duplication: degenerate Gram matrix after rank reduction");
-        const auto mr = block_metrics(red, n2a_, n2b_);
+        const auto mr = block_metrics(grp, n2a_, n2b_);
         for (index_t q = 0; q < g; ++q) {
           const index_t col = order[i + q];
           if (q < r) {
-            std::copy(red.x.col(q), red.x.col(q) + n_, pool_.x.col(col));
-            pool_.lambda[col] = red.lambda[q];
+            std::copy(grp.x.col(q), grp.x.col(q) + n_, pool_.x.col(col));
+            pool_.lambda[col] = grp.lambda[q];
             pool_.metrics[col] = mr[q];
           } else {
             drop[col] = 1;

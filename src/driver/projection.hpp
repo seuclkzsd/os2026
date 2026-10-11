@@ -30,13 +30,16 @@ PairMetrics pair_metrics(const T* ax, const T* bx, const T* x, index_t n, L lamb
 template <class T>
 index_t orthonormalize_columns(DenseMatrix<T>& w, double drop_tol = 1e-10);
 
-/// Rayleigh-Ritz for a Hermitian-definite pencil restricted to span(X): solves
-/// (X^H A X) y = mu (X^H B X) y with hegv. On success X, AX, BX are replaced by X*Y, AX*Y, BX*Y
-/// (B-orthonormal Ritz vectors) and lambda holds mu ascending. Returns false (inputs untouched)
-/// if X^H B X is not positive definite (degenerate subspace).
+/// Rayleigh-Ritz for a Hermitian-definite pencil restricted to span(X), rank-revealing: blocks
+/// may hold dependent columns (the same eigenvector computed twice, columns collapsed by residual
+/// correction). The B-Gram matrix X^H B X = V diag(mu) V^H is eigendecomposed, directions with
+/// mu <= drop_tol * max(mu) are dropped, and (X^H A X) y = theta (X^H B X) y is solved on the
+/// B-orthonormal basis X V_r diag(mu_r)^{-1/2}. X, AX, BX are replaced by the r <= m B-orthonormal
+/// Ritz vectors (and their products), lambda by the r Ritz values ascending; returns r. With a
+/// well-conditioned X^H B X this is the plain Rayleigh-Ritz (r = m). Cost O(n m^2 + m^3).
 template <class T>
-bool rayleigh_ritz_definite(DenseMatrix<T>& x, DenseMatrix<T>& ax, DenseMatrix<T>& bx,
-                            std::vector<double>& lambda);
+index_t rayleigh_ritz_definite(DenseMatrix<T>& x, DenseMatrix<T>& ax, DenseMatrix<T>& bx,
+                                  std::vector<double>& lambda, double drop_tol);
 
 /// Rayleigh-Ritz for an indefinite Hermitian pencil restricted to span(W) (W Euclidean
 /// orthonormal, AW = A W, BW = B W): eigenpairs of the small pencil (W^H A W, W^H B W) computed as

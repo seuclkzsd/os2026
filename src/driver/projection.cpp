@@ -85,26 +85,43 @@ index_t orthonormalize_columns(DenseMatrix<T>& w, double drop_tol) {
 }
 
 template <class T>
-bool rayleigh_ritz_definite(DenseMatrix<T>& x, DenseMatrix<T>& ax, DenseMatrix<T>& bx,
-                            std::vector<double>& lambda) {
+index_t rayleigh_ritz_definite(DenseMatrix<T>& x, DenseMatrix<T>& ax, DenseMatrix<T>& bx,
+                                  std::vector<double>& lambda, double drop_tol) {
   const index_t n = x.rows(), m = x.cols();
   if (m == 0) {
     lambda.clear();
-    return true;
+    return 0;
   }
   DenseMatrix<T> g(m, m), h(m, m);
   linalg::gram(n, m, x.data(), x.ld(), ax.data(), ax.ld(), g.data(), g.ld());
   linalg::gram(n, m, x.data(), x.ld(), bx.data(), bx.ld(), h.data(), h.ld());
   make_hermitian(g);
   make_hermitian(h);
-  std::vector<double> mu(static_cast<std::size_t>(m));
   const auto fm = static_cast<fint>(m);
-  if (lapack::hegv('V', 'U', fm, g.data(), fm, h.data(), fm, mu.data()) != 0) return false;
-  replace_by_product(x, g);
-  replace_by_product(ax, g);
-  replace_by_product(bx, g);
-  lambda = std::move(mu);
-  return true;
+  std::vector<double> mu(static_cast<std::size_t>(m));
+  lapack::heev('V', 'U', fm, h.data(), fm, mu.data());  // h <- V
+  std::vector<index_t> keep;
+  for (index_t q = 0; q < m; ++q)
+    if (mu[q] > drop_tol * mu.back() && mu[q] > 0.0) keep.push_back(q);
+  const auto r = static_cast<index_t>(keep.size());
+  // Y = V_r diag(mu_r)^{-1/2}: X Y is B-orthonormal.
+  DenseMatrix<T> y(m, r);
+  for (index_t q = 0; q < r; ++q)
+    for (index_t p = 0; p < m; ++p) y(p, q) = h(p, keep[q]) / std::sqrt(mu[keep[q]]);
+  // Projected A on that basis: Y^H G Y (r x r), then its eigenvectors Z; coefficients C = Y Z.
+  DenseMatrix<T> gy(m, r), gr(r, r);
+  linalg::multiply(m, m, r, g.data(), g.ld(), y.data(), y.ld(), gy.data(), gy.ld());
+  linalg::gram(m, r, y.data(), y.ld(), gy.data(), gy.ld(), gr.data(), gr.ld());
+  make_hermitian(gr);
+  std::vector<double> theta(static_cast<std::size_t>(r));
+  lapack::heev('V', 'U', static_cast<fint>(r), gr.data(), static_cast<fint>(r), theta.data());
+  DenseMatrix<T> coef(m, r);
+  linalg::multiply(m, r, r, y.data(), y.ld(), gr.data(), gr.ld(), coef.data(), coef.ld());
+  replace_by_product(x, coef);
+  replace_by_product(ax, coef);
+  replace_by_product(bx, coef);
+  lambda = std::move(theta);
+  return r;
 }
 
 template <class T>
@@ -164,8 +181,8 @@ bool rayleigh_ritz_indefinite(const DenseMatrix<T>& w, const DenseMatrix<T>& aw,
 #define HS_INSTANTIATE_PROJECTION(T)                                                                   \
   template void apply_block<T>(const CsrMatrix<T>*, const DenseMatrix<T>&, DenseMatrix<T>&);           \
   template index_t orthonormalize_columns<T>(DenseMatrix<T>&, double);                                 \
-  template bool rayleigh_ritz_definite<T>(DenseMatrix<T>&, DenseMatrix<T>&, DenseMatrix<T>&,           \
-                                          std::vector<double>&);                                       \
+  template index_t rayleigh_ritz_definite<T>(DenseMatrix<T>&, DenseMatrix<T>&, DenseMatrix<T>&,     \
+                                                std::vector<double>&, double);                         \
   template bool rayleigh_ritz_indefinite<T>(const DenseMatrix<T>&, const DenseMatrix<T>&,              \
                                             const DenseMatrix<T>&, std::vector<cplx>&, DenseMatrix<cplx>&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_PROJECTION)
