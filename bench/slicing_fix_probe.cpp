@@ -12,6 +12,7 @@
 //   lap4                  30x30 Laplacian intervals around the 30-fold eigenvalue 4     (F3)
 //   cluster_mid           40-fold 0.5 inside [0.2, 0.8], slice_size 10 and auto         (F3)
 //   psd_smallest          smallest / largest 5 next to a 600-dim null space            (F4)
+//   near_cluster          smallest 5 inside 40 close, distinct eigenvalues              (F4)
 //   anchor                1-D Laplacian, interval [-1, w_i] (w_i an eigenvalue), double /
 //                         single / BLR factors                                         (F6)
 //   mult                  12 copies of 1.0 in [0.9, 1.15], 30 copies in [0.9, 1.1]      (F8)
@@ -303,6 +304,16 @@ void probe(const std::string& p) {
     for (auto& x : neg) x = -x;
     const auto an = hs::test::prescribed_spectrum<double>(neg, 4, 42);
     run("nsd600_largest5", an, kNoB, end_cfg(hs::TargetMode::Largest, 5), std::vector<double>(5, 0.0), false);
+  }
+  if (all || p == "near_cluster") {
+    // The 5 smallest end inside 40 close but distinct eigenvalues (spacing 1e-6): not a
+    // numerically equal cluster, so the partial-cluster shortcut must fall back to all 40.
+    std::vector<double> lam = {0.2, 0.3, 0.4};
+    for (int i = 0; i < 40; ++i) lam.push_back(1.0 + 1e-6 * i);
+    for (int i = 1; i <= 300; ++i) lam.push_back(2.0 + 0.01 * i);
+    const auto a = hs::test::prescribed_spectrum<double>(lam, 4, 52);
+    run("near_cluster_smallest5", a, kNoB, end_cfg(hs::TargetMode::Smallest, 5),
+        std::vector<double>(lam.begin(), lam.begin() + 5));
   }
   if (all || p == "anchor") {
     struct Case {

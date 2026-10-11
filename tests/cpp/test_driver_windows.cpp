@@ -438,6 +438,20 @@ TEST(DriverTargets, SmallestInsideALargeNullSpaceReturnsCopies) {
   }
 }
 
+TEST(DriverTargets, SmallestInsideCloseButDistinctEigenvaluesComputesThemAll) {
+  // The 5 smallest end inside 40 close eigenvalues 1 + 1e-6 i: counts do not split them, but they
+  // are not numerically equal, so the partial-cluster shortcut must not pick arbitrary members -
+  // the two verification counts fail and all 40 are computed; the 5 smallest are exact.
+  std::vector<double> lam = {0.2, 0.3, 0.4};
+  for (int i = 0; i < 40; ++i) lam.push_back(1.0 + 1e-6 * i);
+  for (int i = 1; i <= 300; ++i) lam.push_back(2.0 + 0.01 * i);
+  auto a = hs::test::prescribed_spectrum<double>(lam, 4, 52);
+  auto s = hs::solve(a, nullptr, end_cfg(hs::TargetMode::Smallest, 5));
+  expect_window_ok(s);
+  expect_same_set(s.eigenvalues, {lam.begin(), lam.begin() + 5}, 1e-12);
+  EXPECT_EQ(s.report.certificate.count_inertia, 43);
+}
+
 TEST(DriverSlicing, IntervalsAroundA30FoldEigenvalue) {
   // 30 x 30 Laplacian: eigenvalue 4 has multiplicity 30. Cuts cannot split it, so one slice holds
   // all copies, at its edge; the slice's reruns get a shift on the multiplet, where single-vector

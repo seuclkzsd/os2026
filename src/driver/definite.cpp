@@ -1399,8 +1399,18 @@ Solution<T> WindowSolver<T>::solve() {
   event(c_, "slices", {{"slices", static_cast<std::int64_t>(slices_.size())}});
   for (std::size_t i = 0; i < slices_.size(); ++i) {
     if (run_slice(slices_[i], static_cast<index_t>(i))) continue;
-    // A partial cluster that is not numerically equal: all of its eigenvalues are needed.
+    // A partial cluster that is not numerically equal: all of its eigenvalues are needed - one
+    // slice (counts cannot split it), whose output and working set must fit the budget.
     Slice& s = slices_[i];
+    const double need_bytes = 8.0 * static_cast<double>(n_) * sizeof(T) * static_cast<double>(s.count());
+    const double avail =
+        cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+    if (need_bytes > 0.9 * avail)
+      HS_THROW(OutOfMemoryBudget, "the target ends inside a cluster of " << s.count() << " eigenvalues in [" << s.lo.s
+                                                                         << ", " << s.hi.s
+                                                                         << "] that are not numerically equal: "
+                                                                         << need_bytes / 1073741824.0
+                                                                         << " GiB needed (zero_filter_tol?)");
     warn(c_, "cluster [" + fmt(s.lo.s) + ", " + fmt(s.hi.s) + "] is not numerically multiple: all " +
                  std::to_string(s.count()) + " of its eigenvalues computed");
     for (auto& w : windows)
