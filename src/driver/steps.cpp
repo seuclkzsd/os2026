@@ -68,9 +68,10 @@ Block<T> take_columns(const Block<T>& src, const std::vector<index_t>& cols) {
   out.x.resize(n, m);
   out.ax.resize(n, m);
   out.bx.resize(n, m);
+  for (index_t j = 0; j < m; ++j) out.lambda.push_back(src.lambda[cols[j]]);
+#pragma omp parallel for schedule(static)
   for (index_t j = 0; j < m; ++j) {
     const index_t c = cols[j];
-    out.lambda.push_back(src.lambda[c]);
     std::copy(src.x.col(c), src.x.col(c) + n, out.x.col(j));
     std::copy(src.ax.col(c), src.ax.col(c) + n, out.ax.col(j));
     std::copy(src.bx.col(c), src.bx.col(c) + n, out.bx.col(j));

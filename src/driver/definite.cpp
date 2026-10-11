@@ -187,14 +187,46 @@ void keep_converged(DefiniteRun<T>& run, double n2a, double n2b, double tol) {
   run.all = take_columns(run.all, conv);
 }
 
+// Residual metrics of every column (DESIGN §4.5). Columns in parallel; each column's sums run in
+// one thread in index order, so the result does not depend on the thread count.
 template <class T>
 std::vector<PairMetrics> block_metrics(const Block<T>& blk, double n2a, double n2b) {
-  std::vector<PairMetrics> m;
-  const index_t n = blk.x.rows();
-  for (index_t j = 0; j < blk.size(); ++j)
-    m.push_back(driver::pair_metrics(blk.ax.col(j), blk.bx.col(j), blk.x.col(j), n, blk.lambda[j], n2a, n2b));
-  return m;
+  const index_t n = blk.x.rows(), m = blk.size();
+  std::vector<PairMetrics> out(static_cast<std::size_t>(m));
+#pragma omp parallel for schedule(static)
+  for (index_t j = 0; j < m; ++j)
+    out[static_cast<std::size_t>(j)] =
+        driver::pair_metrics(blk.ax.col(j), blk.bx.col(j), blk.x.col(j), n, blk.lambda[j], n2a, n2b);
+  return out;
 }
+
+/// Columns of x reordered in place so that new column j = old column perm[j] (perm a permutation
+/// of 0..m-1), using one n-vector of workspace (cycle following).
+template <class T>
+void permute_columns(DenseMatrix<T>& x, const std::vector<index_t>& perm) {
+  const index_t n = x.rows(), m = static_cast<index_t>(perm.size());
+  std::vector<char> done(static_cast<std::size_t>(m), 0);
+  std::vector<T> tmp(static_cast<std::size_t>(n));
+  for (index_t start = 0; start < m; ++start) {
+    if (done[start] || perm[start] == start) {
+      done[start] = 1;
+      continue;
+    }
+    std::copy(x.col(start), x.col(start) + n, tmp.data());
+    index_t j = start;
+    while (true) {
+      done[j] = 1;
+      const index_t src = perm[j];
+      if (src == start) {
+        std::copy(tmp.begin(), tmp.end(), x.col(j));
+        break;
+      }
+      std::copy(x.col(src), x.col(src) + n, x.col(j));
+      j = src;
+    }
+  }
+}
+
 
 /// Metrics of sel; pairs above tol get residual correction with the factorization that
 /// prepare() makes the object hold (that of the run's shift; called only when a pair needs it),
@@ -332,8 +364,19 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     index_t zd = 0;  // restore the target order (Rayleigh-Ritz sorts ascending)
     const auto order = select_nearest(sel.lambda, t.sigma, sel.size(), -1.0, zd);
     std::vector<PairMetrics> m2;
-    for (index_t j : order) m2.push_back(metrics[j]);
-    sel = take_columns(sel, order);
+    std::vector<double> l2;
+    for (index_t j : order) {
+      m2.push_back(metrics[j]);
+      l2.push_back(sel.lambda[j]);
+    }
+    if (static_cast<index_t>(order.size()) == sel.size()) {  // a permutation: reorder in place
+      permute_columns(sel.x, order);
+      permute_columns(sel.ax, order);
+      permute_columns(sel.bx, order);
+      sel.lambda = std::move(l2);
+    } else {
+      sel = take_columns(sel, order);
+    }
     metrics = std::move(m2);
   };
   select_and_verify();
@@ -1131,33 +1174,6 @@ index_t WindowSolver<T>::deduplicate() {
   }
   if (removed > 0) compact_pool(drop);
   return removed;
-}
-
-/// Columns of x reordered in place so that new column j = old column perm[j] (perm a permutation
-/// of 0..m-1), using one n-vector of workspace (cycle following).
-template <class T>
-void permute_columns(DenseMatrix<T>& x, const std::vector<index_t>& perm) {
-  const index_t n = x.rows(), m = static_cast<index_t>(perm.size());
-  std::vector<char> done(static_cast<std::size_t>(m), 0);
-  std::vector<T> tmp(static_cast<std::size_t>(n));
-  for (index_t start = 0; start < m; ++start) {
-    if (done[start] || perm[start] == start) {
-      done[start] = 1;
-      continue;
-    }
-    std::copy(x.col(start), x.col(start) + n, tmp.data());
-    index_t j = start;
-    while (true) {
-      done[j] = 1;
-      const index_t src = perm[j];
-      if (src == start) {
-        std::copy(tmp.begin(), tmp.end(), x.col(j));
-        break;
-      }
-      std::copy(x.col(src), x.col(src) + n, x.col(j));
-      j = src;
-    }
-  }
 }
 
 template <class T>
