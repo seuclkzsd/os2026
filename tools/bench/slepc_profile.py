@@ -16,24 +16,34 @@ tools/bench/compare.py --slepc-profile best):
 
 lookup() takes the case's own profile for the core count and target mode, else the class
 "<problem>/<mode>" profile for that core count, else None (= the default configuration). A profile
-is only valid for the core count it was tuned at (the layout is part of it).
+is only valid for the core count it was tuned at (the layout is part of it), and a case's interval
+profile only for the interval it was tuned for ("target"; null = the case config's target). A
+nearest profile serves any k through its k-rules. Class profiles are a heuristic for untuned cases
+(class_profiles): their combination was never measured, so a comparison against one is not a
+comparison against a tuned baseline (tools/bench/compare.py says so in its tables).
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 REPO = Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from tools.run.guard import parse_cpulist  # noqa: E402,F401  (the core-list parser of every bench tool)
+
 REF_ENV = Path(os.environ.get("HS_REF_ENV", Path.home() / "miniconda3/envs/os2026-ref"))
 BASELINE = REPO / "tools/bench/baseline_slepc.py"
 PROFILE_FILE = REPO / "tools/bench/slepc_profiles.json"
 SCHEMA_VERSION = 1
 BINDS = ("none", "core")
+MUMPS = "st_mat_mumps_"     # MUMPS controls of the spectral transform's factorization
 _OPTION_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _K_RULE = re.compile(r"^(\d*)k([+-]\d+)?$")
 
@@ -97,6 +107,18 @@ class SlepcConfig:
 
     def with_layout(self, ranks: int, threads: int, bind: str | None = None) -> "SlepcConfig":
         return SlepcConfig(ranks, threads, self.bind if bind is None else bind, self.options)
+
+    def fitted(self) -> "SlepcConfig":
+        """Copy without the options its layout cannot use: parallel analysis ICNTL(28)/(29) on one
+        rank, and spectrum-slicing partitions that do not divide the rank count (SLEPc rejects them:
+        EPSKrylovSchurSetPartitions 'Argument out of range')."""
+        drop: dict[str, None] = {}
+        if self.ranks == 1:
+            drop.update({MUMPS + "icntl_28": None, MUMPS + "icntl_29": None})
+        parts = self.option("eps_krylovschur_partitions")
+        if parts is not None and (not parts.isdigit() or int(parts) < 1 or self.ranks % int(parts)):
+            drop["eps_krylovschur_partitions"] = None
+        return self.with_options(**drop) if drop else self
 
     def label(self) -> str:
         """Short unique description, e.g. '2x1/core st_mat_mumps_icntl_7=5 eps_ncv=3k'."""
@@ -179,22 +201,50 @@ def upsert(profiles: list[dict[str, Any]], entry: dict[str, Any]) -> list[dict[s
     return [p for p in profiles if (p["scope"], p["name"], p["mode"], p["cores"]) != key] + [entry]
 
 
-def lookup(profiles: list[dict[str, Any]], case_name: str, problem: str, mode: str,
-           cores: int) -> tuple[SlepcConfig, dict[str, Any]] | None:
-    """(config, profile entry) for a case: its own profile, else its class's, else None."""
+def _same_interval(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+    return (a is not None and b is not None and a.get("mode") == "interval" == b.get("mode")
+            and float(a["lower"]) == float(b["lower"]) and float(a["upper"]) == float(b["upper"]))
+
+
+def lookup(profiles: list[dict[str, Any]], case_name: str, problem: str, mode: str, cores: int,
+           target: dict[str, Any] | None = None,
+           config_target: dict[str, Any] | None = None) -> tuple[SlepcConfig, dict[str, Any]] | None:
+    """(config, profile entry) for a case: its own profile, else its class's, else None. With an
+    interval `target` (the run's effective target), a case profile matches only if it was tuned for
+    that interval: its stored "target", or the case's `config_target` when it stored none."""
     for scope, name in (("case", case_name), ("class", class_name(problem, mode))):
         for p in profiles:
-            if p["scope"] == scope and p["name"] == name and p["mode"] == mode and int(p["cores"]) == cores:
-                return SlepcConfig.from_json(p["config"]), p
+            if not (p["scope"] == scope and p["name"] == name and p["mode"] == mode and int(p["cores"]) == cores):
+                continue
+            if scope == "case" and mode == "interval" and target is not None \
+                    and not _same_interval(p.get("target") or config_target, target):
+                continue
+            return SlepcConfig.from_json(p["config"]), p
     return None
+
+
+# Options that only make SLEPc more accurate (tools/bench/tune_slepc.py's accuracy group): a class
+# profile keeps the strictest value any member needed instead of voting them away.
+ACCURACY_OPTIONS = ("eps_nev", "eps_tol")
+
+
+def _strictest(name: str, values: list[str]) -> str:
+    if name == "eps_tol":
+        return min(values, key=float)
+    # eps_nev: the largest padding (k-rules compared at a few k; plain numbers as they are)
+    return max(values, key=lambda v: tuple(int(expand_value(v, k)) for k in (100, 10, 1)))
 
 
 def class_profiles(profiles: list[dict[str, Any]], problems: dict[str, str]) -> list[dict[str, Any]]:
     """Class profiles ("<problem>/<mode>", per core count) from the valid case profiles. problems
-    maps case name -> problem type. Per knob - the layout (ranks, threads, bind) and each option -
-    the value most of the class's cases chose (an option absent in most cases stays at its default);
-    ties go to the case with the largest tuned solver time (where the choice matters most). A
-    heuristic fallback for untuned cases: the combination itself was not measured as a whole."""
+    maps case name -> problem type. The layout (ranks, threads, bind) is the one most of the class's
+    cases chose; each option is voted among the cases with that layout (an option absent in most of
+    them stays at its default), so the options fit the layout they were tuned with; ties go to the
+    case with the largest tuned solver time (where the choice matters most). Accuracy options
+    (ACCURACY_OPTIONS) take the strictest value any case needed, and options the layout cannot use
+    are dropped (SlepcConfig.fitted). A heuristic fallback for untuned cases: the combination itself
+    was not measured as a whole ("validated": false), and nothing guarantees that it passes the
+    evaluation on another case."""
     groups: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
     for p in profiles:
         if p["scope"] == "case" and p.get("tuned", {}).get("valid", False) and p["name"] in problems:
@@ -209,14 +259,18 @@ def class_profiles(profiles: list[dict[str, Any]], problems: dict[str, str]) -> 
             best = max(counts.values())
             return next(v for v in values if counts[v] == best)   # members are ordered by solver time
 
-        ranks, threads, bind = vote([(c.ranks, c.threads, c.bind) for c in cfgs])
-        names = sorted({n for c in cfgs for n, _ in c.options})
+        layout = vote([(c.ranks, c.threads, c.bind) for c in cfgs])
+        same = [c for c in cfgs if (c.ranks, c.threads, c.bind) == layout]
         opts = {}
-        for n in names:
-            v = vote([c.option(n) for c in cfgs])
+        for n in sorted({n for c in same for n, _ in c.options} - set(ACCURACY_OPTIONS)):
+            v = vote([c.option(n) for c in same])
             if v is not None:
                 opts[n] = v
-        out.append({"scope": "class", "name": cname, "mode": mode, "cores": cores,
-                    "config": SlepcConfig.make(ranks, threads, bind, opts).to_json(),
-                    "from_cases": [p["name"] for p in members]})
+        for n in ACCURACY_OPTIONS:
+            needed = [c.option(n) for c in cfgs if c.option(n) is not None]
+            if needed:
+                opts[n] = _strictest(n, needed)
+        cfg = SlepcConfig.make(*layout, opts).fitted()
+        out.append({"scope": "class", "name": cname, "mode": mode, "cores": cores, "config": cfg.to_json(),
+                    "validated": False, "from_cases": [p["name"] for p in members]})
     return out

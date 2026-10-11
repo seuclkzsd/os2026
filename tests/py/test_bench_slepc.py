@@ -3,6 +3,7 @@
 tables. No PETSc needed: everything runs on fixtures (log excerpts captured from real
 baseline_slepc.py runs with PETSc 3.26 / SLEPc 3.26, trimmed) and synthetic documents."""
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -267,6 +268,32 @@ def test_profile_lookup_upsert_and_roundtrip(tmp_path):
         slepc_profile.load_profiles(path)
 
 
+def test_profile_lookup_matches_the_tuned_interval():
+    tuned = {"mode": "interval", "lower": 40, "upper": 200}
+    profiles = [{**_profile("case", "a", mode="interval", ranks=2, eps_krylovschur_nev="60"), "target": tuned},
+                _profile("case", "b", mode="interval", ranks=2, eps_krylovschur_nev="20"),   # tuned on config target
+                _profile("class", "GHEP/interval", mode="interval")]
+    hit = slepc_profile.lookup(profiles, "a", "GHEP", "interval", 2, target={"mode": "interval", "lower": 40.0,
+                                                                              "upper": 200.0})
+    assert hit[1]["scope"] == "case" and hit[0].option("eps_krylovschur_nev") == "60"
+    other = {"mode": "interval", "lower": 1, "upper": 200}
+    assert slepc_profile.lookup(profiles, "a", "GHEP", "interval", 2, target=other)[1]["scope"] == "class"
+    # a profile without a stored target was tuned on the case config's target
+    assert slepc_profile.lookup(profiles, "b", "GHEP", "interval", 2, target=other,
+                                config_target=other)[1]["scope"] == "case"
+    assert slepc_profile.lookup(profiles, "b", "GHEP", "interval", 2, target=tuned,
+                                config_target=other)[1]["scope"] == "class"
+
+
+def test_config_fitted_drops_options_the_layout_cannot_use():
+    c = SlepcConfig.make(1, 2, "none", {"eps_krylovschur_partitions": 2, "st_mat_mumps_icntl_28": 2,
+                                        "st_mat_mumps_icntl_29": 1, "eps_ncv": "2k"})
+    assert c.fitted().label() == "1x2 eps_ncv=2k"
+    four = c.with_layout(4, 1)
+    assert four.fitted() == four                                             # 2 partitions of 4 ranks
+    assert four.with_options(eps_krylovschur_partitions=3).fitted().option("eps_krylovschur_partitions") is None
+
+
 def test_class_profiles_vote():
     profiles = [_profile("case", "a", ranks=2, solver_s=5.0, st_mat_mumps_icntl_7="3", eps_purify="0"),
                 _profile("case", "b", ranks=2, solver_s=1.0, st_mat_mumps_icntl_7="5"),
@@ -278,8 +305,28 @@ def test_class_profiles_vote():
     assert set(by) == {"GHEP/nearest", "HEP/nearest"}
     g = SlepcConfig.from_json(by["GHEP/nearest"]["config"])
     assert (g.ranks, g.threads) == (2, 1)                        # 2 of 3 cases
-    assert g.option("st_mat_mumps_icntl_7") == "5" and g.option("eps_purify") == "0"
+    # options are voted among the cases with that layout (a, b): ties go to the slower case a
+    assert g.option("st_mat_mumps_icntl_7") == "3" and g.option("eps_purify") == "0"
     assert by["GHEP/nearest"]["from_cases"] == ["a", "c", "b"]   # by tuned solver time
+    assert by["GHEP/nearest"]["validated"] is False
+
+
+def test_class_profiles_keep_accuracy_and_fit_the_layout():
+    # accuracy padding one case needed survives the vote (yee-pec-box-1e5 needed eps_nev=k+4)
+    profiles = [_profile("case", "yee", ranks=1, solver_s=7.0, eps_nev="k+4", eps_purify="0"),
+                _profile("case", "ss", ranks=1, solver_s=3.0, eps_ncv="3k", eps_purify="0", eps_nev="k+2"),
+                _profile("case", "cav", ranks=1, solver_s=0.6, eps_purify="0", eps_tol="1e-11")]
+    g = SlepcConfig.from_json(slepc_profile.class_profiles(profiles, dict.fromkeys(("yee", "ss", "cav"), "GHEP"))[0]
+                              ["config"])
+    assert g.label() == "1x2 eps_nev=k+4 eps_purify=0 eps_tol=1e-11"
+    # interval tunings: bound and unbound 2-rank layouts split the layout vote; the 1-rank layout wins
+    # the tie (slowest case) and must not inherit the 2-rank cases' partitions (SLEPc rejects them)
+    inter = [_profile("case", "a", mode="interval", ranks=2, solver_s=1.0, eps_krylovschur_partitions="2"),
+             {**_profile("case", "b", mode="interval", ranks=2, solver_s=2.0, eps_krylovschur_partitions="2"),
+              "config": SlepcConfig.make(2, 1, "core", {"eps_krylovschur_partitions": "2"}).to_json()},
+             _profile("case", "c", mode="interval", ranks=1, solver_s=3.0)]
+    g = SlepcConfig.from_json(slepc_profile.class_profiles(inter, dict.fromkeys("abc", "GHEP"))[0]["config"])
+    assert g.label() == "1x2"
 
 
 # --------------------------------------------------------------------------------- tune_slepc
@@ -435,6 +482,112 @@ def test_tune_trial_time_prefers_log_view():
     assert tune_slepc.trial_time({"phases": {"solver_s": 1.5}, "report": {"time_setup_s": 1, "time_solve_s": 2}}) == 1.5
     assert tune_slepc.trial_time({"phases": None, "report": {"time_setup_s": 1, "time_solve_s": 2}}) == 3
     assert tune_slepc.trial_time({"phases": None, "report": None}) is None
+
+
+def test_tune_random_failures_and_flaky_profiles():
+    trials = [{**_trial(0, 1.0), "label": "a"}, {**_trial(1, 1.0, valid=False), "label": "a"},
+              {**_trial(2, 1.0, valid=False), "label": "b"}, {**_trial(3, 1.0), "label": "c"}]
+    assert tune_slepc.random_failures(trials) == ["a"]                # b fails every time: not random
+    best = SlepcConfig(2, 1)
+    doc = {"case": "c1", "mode": "nearest", "ncores": 2, "target_override": None, "tag": "t", "date": "d", "host": "h",
+           "best": best.label(), "best_config": best.to_json(), "default_median_s": 2.0, "default_valid": True,
+           "speedup_vs_default": 2.0, "trials": trials,
+           "confirmation": {"configs": {best.label(): tune_slepc.aggregate([_trial(4, 1.0)])}}}
+    assert tune_slepc.profile_entry(doc)["tuned"]["flaky"] is True    # derived from the trials of old documents
+    assert tune_slepc.profile_entry({**doc, "trials": trials[2:]})["tuned"]["flaky"] is False
+
+
+class _SyntheticTuner(tune_slepc.Tuner):
+    """Tuner whose trials are synthetic: model(cfg, n) -> (solver time, valid) for the n-th run of cfg."""
+
+    def __init__(self, model, case_name, args):
+        super().__init__(case_name, args, None)
+        self.model = model
+        self.dir = Path(args.root) / "tune"      # keep tune.json out of the repository
+
+    def measure(self, cfg, phase, timeout, tid):
+        t, ok = self.model(cfg, len(self.cache.get(cfg.label(), [])))
+        return {"id": tid, "phase": phase, "label": cfg.label(), "config": cfg.to_json(),
+                "guard": {"returncode": 0, "killed": None, "wall_s": t + 2.0, "peak_rss_gib": 0.1},
+                "report": {"unused_options": [], "success": ok, "peak_rss_bytes": 2**20},
+                "phases": {"solver_s": t, "solves": 10},
+                "eval": {"verdict": "pass" if ok else "fail", "reasons": [] if ok else ["2 missing"], "max_eta": 1e-13}}
+
+
+def _tuner_args(tmp_path, *extra):
+    cio.save_case("tiny", sp.diags(np.arange(1.0, 9.0)).tocsr(), sp.identity(8, format="csr"),
+                  meta={"family": "test", "problem": "GHEP"}, config=cio.default_config(0.0, 2), root=tmp_path)
+    return tune_slepc.build_parser().parse_args(["tiny", "--root", str(tmp_path), "--cores", "40,41",
+                                                 "--profiles-file", str(tmp_path / "profiles.json"), *extra])
+
+
+def _speed_model(cfg, n):
+    """2x1 beats 1x2, AMF beats the other orderings, no purification saves time; BLR 1e-12 is a bit
+    faster but fails every 4th run (like wg-square-1e5), BLR 1e-10 always fails; the rest is slower."""
+    t, known = 2.0, {"st_mat_mumps_icntl_7", "st_mat_mumps_icntl_35", "st_mat_mumps_cntl_7", "eps_purify"}
+    t -= 0.4 if cfg.ranks == 2 else 0.0
+    t -= 0.5 if cfg.option("st_mat_mumps_icntl_7") == "2" else 0.0
+    t += 0.3 if cfg.option("st_mat_mumps_icntl_7") not in (None, "2") else 0.0
+    t -= 0.2 if cfg.option("eps_purify") == "0" else 0.0
+    t += 0.3 * len({n for n, _ in cfg.options} - known)
+    if cfg.option("st_mat_mumps_icntl_35"):
+        return t - 0.1, cfg.option("st_mat_mumps_cntl_7") == "1e-12" and n % 4 != 3
+    return t, True
+
+
+def test_tune_descent_and_flaky_confirmation(tmp_path):
+    tuner = _SyntheticTuner(_speed_model, "tiny", _tuner_args(tmp_path, "--confirm-reps", "5"))
+    assert not tuner.flaky
+    doc = tuner.tune()
+    groups = [d["group"] for d in doc["decisions"]]
+    # accuracy skipped (the default is valid), icntl_48 has no candidate on 1-thread ranks, GHEP: no problem_type
+    assert groups == ["default", "layout", "ordering", "layout2", "icntl_58", "icntl_13", "icntl_8", "blr", "ncv",
+                      "restart", "purify", "prune"]
+    by = {d["group"]: d for d in doc["decisions"]}
+    assert by["layout"]["incumbent"] == "2x1" and by["ordering"]["incumbent"] == "2x1 st_mat_mumps_icntl_7=2"
+    assert not by["icntl_58"]["moved"] and not by["layout2"]["moved"]
+    blr = "2x1 st_mat_mumps_cntl_7=1e-12 st_mat_mumps_icntl_35=2 st_mat_mumps_icntl_7=2"
+    assert by["blr"]["moved"] and by["blr"]["incumbent"] == blr     # its single screening run passed
+    inc = "2x1 eps_purify=0 st_mat_mumps_cntl_7=1e-12 st_mat_mumps_icntl_35=2 st_mat_mumps_icntl_7=2"
+    assert by["purify"]["incumbent"] == inc and by["prune"]["incumbent"] == inc   # dropping BLR is 12 % slower
+    conf = doc["confirmation"]
+    assert list(conf["configs"])[:2] == ["1x2", inc]
+    # BLR failed its 4th run: the case fails at random, so every configuration still valid got 20 runs
+    assert doc["flaky"] and inc in doc["random_failures"] and not conf["configs"][inc]["valid"]
+    assert conf["extended"] and all(conf["configs"][c]["n"] == 20 and conf["configs"][c]["valid"]
+                                    for c in conf["extended"])
+    assert doc["best"] == "2x1 eps_purify=0 st_mat_mumps_icntl_7=2" and doc["default_valid"]
+    assert tune_slepc.profile_entry(doc)["tuned"]["flaky"]
+    assert json.loads((tmp_path / "tune" / "tune.json").read_text())["best"] == doc["best"]
+
+
+def test_tune_accuracy_group_only_while_invalid(tmp_path):
+    def model(cfg, n):   # valid only with eps_nev padding; the larger padding costs more
+        return 2.0 + (0.1 if cfg.option("eps_nev") == "k+4" else 0.0) + (0.1 if cfg.option("eps_tol") else 0.0), \
+            cfg.option("eps_nev") is not None
+    tuner = _SyntheticTuner(model, "tiny", _tuner_args(tmp_path, "--groups", "accuracy,purify",
+                                                       "--confirm-reps", "2"))
+    doc = tuner.tune()
+    assert [d["group"] for d in doc["decisions"]] == ["default", "accuracy", "purify"]
+    assert doc["decisions"][1]["incumbent"] == "1x2 eps_nev=k+2"
+    assert not doc["default_valid"] and doc["best"] == "1x2 eps_nev=k+2"
+    assert not doc["flaky"] and not doc["confirmation"]["extended"]   # failing every time is not random
+    assert all(s["n"] == 2 for s in doc["confirmation"]["configs"].values())
+
+
+def test_tune_confirmation_includes_the_stored_profile_and_its_flaky_flag(tmp_path):
+    args = _tuner_args(tmp_path, "--groups", "ncv", "--from-profile", "--confirm-reps", "2",
+                       "--flaky-confirm-reps", "3", "--confirm-top", "1")
+    stored = SlepcConfig.make(2, 1, "none", {"st_mat_mumps_icntl_7": "2"})
+    slepc_profile.save_profiles([{**_profile("case", "tiny", ranks=2), "config": stored.to_json(),
+                                  "tuned": {"valid": True, "solver_s": 1.0, "flaky": True}}], args.profiles_file)
+    tuner = _SyntheticTuner(lambda cfg, n: (_speed_model(cfg, n)[0], True), "tiny", args)
+    assert tuner.flaky                                  # recorded by the earlier tuning
+    doc = tuner.tune()
+    conf = doc["confirmation"]
+    assert conf["start"] == stored.label() and stored.label() in conf["configs"]
+    # the stored flag alone extends the confirmation of every valid configuration
+    assert all(s["n"] == 3 for s in conf["configs"].values()) and len(conf["configs"]) == 3
 
 
 # ------------------------------------------------------------------------------------ compare

@@ -7,9 +7,14 @@ Search space (SlepcConfig, tools/bench/slepc_profile.py) - greedy coordinate des
 untuned default (1 rank x P threads, SLEPc/MUMPS defaults); each group's candidates are measured
 against the incumbent, which moves to the fastest VALID one if it is faster by more than --margin:
   accuracy   only while the incumbent is invalid: -eps_tol tol/10, -eps_nev k+2 / k+4,
-             -eps_ncv 3k, and tol/10 with k+4 (SLEPc's EPS_CONV_NORM uses ||.||_inf, an upper
-             bound of ||.||_2, so a pair it accepts can fail tools/eval's conservative test, and
-             single-vector Krylov can miss copies of a multiple eigenvalue)
+             -eps_ncv 3k, and tol/10 with k+4. SLEPc's convergence test judges the Krylov
+             residual estimate of the shift-inverted operator, and the true residual of a pair it
+             accepts can exceed tol: baseline_slepc.py's EPSComputeError then rejects it as well
+             (24 of the 25 backward-error failures of the 2-core tuning), so a tighter -eps_tol is
+             the remedy. The ||.||_inf norm of EPS_CONV_NORM (an upper bound of ||.||_2) makes the
+             test more lenient than tools/eval's only by ||A||_inf/||A||_2, about 1.3x on
+             yee-pec-box-1e5. Single-vector Krylov can also miss copies of a multiple eigenvalue
+             (the -eps_nev padding).
   layout     ranks x threads over the divisors of P (1xP, ..., Px1), --bind-to none | core
   ordering   MUMPS ICNTL(7) AMD/AMF/SCOTCH/PORD/METIS/QAMD (default 7 = automatic choice), and
              with >1 rank parallel analysis ICNTL(28)=2 with ICNTL(29) PT-SCOTCH / ParMETIS
@@ -31,9 +36,16 @@ the tuner only tightens it (-eps_tol) when that is needed to pass the evaluation
 Metric: the solver time setup + solve + eigenvector computation from -log_view
 (tools/bench/slepc_log.py), the same scope as hsolve's time_total_s; MPI/Python start-up and case
 loading are excluded. Screening runs each configuration --screen-reps times (min); the final
-confirmation runs the default, the best and up to --confirm-top runners-up --confirm-reps times
-INTERLEAVED (rotating order) and compares MEDIANS; a configuration is valid only if every
-confirmation run passes the evaluation.
+confirmation runs the default, the descent's start (--from-profile: the stored profile), the best
+and up to --confirm-top runners-up --confirm-reps times INTERLEAVED (rotating order) and compares
+MEDIANS; a configuration is valid only if every confirmation run passes the evaluation.
+Randomly failing cases: when a configuration of the case was valid in some runs and invalid in
+others - in this tuning, or recorded as "flaky" in the case's stored profile (multi-rank MUMPS is
+not deterministic; SLEPc's GHIEP Krylov-Schur on wg-square-1e5 misses eigenvalues in some runs) -
+every configuration still valid after the regular confirmation gets further interleaved runs up to
+--flaky-confirm-reps (default 20), all of which it must pass. 5 passing runs cannot tell a
+configuration that fails in a quarter of its runs from a sound one (it passes 5 of 5 with
+probability 0.24); 20 can (0.003).
 
 Every trial runs under tools/run/guard.py (nested: the tuner itself must run under guard, it
 evaluates results in-process with the case norms estimated once). Output:
@@ -70,22 +82,13 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 from tools.bench import slepc_log  # noqa: E402
-from tools.bench.slepc_profile import (PROFILE_FILE, SlepcConfig, class_profiles, default_config,  # noqa: E402
-                                       expand_value, load_profiles, mpiexec_command, save_profiles, upsert)
+from tools.bench.slepc_profile import (MUMPS, PROFILE_FILE, SlepcConfig, class_profiles,  # noqa: E402
+                                       default_config, expand_value, load_profiles, lookup, mpiexec_command,
+                                       parse_cpulist, save_profiles, upsert)
 
 GUARD = REPO / "tools/run/guard.py"
 ORDERINGS = {"0": "AMD", "2": "AMF", "3": "SCOTCH", "4": "PORD", "5": "METIS", "6": "QAMD"}
 PAR_ORDERINGS = {"1": "PT-SCOTCH", "2": "ParMETIS"}
-MUMPS = "st_mat_mumps_"
-
-
-def parse_cores(spec: str) -> list[int]:
-    out: list[int] = []
-    for part in spec.split(","):
-        if part.strip():
-            a, _, b = part.partition("-")
-            out += list(range(int(a), int(b or a) + 1))
-    return sorted(set(out))
 
 
 def layouts(cores: int) -> list[tuple[int, int, str]]:
@@ -124,16 +127,8 @@ def g_accuracy(inc: SlepcConfig, ctx: Context) -> list[SlepcConfig]:
 
 
 def g_layout(inc: SlepcConfig, ctx: Context) -> list[SlepcConfig]:
-    out = []
-    for r, t, b in layouts(ctx.cores):
-        c = inc.with_layout(r, t, b)
-        if r == 1:   # parallel analysis / partitions need several ranks: drop them, not the layout
-            c = c.with_options(**{MUMPS + "icntl_28": None, MUMPS + "icntl_29": None,
-                                  "eps_krylovschur_partitions": None})
-        elif inc.option("eps_krylovschur_partitions") and r % int(inc.option("eps_krylovschur_partitions")):
-            c = c.with_options(eps_krylovschur_partitions=None)
-        out.append(c)
-    return out
+    # parallel analysis / partitions the layout cannot use are dropped, not the layout
+    return [inc.with_layout(r, t, b).fitted() for r, t, b in layouts(ctx.cores)]
 
 
 def g_ordering(inc: SlepcConfig, ctx: Context) -> list[SlepcConfig]:
@@ -269,6 +264,7 @@ class Tuner:
         self.cio, self.evaluate = cio, evaluate
         self.args = args
         c = cio.load_case(case_name, root=args.root)
+        self.config_target = dict(c.config.get("target", {}))
         if target_override is not None:
             c = dataclasses.replace(c, config={**c.config, "target": target_override})
         self.case = c
@@ -276,12 +272,15 @@ class Tuner:
         self.mode = tgt.get("mode", "nearest")
         self.target = tgt
         self.target_override = target_override
-        self.ctx = Context(cores=len(parse_cores(args.cores)), problem=c.meta["problem"], mode=self.mode,
+        self.ctx = Context(cores=len(parse_cpulist(args.cores)), problem=c.meta["problem"], mode=self.mode,
                            k=int(tgt["k"]) if self.mode == "nearest" else None,
                            tol=float(c.config.get("tol", 1e-10)))
         self.dir = REPO / "results/raw" / args.tag / (case_name + ("" if self.mode == "nearest" else f"@{self.mode}"))
         self.trials: list[dict[str, Any]] = []
         self.cache: dict[str, list[dict[str, Any]]] = {}
+        stored = self.stored_profile()
+        # random failures recorded by an earlier tuning of this case: confirm with the long series at once
+        self.flaky = bool(stored and stored[1].get("tuned", {}).get("flaky"))
         t0 = time.perf_counter()
         self.norms = evaluate.estimate_norms(c.A, c.B)
         self.norm_time = time.perf_counter() - t0
@@ -290,8 +289,22 @@ class Tuner:
         print(f"[tune {self.case.name}] {msg}", flush=True)
 
     def run(self, cfg: SlepcConfig, phase: str, timeout: float) -> dict[str, Any]:
-        """One guarded, evaluated baseline run of cfg."""
-        tid = len(self.trials)
+        """One measured trial of cfg (measure()), judged (validity()) and recorded."""
+        t = self.measure(cfg, phase, timeout, len(self.trials))
+        t["valid"], t["why"] = self.validity(t)
+        t["solver_s"] = trial_time(t)
+        self.trials.append(t)
+        self.cache.setdefault(t["label"], []).append(t)
+        ph = t["phases"] or {}
+        self.log(f"#{t['id']:03d} {phase:12s} {t['label']:70s} solver={_fmt(t['solver_s'])} "
+                 f"ana={_fmt(ph.get('analysis_s'))} num={_fmt(ph.get('numeric_s'))} "
+                 f"solves={ph.get('solves')}/{_fmt(ph.get('solve_s'))} wall={t['guard'].get('wall_s')} "
+                 f"{'VALID' if t['valid'] else 'invalid: ' + str(t['why'])}")
+        self.save()
+        return t
+
+    def measure(self, cfg: SlepcConfig, phase: str, timeout: float, tid: int) -> dict[str, Any]:
+        """One guarded, evaluated baseline run of cfg: the trial record before its verdict."""
         tdir = self.dir / "trials" / f"{tid:03d}"
         if tdir.exists():
             shutil.rmtree(tdir)
@@ -308,8 +321,7 @@ class Tuner:
                                                                        "killed": "no guard summary"}
         t: dict[str, Any] = {"id": tid, "phase": phase, "label": cfg.label(), "config": cfg.to_json(),
                              "guard": {k: guard.get(k) for k in ("returncode", "killed", "wall_s", "peak_rss_gib")},
-                             "report": None, "phases": slepc_log.read_phases(log_path), "eval": None,
-                             "valid": False, "why": None}
+                             "report": None, "phases": slepc_log.read_phases(log_path), "eval": None}
         if (res / "report.json").exists():
             rep = json.loads((res / "report.json").read_text())
             t["report"] = {k: rep.get(k) for k in ("time_setup_s", "time_solve_s", "time_eps_solve_s", "time_vectors_s",
@@ -325,16 +337,6 @@ class Tuner:
             if not self.args.keep_vectors:
                 for f in ("eigenvectors.npy", "complex_eigenvectors.npy"):
                     (res / f).unlink(missing_ok=True)
-        t["valid"], t["why"] = self.validity(t)
-        t["solver_s"] = trial_time(t)
-        self.trials.append(t)
-        self.cache.setdefault(t["label"], []).append(t)
-        ph = t["phases"] or {}
-        self.log(f"#{tid:03d} {phase:12s} {t['label']:70s} solver={_fmt(t['solver_s'])} "
-                 f"ana={_fmt(ph.get('analysis_s'))} num={_fmt(ph.get('numeric_s'))} "
-                 f"solves={ph.get('solves')}/{_fmt(ph.get('solve_s'))} wall={guard.get('wall_s')} "
-                 f"{'VALID' if t['valid'] else 'invalid: ' + str(t['why'])}")
-        self.save()
         return t
 
     def validity(self, t: dict[str, Any]) -> tuple[bool, str | None]:
@@ -405,43 +407,71 @@ class Tuner:
                               "incumbent": inc["config"].label(), "time": inc["time"], "valid": inc["valid"],
                               "moved": moved})
             self.log(f"group {name}: {'-> ' if moved else 'keep '}{inc['config'].label()} ({_fmt(inc['time'])})")
-        confirm = self.confirm(default, inc, screened)
+        confirm = self.confirm(default, inc, screened, start)
         return self.summary(default, decisions, confirm)
 
+    def stored_profile(self) -> tuple[SlepcConfig, dict[str, Any]] | None:
+        """The case's own stored profile for this core count and target (None without one)."""
+        hit = lookup(load_profiles(self.args.profiles_file), self.case.name, self.ctx.problem, self.mode,
+                     self.ctx.cores, target=self.target, config_target=self.config_target)
+        return hit if hit is not None and hit[1]["scope"] == "case" else None
+
     def start_config(self) -> SlepcConfig | None:
-        """--from-profile: the case's stored profile for this core count and target mode."""
+        """--from-profile: the case's stored profile for this core count and target."""
         if not self.args.from_profile:
             return None
-        from tools.bench.slepc_profile import lookup
-        hit = lookup(load_profiles(self.args.profiles_file), self.case.name, self.ctx.problem, self.mode,
-                     self.ctx.cores)
-        if hit is None or hit[1]["scope"] != "case":
+        hit = self.stored_profile()
+        if hit is None:
             self.log("no stored case profile: starting from the default")
             return None
         return hit[0]
 
-    def confirm(self, default: SlepcConfig, inc: dict[str, Any], screened: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        """Interleaved repetitions of default, best and runners-up; medians decide."""
+    def confirm(self, default: SlepcConfig, inc: dict[str, Any], screened: dict[str, dict[str, Any]],
+                start: SlepcConfig | None = None) -> dict[str, Any]:
+        """Interleaved repetitions of the default, the start, the best and the runners-up; medians
+        decide. A configuration is valid only if all its runs of this tuning (screening included)
+        passed. A randomly failing case (self.flaky, or observed here) extends the series of every
+        configuration still valid to --flaky-confirm-reps runs."""
         args = self.args
+        fixed: list[SlepcConfig] = []
+        for c in (default, start, inc["config"]):
+            if c is not None and c.label() not in {u.label() for u in fixed}:
+                fixed.append(c)
         pool = sorted((r for r in screened.values() if r["valid"]), key=lambda r: r["time"])
-        cands = [default, inc["config"]] + [r["config"] for r in pool]
-        uniq: list[SlepcConfig] = []
-        for c in cands:
-            if c.label() not in {u.label() for u in uniq}:
-                uniq.append(c)
-        uniq = uniq[:2 + args.confirm_top]
+        runners = [r["config"] for r in pool if r["config"].label() not in {u.label() for u in fixed}]
+        uniq = fixed + runners[:args.confirm_top]
         timeout = min(args.timeout, max(args.min_trial_timeout,
                                         args.timeout_factor * max(screened[c.label()]["wall"] or 0 for c in uniq)))
         runs: dict[str, list[dict[str, Any]]] = {c.label(): [] for c in uniq}
-        for rep in range(args.confirm_reps):
-            order = uniq[rep % len(uniq):] + uniq[:rep % len(uniq)]
-            for c in order:
-                runs[c.label()].append(self.run(c, f"confirm{rep}", timeout))
+        self.interleave(uniq, 0, args.confirm_reps, runs, timeout)
+        if random_failures(self.trials):
+            self.flaky = True
+        extended: list[SlepcConfig] = []
+        if self.flaky and args.flaky_confirm_reps > args.confirm_reps:
+            extended = [c for c in uniq if all(t["valid"] for t in self.cache[c.label()])]
+            if extended:
+                self.log(f"random failures: {len(extended)} configuration(s) to {args.flaky_confirm_reps} runs")
+                self.interleave(extended, args.confirm_reps, args.flaky_confirm_reps, runs, timeout)
         stats = {}
         for c in uniq:
-            rs = runs[c.label()]
-            stats[c.label()] = {"config": c.to_json(), **aggregate(rs)}
-        return {"configs": stats, "best": choose_best(stats, args.margin), "default": default.label()}
+            st = {"config": c.to_json(), **aggregate(runs[c.label()])}
+            every = self.cache[c.label()]
+            if not all(t["valid"] for t in every):     # e.g. failed its screening run
+                st["valid"] = False
+                st["invalid_reasons"] = sorted({t["why"] for t in every if not t["valid"] and t["why"]})
+            st["runs_total"] = len(every)
+            stats[c.label()] = st
+        return {"configs": stats, "best": choose_best(stats, args.margin), "default": default.label(),
+                "start": start.label() if start is not None else None,
+                "extended": [c.label() for c in extended]}
+
+    def interleave(self, cfgs: list[SlepcConfig], first: int, stop: int, runs: dict[str, list[dict[str, Any]]],
+                   timeout: float) -> None:
+        """Confirmation repetitions first..stop-1 of cfgs, in rotating order."""
+        for rep in range(first, stop):
+            order = cfgs[rep % len(cfgs):] + cfgs[:rep % len(cfgs)]
+            for c in order:
+                runs[c.label()].append(self.run(c, f"confirm{rep}", timeout))
 
     def summary(self, default: SlepcConfig, decisions: list[dict[str, Any]], confirm: dict[str, Any]) -> dict[str, Any]:
         doc = {"case": self.case.name, "problem": self.ctx.problem, "mode": self.mode, "target": self.target,
@@ -449,6 +479,8 @@ class Tuner:
                "tol": self.ctx.tol, "n": self.case.n, "tag": self.args.tag,
                "date": datetime.datetime.now().isoformat(timespec="seconds"), "host": os.uname().nodename,
                "screen_reps": self.args.screen_reps, "confirm_reps": self.args.confirm_reps,
+               "flaky_confirm_reps": self.args.flaky_confirm_reps, "flaky": self.flaky,
+               "random_failures": random_failures(self.trials),
                "margin": self.args.margin, "default": default.label(),
                "decisions": decisions, "confirmation": confirm, "trials": self.trials}
         apply_best(doc, confirm["best"])
@@ -461,6 +493,14 @@ class Tuner:
         if doc is None:
             doc = {"case": self.case.name, "mode": self.mode, "in_progress": True, "trials": self.trials}
         path.write_text(json.dumps(doc, indent=1) + "\n")
+
+
+def random_failures(trials: list[dict[str, Any]]) -> list[str]:
+    """Labels of the configurations that were valid in some trials and invalid in others."""
+    seen: dict[str, set[bool]] = {}
+    for t in trials:
+        seen.setdefault(t["label"], set()).add(bool(t["valid"]))
+    return sorted(label for label, v in seen.items() if len(v) == 2)
 
 
 def choose_best(stats: dict[str, dict[str, Any]], margin: float) -> str | None:
@@ -549,10 +589,13 @@ def report_markdown(docs: list[dict[str, Any]]) -> str:
             f"{_fmt(ph['ortho_s'])} | yes |")
     lines += ["", "Confirmation runs (interleaved; median [min-max] solver time, s):", ""]
     for d in docs:
-        lines.append(f"- **{d['case']}** ({d['confirm_reps']} reps): " + "; ".join(
-            f"`{label}` {_fmt(s['median_s'])} [{_fmt(s['min_s'])}-{_fmt(s['max_s'])}]"
-            f"{'' if s['valid'] else ' INVALID (' + '; '.join(s['invalid_reasons'])[:120] + ')'}"
-            for label, s in d["confirmation"]["configs"].items()))
+        flaky = d.get("random_failures") or []
+        note = f", randomly failing: {len(flaky)} configuration(s) valid in some runs only" if flaky else ""
+        lines.append(f"- **{d['case']}** ({d['confirm_reps']} reps{note}): "
+                     + "; ".join(
+                         f"`{label}` {_fmt(s['median_s'])} [{_fmt(s['min_s'])}-{_fmt(s['max_s'])}] ({s['n']} runs)"
+                         f"{'' if s['valid'] else ' INVALID (' + '; '.join(s['invalid_reasons'])[:120] + ')'}"
+                         for label, s in d["confirmation"]["configs"].items()))
     return "\n".join(lines) + "\n"
 
 
@@ -577,6 +620,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--screen-reps", type=int, default=1)
     ap.add_argument("--confirm-reps", type=int, default=5)
     ap.add_argument("--confirm-top", type=int, default=2, help="runners-up in the confirmation")
+    ap.add_argument("--flaky-confirm-reps", type=int, default=20,
+                    help="confirmation runs per configuration of a randomly failing case (docstring)")
     ap.add_argument("--margin", type=float, default=0.03, help="relative gain a candidate needs to replace the incumbent")
     ap.add_argument("--keep-vectors", action="store_true", help="keep eigenvectors.npy of every trial")
     ap.add_argument("--groups", default=None, help="comma list: run only these search groups (see plan())")
@@ -597,12 +642,13 @@ def profile_entry(doc: dict[str, Any]) -> dict[str, Any] | None:
     if not doc.get("best"):
         return None
     best = doc["confirmation"]["configs"][doc["best"]]
+    flaky = bool(doc.get("flaky")) or bool(random_failures(doc.get("trials", [])))
     return {"scope": "case", "name": doc["case"], "mode": doc["mode"], "cores": doc["ncores"],
             "target": doc["target_override"], "config": doc["best_config"],
             "tuned": {"tag": doc["tag"], "date": doc["date"], "host": doc["host"], "valid": True,
                       "solver_s": best["median_s"], "default_solver_s": doc["default_median_s"],
                       "default_valid": doc["default_valid"], "speedup_vs_default": doc["speedup_vs_default"],
-                      "reps": best["n"], "phases": best["phases"]}}
+                      "reps": best["n"], "flaky": flaky, "phases": best["phases"]}}
 
 
 def update_profiles(path: str, docs: list[dict[str, Any]], root: str) -> None:
