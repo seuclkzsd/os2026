@@ -223,9 +223,10 @@ class SparseFactorization {
 
   /// Inertia of the last factorized K: neg = INFOG(12), zero = null pivots (both halved, zero
   /// rounded up, for complex T), pos = n - neg - zero, valid = (last factorize() succeeded, i.e.
-  /// no null pivots). With Single or BLR it is the inertia of the rounded / compressed matrix,
-  /// exact only when no eigenvalue lies within that perturbation of the shift (compute_inertia
-  /// always factorizes in double precision without BLR).
+  /// no null pivots, and its factors were not released since: valid <=> solve() works). With
+  /// Single or BLR it is the inertia of the rounded / compressed matrix, exact only when no
+  /// eigenvalue lies within that perturbation of the shift (compute_inertia always factorizes in
+  /// double precision without BLR).
   virtual Inertia inertia() const = 0;
 
   /// Toggle out-of-core storage of the factors; takes effect at the next factorize().
@@ -233,9 +234,11 @@ class SparseFactorization {
 
   /// Frees the numerical factors and their workspace but keeps the analysis (MUMPS JOB=-4), e.g.
   /// to count inertia with an InertiaCounter without holding both in memory. Afterwards solve()
-  /// throws Internal until the next successful factorize(); inertia() and stats() keep describing
-  /// the last factorization. Returns true if memory was released (false: nothing to release, or
-  /// a backend without this feature).
+  /// throws Internal until the next successful factorize(), and inertia().valid is false (it is
+  /// the "usable factorization" test of ShiftInvertOperator and the driver), while inertia()'s
+  /// counts and stats() keep describing the released factorization: copy inertia() before
+  /// releasing if its certified counts are still needed. Returns true if memory was released
+  /// (false: nothing to release - inertia() unchanged - or a backend without this feature).
   virtual bool release_factors() { return false; }
 
   /// Toggle null-pivot detection (ICNTL(24)/CNTL(3), default on); takes effect at the next

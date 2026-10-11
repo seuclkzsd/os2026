@@ -22,6 +22,7 @@
 #include "factor/mumps_factorization.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
+#include "hsolve/operator.hpp"
 #include "hsolve/sparse.hpp"
 #include "linalg/dense_ops.hpp"
 #include "support/fixtures.hpp"
@@ -380,12 +381,19 @@ TYPED_TEST(FactorDiscard, ReleasedFactorsRefactorizeFromTheSameAnalysis) {
   EXPECT_FALSE(f->release_factors());  // already released
   std::vector<T> b(static_cast<std::size_t>(n), T(1));
   EXPECT_EQ(error_code_of([&] { f->solve(b.data(), 1, n); }), hs::Error::Code::Internal);
-  EXPECT_EQ(f->inertia().neg, neg);  // still describes the last factorization
+  // inertia().valid is the "solve() works" test of other modules (ShiftInvertOperator, the
+  // driver's rescue): false now, while the counts still describe the released factorization.
+  EXPECT_FALSE(f->inertia().valid);
+  EXPECT_EQ(f->inertia().neg, neg);
+  EXPECT_EQ(error_code_of([&] { hs::ShiftInvertOperator<T> op(*f, pencil, shifts[0]); }),
+            hs::Error::Code::InvalidInput);
 
   InertiaCounter<T> counter(*f, {});
   expect_exact_counts(counter, w, shifts);
 
   ASSERT_TRUE(f->factorize(1.0, -shifts[0]));
+  EXPECT_TRUE(f->inertia().valid);
+  hs::ShiftInvertOperator<T> op(*f, pencil, shifts[0]);  // accepted again
   std::vector<T> x2(static_cast<std::size_t>(n), T(1));
   f->solve(x2.data(), 1, n);
   for (index_t i = 0; i < n; ++i) EXPECT_NEAR(std::abs(x2[i] - x1[i]), 0.0, 1e-12 * std::abs(x1[i]));

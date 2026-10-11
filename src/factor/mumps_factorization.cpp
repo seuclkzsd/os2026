@@ -274,6 +274,10 @@ bool MumpsFactorization<T, U>::release_factors() {
   if (info1 < 0) throw_mumps_error("release of the factors (JOB=-4)", info1, mumps_.infog(2));
   holds_factors_ = false;
   factorized_ = false;
+  // inertia().valid is what other modules test for "solve() works" (ShiftInvertOperator's
+  // constructor, the driver's rescue path): it must not stay true without factors. The counts
+  // keep describing the released factorization.
+  inertia_.valid = false;
   return true;
 }
 
