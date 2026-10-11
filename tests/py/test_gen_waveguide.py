@@ -17,7 +17,7 @@ from tools.gen import waveguide as wg
 K0 = wg.wavenumber(50.0)          # 10 mm square guide at 50 GHz: the competition's real case
 A_MM = B_MM = 10.0
 # Slab-loaded test guides: (eps_r, mu_r, width mm, top of the low block of modes compared, mm^-2).
-SLABS = {"slab": (2.25, 1.0, 5.0, -0.15)}
+SLABS = {"slab": (2.25, 1.0, 5.0, -0.15), "magnetic": (4.0, 2.0, 3.0, -5.3)}
 
 
 def _disc(nx, *, eps=1.0, family="waveguide", **kw):
@@ -204,10 +204,10 @@ def _max_errors(family, levels, **kw):
     return np.array(errors), np.array(bounds)
 
 
-@pytest.mark.parametrize("family", ["hollow", "slab", "cavity", "tm"])
+@pytest.mark.parametrize("family", ["hollow", "slab", "magnetic", "cavity", "tm"])
 def test_convergence_is_second_order(family):
-    """-lambda -> beta^2 (waveguide, hollow and slab-loaded) and kc^2 (cavity = TE family, P1 TM
-    family) at O(h^2)."""
+    """-lambda -> beta^2 (waveguide: hollow, dielectric slab, magnetic slab with mu_r = 2) and
+    kc^2 (cavity = TE family, P1 TM family) at O(h^2)."""
     err, slack = _max_errors(family, (16, 32, 64))
     ratios = err[:-1] / err[1:]
     assert np.all(err[1:] < err[:-1])
@@ -215,7 +215,7 @@ def test_convergence_is_second_order(family):
     assert np.all(slack > 0)                      # the a-priori bound holds on every level
 
 
-@pytest.mark.parametrize("family", ["hollow", "slab", "cavity", "tm"])
+@pytest.mark.parametrize("family", ["hollow", "slab", "magnetic", "cavity", "tm"])
 @pytest.mark.parametrize("pattern,perturb", [("diagonal", 0.0), ("unionjack", 0.24)])
 def test_error_bound_holds_on_other_meshes(family, pattern, perturb):
     _, slack = _max_errors(family, (16, 32), pattern=pattern, perturb=perturb, seed=5)
@@ -245,11 +245,24 @@ def test_slab_modes_reduce_to_hollow_and_scan_misses_no_root():
         assert min(coarse.values()) > -K0 * K0 * eps * mu                 # Rayleigh bound
 
 
-def test_fully_filled_guide_matches_scaled_hollow_guide():
-    """slab_width = a: homogeneous eps, so beta^2 = eps k0^2 - kc^2."""
-    filled = wg.slab_guide_modes(A_MM, B_MM, K0, A_MM, 2.25, 1.0, 0.0)
-    kc2 = wg.rectangle_cutoffs(A_MM, B_MM, 2.25 * K0 * K0, tm=True)
-    assert np.allclose(sorted(m.value for m in filled), sorted(m.value - 2.25 * K0 * K0 for m in kc2))
+@pytest.mark.parametrize("eps,mu", [(2.25, 1.0), (1.0, 3.0), (2.0, 1.5)])
+def test_fully_filled_guide_matches_scaled_hollow_guide(eps, mu):
+    """slab_width = a: homogeneous eps, mu, so beta^2 = eps mu k0^2 - kc^2."""
+    filled = wg.slab_guide_modes(A_MM, B_MM, K0, A_MM, eps, mu, 0.0)
+    kc2 = wg.rectangle_cutoffs(A_MM, B_MM, eps * mu * K0 * K0, tm=True)
+    assert np.allclose(sorted(m.value for m in filled), sorted(m.value - eps * mu * K0 * K0 for m in kc2))
+
+
+@pytest.mark.parametrize("eps,mu", [(2.25, 1.0), (1.0, 3.0), (2.0, 1.5)])
+def test_filled_guide_pencil_is_scaled_hollow_pencil(eps, mu):
+    """Homogeneous eps, mu: mu (A, B) is exactly the hollow-guide pencil at k0^2 eps mu, so the
+    discrete eigenvalues obey beta^2 = eps mu k0^2 - kc^2 as well (1/mu weights S_tt, T_tt, G
+    and S_zz; eps weights the k0^2 terms)."""
+    disc, eps_r, mu_r = _disc(6, eps=eps, mu_slab=mu, slab_width=A_MM, perturb=0.2, seed=8)
+    A, B = wg.waveguide_pencil(disc, K0, eps_r, mu_r)
+    A0, B0 = wg.waveguide_pencil(disc, K0 * np.sqrt(eps * mu))
+    assert abs(mu * A - A0).max() <= 1e-13 * abs(A0).max()
+    assert abs(mu * B - B0).max() <= 1e-13 * abs(B0).max()
 
 
 # ------------------------------------------------------------------------------- generator
@@ -369,6 +382,27 @@ def test_safe_cuts_match_family_members_in_order():
     fam = np.array([0, 1, 0, 1, 0])
     assert wg.safe_cuts(v, e, fam) == [(2, 2.5)]
     assert wg.safe_cuts(v, e) == [(2, 2.5), (3, 3.5)]
+
+
+def test_generate_model_path_loaded_guide_counts_and_targets_hold():
+    """n > DENSE_LIMIT, loaded guide (eps_r = 1.5 half slab at 35 GHz): the negative count (the
+    error bound isolates the zero cluster), the window and the propagating target come from the
+    slab model; verify them on the discrete pencil.  The positive count and the number of complex
+    eigenvalues stay unknown (null)."""
+    gen = wg.generate(wg.CaseSpec(target_n=3000, eps_slab=1.5, freq_ghz=35.0), "slab_model")
+    A, B = gen.A, gen.B
+    neg, zero, pos = gen.meta["inertia"]["pencil"]
+    assert A.shape[0] > wg.DENSE_LIMIT and zero == gen.meta["mesh"]["interior_nodes"] and pos is None
+    assert neg == 10 and gen.meta["complex_eigenvalue_count"] is None
+    assert _check_window_against_discrete(gen) == neg          # the window holds every propagating mode
+    (target,) = gen.meta["targets"]                             # no evanescent target without a dense check
+    assert target["k"] == neg and "all propagating modes" in target["why"]
+    _check_targets_against_discrete(gen, A, B)
+    # Beyond the block come zero-cluster members (ARPACK returns only some copies of the nn-fold
+    # zero) and evanescent modes, none of them negative.
+    lam = _nearest(A, B, target["sigma"], neg + 4)
+    lam = lam[np.argsort(np.abs(lam - target["sigma"]))]
+    assert np.all(lam[:neg].real < 0) and np.all(lam[neg:].real > -1e-9)
 
 
 def test_dense_check_tolerates_complex_pairs_among_propagating_modes():
