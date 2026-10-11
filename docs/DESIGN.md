@@ -656,8 +656,9 @@ B 正定时，ν₋(A − sB) = 「小于 s 的特征值个数」，由 LDLᵀ �
 B 不定时惯性计数不成立，理论上可有复特征值。用非厄密 Krylov-Schur；实/复分类见 §3.6-10。
 
 ### 4.4 收敛（内层）
-Krylov 求解器：Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz 值|）；块模式在块边界也检查
-（§3.5）。LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
+Krylov 求解器：Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz 值|）；两种 Krylov-Schur 的块模式都在
+块边界也检查（§3.5），因此块运行恰好达到 tol（driver 的验收按真实后向误差 η ≤ tol，§4.5）。
+LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 
 ### 4.5 残差与精度指标（报告中全部给出）
 - 绝对残差 r = ‖A x − λ B x‖₂
@@ -680,11 +681,15 @@ Krylov 求解器：Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz �
   符号，重复定义会被链接器静默挑一个）。临时替身只能写在测试文件的匿名命名空间里且换名。
 - 非拥有引用的构造函数删除右值重载（防悬垂）；选项结构里的指针只在调用期间有效。
 - **禁止**：稀疏矩阵稠密化（唯一例外：测试/评测代码中 n ≤ 4000 的参考解）；全局可变状态（唯一
-  例外：串行化 MUMPS 调用的进程级锁，§3.4）；无种子随机数；库代码中 `std::cout`/`printf`。
+  例外：串行化 MUMPS 调用的进程级锁，§3.4；稀疏核分派的 CPU 检测与 `HS_KERNELS_NO_AVX512` 在首次
+  调用时读一次、之后只读，不算可变状态）；无种子随机数；库代码中 `std::cout`/`printf`。
 - 测试：`tests/cpp/test_<module>*.cpp`（GoogleTest），**套件名以模块名开头**（`Sparse*`、`Io*`、
   `Linalg*`、`Factor*`、`Ops*`、`Lanczos*`、`KrylovSchurGeneral*`、`Lobpcg*`、`JacobiDavidson*`、
-  `Driver*`；P3 新增如 `LinalgDenseOpsBlockCgs`、`FactorInertiaCounter`、`LanczosBlockTyped`、
-  `LanczosBitwiseTyped`、`LobpcgTyped`、`JacobiDavidsonTyped`、`DriverSlicing`、`DriverZeroCluster`）；ctest 名为
+  `Verify*`、`Driver*`；P3 新增如 `LinalgDenseOpsBlockCgs`、`FactorInertiaCounter`、`LanczosBlockTyped`、
+  `LanczosBitwiseTyped`、`LobpcgTyped`、`JacobiDavidsonTyped`、`DriverSlicing`、`DriverZeroCluster`；P4 新增
+  如 `SparseKernelPaths`、`OpsKernelPaths`、`OpsFactorSolve`、`FactorOrdering*`、`FactorBlockAnalysis`、
+  `KrylovSchurGeneralBitwise`、`VerifyExclusion`、`VerifyBound`、`DriverBlocks`、`DriverCounter`、
+  `DriverGhiepBlock`）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
   `<可执行文件>.<套件>.<用例>`，`tools/dev/test.sh release test_factor` 只跑该文件，匹配不到测试即
   报错。共享夹具在 `tests/cpp/support/`（`hsolve_test_support`），只追加不改签名。
   数值测试尽量用有解析解的问题。Python 工具与 Python 接口的测试在 `tests/py/`（pytest；
@@ -695,8 +700,21 @@ Krylov 求解器：Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz �
 - 新增依赖必须是开源许可，并登记到 `docs/DEPENDENCIES.md`。
 
 ## 6. 资源与实验规范
-本机为共享服务器（2×Xeon Gold 6336Y，48 物理核，125 GB）。**所有编译之外的运行都必须
-经过 `tools/run/guard.py`**：
+**计算位置**（P4 收尾起）：本机（开发服务器，共享，2×Xeon Gold 6336Y，48 物理核，125 GB）不再做
+编译、测试与实验，只做编辑、git 与合并；全部计算在集群节点 gpu01 / gpu02 上进行：
+- 节点：2×Xeon Silver 4314（2×16 核，AVX-512），251 GB，CentOS 7（glibc 2.17），无外网，home 目录
+  各节点共享。`tools/dev/deploy_cluster.sh HOST` 由本机 conda 包缓存离线重建两个环境
+  （`docs/DEPENDENCIES.md`）、建裸仓库（git remote `cluster`）与克隆、拷贝测例数据。
+- `tools/dev/cluster_run.sh HOST [--wip | --allow-dirty] -- CMD`：把当前 worktree 的 HEAD 推到
+  `wt/<name>`，在节点的 `$HOME/os2026-wt/<name>` 检出该提交，经 `env/run.sh` 运行 CMD；`--wip` 用
+  `git stash create` 的临时提交传送未提交的已跟踪改动（不动工作区、索引与 stash 列表）；调用方的
+  `HS_CORES`、`HS_JOBS`、`HS_MEM_GB`、`HS_MAX_SHARED_MEM_GB`、`HS_MIN_AVAIL_GB` 被转发。同一 `<name>`
+  不得同时在两个节点上构建（home 共享）。
+- 每节点上限：`env/hosts/<host>.sh` 设 `HS_CORES=16-31`（NUMA node 1 的 16 个物理核）、`HS_MEM_GB=60`、
+  `HS_MAX_SHARED_MEM_GB=64`；`env/activate.sh` 按短主机名加载它。
+- 两种 CPU 上 OpenBLAS 的乘积末位可能不同（§5 逐位测试以 CPU 型号为键）。
+
+**所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：
 - 默认绑定 NUMA node1 的 16 个物理核 `24-30,33-41`，进程树 RSS 上限 30 GiB；系统可用内存低于
   12 GiB 时只终止「大」进程树（≥ max(2 GiB, mem_gb/4)），小的构建/测试不受连带。
 - 峰值内存报告取采样和、内核高水位 VmHWM 之和、ru_maxrss 三者最大值（不漏短时尖峰）。
@@ -704,6 +722,12 @@ Krylov 求解器：Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz �
 - 多 agent 并行阶段：每个 agent 使用不相交的 `HS_CORES`（各 2 核）与 `HS_JOBS=2`，并设置
   `HS_MAX_SHARED_MEM_GB=8`（超过 8 GiB 的运行必须 `--exclusive`）。
 - 预估内存（MUMPS 分析）超过 28 GiB 的实验不运行，记录并上报。
+- **MPI 绑核**：`mpiexec --bind-to core` 无视 guard 的 cpuset（40,41 下 SLEPc 的 rank 被绑到 CPU 0/48
+  与 1/49）。需要绑核的 MPI 运行用 `tools/bench/baseline_slepc.py --bind core`（每个 rank 绑到继承
+  cpuset 中自己的一块），或其它在继承 cpuset 内自绑的方式。
+- 嵌套 guard（如 tune_slepc 每个试验一个 guard、外层再一个）：`--exclusive` 只给外层，内层带
+  `--exclusive` 会永远等待外层持有的锁；外层超时终止时内层的 mpiexec 进程组目前不会被一起终止
+  （guard 只处理 KeyboardInterrupt），须手工清理。
 
 ## 7. 版本管理
 - `main` 始终可编译、测试全过。功能在分支（或 worktree）开发，合并前须通过评审与测试。
@@ -719,5 +743,6 @@ Krylov 求解器：Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz �
 | P0 | 仓库骨架、环境、资源看门狗、接口与设计文档；设计评审 v2 |
 | P1 | io / factor+ops / eigen（两种）实现与单测；测例生成器；评测工具 |
 | P2 | driver + CLI；端到端测试；测例集与首轮实验（对比 scipy 基线） |
-| P3 | **已完成**：低内存输入装配与无映射铅笔；确定性正交化（融合 CGS2、DGKS、块 CGS2）；MUMPS 约定补充与 InertiaCounter；块 Krylov-Schur（eigen 层）；LOBPCG / JD；谱切片与惯性搜索的单边目标、零带切除、GHIEP 零簇移位放置；互斥分阶段计时；Python 接口；评测工具（汇总、合并参考、scipy 基线）。**未做**：SpMV SIMD；GHIEP 重特征值的块 Krylov（一般 Krylov-Schur 仍只支持 p = 1） |
-| P4 | driver 集成：InertiaCounter 证书、JD + 单精度因子的内存受限回退（需 ops 的只回代算子）、block_size 端到端测量后再定默认、GHIEP 后处理内存与预算、确定性的排序决策；故障场景验证矩阵、方案文档、复现材料 |
+| P3 | **已完成**：低内存输入装配与无映射铅笔；确定性正交化（融合 CGS2、DGKS、块 CGS2）；MUMPS 约定补充与 InertiaCounter；块 Krylov-Schur（eigen 层）；LOBPCG / JD；谱切片与惯性搜索的单边目标、零带切除、GHIEP 零簇移位放置；互斥分阶段计时；Python 接口；评测工具（汇总、合并参考、scipy 基线）。**未做**：SpMV SIMD；GHIEP 重特征值的块 Krylov（一般 Krylov-Schur 仍只支持 p = 1）——二者 P4 完成 |
+| P4 | **已完成**（6a3d7c1）：稀疏核运行时分派（AVX-512）与融合修正残差、修正的舍入水平停止与活跃列回代、`FactorSolveOperator`；自研并行嵌套剖分（factor 层）与 ICNTL(15) 块分析；一般 Krylov-Schur 块模式与峰值列函数；src/verify（随机排除检验、单精度计数规则、代价模型）；driver：块 Krylov 默认（HEP/GHEP p = 4、GHIEP p = 2 的规则）、InertiaCounter 证书与 certificate 阶段、确定性排序模型（deterministic 用 METIS）、B 的 O(nnz) 筛查、GHIEP 后处理内存（wg-square-1e6 峰值 2.89 → 1.77 GB）；SLEPc 调优器与公平对比工具；集群节点部署。**未做**：JD + 单精度因子的内存受限回退；verify 接入 driver；自研嵌套剖分接入自适应排序；driver 检查单精度/BLR 修正是否收敛；16 核独占重测（SLEPc 调优与对比、排序、回代、GHIEP 块宽）；故障场景验证矩阵 |
+| P5 | verify 接入 driver（certificate = exact / randomized / auto）及 P4 未做项；进行中 |
