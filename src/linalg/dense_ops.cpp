@@ -342,11 +342,20 @@ inline void update_cplx(index_t len, index_t k, const double* v, index_t ldv, co
 constexpr index_t kFusedTileBytes = 128 * 1024;
 constexpr index_t kStreamTileBytes = 512 * 1024;
 
+/// Blocks a parallel sweep is cut into at least (when n allows, i.e. down to 128 rows per block):
+/// the partition must not depend on the thread count, so it has to offer enough blocks to balance
+/// the threads of any run (a 512 KB tile left 3 blocks for n = 3000 complex rows and k = 30, i.e.
+/// 2:1 work on 2 threads, and 10 blocks for n = 1e4: 10 of 16 threads busy). Serial sweeps keep
+/// the tile size (smaller blocks only add per-block overhead there).
+constexpr index_t kMinBlocks = 64;
+
 /// Rows per block of a CGS sweep over `matrices` distinct n x k operands (a function of the
-/// sizes only: deterministic partition).
-inline index_t cgs_block_rows(index_t k, index_t scalar_bytes, index_t matrices, bool fused) {
+/// sizes only: deterministic partition; `parallel` is one too).
+inline index_t cgs_block_rows(index_t n, index_t k, index_t scalar_bytes, index_t matrices, bool fused,
+                              bool parallel) {
   const index_t row_bytes = std::max<index_t>(k, 1) * scalar_bytes * std::max<index_t>(matrices, 1);
-  const index_t rows = (fused ? kFusedTileBytes : kStreamTileBytes) / row_bytes;
+  index_t rows = (fused ? kFusedTileBytes : kStreamTileBytes) / row_bytes;
+  if (parallel) rows = std::min(rows, n / kMinBlocks);
   return std::clamp<index_t>(rows / 32 * 32, 128, 4096);
 }
 
@@ -378,8 +387,9 @@ void run_sweep(index_t n, index_t k, const Sweep& s, double* proj, double* norm)
   // Distinct n x k operands: V (and BV) of the update; a fused projection re-reads one of them.
   const bool fused = s.c && s.p;
   const index_t mats = s.c ? (s.bv ? 2 : 1) : (s.p ? 1 : 0);
-  const Partition part(n, cgs_block_rows(k, 8 * d, mats, fused), kMaxSlots);
   const index_t work = n * d * std::max<index_t>(k * (mats + (fused ? 1 : 0)), 1);
+  const bool parallel = work >= kParallelMinWork;
+  const Partition part(n, cgs_block_rows(n, k, 8 * d, mats, fused, parallel), kMaxSlots);
   auto block = [&](index_t r0, index_t rows, double* acc) {
     const index_t o = r0 * d, len = rows * d;
     if (s.c) {
@@ -403,12 +413,12 @@ void run_sweep(index_t n, index_t k, const Sweep& s, double* proj, double* norm)
   if (width == 0) {
     // Update only: no reduction, any row distribution gives the same result.
     const index_t nb = part.nblocks;
-#pragma omp parallel for schedule(static) if (work >= kParallelMinWork)
+#pragma omp parallel for schedule(static) if (parallel)
     for (index_t b = 0; b < nb; ++b) block(part.row(b), part.row(b + 1) - part.row(b), nullptr);
     return;
   }
   std::vector<double> out(static_cast<std::size_t>(width));
-  reduce_blocks(part, width, work >= kParallelMinWork, out.data(), block);
+  reduce_blocks(part, width, parallel, out.data(), block);
   if (s.p) std::copy(out.begin(), out.begin() + kd, proj);
   if (s.na) *norm = out[static_cast<std::size_t>(width - 1)];
 }
