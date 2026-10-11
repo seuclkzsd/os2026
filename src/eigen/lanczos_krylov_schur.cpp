@@ -45,6 +45,11 @@
 // new direction orthogonal to working precision, since the orthogonality loss of the second
 // pass is about eps * (rounding noise of the first pass) / beta.
 //
+// store_bv. The stored M*V columns are never updated by the CGS2 recurrence bw -= (M V) c: the
+// error of the stored columns would enter the new column amplified by ||Op v_j||_M / beta and
+// compound over the restarts (measured: M-orthonormality lost to 5e-5 after 1000 restarts). Each
+// new column instead gets M applied to the orthogonalized vector, still one application per step.
+//
 // Deflation semantics. The basis stays M-orthogonal to span(D), so the solver computes eigenpairs
 // of the deflated operator P Op P (P = I - D D^H M). The estimates measure ||P (Op x - theta
 // x)||_M; the components of Op x along span(D), bounded by the residuals of D's own columns, are
@@ -264,12 +269,21 @@ void ThickRestartLanczos<T>::load_deflation() {
 template <class T>
 std::pair<double, double> ThickRestartLanczos<T>::orthogonalize(index_t j) {
   T* w = vcol(j);
-  T* bw = store_bv_ ? bvcol(j) : (mw_.empty() ? nullptr : mw_.data());
-  if (store_bv_) b_inner_->apply(w, n_, bw, n_, 1);  // stored mode needs M*w on entry
   const index_t k = d_ + j;
-  const double after =
-      linalg::orthogonalize_cgs2(n_, k, basis_.data(), n_, store_bv_ ? bbasis_.data() : nullptr, n_,
-                                 w, bw, coef_.data(), apply_m_ ? &apply_m_ : nullptr);
+  double after = 0.0;
+  if (store_bv_) {
+    // The coefficients (M V)^H w need only the stored columns and w. orthogonalize_cgs2 also
+    // updates bw -= (M V) c and derives the norm from it; both are discarded (see "store_bv"
+    // above): the column slot of M*w only serves as scratch until M w_perp is stored in it.
+    T* bw = bvcol(j);
+    linalg::orthogonalize_cgs2(n_, k, basis_.data(), n_, bbasis_.data(), n_, w, bw, coef_.data());
+    b_inner_->apply(w, n_, bw, n_, 1);
+    after = std::sqrt(std::max(std::real(linalg::dot(n_, w, bw)), 0.0));
+  } else {
+    after = linalg::orthogonalize_cgs2<T>(n_, k, basis_.data(), n_, nullptr, n_, w,
+                                          mw_.empty() ? nullptr : mw_.data(), coef_.data(),
+                                          apply_m_ ? &apply_m_ : nullptr);
+  }
   double c2 = after * after;
   for (index_t i = 0; i < k; ++i) c2 += abs2(coef_[i]);
   return {std::sqrt(c2), after};

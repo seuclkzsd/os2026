@@ -514,6 +514,30 @@ TYPED_TEST(LanczosTyped, StoredAndRecomputedBvAgreeThroughRestarts) {
     EXPECT_NEAR(ref.theta[i], stored.theta[i], 1e-11 * std::abs(ref.theta[0])) << i;
 }
 
+TYPED_TEST(LanczosTyped, StoredBvStaysOrthonormalOverManyRestarts) {
+  // store_bv: the stored M*w of a new basis vector must come from M applied to the orthogonalized
+  // vector. Updating it by the CGS2 recurrence passes the error of the stored columns on, amplified
+  // by ||Op v|| / beta every step: here the returned vectors had lost M-orthonormality to 1.8e-9
+  // after 300 restarts (check_contract requires 1e-12). Slow problem: Op = L^{-1} with B ~ I,
+  // smallest theta wanted, a small basis and an unreachable tolerance.
+  using T = TypeParam;
+  const index_t n = 400;
+  const auto lap = hs::test::laplacian_1d<T>(n);
+  const auto bd = hs::test::to_dense(hs::test::prescribed_spectrum<T>(
+      std::vector<double>(static_cast<std::size_t>(n), 1.0), 8, 3));
+  hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(lap), &bd, 0.0);
+  DenseOperator<T> bop(bd);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 8;
+  opt.ncv = 18;
+  opt.tol = 1e-14;
+  opt.max_restarts = 300;
+  opt.store_bv = true;
+  const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::SmallestAlgebraic, opt);
+  EXPECT_EQ(r.restarts, opt.max_restarts);
+  check_contract<T>(op, &bop, r, Which::SmallestAlgebraic, opt, condition_number(lap));
+}
+
 TYPED_TEST(LanczosTyped, ReproducibleForFixedSeed) {
   using T = TypeParam;
   auto op = operator_with_spectrum<T>(cubic_spectrum(250), 71);
