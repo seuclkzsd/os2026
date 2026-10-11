@@ -125,10 +125,10 @@ constexpr index_t kMaxConfiguredBlock = 64;
 /// 2 threads, medians), seconds for p = 1 / 2 / 4 / 8:
 ///   wg-square-1e5     2.46 / 1.85 / 1.85 / 1.99    wg-square-1e5, sigma 0     9.0 / 7.9 / 13.8 / 15.1
 ///   wg-halfslab-1e5   3.12 / 2.07 / 2.20 / 2.57    wg-halfslab-1e5, sigma 0  16.0 / 12.3 / 12.4 / 13.5
-/// and on five synthetic GHIEP pencils (n = 2e4 .. 1e5, zero cluster, complex pairs) p = 2 was
-/// 1.26 - 1.39x and p = 4 1.14 - 1.89x faster than p = 1. p = 2 never lost against p = 1 (1.15 -
-/// 1.51x over all nine cases); p = 4 was as fast on average but 1.5x slower in the worst case.
-/// n ~ 1e4: p = 2 gained <= 7%, p >= 4 lost.
+/// and on the five synthetic pencils of the bench (syn-ghiep-{wg,wg0}-{20480,102400},
+/// syn-ghiep-cplx-102400: banded, cheap solves, zero cluster, complex pairs) p = 2 was 1.09 -
+/// 1.12x and p = 4 0.95 - 1.12x as fast as p = 1. p = 2 never lost against p = 1 (1.09 - 1.51x
+/// over all nine cases); p = 4 lost up to 1.5x. n ~ 1e4: p = 2 gained <= 7%, p >= 4 lost.
 index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev) {
   const index_t configured = configured_block_size(cfg, 0);
   if (configured > 0) return std::max<index_t>(1, std::min({configured, kMaxConfiguredBlock, n / 16}));
