@@ -18,14 +18,9 @@ namespace hs::ordering {
 
 namespace {
 
-// Graphs from this size on get METIS' two-stage scheme (MlevelNodeBisectionL2): kTwoStageLevels
-// contractions, the best of kRuns complete bisections of that graph, refinement back up. The runs
-// are independent OpenMP tasks (each with its own seed) when the graph has kParallelRunSize
-// vertices or more.
-constexpr std::int32_t kTwoStageSize = 5000;
-constexpr int kTwoStageLevels = 4;
-constexpr int kRuns = 5;
-constexpr std::int32_t kParallelRunSize = 1000;
+// The two-stage scheme for large graphs: kTwoStageSize, kTwoStageLevels, kTwoStageRuns and
+// kParallelRunSize in ordering_detail.hpp.
+constexpr int kRuns = kTwoStageRuns;
 
 // Indexed binary max-heap of vertices keyed by gain; ties go to the lower rank, then the lower
 // vertex number, so the order of extraction is a function of keys and ranks alone.

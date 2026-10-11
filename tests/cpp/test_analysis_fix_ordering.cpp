@@ -1,6 +1,7 @@
 // Regression tests for the review fixes of hsolve's nested-dissection ordering (src/factor/
-// ordering*.cpp, compute_ordering): coarsening with small targets on graphs with many components;
-// calls from inside an OpenMP parallel region (threads = 1 included); the documented option ranges.
+// ordering*.cpp, compute_ordering): coarsening with small targets on graphs with many components,
+// calls from inside an OpenMP parallel region (threads = 1 included), the documented option
+// ranges, and the thread independence of the concurrent trial bisections of large separators.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -98,6 +99,16 @@ bool is_pivot_order(const std::vector<int>& perm, index_t m) {
   for (const int p : perm) {
     if (p < 1 || p > m || seen[p - 1]) return false;
     seen[p - 1] = 1;
+  }
+  return true;
+}
+
+bool is_permutation(const std::vector<std::int32_t>& order, std::int32_t n) {
+  if (static_cast<std::int32_t>(order.size()) != n) return false;
+  std::vector<char> seen(static_cast<std::size_t>(n), 0);
+  for (const std::int32_t v : order) {
+    if (v < 0 || v >= n || seen[v]) return false;
+    seen[v] = 1;
   }
   return true;
 }
@@ -285,6 +296,60 @@ TEST(FactorOrderingSeparator, HugeImbalanceMeansNoBound) {
     p.imbalance = imb;
     EXPECT_EQ(ord::vertex_separator(g, 1, p), ref) << "imbalance " << imb;
   }
+}
+
+// ------------------------------------------------------------- concurrent trial bisections
+
+// vertex_separator runs its kTwoStageRuns trial bisections as concurrent tasks only when the
+// mid graph (kTwoStageLevels contractions down) has at least kParallelRunSize vertices: a
+// 120 x 120 grid (mid graph about 1200 vertices) and a 30^3 grid (about 2000) get there, smaller
+// test graphs (20^3: about 600) run the trials one after the other.
+TEST(FactorOrderingSeparator, ConcurrentTrialRunsAreThreadIndependent) {
+  struct Case {
+    std::int32_t n;
+    Edges edges;
+  };
+  const Case cases[] = {{120 * 120, grid_edges(120, 120)}, {30 * 30 * 30, grid_edges(30, 30, 30)}};
+  for (const Case& cs : cases) {
+    const ord::Graph g = graph_from_edges(cs.n, cs.edges);
+    ASSERT_GE(g.n, ord::kTwoStageSize);
+    const ord::SeparatorParams p;
+    for (std::uint64_t seed : {1ULL, 2ULL, 3ULL}) {
+      ord::SeparatorTrace tr;
+      const auto ref = ord::vertex_separator(g, seed, p, &tr);
+      ASSERT_GT(tr.vertices.size(), static_cast<std::size_t>(ord::kTwoStageLevels));
+      EXPECT_GE(tr.vertices[ord::kTwoStageLevels], ord::kParallelRunSize)
+          << "n=" << g.n << ": the trial runs would not be concurrent";
+      ASSERT_TRUE(ord::check_separator(g, ref).valid);
+      for (int threads : {2, 3, 4}) {
+        std::vector<std::uint8_t> where;
+#pragma omp parallel num_threads(threads) default(shared)
+#pragma omp single
+        where = ord::vertex_separator(g, seed, p);
+        EXPECT_EQ(where, ref) << "n=" << g.n << " seed " << seed << ", " << threads << " threads";
+      }
+    }
+  }
+}
+
+TEST(FactorOrderingDissection, IndependentOfTheThreadCountWithConcurrentTrialRuns) {
+  const ord::Graph g = graph_from_edges(120 * 120, grid_edges(120, 120));
+  ord::SeparatorTrace tr;
+  static_cast<void>(ord::vertex_separator(g, 1, ord::SeparatorParams{}, &tr));
+  ASSERT_GT(tr.vertices.size(), static_cast<std::size_t>(ord::kTwoStageLevels));
+  ASSERT_GE(tr.vertices[ord::kTwoStageLevels], ord::kParallelRunSize);
+  const ord::DissectionParams p;
+  ord::DissectionStats s1;
+  const auto ref = ord::nested_dissection(g, p, 1, &s1);
+  ASSERT_TRUE(is_permutation(ref, g.n));
+  EXPECT_GT(s1.separators, 50);
+  for (int threads : {2, 3, 4}) EXPECT_EQ(ord::nested_dissection(g, p, threads), ref) << threads;
+  // The 3-D grid: several levels of concurrent trial runs below the top separator.
+  const ord::Graph g3 = graph_from_edges(30 * 30 * 30, grid_edges(30, 30, 30));
+  const auto ref3 = ord::nested_dissection(g3, p, 1);
+  ASSERT_TRUE(is_permutation(ref3, g3.n));
+  EXPECT_EQ(ord::nested_dissection(g3, p, 2), ref3);
+  EXPECT_EQ(ord::nested_dissection(g3, p, 4), ref3);
 }
 
 }  // namespace

@@ -78,6 +78,16 @@ std::uint64_t child_seed(std::uint64_t parent, int side) noexcept;
 /// edge joins part 0 and part 1).
 inline constexpr std::uint8_t kSeparator = 2;
 
+/// vertex_separator's two-stage scheme (METIS MlevelNodeBisectionL2) for graphs of at least
+/// kTwoStageSize vertices: kTwoStageLevels contractions to a "mid" graph, the best of
+/// kTwoStageRuns complete bisections of it, refinement back up. The runs are concurrent OpenMP
+/// tasks (each with its own seed) when the mid graph has at least kParallelRunSize vertices
+/// (SeparatorTrace::vertices[kTwoStageLevels] shows its size).
+inline constexpr std::int32_t kTwoStageSize = 5000;
+inline constexpr int kTwoStageLevels = 4;
+inline constexpr int kTwoStageRuns = 5;
+inline constexpr std::int32_t kParallelRunSize = 1000;
+
 /// Largest subgraph the dissection orders by minimum degree (bitset elimination graph: O(n^2/64)
 /// memory, up to O(n^3/64) time), hence the largest DissectionParams::leaf_size (and
 /// OrderingOptions::leaf_size). A larger subgraph that cannot be split (no separator leaves both
