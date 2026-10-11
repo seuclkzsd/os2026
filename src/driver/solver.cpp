@@ -144,13 +144,25 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
 
 // nu_-(A - s B): number of eigenvalues below s. If K(s) is singular the endpoint is moved in
 // direction `outward` (+1 / -1) by a growing step; moves are counted. Returns the final s.
+// Inertia must come from an exact (double, full-rank) factorization: the inertia of a single-
+// precision or BLR factor is that of the rounded/compressed matrix. The main factorization object
+// is reused when it is exact (same pattern, analysis reused); otherwise compute_inertia builds a
+// separate double factorization.
 template <class T>
-index_t count_below(Ctx& c, SparseFactorization<T>& fac, double& s, double outward, double step) {
+index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
+                    double step) {
+  const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
   for (int tries = 0; tries < 8; ++tries) {
-    if (fac.factorize(1.0, -s)) {
-      const Inertia in = fac.inertia();
-      if (in.valid) return in.neg;
+    Inertia in;
+    if (exact) {
+      if (fac.factorize(1.0, -s)) in = fac.inertia();
+    } else {
+      FactorOptions o = fac.options();
+      o.precision = FactorPrecision::Double;
+      o.blr = false;
+      in = compute_inertia(pencil, 1.0, -s, o);
     }
+    if (in.valid) return in.neg;
     s += outward * step * std::pow(4.0, tries);
     ++c.rep.certificate.endpoint_moves;
   }
@@ -339,8 +351,8 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   double lo = t.lower, hi = t.upper;
   if (t.mode == TargetMode::Interval) {
     const double step = 1e-10 * std::max(scale, std::max(std::abs(lo), std::abs(hi)));
-    const index_t nu_lo = count_below(c, fac, lo, -1.0, step);
-    const index_t nu_hi = count_below(c, fac, hi, +1.0, step);
+    const index_t nu_lo = count_below(c, fac, pencil, lo, -1.0, step);
+    const index_t nu_hi = count_below(c, fac, pencil, hi, +1.0, step);
     interval_count = nu_hi - nu_lo;
     event(c, "interval_count", {{"lower", lo}, {"upper", hi}, {"count", static_cast<std::int64_t>(interval_count)}});
     if (interval_count == 0) {
@@ -445,8 +457,8 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
       nu_a = 0;
       nu_b = interval_count;  // counted before the Krylov run
     } else {
-      if (std::isfinite(a_end)) nu_a = count_below(c, fac, a_end, -1.0, step);
-      if (std::isfinite(b_end)) nu_b = count_below(c, fac, b_end, +1.0, step);
+      if (std::isfinite(a_end)) nu_a = count_below(c, fac, pencil, a_end, -1.0, step);
+      if (std::isfinite(b_end)) nu_b = count_below(c, fac, pencil, b_end, +1.0, step);
     }
     cert.performed = true;
     cert.lower = a_end;
@@ -732,7 +744,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
 // ------------------------------------------------------------------------------------- solve
 
 template <class T>
-Solution<T> solve(const CsrMatrix<T>& a_in, const CsrMatrix<T>* b_in, const SolverConfig& cfg, Logger* log) {
+Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b_in, const SolverConfig& cfg,
+                  Logger* log) {
   Timer total;
   SolveReport rep;
   Ctx c{cfg, log, rep};
@@ -818,7 +831,7 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const CsrMatrix<T>* b_in, const Solv
 }
 
 #define HS_INSTANTIATE_SOLVE(T) \
-  template Solution<T> solve<T>(const CsrMatrix<T>&, const CsrMatrix<T>*, const SolverConfig&, Logger*);
+  template Solution<T> solve<T>(const CsrMatrix<T>&, const non_deduced_t<CsrMatrix<T>>*, const SolverConfig&, Logger*);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_SOLVE)
 #undef HS_INSTANTIATE_SOLVE
 

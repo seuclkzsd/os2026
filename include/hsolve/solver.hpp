@@ -168,7 +168,7 @@ std::string config_to_json(const SolverConfig& cfg, int indent = 2);
 /// Throws hs::Error on unrecoverable failure (NotHermitian, OutOfMemoryBudget, ...); a run that
 /// completes but misses the tolerance returns with report.success == false.
 template <class T>
-Solution<T> solve(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const SolverConfig& cfg,
+Solution<T> solve(const CsrMatrix<T>& a, const non_deduced_t<CsrMatrix<T>>* b, const SolverConfig& cfg,
                   Logger* log = nullptr);
 
 }  // namespace hs

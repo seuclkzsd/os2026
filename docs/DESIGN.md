@@ -97,8 +97,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   `[[nodiscard]] bool factorize(α, β)`、`solve(b, nrhs, ldb)`（多右端一次调用）、`inertia()`、
   `set_out_of_core()`。
 - **MUMPS 实测约定**（评审用探针程序在 5.8.2 上验证）：
-  - 零主元检测需 `ICNTL(24)=1` **且** `CNTL(3)>0`（`null_pivot_tol`，默认 1e-12，相对预处理后
-    矩阵范数）；CNTL(3)=0 时 3600 阶精确奇异矩阵也会「成功」分解。
+  - 零主元检测需 `ICNTL(24)=1` **且** `CNTL(3)>0`（`null_pivot_tol`，相对预处理后矩阵范数）；
+    CNTL(3)=0 时 3600 阶精确奇异矩阵也会「成功」分解。默认值经 P1 实测标定：双精度 1e-8、单精度
+    `single_null_pivot_tol` 1e-4（单精度只能部分检测）；检测是依赖消去顺序的启发式，「近奇异但
+    非奇异」的保证相对于 ‖K‖（即 scale）而非 |λ|；漏检时分解成功、位移反演照常工作。
+    `deterministic`（ICNTL(48)=0，默认开）保证同线程数下结果可复现。复数时 INFOG(12) 为奇数视为奇异。
   - ICNTL(24)=1 时 MUMPS 不报错而是修补零主元（INFOG(28)），之后的回代会丢掉该方向 ⇒
     **INFO(1)==−10 或 INFOG(28)>0 一律视为奇异：`factorize` 返回 false**，`solve` 拒绝执行，
     `inertia().valid=false`（计数仍填），对象保持已分析状态以便扰动位移后重分解。
@@ -110,6 +113,8 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 - `scaling` 默认 ICNTL(8)=7（每次分解重算缩放），使一次分析服务不同位移。
 - `FactorEstimate`：INFOG(20)（因子条目估计）、INFOG(16/17) 内存、INFOG(26/27) 外存、
   INFOG(36/38) BLR 估计（仅当分析时启用 BLR，否则 −1）、RINFOG(1) flops。
+- 单精度 / BLR 分解的 inertia() 是舍入/压缩后矩阵的惯性，**证书不得使用**：driver 在主分解为
+  单精度或 BLR 时改用 `compute_inertia`（双精度）计数。
 - `compute_inertia(pencil, α, β)`：自建对象、强制双精度且无 BLR、奇异时返回 valid=false 不抛；
   仅用于 B 正定性检测与测试——**driver 的证书复用主分解对象**（同一模式只分析一次）。
   B 为 HPD 当且仅当 `valid && neg==0 && zero==0`。
@@ -128,8 +133,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 - 结果契约：m = theta.size()；theta/estimate/vectors 按下标一一对应；[0, nconv) 为已收敛对、
   按 which 排序，[nconv, m) 为未收敛对、同样排序；converged == (nconv ≥ nev)。
 - `lanczos_krylov_schur`：算子须在 ⟨x,y⟩_M = yᴴMx 下自伴（M = b_inner 或 I）。CGS2 全正交化
-  （默认按需重算 M·w，`store_bv` 才存 M·V），厚重启，已收敛对通过将耦合向量 b 的对应分量置零
-  实现锁定，`deflation` 块 D（M-正交）用于「延迟重启」找更多特征对。m == nev。
+  （默认按需重算 M·w，`store_bv` 才存 M·V），厚重启；**锁定只在耦合达到工作精度
+  （|b_l| ≤ ~1e-15‖Op‖）时把 b 分量置零**（按 tol 置零会让其它对的残差估计失真，P1 实测）；
+  `deflation` 块 D（M-正交）用于「延迟重启」找更多特征对——此时估计针对收缩算子 P·Op·P，Op x
+  在 span(D) 上的分量由 D 自身残差界定，driver 最后对 [D X] 做 Rayleigh–Ritz 消除。m == nev。
+  单向量 Krylov 对精确重特征值只能靠舍入得到其余副本：driver 的惯性证书 + 收缩重跑负责补齐。
 - `krylov_schur_general`：欧氏内积，实数用实 Schur 形（dgees/dtrsen），共轭对永不拆开：
   m ∈ {nev, nev+1}，共轭对相邻、正虚部在前，nconv 不拆对，schur_form 无被截断的 2×2 块，
   前 nconv 列 Schur 基张成（近似）不变子空间。**不支持 deflation**（非正规算子的不变子空间的
@@ -248,5 +256,5 @@ Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz 值|）。
 | P0 | 仓库骨架、环境、资源看门狗、接口与设计文档；设计评审 v2 |
 | P1 | io / factor+ops / eigen（两种）实现与单测；测例生成器；评测工具 |
 | P2 | driver + CLI；端到端测试；测例集与首轮实验（对比 scipy 基线） |
-| P3 | 性能剖析与优化（块回代、SpMV AVX-512、MUMPS 参数、混合精度）；LOBPCG / JD；区间切片 |
+| P3 | 性能剖析与优化（块回代、SpMV AVX-512、MUMPS 参数、混合精度、正交化 DGKS/BLAS3）；LOBPCG / JD；区间切片；零簇移位放置；GHIEP 重特征值（块 Krylov） |
 | P4 | 故障场景验证矩阵、方案文档、复现材料 |
