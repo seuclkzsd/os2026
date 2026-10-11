@@ -107,7 +107,8 @@ FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
 // detection off (tiny pivots are kept; shift-invert then amplifies exactly the wanted near-null
 // directions). `detection_off` tells later refactorizations at this shift to do the same.
 template <class T>
-double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off) {
+double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off,
+                      bool on_eigenvalue) {
   PhaseScope phase(c.clock, Phase::Factor);
   detection_off = false;
   if (c.held.shift == sigma0 && !c.held.detection_off) return sigma0;  // e.g. right after counting there
@@ -117,8 +118,10 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
   const index_t perturbations = std::min<index_t>(1, c.cfg.max_shift_retries);
   for (index_t r = 0;; ++r) {
     if (fac.factorize(1.0, -s)) {
-      c.rep.shift_retries = std::max(c.rep.shift_retries, r);
-      if (r > 0) warn(c, "shift perturbed to " + fmt(s) + " (A - sigma B singular at the requested shift)");
+      if (!on_eigenvalue) {
+        c.rep.shift_retries = std::max(c.rep.shift_retries, r);
+        if (r > 0) warn(c, "shift perturbed to " + fmt(s) + " (A - sigma B singular at the requested shift)");
+      }
       c.held = FactorHeld{s, false};
       return s;
     }
@@ -129,9 +132,11 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
   fac.set_null_pivot_detection(false);
   if (fac.factorize(1.0, -sigma0)) {
     detection_off = true;
-    c.rep.shift_retries = std::max(c.rep.shift_retries, perturbations + 1);
-    warn(c, "shift " + fmt(sigma0) + " lies inside an eigenvalue cluster denser than the null-pivot threshold; "
-            "factorized there without null-pivot detection");
+    if (!on_eigenvalue) {
+      c.rep.shift_retries = std::max(c.rep.shift_retries, perturbations + 1);
+      warn(c, "shift " + fmt(sigma0) + " lies inside an eigenvalue cluster denser than the null-pivot threshold; "
+              "factorized there without null-pivot detection");
+    }
     c.held = FactorHeld{sigma0, true};
     return sigma0;
   }
@@ -175,10 +180,11 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 // final s via `s`.
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step, bool* detection_off, bool s_is_gap) {
+                    double step, bool* detection_off, bool s_is_gap, bool* near_eigenvalue) {
   PhaseScope phase(c.clock, Phase::Factor);
   const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
   if (exact) c.held = FactorHeld{};
+  if (near_eigenvalue) *near_eigenvalue = false;
   for (int tries = 0; tries < 8; ++tries) {
     for (const bool detection : {true, false}) {
       if (!detection && !exact) break;
@@ -201,6 +207,7 @@ index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>&
         if (detection_off) *detection_off = !detection;
         return in.neg;
       }
+      if (near_eigenvalue) *near_eigenvalue = true;
     }
     s += outward * step * std::pow(4.0, tries);
     ++c.rep.certificate.endpoint_moves;
@@ -346,11 +353,11 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   template void recompute_products<T>(const CsrMatrix<T>&, const CsrMatrix<T>*, Block<T>&);                  \
   template Block<T> take_columns<T>(const Block<T>&, const std::vector<index_t>&);                          \
   template void append_columns<T>(DenseMatrix<T>&, const DenseMatrix<T>&);                                  \
-  template double factorize_near<T>(Ctx&, SparseFactorization<T>&, double, double, bool&);                  \
+  template double factorize_near<T>(Ctx&, SparseFactorization<T>&, double, double, bool&, bool);            \
   template void refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                             \
   template bool try_refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                         \
   template index_t count_below<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double&, double,  \
-                                  double, bool*, bool);                                                     \
+                                  double, bool*, bool, bool*);                                              \
   template void analyze_within_budget<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double, bool); \
   template std::unique_ptr<SparseFactorization<T>> adaptive_analysis<T>(                                    \
       Ctx&, const FactorOptions&, const ShiftedPencil<T>&, double, index_t, index_t);

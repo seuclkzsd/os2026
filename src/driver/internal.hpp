@@ -110,8 +110,11 @@ FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb);
 /// Factorize K(sigma0) (DESIGN §3.6-4): perturb the shift on a null pivot, and factorize at sigma0
 /// without null-pivot detection when every nearby shift looks singular (dense cluster). Returns
 /// the shift used; detection_off tells later refactorizations at that shift to do the same.
+/// on_eigenvalue: sigma0 was placed on an eigenvalue on purpose (a multiple eigenvalue's own
+/// shift): the perturbation is expected and not reported as a warning.
 template <class T>
-double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off);
+double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off,
+                      bool on_eigenvalue = false);
 
 /// Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
 /// No-op when the object already holds exactly that factorization (Ctx::held).
@@ -126,10 +129,13 @@ bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool 
 /// exact (double, non-BLR) factor the object then holds K(s) (Ctx::held), counted with null-pivot
 /// detection unless *detection_off (optional) reports otherwise. s_is_gap: s lies mid-way between
 /// computed eigenvalues (count there without detection if flagged); otherwise a flagged s is first
-/// moved by step / 10 (it may sit on an eigenvalue) - see steps.cpp.
+/// moved by step / 10 (it may sit on an eigenvalue) - see steps.cpp. *near_eigenvalue (optional)
+/// is set when the requested s was flagged singular: an eigenvalue (or a cluster) lies within the
+/// null-pivot threshold of the returned s, which then is no place for a shift.
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step, bool* detection_off = nullptr, bool s_is_gap = false);
+                    double step, bool* detection_off = nullptr, bool s_is_gap = false,
+                    bool* near_eigenvalue = nullptr);
 
 /// Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3).
 template <class T>
