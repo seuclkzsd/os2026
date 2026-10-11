@@ -26,8 +26,11 @@
 //     build/release/bench_ghiep_block [--mode ks|e2e] [--data DIR] [--p 1,2,4,8] [--reps 3]
 //     [--ncv 0] [--apply-reps 9] [--ordering 0] [--tol 1e-11] CASE...
 // --ncv (ks mode): requested basis sizes, each run with every p (0 = the solver's auto rule).
-// DIR defaults to $HS_DATA_ROOT or ./data; CASE is a directory name under DIR/cases.
+// DIR defaults to $HS_DATA_ROOT or ./data; CASE is a directory name under DIR/cases, or a
+// synthetic GHIEP pencil generated in process, syn-ghiep-<kind>-<n> with kind wg / wg0 / cplx
+// (banded, known spectrum, zero cluster; see synthetic_case).
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -40,6 +43,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "eigen/general_krylov_schur.hpp"
@@ -308,26 +312,145 @@ void run_e2e(const Args& args, const std::string& name, const CsrMatrix<double>&
   }
 }
 
+// ------------------------------------------------------------------- synthetic GHIEP pencils
+
+/// 2 x 2 Householder reflector I - 2 v v^T / (v^T v) from a deterministic v seeded by `index`.
+std::array<std::array<double, 2>, 2> reflector(index_t index) {
+  const double phi = 0.7 + 1.3 * std::sin(0.37 * static_cast<double>(index));
+  const double v[2] = {1.0, std::cos(phi)};
+  const double vv = v[0] * v[0] + v[1] * v[1];
+  std::array<std::array<double, 2>, 2> q{};
+  for (int r = 0; r < 2; ++r)
+    for (int c = 0; c < 2; ++c) q[r][c] = (r == c ? 1.0 : 0.0) - 2.0 / vv * v[r] * v[c];
+  return q;
+}
+
+/// Banded real GHIEP pencil with a prescribed spectrum, the construction of
+/// tests/cpp/test_ghiep_driver.cpp: A = Q^T D_A Q, B = Q^T D_B Q, Q = G2 G1 products of 2 x 2
+/// reflectors on the index pairs (0, 1), (2, 3), ... and (1, 2), (3, 4), ...; D_B = diag(+-1),
+/// D_A = diag(lambda D_B) for the real eigenvalues, [[x, y], [y, -x]] / diag(1, -1) per complex
+/// pair x +- iy. lam.size() even.
+std::pair<CsrMatrix<double>, CsrMatrix<double>> synthetic_pencil(const std::vector<double>& lam,
+                                                                 const std::vector<cplx>& pairs) {
+  const auto nreal = static_cast<index_t>(lam.size());
+  const index_t n = nreal + 2 * static_cast<index_t>(pairs.size());
+  std::vector<std::vector<std::pair<index_t, double>>> q(static_cast<std::size_t>(n));
+  for (index_t k = 0; k < n; ++k) {
+    std::vector<std::pair<index_t, double>> g2;
+    if (k == 0 || (k == n - 1 && k % 2 == 1)) {
+      g2 = {{k, 1.0}};
+    } else {
+      const index_t base = k - (k + 1) % 2;
+      const auto r = reflector(base);
+      g2 = {{base, r[k - base][0]}, {base + 1, r[k - base][1]}};
+    }
+    for (const auto& [l, gv] : g2) {
+      const auto r = reflector(l / 2 + 7919);
+      const index_t base = l - l % 2;
+      q[k].push_back({base, gv * r[l % 2][0]});
+      q[k].push_back({base + 1, gv * r[l % 2][1]});
+    }
+  }
+  struct DEntry {
+    index_t k, l;
+    double a, b;
+  };
+  std::vector<DEntry> d;
+  for (index_t i = 0; i < nreal; ++i) {
+    const double s = (i % 3 == 0) ? -1.0 : 1.0;
+    d.push_back({i, i, lam[i] * s, s});
+  }
+  for (std::size_t p = 0; p < pairs.size(); ++p) {
+    const index_t i = nreal + 2 * static_cast<index_t>(p);
+    d.push_back({i, i, pairs[p].real(), 1.0});
+    d.push_back({i + 1, i + 1, -pairs[p].real(), -1.0});
+    d.push_back({i, i + 1, pairs[p].imag(), 0.0});
+    d.push_back({i + 1, i, pairs[p].imag(), 0.0});
+  }
+  std::vector<index_t> rows, cols;
+  std::vector<double> av, bv;
+  for (const DEntry& e : d)
+    for (const auto& [i, qki] : q[e.k])
+      for (const auto& [j, qlj] : q[e.l]) {
+        rows.push_back(i);
+        cols.push_back(j);
+        av.push_back(qki * e.a * qlj);
+        bv.push_back(qki * e.b * qlj);
+      }
+  return {hs::csr_from_coo(n, n, rows, cols, av), hs::csr_from_coo(n, n, rows, cols, bv)};
+}
+
+/// Synthetic case by name, "syn-ghiep-<kind>-<n>" (n even):
+///   wg    n / 10 zeros (the cluster), 64 negative eigenvalues in [-1, -0.1], positives from 0.05
+///         spaced 3 / #positives (dense), sigma = -0.507 (between two negatives), k = 12;
+///   wg0   the same pencil, sigma = 0 (cluster mode: one-sided runs), k = 10;
+///   cplx  the same spectrum on n - 8 real values plus four complex pairs -0.5 +- 0.004i,
+///         -0.52 +- 0.01i, -0.47 +- 0.002i, -0.55 +- 0.02i near sigma = -0.505, k = 16.
+bool synthetic_case(const std::string& name, CsrMatrix<double>& a, CsrMatrix<double>& b,
+                    hs::SolverConfig& cfg) {
+  const std::string prefix = "syn-ghiep-";
+  if (name.rfind(prefix, 0) != 0) return false;
+  const std::string rest = name.substr(prefix.size());
+  const auto dash = rest.find('-');
+  if (dash == std::string::npos) throw std::runtime_error(name + ": expected syn-ghiep-<kind>-<n>");
+  const std::string kind = rest.substr(0, dash);
+  const index_t n = std::stoll(rest.substr(dash + 1));
+  if (n < 1000 || n % 2 != 0) throw std::runtime_error(name + ": n must be even and >= 1000");
+  auto waveguide_like = [](index_t m) {
+    std::vector<double> lam(static_cast<std::size_t>(m / 10), 0.0);
+    for (int i = 0; i < 64; ++i) lam.push_back(-0.1 - 0.9 * i / 63.0);
+    const auto pos = static_cast<index_t>(m - static_cast<index_t>(lam.size()));
+    for (index_t i = 0; i < pos; ++i)
+      lam.push_back(0.05 + 3.0 * static_cast<double>(i) / static_cast<double>(pos));
+    return lam;
+  };
+  cfg = hs::SolverConfig{};
+  cfg.tol = 1e-10;
+  std::pair<CsrMatrix<double>, CsrMatrix<double>> p;
+  if (kind == "wg" || kind == "wg0") {
+    p = synthetic_pencil(waveguide_like(n), {});
+    cfg.target.sigma = kind == "wg" ? -0.507 : 0.0;
+    cfg.target.k = kind == "wg" ? 12 : 10;
+  } else if (kind == "cplx") {
+    p = synthetic_pencil(waveguide_like(n - 8),
+                         {cplx(-0.5, 0.004), cplx(-0.52, 0.01), cplx(-0.47, 0.002), cplx(-0.55, 0.02)});
+    cfg.target.sigma = -0.505;
+    cfg.target.k = 16;
+  } else {
+    throw std::runtime_error(name + ": unknown synthetic kind '" + kind + "'");
+  }
+  a = std::move(p.first);
+  b = std::move(p.second);
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
     const Args args = parse_args(argc, argv);
     for (const std::string& name : args.cases) {
-      const auto dir = args.data / "cases" / name;
-      const hs::SolverConfig cfg = hs::parse_config(read_text(dir / "config.json"));
+      CsrMatrix<double> syn_a, syn_b;
+      hs::SolverConfig cfg;
+      std::optional<hs::LoadedMatrix> la, lb;
+      const CsrMatrix<double>* a = &syn_a;
+      const CsrMatrix<double>* b = &syn_b;
+      if (!synthetic_case(name, syn_a, syn_b, cfg)) {
+        const auto dir = args.data / "cases" / name;
+        cfg = hs::parse_config(read_text(dir / "config.json"));
+        la = hs::load_matrix(dir / "A.npz");
+        lb = hs::load_matrix(dir / "B.npz");
+        if (la->is_complex() || lb->is_complex())
+          throw std::runtime_error(name + ": complex cases are not supported by this bench");
+        a = &std::get<CsrMatrix<double>>(la->matrix);
+        b = &std::get<CsrMatrix<double>>(lb->matrix);
+      }
       if (cfg.target.mode != hs::TargetMode::Nearest)
         throw std::runtime_error(name + ": target is not 'nearest'");
-      hs::LoadedMatrix la = hs::load_matrix(dir / "A.npz");
-      hs::LoadedMatrix lb = hs::load_matrix(dir / "B.npz");
-      if (la.is_complex() || lb.is_complex())
-        throw std::runtime_error(name + ": complex cases are not supported by this bench");
-      const auto& a = std::get<CsrMatrix<double>>(la.matrix);
-      const auto& b = std::get<CsrMatrix<double>>(lb.matrix);
       if (args.mode == "ks")
-        run_ks(args, name, a, b, cfg.target.sigma, cfg.target.k);
+        run_ks(args, name, *a, *b, cfg.target.sigma, cfg.target.k);
       else
-        run_e2e(args, name, a, b, cfg);
+        run_e2e(args, name, *a, *b, cfg);
     }
   } catch (const std::exception& e) {
     std::cerr << "bench_ghiep_block: " << e.what() << "\n";
