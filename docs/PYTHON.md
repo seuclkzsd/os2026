@@ -58,7 +58,7 @@ A = hsolve.load_matrix("case/A.npz")           # scipy.sparse.csr_array，零拷
 | `config` | dict 或 `config.json` 路径（`docs/FORMATS.md` §2 的全部键；未知键报错）。**显式传入**的关键字参数覆盖它，未传的关键字不覆盖 |
 | `threads` | OpenMP 线程数，0 = `OMP_NUM_THREADS` / 全部可用；调用结束后恢复进程原线程设置 |
 | `verbose` | 0 静默，1 进度事件，2 调试；写到进程的 stderr（C 层，Jupyter 中显示在终端） |
-| `storage` | `auto`（某个严格三角为空时视为三角存储并镜像，与 CLI 相同）\| `full` \| `upper` \| `lower`（声明只存该三角，另一三角出现元素报错） |
+| `storage` | `auto`（某个严格三角为空时视为三角存储并镜像，与 CLI 相同）\| `full` \| `upper` \| `lower`（声明只存该三角，另一三角出现元素报错）；同时作用于 A 与 B |
 
 `SolveResult` 字段：
 
