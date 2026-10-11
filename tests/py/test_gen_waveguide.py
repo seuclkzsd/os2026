@@ -16,6 +16,8 @@ from tools.gen import waveguide as wg
 
 K0 = wg.wavenumber(50.0)          # 10 mm square guide at 50 GHz: the competition's real case
 A_MM = B_MM = 10.0
+# Slab-loaded test guides: (eps_r, mu_r, width mm, top of the low block of modes compared, mm^-2).
+SLABS = {"slab": (2.25, 1.0, 5.0, -0.15), "magnetic": (4.0, 2.0, 3.0, -5.3)}
 
 
 def _disc(nx, *, eps=1.0, family="waveguide", **kw):
@@ -162,24 +164,36 @@ def test_cavity_null_space_dimension():
 # ------------------------------------------------------------------- convergence / error bound
 
 def _max_errors(family, levels, **kw):
-    """Max |lambda_h - lambda| over a block of low modes on successively refined meshes, together
-    with the a-priori bound; the block is chosen away from the zero cluster."""
+    """Max |lambda_h - lambda| over a block of low modes on successively refined meshes (k-th
+    discrete against k-th continuous value), together with the slack of the a-priori bound; the
+    block is chosen away from the zero cluster.  'cavity' is the Nedelec TE family alone, 'tm'
+    the P1 Dirichlet (TM) family alone: the generator matches each family in order on its own."""
     if family == "hollow":
         exact = np.array([m.value for m in wg.hollow_guide_modes(A_MM, B_MM, K0, 0.0)])      # 18 modes
         shift = K0 * K0
-    elif family == "slab":
-        exact = np.array([m.value for m in wg.slab_guide_modes(A_MM, B_MM, K0, 5.0, 2.25, 1.0, -0.15)])
-        shift = 2.25 * K0 * K0
+    elif family in SLABS:
+        eps, mu, width, top = SLABS[family]
+        shift = eps * mu * K0 * K0
+        exact = np.array([m.value for m in wg.slab_guide_modes(A_MM, B_MM, K0, width, eps, mu, top)])
     else:
-        exact = np.array([m.value for m in wg.rectangle_cutoffs(A_MM, B_MM, 1.6, tm=False)])
+        tm = family == "tm"
+        exact = np.array([m.value for m in wg.rectangle_cutoffs(A_MM, B_MM, 4.0 if tm else 1.6, tm=tm)
+                          if m.label.startswith("TM" if tm else "TE")])
         shift = 0.0
     errors, bounds = [], []
     for nx in levels:
         if family == "cavity":
             disc, _, _ = _disc(nx, family="cavity2d", **kw)
             A, B = wg.cavity_pencil(disc)
+        elif family == "tm":
+            disc, _, _ = _disc(nx, **kw)
+            A, B = wg.stiff_zz(disc), wg.mass_zz(disc)
+        elif family in SLABS:
+            eps, mu, width, _ = SLABS[family]
+            disc, eps_r, mu_r = _disc(nx, eps=eps, mu_slab=mu, slab_width=width, **kw)
+            A, B = wg.waveguide_pencil(disc, K0, eps_r, mu_r)
         else:
-            disc, eps_r, mu_r = _disc(nx, eps=2.25 if family == "slab" else 1.0, **kw)
+            disc, eps_r, mu_r = _disc(nx, **kw)
             A, B = wg.waveguide_pencil(disc, K0, eps_r, mu_r)
         sigma = 0.5 * (exact[0] + exact[-1])
         lam = _real(_nearest(A, B, sigma, exact.size + 4))
@@ -190,9 +204,10 @@ def _max_errors(family, levels, **kw):
     return np.array(errors), np.array(bounds)
 
 
-@pytest.mark.parametrize("family", ["hollow", "slab", "cavity"])
+@pytest.mark.parametrize("family", ["hollow", "slab", "magnetic", "cavity", "tm"])
 def test_convergence_is_second_order(family):
-    """-lambda -> beta^2 (waveguide, hollow and slab-loaded) and kc^2 (cavity) at O(h^2)."""
+    """-lambda -> beta^2 (waveguide: hollow, dielectric slab, magnetic slab with mu_r = 2) and
+    kc^2 (cavity = TE family, P1 TM family) at O(h^2)."""
     err, slack = _max_errors(family, (16, 32, 64))
     ratios = err[:-1] / err[1:]
     assert np.all(err[1:] < err[:-1])
@@ -200,7 +215,7 @@ def test_convergence_is_second_order(family):
     assert np.all(slack > 0)                      # the a-priori bound holds on every level
 
 
-@pytest.mark.parametrize("family", ["hollow", "slab", "cavity"])
+@pytest.mark.parametrize("family", ["hollow", "slab", "magnetic", "cavity", "tm"])
 @pytest.mark.parametrize("pattern,perturb", [("diagonal", 0.0), ("unionjack", 0.24)])
 def test_error_bound_holds_on_other_meshes(family, pattern, perturb):
     _, slack = _max_errors(family, (16, 32), pattern=pattern, perturb=perturb, seed=5)
@@ -230,11 +245,24 @@ def test_slab_modes_reduce_to_hollow_and_scan_misses_no_root():
         assert min(coarse.values()) > -K0 * K0 * eps * mu                 # Rayleigh bound
 
 
-def test_fully_filled_guide_matches_scaled_hollow_guide():
-    """slab_width = a: homogeneous eps, so beta^2 = eps k0^2 - kc^2."""
-    filled = wg.slab_guide_modes(A_MM, B_MM, K0, A_MM, 2.25, 1.0, 0.0)
-    kc2 = wg.rectangle_cutoffs(A_MM, B_MM, 2.25 * K0 * K0, tm=True)
-    assert np.allclose(sorted(m.value for m in filled), sorted(m.value - 2.25 * K0 * K0 for m in kc2))
+@pytest.mark.parametrize("eps,mu", [(2.25, 1.0), (1.0, 3.0), (2.0, 1.5)])
+def test_fully_filled_guide_matches_scaled_hollow_guide(eps, mu):
+    """slab_width = a: homogeneous eps, mu, so beta^2 = eps mu k0^2 - kc^2."""
+    filled = wg.slab_guide_modes(A_MM, B_MM, K0, A_MM, eps, mu, 0.0)
+    kc2 = wg.rectangle_cutoffs(A_MM, B_MM, eps * mu * K0 * K0, tm=True)
+    assert np.allclose(sorted(m.value for m in filled), sorted(m.value - eps * mu * K0 * K0 for m in kc2))
+
+
+@pytest.mark.parametrize("eps,mu", [(2.25, 1.0), (1.0, 3.0), (2.0, 1.5)])
+def test_filled_guide_pencil_is_scaled_hollow_pencil(eps, mu):
+    """Homogeneous eps, mu: mu (A, B) is exactly the hollow-guide pencil at k0^2 eps mu, so the
+    discrete eigenvalues obey beta^2 = eps mu k0^2 - kc^2 as well (1/mu weights S_tt, T_tt, G
+    and S_zz; eps weights the k0^2 terms)."""
+    disc, eps_r, mu_r = _disc(6, eps=eps, mu_slab=mu, slab_width=A_MM, perturb=0.2, seed=8)
+    A, B = wg.waveguide_pencil(disc, K0, eps_r, mu_r)
+    A0, B0 = wg.waveguide_pencil(disc, K0 * np.sqrt(eps * mu))
+    assert abs(mu * A - A0).max() <= 1e-13 * abs(A0).max()
+    assert abs(mu * B - B0).max() <= 1e-13 * abs(B0).max()
 
 
 # ------------------------------------------------------------------------------- generator
@@ -250,22 +278,64 @@ def test_resolve_grid_matches_target_n():
 
 
 @pytest.mark.parametrize("kw", [dict(nx=4, target_n=100), dict(ny=4, target_n=100), dict(nx=4, pattern="x"),
-                                dict(family="cavity2d", nx=4, eps_slab=2.0), dict(nx=4, freq_ghz=-1.0)])
+                                dict(family="cavity2d", nx=4, eps_slab=2.0), dict(nx=4, freq_ghz=-1.0),
+                                dict(nx=4, eps_slab=2.25, slab_width=0.0), dict(nx=4, eps_slab=2.25, slab_width=10.5)])
 def test_case_spec_rejects_bad_input(kw):
     with pytest.raises(ValueError):
         wg.CaseSpec(**kw)
 
 
+def test_case_spec_normalises_numbers():
+    """numpy scalars (e.g. from a scripted sweep) become plain Python numbers; integer fields
+    must be integral."""
+    spec = wg.CaseSpec(nx=np.int64(6), freq_ghz=np.linspace(40.0, 60.0, 3)[1], eps_slab=np.float64(2.25),
+                       slab_width=np.float32(2.5), seed=np.int32(3))
+    assert type(spec.nx) is int and type(spec.seed) is int
+    assert type(spec.freq_ghz) is float and type(spec.eps_slab) is float and type(spec.slab_width) is float
+    with pytest.raises(TypeError):
+        wg.CaseSpec(nx=6.5)
+
+
+@pytest.mark.parametrize("spec,name", [
+    (wg.CaseSpec(nx=6, ny=4, eps_slab=np.float64(2.25), freq_ghz=np.linspace(40.0, 60.0, 3)[1], slab_width=3.0),
+     "my case"),
+    (wg.CaseSpec(nx=5, ny=5, slab_width=3.0, perturb=0.1, seed=4), "-dash;$x"),     # slab_width ignored: no slab
+    (wg.CaseSpec(family="cavity2d", nx=4, ny=6, pattern="diagonal"), "c'q"),
+])
+def test_command_line_round_trips_the_spec(spec, name):
+    """meta.params.command parses back (POSIX shell words) into the same inputs, so it
+    regenerates the case exactly; names with blanks or shell metacharacters stay one word."""
+    argv = shlex.split(wg.command_line(spec, name, spec.nx, spec.ny))
+    assert argv[:3] == ["python", "-m", "tools.gen.waveguide"]
+    again, again_name, _ = wg.parse_args(argv[3:])
+    assert again == spec and again_name == name
+
+
 def _check_targets_against_discrete(gen, A, B):
-    """Each suggested 'nearest k' query selects exactly a block: the k-th and (k+1)-th distances
-    to sigma differ, and the propagating target selects only negative eigenvalues."""
+    """Each suggested 'nearest k' query selects exactly a block of real eigenvalues: the k-th and
+    (k+1)-th distances to sigma differ, and the propagating target selects only negative ones."""
     for t in gen.meta["targets"]:
         lam = _nearest(A, B, t["sigma"], t["k"] + 4)
-        dist = np.sort(np.abs(lam - t["sigma"]))
+        order = np.argsort(np.abs(lam - t["sigma"]))
+        dist = np.abs(lam - t["sigma"])[order]
         assert dist[t["k"] - 1] < dist[t["k"]] - 1e-9
+        nearest = lam[order][: t["k"]]
+        assert np.abs(nearest.imag).max() <= 1e-9 * np.abs(nearest).max()
         if "propagating" in t["why"]:
-            nearest = lam[np.argsort(np.abs(lam - t["sigma"]))][: t["k"]]
             assert np.all(nearest.real < 0)
+
+
+def _check_window_against_discrete(gen):
+    """The discrete pencil has exactly as many eigenvalues in the reference window as are listed
+    there, all real.  Returns that count."""
+    lo, hi = gen.ref["window"]
+    listed = gen.ref["eigenvalues"]
+    inside = int(((listed > lo) & (listed < hi)).sum())
+    lam = _nearest(gen.A, gen.B, 0.5 * (lo + hi), inside + 6)
+    in_window = (lam.real > lo) & (lam.real < hi)
+    assert int(in_window.sum()) == inside
+    assert np.abs(lam[in_window].imag).max() <= 1e-9 * np.abs(lam).max()
+    return inside
 
 
 def test_generate_model_path_window_and_targets_hold():
@@ -276,21 +346,104 @@ def test_generate_model_path_window_and_targets_hold():
     nn = gen.meta["mesh"]["interior_nodes"]
     assert A.shape[0] > wg.DENSE_LIMIT and gen.meta["problem"] == "GHIEP"
     assert gen.meta["inertia"]["pencil"] == [18, nn, A.shape[0] - nn - 18]
-    lo, hi = gen.ref["window"]
-    listed = gen.ref["eigenvalues"]
-    inside = int(((listed > lo) & (listed < hi)).sum())
-    lam = _real(_nearest(A, B, 0.5 * (lo + hi), inside + 6))
-    assert int(((lam > lo) & (lam < hi)).sum()) == inside
+    assert _check_window_against_discrete(gen) == 18
     _check_targets_against_discrete(gen, A, B)
 
     cav = wg.generate(wg.CaseSpec(family="cavity2d", nx=27), "cav_model")
     assert cav.A.shape[0] > wg.DENSE_LIMIT and cav.meta["problem"] == "GHEP"
     _check_targets_against_discrete(cav, cav.A, cav.B)
-    lo, hi = cav.ref["window"]
-    listed = cav.ref["eigenvalues"]
-    inside = int(((listed > lo) & (listed < hi)).sum())
-    lam = _real(_nearest(cav.A, cav.B, 0.5 * (lo + hi), inside + 6))
-    assert int(((lam > lo) & (lam < hi)).sum()) == inside
+    _check_window_against_discrete(cav)
+
+
+@pytest.mark.parametrize("spec", [wg.CaseSpec(family="cavity2d", nx=27, perturb=0.24, seed=11),
+                                  wg.CaseSpec(nx=24, freq_ghz=120.0)])
+def test_generate_model_path_ignores_tails_of_ordered_families(spec):
+    """Poorly resolved validation modes have a-priori bars (0.15 h^2 kt^4) that reach below the
+    zero cluster.  Matched in order within the TE and TM families they cannot close the gaps
+    below them, so these meshes still get a certified window and targets (they used to be
+    refused); both hold on the discrete problem."""
+    gen = wg.generate(spec, "tails")
+    assert gen.A.shape[0] > wg.DENSE_LIMIT and gen.meta["targets"] and gen.ref["complete"]
+    _check_targets_against_discrete(gen, gen.A, gen.B)
+    _check_window_against_discrete(gen)
+
+
+def test_safe_cuts_match_family_members_in_order():
+    """Per-mode bars: a far value whose bar reaches below everything closes every gap.  In an
+    ordered family only the neighbours of a cut constrain it, and no cut may lie above the last
+    validated member of a family (its continuation is unknown)."""
+    v = np.array([1.0, 2.0, 3.0, 10.0])
+    e = np.array([0.1, 0.1, 0.1, 9.5])
+    assert wg.safe_cuts(v, e) == []
+    assert wg.safe_cuts(v, e, np.zeros(4, dtype=int)) == [(0, 1.5), (1, 2.5)]
+    # Family 0 at 1, 2, 4 (bars 0.1); family 1 at 1.5 (bar 0.6) and 3 (bar 0.1).
+    v = np.array([1.0, 1.5, 2.0, 3.0, 4.0])
+    e = np.array([0.1, 0.6, 0.1, 0.1, 0.1])
+    fam = np.array([0, 1, 0, 1, 0])
+    assert wg.safe_cuts(v, e, fam) == [(2, 2.5)]
+    assert wg.safe_cuts(v, e) == [(2, 2.5), (3, 3.5)]
+
+
+def test_generate_model_path_loaded_guide_counts_and_targets_hold():
+    """n > DENSE_LIMIT, loaded guide (eps_r = 1.5 half slab at 35 GHz): the negative count (the
+    error bound isolates the zero cluster), the window and the propagating target come from the
+    slab model; verify them on the discrete pencil.  The positive count and the number of complex
+    eigenvalues stay unknown (null)."""
+    gen = wg.generate(wg.CaseSpec(target_n=3000, eps_slab=1.5, freq_ghz=35.0), "slab_model")
+    A, B = gen.A, gen.B
+    neg, zero, pos = gen.meta["inertia"]["pencil"]
+    assert A.shape[0] > wg.DENSE_LIMIT and zero == gen.meta["mesh"]["interior_nodes"] and pos is None
+    assert neg == 10 and gen.meta["complex_eigenvalue_count"] is None
+    assert _check_window_against_discrete(gen) == neg          # the window holds every propagating mode
+    (target,) = gen.meta["targets"]                             # no evanescent target without a dense check
+    assert target["k"] == neg and "all propagating modes" in target["why"]
+    _check_targets_against_discrete(gen, A, B)
+    # Beyond the block come zero-cluster members (ARPACK returns only some copies of the nn-fold
+    # zero) and evanescent modes, none of them negative.
+    lam = _nearest(A, B, target["sigma"], neg + 4)
+    lam = lam[np.argsort(np.abs(lam - target["sigma"]))]
+    assert np.all(lam[:neg].real < 0) and np.all(lam[neg:].real > -1e-9)
+
+
+def test_dense_check_tolerates_complex_pairs_among_propagating_modes():
+    """eps_r = 30 on a 2 mm slab at 25 GHz, 8 cells: the coarse mesh couples two propagating
+    branches of opposite B-type into a complex pair with Re lambda < 0 (it used to abort
+    generation).  The case records it and the propagating target keeps clear of it."""
+    gen = wg.generate(wg.CaseSpec(nx=8, eps_slab=30.0, slab_width=2.0, freq_ghz=25.0), "slab_contrast")
+    assert gen.A.shape[0] <= wg.DENSE_LIMIT
+    assert gen.meta["complex_eigenvalue_count"] > 0 and gen.meta["complex_eigenvalue_min_real"] < 0
+    neg = gen.meta["inertia"]["pencil"][0]
+    prop = gen.meta["targets"][0]
+    assert f"of the {neg} propagating modes" in prop["why"] and "complex" in prop["why"]
+    _check_targets_against_discrete(gen, gen.A, gen.B)
+
+
+def test_hollow_guide_below_cutoff_lists_evanescent_modes():
+    """10 GHz is below the TE1,0 cutoff (15 GHz): no propagating mode, so the reference lists the
+    least evanescent modes, certifies a window above the zero cluster and suggests an evanescent
+    target (all of which used to be refused as 'mesh too coarse'); all hold on the discrete
+    pencil."""
+    gen = wg.generate(wg.CaseSpec(nx=30, freq_ghz=10.0), "wg_below_cutoff")
+    n, nn = gen.A.shape[0], gen.meta["mesh"]["interior_nodes"]
+    listed = gen.ref["eigenvalues"]
+    assert n > wg.DENSE_LIMIT and listed.min() > 0 and listed.size >= wg.WAVEGUIDE_EVANESCENT
+    assert gen.meta["inertia"]["pencil"] == [0, nn, n - nn]
+    assert gen.ref["complete"] and gen.ref["window"][0] > 0
+    _check_window_against_discrete(gen)
+    assert [("evanescent" in t["why"]) for t in gen.meta["targets"]] == [True]
+    _check_targets_against_discrete(gen, gen.A, gen.B)
+
+
+def test_loaded_guide_below_cutoff():
+    """Without a propagating mode the loaded guide has targets only where a dense check locates
+    the complex pairs of its evanescent spectrum; otherwise the refusal says why."""
+    with pytest.raises(ValueError, match="no propagating mode at 5.0 GHz"):
+        wg.generate(wg.CaseSpec(nx=30, freq_ghz=5.0, eps_slab=2.25), "x")
+    gen = wg.generate(wg.CaseSpec(nx=8, freq_ghz=5.0, eps_slab=2.25), "slab_below_cutoff")
+    assert gen.A.shape[0] <= wg.DENSE_LIMIT and gen.meta["inertia"]["pencil"][0] == 0
+    assert not gen.ref["complete"] and "no propagating mode" in gen.ref["note"]
+    assert [("evanescent" in t["why"]) for t in gen.meta["targets"]] == [True]
+    _check_targets_against_discrete(gen, gen.A, gen.B)
 
 
 def test_generate_dense_path_records_exact_counts():
@@ -299,8 +452,8 @@ def test_generate_dense_path_records_exact_counts():
     inertia = gen.meta["inertia"]
     assert inertia["B"] == [49, 0, 176] and inertia["A"][1] == 49
     assert sum(inertia["pencil"]) + gen.meta["complex_eigenvalue_count"] == n
-    assert gen.meta["complex_eigenvalue_count"] > 0
-    assert len(gen.meta["targets"]) == 1 and "propagating" in gen.meta["targets"][0]["why"]
+    assert gen.meta["complex_eigenvalue_count"] > 0 and gen.meta["complex_eigenvalue_min_real"] > 0
+    assert "propagating" in gen.meta["targets"][0]["why"]
     _check_targets_against_discrete(gen, gen.A, gen.B)
 
 
