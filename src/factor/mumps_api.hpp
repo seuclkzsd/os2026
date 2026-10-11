@@ -5,6 +5,7 @@
 #pragma once
 
 #include <dmumps_c.h>
+#include <pthread.h>
 #include <smumps_c.h>
 
 #include <cstdint>
@@ -24,9 +25,36 @@ namespace hs::mumps {
 /// "PB allocation in MUMPS_LOAD_INIT" + SIGSEGV in the first concurrent round, 7 of 7 runs
 /// (bench/certpar_inertia.cpp --exp concurrent --mumps-lock 0). With this lock, objects used
 /// from different threads are safe; their MUMPS phases simply run one after the other.
-/// The lock is held for the duration of one MUMPS call (JOB = -1, -2, 1, 2, 3).
-inline std::mutex& call_mutex() {
-  static std::mutex m;
+/// The lock is held for the duration of one MUMPS call (JOB = -1, -2, -4, 1, 2, 3).
+///
+/// Why not std::mutex: libstdc++ (glibc < 2.34) makes std::mutex::lock() a no-op unless
+/// __gthread_active_p() sees a weak reference to __pthread_key_create resolved in the
+/// EXECUTABLE. With the conda toolchain's -Wl,--as-needed, a link that gets pthread_create from
+/// elsewhere (the ASan debug preset: libasan intercepts it) drops libpthread, the weak reference
+/// resolves to 0 at link time, and the lock silently does nothing even though libpthread is loaded
+/// at run time (libgomp and libasan need it): build/debug/test_factor_counter then crashed in
+/// MUMPS_LOAD_INIT in 3 of 3 runs. pthread_mutex_lock() called directly has no such check: it binds
+/// to libc's forwarder (or libpthread itself), which uses libpthread whenever it is loaded - and
+/// it is, in any process with a second thread. bench/certpar_fix_probes.cpp --exp lock checks it.
+class CallMutex {
+ public:
+  constexpr CallMutex() noexcept = default;
+  CallMutex(const CallMutex&) = delete;
+  CallMutex& operator=(const CallMutex&) = delete;
+
+  void lock() {
+    const int rc = pthread_mutex_lock(&m_);
+    HS_ASSERT(rc == 0, "pthread_mutex_lock on the MUMPS call lock failed: " << rc);
+  }
+  void unlock() noexcept { pthread_mutex_unlock(&m_); }
+
+ private:
+  pthread_mutex_t m_ = PTHREAD_MUTEX_INITIALIZER;
+};
+
+/// The process-wide MUMPS call lock (BasicLockable; constant-initialised, never destroyed early).
+inline CallMutex& call_mutex() {
+  static CallMutex m;
   return m;
 }
 
@@ -108,7 +136,7 @@ class Instance {
                                         << infog(1) << ", INFOG(2)=" << infog(2));
   }
   ~Instance() {
-    std::lock_guard<std::mutex> lock(call_mutex());
+    std::lock_guard<CallMutex> lock(call_mutex());
     s_->job = kTerminate;
     Api<U>::call(s_.get());
   }
@@ -125,7 +153,7 @@ class Instance {
 
   /// Run one job under call_mutex(); returns INFOG(1) (negative: error, positive: warning).
   int run(int job) {
-    std::lock_guard<std::mutex> lock(call_mutex());
+    std::lock_guard<CallMutex> lock(call_mutex());
     s_->job = job;
     Api<U>::call(s_.get());
     return s_->infog[0];

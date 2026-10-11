@@ -8,6 +8,8 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <numeric>
@@ -16,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "factor/mumps_api.hpp"
 #include "factor/mumps_factorization.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
@@ -447,6 +450,30 @@ TYPED_TEST(FactorPivotOrder, IsAPermutationAndNearlyReproducesTheFill) {
 }
 
 // ------------------------------------------------------------------------------- threads
+
+// The MUMPS call lock must exclude in every build. As a std::mutex it was a no-op in executables
+// linked without libpthread (the ASan debug preset, where libstdc++'s __gthread_active_p() is
+// false), and DistinctObjectsFromTwoThreadsAreSafe crashed in MUMPS_LOAD_INIT. The test must not
+// pull libpthread into the link itself, or it would hide exactly that: std::this_thread::sleep_for
+// does (nanosleep binds to libpthread first), hence the yield loop on steady_clock.
+TEST(FactorCallLock, ExcludesASecondThread) {
+  auto& m = hs::mumps::call_mutex();
+  std::atomic<bool> trying{false}, acquired{false};
+  m.lock();
+  std::thread t([&] {
+    trying = true;
+    m.lock();
+    acquired = true;
+    m.unlock();
+  });
+  while (!trying) std::this_thread::yield();
+  const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+  while (!acquired && std::chrono::steady_clock::now() < until) std::this_thread::yield();
+  EXPECT_FALSE(acquired.load()) << "the second thread entered the held MUMPS call lock";
+  m.unlock();
+  t.join();
+  EXPECT_TRUE(acquired.load());
+}
 
 // Sequential MUMPS is not thread-safe across instances (factor.hpp); the module serializes all
 // MUMPS calls, so distinct objects driven from two threads must give exactly the single-threaded
