@@ -41,12 +41,4 @@ template <class T>
 index_t rayleigh_ritz_definite(DenseMatrix<T>& x, DenseMatrix<T>& ax, DenseMatrix<T>& bx,
                                   std::vector<double>& lambda, double drop_tol);
 
-/// Rayleigh-Ritz for an indefinite Hermitian pencil restricted to span(W) (W Euclidean
-/// orthonormal, AW = A W, BW = B W): eigenpairs of the small pencil (W^H A W, W^H B W) computed as
-/// eig(H^{-1} G) via LU + Schur. lambda/x receive m complex eigenvalues and unit-2-norm vectors
-/// X = W Y. Returns false if H is (numerically) singular, i.e. rcond-like pivot ratio < 1e-12.
-template <class T>
-bool rayleigh_ritz_indefinite(const DenseMatrix<T>& w, const DenseMatrix<T>& aw, const DenseMatrix<T>& bw,
-                              std::vector<cplx>& lambda, DenseMatrix<cplx>& x);
-
 }  // namespace hs::driver

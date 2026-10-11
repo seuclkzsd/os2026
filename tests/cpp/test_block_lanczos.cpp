@@ -437,11 +437,11 @@ TEST(LanczosBlockLayout, BasisSizesAreWholeBlocks) {
   }
 }
 
-TEST(KrylovSchurGeneralBlock, BlockSizeOtherThanOneIsRejected) {
+TEST(KrylovSchurGeneralBlock, BlockSizeBelowOneIsRejected) {
   hs::test::DiagonalOperator<double> op(std::vector<double>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
   hs::KrylovSchurOptions<double> opt;
   opt.nev = 2;
-  for (index_t p : {0, 2, 4}) {
+  for (index_t p : {0, -1}) {
     opt.block_size = p;
     try {
       hs::krylov_schur_general<double>(op, hs::Which::LargestMagnitude, opt);

@@ -98,18 +98,6 @@ constexpr index_t kAutoBlock = 2;
 constexpr index_t kBlockMinOrder = 20000;
 constexpr index_t kBlockMinNev = 4;
 
-// SolverConfig::block_size once the field exists (interface request of module ghiep: index_t, 0 =
-// auto, 1 = single-vector), detected at compile time; until then every run uses the automatic
-// rule.
-template <class C>
-auto configured_block_size(const C& cfg, int) -> decltype(static_cast<index_t>(cfg.block_size)) {
-  return static_cast<index_t>(cfg.block_size);
-}
-template <class C>
-index_t configured_block_size(const C&, long) {
-  return 0;
-}
-
 /// Largest configured block size used: wider blocks only add basis work, and a block too wide for
 /// the space makes krylov_schur_general fall back to one exact cycle over all of it.
 constexpr index_t kMaxConfiguredBlock = 64;
@@ -133,9 +121,8 @@ constexpr double kBlockMemoryShare = 0.9;
 /// one-sided runs next to the zero cluster, where every block brings p cluster directions back
 /// (wg-square-1e5 at sigma = 0, whole solve: 284 / 400 / 620 / 855). End to end, seconds for
 /// p = 1 / 2 / 4 / 8 (3 repetitions; bench/ghiep_fix_e2e.cpp on the data cases, with --sigma 0 for
-/// the one-sided rows, bench/ghiep_block.cpp --mode e2e on the synthetic ones; forcing p needs
-/// SolverConfig::block_size - interface request 2 of module ghiep - so these were measured on this
-/// code plus that one field):
+/// the one-sided rows, bench/ghiep_block.cpp --mode e2e on the synthetic ones; p forced through
+/// SolverConfig::block_size):
 ///   wg-square-1e5     2.09 / 1.56 / 1.57 / 1.69    wg-square-1e5, sigma 0    9.9 / 8.6 / 14.6 / 10.1
 ///   wg-halfslab-1e5   3.89 / 2.46 / 3.10 / 3.40    wg-halfslab-1e5, sigma 0  14.5 / 11.4 / 10.6 / 12.7
 /// and on the five synthetic pencils (syn-ghiep-{wg,wg0}-{20480,102400}, syn-ghiep-cplx-102400:
@@ -147,7 +134,7 @@ constexpr double kBlockMemoryShare = 0.9;
 /// p = 2 1.03 - 1.19x, but on totals of 0.11 - 0.16 s (10 - 20 ms, the noise level of these
 /// runs), so the rule keeps p = 1 below kBlockMinOrder.
 index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev) {
-  const index_t configured = configured_block_size(cfg, 0);
+  const index_t configured = cfg.block_size;
   if (configured > 0) {
     if (nev <= kMaxProbeNev) return 1;
     return std::max<index_t>(1, std::min({configured, nev, kMaxConfiguredBlock, n / 16}));
@@ -292,7 +279,7 @@ void small_eig(const DenseMatrix<T>& a, std::vector<cplx>& w, DenseMatrix<cplx>&
 
 /// Rayleigh-Ritz for the indefinite pencil on span(W), W (n x m) Euclidean orthonormal: the
 /// eigenpairs (mu, y) of the small pencil (W^H A W, W^H B W), computed as eig(H^{-1} G) via LU and
-/// a complex Schur form (projection.cpp's rayleigh_ritz_indefinite), with G and H formed in column
+/// a complex Schur form, with G and H formed in column
 /// blocks of kProjectBatch: no n x m image A W or B W is materialized (DESIGN §3.6-3). Ritz vectors
 /// are W y. Returns false when H is numerically singular (pivot ratio < 1e-12).
 template <class T>

@@ -72,7 +72,11 @@ struct SolverConfig {
                                     ///< it gets all missing copies of a multiple eigenvalue by
                                     ///< construction only up to that width. p is halved (warning)
                                     ///< while the block basis does not fit the memory budget.
-                                    ///< GHIEP runs are single-vector.
+                                    ///< GHIEP (src/driver/indefinite.cpp): auto p = 2 for n >= 2e4
+                                    ///< and nev >= 4, else 1; a configured p is capped at nev, 64
+                                    ///< and n/16, probes (nev <= 2) stay single-vector, and p is
+                                    ///< halved (warning) while the run's peak columns exceed 90% of
+                                    ///< the budget left beside the current RSS.
   index_t slice_size = 0;           ///< spectrum slicing (interval / smallest / largest, B HPD): at
                                     ///< most this many eigenvalues per shift; 0 = auto (cost model)
   index_t max_restarts = 1000;
@@ -173,7 +177,7 @@ struct SolveReport {
   index_t shift_retries = 0;
   FactorOptions factor_options;
   index_t block_size = 1;        ///< Krylov block width p of the first shift-invert run (resolved
-                                 ///< SolverConfig::block_size; 1 for GHIEP)
+                                 ///< SolverConfig::block_size)
   // statistics
   FactorStats factor_stats;
   index_t restarts = 0;

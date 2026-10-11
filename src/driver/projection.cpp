@@ -124,67 +124,11 @@ index_t rayleigh_ritz_definite(DenseMatrix<T>& x, DenseMatrix<T>& ax, DenseMatri
   return r;
 }
 
-template <class T>
-bool rayleigh_ritz_indefinite(const DenseMatrix<T>& w, const DenseMatrix<T>& aw, const DenseMatrix<T>& bw,
-                              std::vector<cplx>& lambda, DenseMatrix<cplx>& x) {
-  const index_t n = w.rows(), m = w.cols();
-  lambda.clear();
-  x.resize(n, m);
-  if (m == 0) return true;
-  DenseMatrix<T> g(m, m), h(m, m);
-  linalg::gram(n, m, w.data(), w.ld(), aw.data(), aw.ld(), g.data(), g.ld());
-  linalg::gram(n, m, w.data(), w.ld(), bw.data(), bw.ld(), h.data(), h.ld());
-  make_hermitian(g);
-  make_hermitian(h);
-  // M = H^{-1} G (H Hermitian indefinite: LU with partial pivoting).
-  const auto fm = static_cast<fint>(m);
-  std::vector<fint> ipiv(static_cast<std::size_t>(m));
-  if (lapack::getrf(fm, h.data(), fm, ipiv.data()) != 0) return false;
-  double umax = 0.0, umin = INFINITY;
-  for (index_t i = 0; i < m; ++i) {
-    umax = std::max(umax, std::abs(h(i, i)));
-    umin = std::min(umin, std::abs(h(i, i)));
-  }
-  if (!(umin > 1e-12 * umax)) return false;
-  lapack::getrs(fm, fm, h.data(), fm, ipiv.data(), g.data(), fm);
-  // Complex Schur form of M (small, so complex arithmetic avoids 2x2 real blocks) and its
-  // eigenvectors Y.
-  DenseMatrix<cplx> mc(m, m), q(m, m);
-  for (index_t j = 0; j < m; ++j)
-    for (index_t i = 0; i < m; ++i) mc(i, j) = cplx(g(i, j));
-  std::vector<cplx> mu(static_cast<std::size_t>(m));
-  lapack::gees(fm, mc.data(), fm, mu.data(), q.data(), fm);
-  lapack::trevc_backtransform(fm, mc.data(), fm, q.data(), fm);  // q <- eigenvectors of M
-  // X = W * Y (complex), columns normalised to unit 2-norm.
-  if constexpr (is_complex_v<T>) {
-    linalg::multiply(n, m, m, w.data(), w.ld(), q.data(), q.ld(), x.data(), x.ld());
-  } else {
-    DenseMatrix<double> yr(m, m), yi(m, m), xr(n, m), xi(n, m);
-    for (index_t j = 0; j < m; ++j)
-      for (index_t i = 0; i < m; ++i) {
-        yr(i, j) = q(i, j).real();
-        yi(i, j) = q(i, j).imag();
-      }
-    linalg::multiply(n, m, m, w.data(), w.ld(), yr.data(), yr.ld(), xr.data(), xr.ld());
-    linalg::multiply(n, m, m, w.data(), w.ld(), yi.data(), yi.ld(), xi.data(), xi.ld());
-    for (index_t j = 0; j < m; ++j)
-      for (index_t i = 0; i < n; ++i) x(i, j) = cplx(xr(i, j), xi(i, j));
-  }
-  for (index_t j = 0; j < m; ++j) {
-    const double nrm = linalg::norm2(n, x.col(j));
-    if (nrm > 0) linalg::scal(n, cplx(1.0 / nrm), x.col(j));
-  }
-  lambda = std::move(mu);
-  return true;
-}
-
 #define HS_INSTANTIATE_PROJECTION(T)                                                                   \
   template void apply_block<T>(const CsrMatrix<T>*, const DenseMatrix<T>&, DenseMatrix<T>&);           \
   template index_t orthonormalize_columns<T>(DenseMatrix<T>&, double);                                 \
   template index_t rayleigh_ritz_definite<T>(DenseMatrix<T>&, DenseMatrix<T>&, DenseMatrix<T>&,     \
-                                                std::vector<double>&, double);                         \
-  template bool rayleigh_ritz_indefinite<T>(const DenseMatrix<T>&, const DenseMatrix<T>&,              \
-                                            const DenseMatrix<T>&, std::vector<cplx>&, DenseMatrix<cplx>&);
+                                                std::vector<double>&, double);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_PROJECTION)
 #undef HS_INSTANTIATE_PROJECTION
 
