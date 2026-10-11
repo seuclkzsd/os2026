@@ -104,6 +104,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
@@ -112,9 +113,16 @@ namespace hs {
 
 enum class FactorPrecision { Double, Single };
 
+/// FactorOptions::ordering value selecting hsolve's own multithreaded nested dissection
+/// (compute_ordering below), handed to MUMPS as its pivot order (PERM_IN, ICNTL(7) = 1).
+inline constexpr int kOrderingNestedDissection = 10;
+
 struct FactorOptions {
   FactorPrecision precision = FactorPrecision::Double;  ///< Single: s/cmumps (pair with SolveRefinement)
-  int ordering = 7;           ///< ICNTL(7): 7 auto, 5 METIS, 3 SCOTCH, 4 PORD, 0 AMD
+  int ordering = 7;           ///< ICNTL(7): 7 auto, 5 METIS, 3 SCOTCH, 4 PORD, 0 AMD, 6 QAMD,
+                              ///< 2 AMF; or kOrderingNestedDissection (hsolve, multithreaded)
+  int ordering_threads = 0;   ///< threads of compute_ordering for kOrderingNestedDissection;
+                              ///< 0 = `threads` (the ordering itself does not depend on it)
   int scaling = 7;            ///< ICNTL(8): 7 = recomputed at every factorization (shift-independent)
   int threads = 0;            ///< ICNTL(16) OpenMP threads; 0 = omp_get_max_threads()
   int mem_relax_pct = 35;     ///< ICNTL(14) initial value; on a workspace error it is doubled (at
@@ -163,6 +171,7 @@ struct FactorEstimate {
 struct FactorStats {
   index_t analyses = 0;      ///< successful + failed analyze() calls
   double analyze_s = 0.0;    ///< accumulated over all analyze() calls
+  double ordering_s = 0.0;   ///< part of analyze_s spent in compute_ordering (hsolve orderings)
   double factorize_s = 0.0;  ///< accumulated over all factorize() calls
   double solve_s = 0.0;      ///< accumulated over all solve() calls
   index_t factorizations = 0;    ///< successful + failed factorize() calls
@@ -377,5 +386,45 @@ class InertiaCounter {
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
+
+// ------------------------------------------------------------------ hsolve's own orderings
+
+/// Options of compute_ordering (nested dissection). The defaults follow METIS_NodeND.
+struct OrderingOptions {
+  int threads = 0;              ///< OpenMP threads; 0 = omp_get_max_threads(). The ordering does
+                                ///< NOT depend on it (bitwise the same for every thread count)
+  index_t leaf_size = 120;      ///< subgraphs of at most this many vertices: minimum degree
+  double imbalance = 1.2;       ///< each half of a separator weighs at most imbalance * |V| / 2
+  index_t coarsen_to = 100;     ///< multilevel separators coarsen down to this many vertices
+  int init_tries = 7;           ///< greedy-growing attempts for the coarsest separator
+  int refine_passes = 10;       ///< node-FM refinement passes per level (stop early without gain)
+  std::uint64_t seed = 2026;    ///< seed of the (counter-based, thread-independent) random choices
+};
+
+struct OrderingStats {
+  double seconds = 0.0;         ///< wall time of compute_ordering (graph construction included)
+  int threads = 0;              ///< OpenMP threads used
+  index_t vertices = 0;         ///< vertices of the ordered graph (n: the embedding is compressed)
+  std::int64_t edges = 0;       ///< its undirected edges
+  index_t separators = 0;       ///< separators computed (nonleaf subgraphs)
+  index_t leaves = 0;           ///< subgraphs ordered by minimum degree
+  index_t top_separator = 0;    ///< vertices of the first separator
+};
+
+/// Fill-reducing pivot order of the matrix MUMPS factorizes for pencil (K for real T, its real
+/// embedding E of order 2n for complex T) by nested dissection: multilevel vertex separators
+/// (sorted heavy-edge matching, greedy growing, one-sided node FM refinement) applied
+/// recursively, the two halves of every separator ordered concurrently as OpenMP tasks, leaves by
+/// minimum degree. Complex T: the n-vertex graph of K is ordered and expanded so that the two
+/// embedding variables i and n+i of every vertex are eliminated one after the other (the
+/// embedding's pattern is that of K with 2x2 blocks, so this loses nothing and halves the graph).
+/// Returns PERM_IN for ICNTL(7) = 1: entry v is the 1-based pivot position of variable v (size n,
+/// or 2n). Deterministic: a function of the pencil's pattern and `options` (threads excluded).
+/// Thread-safe (no shared state; uses its own OpenMP parallel region). O(nnz log n) work.
+/// Throws InvalidInput (bad options), Unsupported (order above the 32-bit MUMPS range).
+/// Scalar set: T in {double, cplx}.
+template <class T>
+std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const OrderingOptions& options = {},
+                                  OrderingStats* stats = nullptr);
 
 }  // namespace hs

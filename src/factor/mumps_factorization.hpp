@@ -63,6 +63,10 @@ class MumpsFactorization final : public SparseFactorization<T> {
   static constexpr int kEmbeddingFactor = is_complex_v<T> ? 2 : 1;
 
   void configure_static_controls();
+  /// ICNTL(7) for options().ordering (hsolve's own orderings reach MUMPS as PERM_IN: ICNTL(7)=1).
+  int mumps_ordering() const {
+    return options_.ordering == kOrderingNestedDissection ? 1 : options_.ordering;
+  }
   bool read_factorization_info(bool mumps_singular);
 
   FactorOptions options_;
