@@ -103,6 +103,32 @@ Block<T> take_columns(const Block<T>& src, const std::vector<index_t>& cols);
 template <class T>
 void append_columns(DenseMatrix<T>& dst, const DenseMatrix<T>& src);
 
+// ------------------------------------------------------------------------------ run-time models
+
+/// Run-time models of the MUMPS building blocks on this machine (DESIGN §3.6-3b). Deterministic
+/// functions of the input and the analysis estimate, so that every decision built on them
+/// (ordering, InertiaCounter, slice size) is the same in every run of the same problem. `order`
+/// and `entries` describe the matrix MUMPS factorizes (mumps_input_size).
+double model_factor_s(const FactorEstimate& e, double order, int threads);  ///< one factorization
+double model_solve_s(const FactorEstimate& e);                               ///< one 1-RHS solve
+/// One MUMPS analysis with AMD ordering (input conversion, ordering, symbolic factorization) of an
+/// input with `entries` upper-triangle entries whose factors hold `factor_entries` (the analysis
+/// estimate), fitted on the data cases (steps.cpp). MUMPS' analysis is sequential: no threads.
+double model_analysis_s(double order, double entries, double factor_entries);
+/// An InertiaCounter count (inertia-only factorization) saves this fraction of a factorization.
+constexpr double kCounterSaving = 0.13;
+/// A SCOTCH analysis costs this many AMD analyses of the same input (adaptive ordering; measured
+/// 2.2..17, median ~9 on the 1e5 data cases, bench/drvint_profile --exp analysis; 7 keeps the
+/// P3 calibration, which picks the same ordering as before on every data case).
+constexpr double kNdAnalysisOverAmd = 7.0;
+
+struct MumpsInputSize {
+  double order = 0.0;    ///< n, or 2n for complex T (real symmetric embedding)
+  double entries = 0.0;  ///< upper-triangle entries passed to MUMPS
+};
+template <class T>
+MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil);
+
 // ------------------------------------------------------------------------------ factorization
 
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb);
@@ -141,6 +167,17 @@ index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>&
 template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed = false);
+
+/// The adaptive ordering's decision from the AMD probe's estimate (deterministic, see steps.cpp).
+struct OrderingDecision {
+  double fill_ratio = 0.0;      ///< AMD factor entries / nnz(K)
+  double saving_s = 0.0;        ///< predicted saving of nested dissection on the run
+  double amd_analysis_s = 0.0;  ///< model_analysis_s of the input and the AMD estimate
+  double nd_cost_s = 0.0;       ///< kNdAnalysisOverAmd * amd_analysis_s
+  bool use_nd = false;          ///< saving_s > nd_cost_s
+};
+OrderingDecision decide_ordering(const FactorEstimate& amd, const MumpsInputSize& in, double pencil_nnz,
+                                 int threads, index_t expected_factorizations, index_t expected_solves);
 
 /// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe + cost model, SCOTCH if it pays.
 template <class T>

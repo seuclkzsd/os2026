@@ -95,6 +95,43 @@ FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
   return o;
 }
 
+// ------------------------------------------------------------------------------ run-time models
+
+// Factorization / solve model of DESIGN §3.6-3b (calibrated on the 2x Xeon 6336Y node).
+double model_factor_s(const FactorEstimate& e, double order, int threads) {
+  return 6e-7 * order + e.flops / (12e9 * std::max(1, threads));
+}
+double model_solve_s(const FactorEstimate& e) { return 16.0 * static_cast<double>(e.factor_entries) / 12e9; }
+
+namespace {
+// AMD analysis model, least squares on the relative error over the 42 data cases (n = 289 ..
+// 584016 MUMPS order, 1.6e3 .. 2.6e7 input entries, 5.7e3 .. 5.4e9 AMD factor entries; median of 3
+// analyses each, bench/drvint_profile --exp analysis, 1 thread of MUMPS analysis on the 6336Y):
+//   t = 3.4e-7 s * order + 2.5e-8 s * entries + 3.6e-10 s * factor_entries
+// predicts every case with n >= 1e4 within 0.41x .. 1.44x (median 0.95; order and entries alone:
+// 0.18x .. 1.50x, median 0.84). The third term is the symbolic factorization: 3-D cases with
+// AMD fill of 1e8..1e9 entries take 2..8x longer than 2-D ones with the same input size. The
+// measured wall time it replaces varied 3x between runs of the same input (0.086 vs 0.258 s,
+// syn-ghep-near-singular-real-1e5, first MUMPS call of the process), which made the adaptive
+// ordering run-dependent (wg-square-1e6: saving / SCOTCH cost = 0.78 measured, 1.02 modelled).
+constexpr double kAnalysisPerOrder = 3.4e-7;
+constexpr double kAnalysisPerEntry = 2.5e-8;
+constexpr double kAnalysisPerFactorEntry = 3.6e-10;
+}  // namespace
+
+double model_analysis_s(double order, double entries, double factor_entries) {
+  return kAnalysisPerOrder * order + kAnalysisPerEntry * entries + kAnalysisPerFactorEntry * factor_entries;
+}
+
+template <class T>
+MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil) {
+  const double n = static_cast<double>(pencil.order()), nnz = static_cast<double>(pencil.nnz());
+  // Complex T: the real embedding of order 2n holds up to 4 real entries per off-diagonal complex
+  // one (3 per diagonal entry) in its upper triangle.
+  if constexpr (is_complex_v<T>) return {2.0 * n, 4.0 * nnz - n};
+  return {n, nnz};
+}
+
 // ------------------------------------------------------------------------- factorization steps
 
 // Factorize K(sigma0) (DESIGN §3.6-4). A null pivot means sigma0 is (numerically) ON an eigenvalue:
@@ -245,12 +282,6 @@ void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPen
 
 namespace {
 
-// Factorization / solve model of DESIGN §3.6-3b (calibrated on the 2x Xeon 6336Y node).
-double model_factor_s(const FactorEstimate& e, double order, int threads) {
-  return 6e-7 * order + e.flops / (12e9 * std::max(1, threads));
-}
-double model_solve_s(const FactorEstimate& e) { return 16.0 * static_cast<double>(e.factor_entries) / 12e9; }
-
 // Shift-invert Lanczos converging c pairs in one run (thick restart, ncv = 2c + 1), measured with
 // bench/slicing_sweep (yee-pec-box 1e4 and 1e5, slices of 12..1075 pairs, 2 threads):
 //   solves per pair      ~ kSolvesPerPair + kSolvesPerRun / c  (2.0 + 33/c fits 2.0 .. 5.0)
@@ -308,13 +339,32 @@ CostModel make_cost_model(const FactorEstimate& est, index_t n, int threads, boo
 }
 
 // Adaptive fill-reducing ordering (DESIGN §3.6-3b). Nested dissection (SCOTCH) minimises fill but
-// its analysis costs ~7x an AMD analysis; on 2-D-like graphs AMD's extra fill is cheap. Probe with
-// AMD (fast), predict what nested dissection could save on the run's factorizations and solves,
-// and pay for it only when the predicted saving exceeds its predicted analysis cost.
+// its analysis costs ~kNdAnalysisOverAmd AMD analyses; on 2-D-like graphs AMD's extra fill is
+// cheap. Probe with AMD (fast), predict what nested dissection could save on the run's
+// factorizations and solves, and pay for it only when the predicted saving exceeds its predicted
+// analysis cost. Every input of the decision is deterministic (the analysis estimate and
+// model_analysis_s, not the probe's wall time), so identical runs choose the same ordering even
+// under load.
 // Cost model (calibrated on the 2x Xeon 6336Y node, P3 measurements; only ratios matter):
 //   t_factorize ~ 6e-7 n + flops / (12 GF/s * threads),  t_solve ~ 16 B * entries / 12 GB/s,
 //   nested dissection keeps (flops, entries) >= (0.35, 0.6) of AMD's on 3-D-like graphs (AMD fill
 //   ratio entries/nnz(K) > 20) and >= (0.6, 0.85) otherwise.
+OrderingDecision decide_ordering(const FactorEstimate& amd, const MumpsInputSize& in, double pencil_nnz,
+                                 int threads, index_t expected_factorizations, index_t expected_solves) {
+  OrderingDecision d;
+  const double t_f = model_factor_s(amd, in.order, std::max(1, threads));
+  const double t_s = model_solve_s(amd);
+  d.fill_ratio = static_cast<double>(amd.factor_entries) / std::max(1.0, pencil_nnz);
+  const bool three_d_like = d.fill_ratio > 20.0;
+  const double keep_f = three_d_like ? 0.35 : 0.6, keep_e = three_d_like ? 0.6 : 0.85;
+  d.saving_s = static_cast<double>(expected_factorizations) * t_f * (1.0 - keep_f) +
+               static_cast<double>(expected_solves) * t_s * (1.0 - keep_e);
+  d.amd_analysis_s = model_analysis_s(in.order, in.entries, static_cast<double>(amd.factor_entries));
+  d.nd_cost_s = kNdAnalysisOverAmd * d.amd_analysis_s;
+  d.use_nd = d.saving_s > d.nd_cost_s;
+  return d;
+}
+
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
@@ -325,23 +375,16 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   auto fac = make_mumps_factorization<T>(amd);
   Timer t;
   fac->analyze(pencil, 1.0, -sigma0);
-  const double t_amd = t.seconds();
+  const double t_amd = t.seconds();  // logged only: decisions must not depend on the load
   const FactorEstimate e = fac->estimate();
-  const double threads = std::max(1, fopts.threads);
-  const double n = static_cast<double>(pencil.order()) * (is_complex_v<T> ? 2.0 : 1.0);
-  const double t_f = model_factor_s(e, n, static_cast<int>(threads));
-  const double t_s = model_solve_s(e);
-  const double fill_ratio = static_cast<double>(e.factor_entries) / std::max<double>(1.0, pencil.nnz());
-  const bool three_d_like = fill_ratio > 20.0;
-  const double keep_f = three_d_like ? 0.35 : 0.6, keep_e = three_d_like ? 0.6 : 0.85;
-  const double saving = expected_factorizations * t_f * (1.0 - keep_f) + expected_solves * t_s * (1.0 - keep_e);
-  const double nd_cost = 7.0 * t_amd;
-  const bool use_nd = saving > nd_cost;
-  event(c, "ordering", {{"amd_analyze_s", t_amd}, {"amd_flops", e.flops},
-                        {"amd_entries", static_cast<std::int64_t>(e.factor_entries)}, {"fill_ratio", fill_ratio},
-                        {"predicted_saving_s", saving}, {"predicted_nd_cost_s", nd_cost},
-                        {"choice", std::string(use_nd ? "scotch" : "amd")}});
-  if (!use_nd) return fac;
+  const OrderingDecision d = decide_ordering(e, mumps_input_size(pencil), static_cast<double>(pencil.nnz()),
+                                             fopts.threads, expected_factorizations, expected_solves);
+  event(c, "ordering", {{"amd_analyze_s", t_amd}, {"amd_analyze_model_s", d.amd_analysis_s},
+                        {"amd_flops", e.flops}, {"amd_entries", static_cast<std::int64_t>(e.factor_entries)},
+                        {"fill_ratio", d.fill_ratio}, {"predicted_saving_s", d.saving_s},
+                        {"predicted_nd_cost_s", d.nd_cost_s}, {"choice", std::string(d.use_nd ? "scotch" : "amd")}});
+  if (!d.use_nd) return fac;
+  fac.reset();  // free the AMD analysis before the SCOTCH one: lower peak of the phase
   FactorOptions nd = fopts;
   nd.ordering = 3;  // SCOTCH: measured faster analysis than METIS at equal or better total time
   auto fac_nd = make_mumps_factorization<T>(nd);
