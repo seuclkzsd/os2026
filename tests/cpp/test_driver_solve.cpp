@@ -8,6 +8,7 @@
 
 #include "hsolve/error.hpp"
 #include "hsolve/solver.hpp"
+#include "hsolve/util.hpp"
 #include "linalg/blas_lapack.hpp"
 #include "support/fixtures.hpp"
 
@@ -216,6 +217,44 @@ TEST(DriverSolve, IndefiniteBRealSpectrumWithZeroCluster) {
     if (x != 0.0) nonzero.push_back(x);
   expect_same_set(sol.eigenvalues, nearest(nonzero, sigma, 5), 1e-8);
   EXPECT_EQ(sol.report.zero_cluster_dim, nzero);
+}
+
+TEST(DriverSolve, PhaseTimesCoverTheWallTime) {
+  // time_total_s is the sum of the phases by construction; what must hold is that it accounts
+  // for the wall time of hs::solve (a phase clock started late, or work outside it, would not).
+  // Nearest, interval (sliced), smallest (inertia search) and GHIEP paths. The margin covers the
+  // return and the factorization's destructor, and scheduling noise when tests run in parallel.
+  auto a = hs::test::laplacian_2d<double>(60, 59);
+  for (index_t i = 0; i < a.nrows; ++i)
+    for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p)
+      if (a.colind[p] == i) a.values[p] -= 4.0;
+  std::vector<hs::SolverConfig> cfgs(3, nearest_cfg(0.3, 20));
+  cfgs[1].target.mode = hs::TargetMode::Interval;
+  cfgs[1].target.lower = -0.15;
+  cfgs[1].target.upper = 0.15;
+  cfgs[1].slice_size = 40;
+  cfgs[2].target.mode = hs::TargetMode::Smallest;
+  for (const auto& cfg : cfgs) {
+    hs::Timer wall;
+    const auto sol = hs::solve(a, nullptr, cfg);
+    const double w = wall.seconds();
+    expect_times_add_up(sol.report);
+    EXPECT_LE(sol.report.time_total_s, w);
+    EXPECT_GE(sol.report.time_total_s, 0.8 * w - 5e-3) << static_cast<int>(cfg.target.mode);
+  }
+  // GHIEP: B = diag(+-1) congruent to an indefinite pencil.
+  const index_t n = 400;
+  auto l = hs::test::laplacian_1d<double>(n);
+  hs::DenseMatrix<double> bd(n, n);
+  for (index_t i = 0; i < n; ++i) bd(i, i) = (i % 4 == 0) ? -1.0 : 1.0;
+  const auto b = hs::test::from_dense(bd);
+  hs::Timer wall;
+  const auto sol = hs::solve(l, &b, nearest_cfg(0.5, 6));
+  const double w = wall.seconds();
+  EXPECT_EQ(sol.report.problem, hs::ProblemType::GeneralizedIndefinite);
+  expect_times_add_up(sol.report);
+  EXPECT_LE(sol.report.time_total_s, w);
+  EXPECT_GE(sol.report.time_total_s, 0.8 * w - 5e-3);
 }
 
 TEST(DriverSolve, RejectsNonHermitianAndSymmetrizesNearHermitian) {

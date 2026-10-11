@@ -5,10 +5,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <numeric>
+#include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "hsolve/error.hpp"
+#include "hsolve/log.hpp"
 #include "hsolve/solver.hpp"
 #include "support/fixtures.hpp"
 
@@ -358,6 +363,186 @@ TEST(DriverTargets, NearestNextToAFilteredNullSpace) {
     EXPECT_EQ(sol.report.zero_modes_filtered, 80) << sigma;
     EXPECT_TRUE(std::is_sorted(sol.eigenvalues.begin(), sol.eigenvalues.end()));  // nearest first
   }
+}
+
+// ------------------------------------------------- clusters, multiplets, inexact factors
+
+// Largest backward error of the returned pairs.
+double worst_eta(const hs::SolveReport& r) {
+  double w = 0.0;
+  for (const auto& p : r.pairs) w = std::max(w, p.backward_error);
+  return w;
+}
+
+TEST(DriverTargets, LargestWhoseTopEigenvalueIsMultiple) {
+  // The top eigenvalue is 10-fold and the 4 largest are 4 of its copies: the inertia search for
+  // the window end must fall back BELOW the multiplet (a window above it holds nothing).
+  std::vector<double> lam(10, 3.0);
+  for (int i = 1; i <= 300; ++i) lam.push_back(-0.01 * i);
+  auto a = hs::test::prescribed_spectrum<double>(lam, 4, 41);
+  auto l = hs::solve(a, nullptr, end_cfg(hs::TargetMode::Largest, 4));
+  expect_window_ok(l);
+  expect_same_set(l.eigenvalues, {3.0, 3.0, 3.0, 3.0}, 1e-10);
+  expect_b_orthonormal(l, static_cast<const hs::CsrMatrix<double>*>(nullptr), 1e-9);
+}
+
+TEST(DriverTargets, KthEigenvalueInsideAMultiplet) {
+  // 3 + 2 low eigenvalues, then a 6-fold 2.5: smallest k = 6, 7 end inside the multiplet, which
+  // counts cannot split. The window takes the whole multiplet, its end lies mid-way in the gap
+  // beyond it (a one-sided shift hugging the multiplet left far pairs at eta ~1e-10 after ~25
+  // counts), and largest k (mirror image) falls back below it.
+  std::vector<double> lam = {1.0, 1.0, 1.0, 1.5, 1.5};
+  for (int i = 0; i < 6; ++i) lam.push_back(2.5);
+  for (int i = 1; i <= 400; ++i) lam.push_back(2.5 + 0.37 * i);
+  auto a = hs::test::prescribed_spectrum<double>(lam, 4, 48);
+  std::vector<double> neg(lam);
+  for (auto& x : neg) x = -x;
+  auto an = hs::test::prescribed_spectrum<double>(neg, 4, 49);
+  for (index_t k : {6, 7}) {
+    auto s = hs::solve(a, nullptr, end_cfg(hs::TargetMode::Smallest, k));
+    expect_window_ok(s);
+    expect_same_set(s.eigenvalues, {lam.begin(), lam.begin() + k}, 1e-10);
+    EXPECT_LE(worst_eta(s.report), 1e-12) << k;
+    EXPECT_LE(s.report.factor_stats.factorizations, 18) << k;
+    ASSERT_EQ(s.report.slices.size(), 1u);
+    EXPECT_GT(s.report.slices[0].sigma - 2.5, 0.01) << "one-sided shift hugs the multiplet";
+    EXPECT_LT(s.report.slices[0].sigma, 2.87);
+    auto l = hs::solve(an, nullptr, end_cfg(hs::TargetMode::Largest, k));
+    expect_window_ok(l);
+    expect_same_set(l.eigenvalues, {neg.begin(), neg.begin() + k}, 1e-10);
+    EXPECT_LE(worst_eta(l.report), 1e-12) << k;
+  }
+}
+
+TEST(DriverTargets, SmallestInsideALargeNullSpaceReturnsCopies) {
+  // PSD with a 600-dimensional null space and no zero filter: the 5 smallest are 5 null vectors.
+  // The cluster is numerically one eigenvalue (verified by two counts), so 5 of its copies are a
+  // valid answer - computing all 600 (the cluster's count) is not needed.
+  std::vector<double> lam(600, 0.0);
+  for (int i = 1; i <= 1400; ++i) lam.push_back(0.3 + 0.01 * i);
+  std::vector<double> neg(lam);
+  for (auto& x : neg) x = -x;
+  const auto a = hs::test::prescribed_spectrum<double>(lam, 4, 40);
+  const auto an = hs::test::prescribed_spectrum<double>(neg, 4, 42);  // largest 5: mirror image
+  for (auto mode : {hs::TargetMode::Smallest, hs::TargetMode::Largest}) {
+    auto sol = hs::solve(mode == hs::TargetMode::Smallest ? a : an, nullptr, end_cfg(mode, 5));
+    expect_window_ok(sol);
+    ASSERT_EQ(sol.eigenvalues.size(), 5u);
+    for (double x : sol.eigenvalues) EXPECT_LE(std::abs(x), 1e-9);
+    EXPECT_EQ(sol.report.certificate.count_inertia, 5);
+    EXPECT_LT(sol.report.op_applies, 300) << "the whole null space was computed";
+    expect_b_orthonormal(sol, static_cast<const hs::CsrMatrix<double>*>(nullptr), 1e-9);
+    bool warned = false;
+    for (const auto& w : sol.report.warnings) warned = warned || w.find("numerically equal") != std::string::npos;
+    EXPECT_TRUE(warned);
+  }
+}
+
+TEST(DriverSlicing, IntervalsAroundA30FoldEigenvalue) {
+  // 30 x 30 Laplacian: eigenvalue 4 has multiplicity 30. Cuts cannot split it, so one slice holds
+  // all copies, at its edge; the slice's reruns get a shift on the multiplet, where single-vector
+  // Krylov recovers the copies (from the slice centre two deflated reruns found only 1-2 each).
+  auto a = hs::test::laplacian_2d<double>(30, 30);
+  auto w = hs::test::laplacian_2d_eigenvalues(30, 30);
+  for (double h : {0.1, 0.2}) {
+    auto sol = hs::solve(a, nullptr, interval_cfg(4.0 - h, 4.0 + h));
+    expect_window_ok(sol);
+    expect_same_set(sol.eigenvalues, in_interval(w, 4.0 - h - 1e-12, 4.0 + h + 1e-12), 1e-10);
+    expect_b_orthonormal(sol, static_cast<const hs::CsrMatrix<double>*>(nullptr), 1e-9);
+  }
+}
+
+TEST(DriverSlicing, MultipletsInsideSlicesGetAllCopies) {
+  {  // 40-fold 0.5 inside [0.2, 0.8] with slices of at most 10
+    std::vector<double> lam(40, 0.5);
+    for (int i = 0; i < 300; ++i) lam.push_back(-1.0 + 0.01 * i);
+    auto a = hs::test::prescribed_spectrum<double>(lam, 4, 46);
+    auto sol = hs::solve(a, nullptr, interval_cfg(0.2, 0.8, 10));
+    expect_window_ok(sol);
+    expect_same_set(sol.eigenvalues, in_interval(lam, 0.2, 0.8), 1e-10);
+  }
+  {  // 12 copies of 1.0, automatic slices
+    std::vector<double> lam(12, 1.0);
+    for (int i = 1; i <= 200; ++i) lam.push_back(0.5 + 0.0071 * i);
+    auto a = hs::test::prescribed_spectrum<double>(lam, 4, 23);
+    auto sol = hs::solve(a, nullptr, interval_cfg(0.9, 1.15));
+    expect_window_ok(sol);
+    expect_same_set(sol.eigenvalues, in_interval(lam, 0.9, 1.15), 1e-10);
+  }
+}
+
+TEST(DriverSlicing, IntervalEndOnAnEigenvalueWithInexactFactors) {
+  // [-1, w_i] with w_i an exact eigenvalue and nothing below -1: the count at w_i sits ~1e-11 from
+  // that eigenvalue. As a one-sided shift it broke single / BLR factors and residual correction
+  // collapsed columns onto one eigenvector (BLR: 10 equal values accepted by the certificate). The
+  // shift moves away, and counts are counts of distinct vectors.
+  const index_t n = 400;
+  auto a = hs::test::laplacian_1d<double>(n);
+  auto w = hs::test::laplacian_1d_eigenvalues(n);
+  struct Case {
+    int idx;
+    hs::FactorPrecision precision;
+    hs::Toggle blr;
+  };
+  for (const Case cs : {Case{9, hs::FactorPrecision::Double, hs::Toggle::On},
+                        Case{19, hs::FactorPrecision::Double, hs::Toggle::On},
+                        Case{9, hs::FactorPrecision::Single, hs::Toggle::Off},
+                        Case{4, hs::FactorPrecision::Single, hs::Toggle::Off}}) {
+    auto cfg = interval_cfg(-1.0, w[cs.idx]);
+    cfg.factor_precision = cs.precision;
+    cfg.blr = cs.blr;
+    auto sol = hs::solve(a, nullptr, cfg);
+    expect_window_ok(sol);
+    expect_same_set(sol.eigenvalues, {w.begin(), w.begin() + cs.idx + 1}, 1e-10);
+    expect_b_orthonormal(sol, static_cast<const hs::CsrMatrix<double>*>(nullptr), 1e-9);
+  }
+}
+
+TEST(DriverTargets, InertiaSearchExpandsFromTheOvershootingEnd) {
+  // Largest 10: the start point (top Ritz value) overshoots; the search expands downward from it
+  // instead of counting below the whole spectrum (nu = 0 is known a priori). Smallest: mirror.
+  auto a = hs::test::laplacian_2d<double>(60, 61);
+  for (auto mode : {hs::TargetMode::Largest, hs::TargetMode::Smallest}) {
+    const std::string path = ::testing::TempDir() + "/driver_inertia_search.jsonl";
+    {
+      hs::Logger log(0, path);
+      auto sol = hs::solve(a, nullptr, end_cfg(mode, 10), &log);
+      expect_window_ok(sol);
+    }
+    std::ifstream in(path);
+    std::string line;
+    index_t counts = 0;
+    while (std::getline(in, line)) {
+      const auto j = nlohmann::json::parse(line);
+      if (j.value("event", "") != "count") continue;
+      ++counts;
+      if (mode == hs::TargetMode::Largest) {
+        EXPECT_GT(j["nu"].get<index_t>(), 0) << "count below the whole spectrum";
+      } else {
+        EXPECT_LT(j["nu"].get<index_t>(), a.nrows) << "count above the whole spectrum";
+      }
+    }
+    EXPECT_GT(counts, 0);
+  }
+}
+
+TEST(DriverTargets, NearestWithFewerEigenvaluesOutsideTheBandExplainsTheShortfall) {
+  // 80 zeros and 20 nonzero eigenvalues, nearest 30 outside the band: 20 exist. The run fails
+  // (k not reached) and says why.
+  std::vector<double> lam(80, 0.0);
+  for (int i = 1; i <= 20; ++i) lam.push_back(0.3 + 0.01 * i);
+  auto a = hs::test::prescribed_spectrum<double>(lam, 4, 39);
+  auto cfg = base_cfg();
+  cfg.target.sigma = 0.01;
+  cfg.target.k = 30;
+  cfg.zero_filter_tol = 1e-6;
+  auto sol = hs::solve(a, nullptr, cfg);
+  EXPECT_FALSE(sol.report.success);
+  expect_same_set(sol.eigenvalues, {lam.begin() + 80, lam.end()}, 1e-10);
+  bool explained = false;
+  for (const auto& w : sol.report.warnings)
+    explained = explained || w.find("outside the zero band") != std::string::npos;
+  EXPECT_TRUE(explained);
 }
 
 TEST(DriverTargets, IndefiniteBSupportsNearestOnly) {

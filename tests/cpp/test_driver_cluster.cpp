@@ -23,12 +23,15 @@ struct Pencil {
   hs::CsrMatrix<T> a, b;
 };
 
+// complex_pairs: x +- iy appended as 2x2 blocks A = [[x, y], [y, -x]], B = diag(1, -1)
+// (det(A - l B) = -((l - x)^2 + y^2)).
 template <class T = double>
-Pencil<T> make_pencil(const std::vector<double>& lam, double y_coupling) {
-  const auto n = static_cast<index_t>(lam.size());
-  hs::DenseMatrix<T> y(n, n), ad(n, n), bd(n, n);
-  std::vector<double> sgn(static_cast<std::size_t>(n));
-  for (index_t i = 0; i < n; ++i) {
+Pencil<T> make_pencil(const std::vector<double>& lam, double y_coupling,
+                      const std::vector<hs::cplx>& complex_pairs = {}) {
+  const auto nr = static_cast<index_t>(lam.size());
+  const index_t n = nr + 2 * static_cast<index_t>(complex_pairs.size());
+  hs::DenseMatrix<T> y(n, n), ad(n, n), bd(n, n), da(n, n), db(n, n);
+  for (index_t i = 0; i < n; ++i)
     for (index_t j = 0; j < n; ++j) {
       const double re = std::sin(1.7 * i + 0.9 * j * j + 0.1), im = std::cos(0.7 * i * j + 0.3);
       if constexpr (hs::is_complex_v<T>) {
@@ -37,15 +40,28 @@ Pencil<T> make_pencil(const std::vector<double>& lam, double y_coupling) {
         y(i, j) = (i == j ? 1.0 : 0.0) + y_coupling * re / std::sqrt(double(n));
       }
     }
-    sgn[i] = (i % 3 == 0) ? -1.0 : 1.0;
+  for (index_t i = 0; i < nr; ++i) {
+    const double sgn = (i % 3 == 0) ? -1.0 : 1.0;
+    da(i, i) = T(lam[i] * sgn);
+    db(i, i) = T(sgn);
   }
+  for (std::size_t p = 0; p < complex_pairs.size(); ++p) {
+    const index_t i = nr + 2 * static_cast<index_t>(p);
+    da(i, i) = T(complex_pairs[p].real());
+    da(i, i + 1) = da(i + 1, i) = T(complex_pairs[p].imag());
+    da(i + 1, i + 1) = T(-complex_pairs[p].real());
+    db(i, i) = T(1.0);
+    db(i + 1, i + 1) = T(-1.0);
+  }
+  // A = Y^H D_A Y, B = Y^H D_B Y (D_A, D_B have at most 2 entries per row).
   for (index_t r = 0; r < n; ++r)
     for (index_t c = r; c < n; ++c) {
       T sa = T(0), sb = T(0);
-      for (index_t i = 0; i < n; ++i) {
-        sa += hs::conj_if(y(i, r)) * (lam[i] * sgn[i]) * y(i, c);
-        sb += hs::conj_if(y(i, r)) * sgn[i] * y(i, c);
-      }
+      for (index_t i = 0; i < n; ++i)
+        for (index_t q = std::max<index_t>(0, i - 1); q <= std::min<index_t>(n - 1, i + 1); ++q) {
+          sa += hs::conj_if(y(i, r)) * da(i, q) * y(q, c);
+          sb += hs::conj_if(y(i, r)) * db(i, q) * y(q, c);
+        }
       ad(r, c) = sa;
       ad(c, r) = hs::conj_if(sa);
       bd(r, c) = sb;
@@ -160,6 +176,45 @@ TEST(DriverZeroCluster, ZeroFilterTolBandAndExhaustedSide) {
   bool exhausted_side = false;
   for (const auto& s : sol.report.slices) exhausted_side = exhausted_side || (s.passed && s.count_found < s.nev);
   EXPECT_TRUE(exhausted_side);
+}
+
+TEST(DriverZeroCluster, ComplexPairBetweenTheSideShifts) {
+  // A complex pair 0.02 +- 0.1i whose real part lies between the two side shifts is unwanted by
+  // both one-sided runs (Re theta has the wrong sign for each); the side runs' Ritz values reveal
+  // it and a recovery run adds it. Nearest 4 of sigma = 1e-3: the pair, -0.15 and 0.2.
+  const auto p = make_pencil(waveguide_like(), 0.3, {hs::cplx(0.02, 0.1)});
+  auto sol = hs::solve(p.a, &p.b, nearest_cfg(1e-3, 4));
+  const auto& r = sol.report;
+  EXPECT_TRUE(r.success);
+  EXPECT_EQ(r.zero_cluster_dim, 30);
+  expect_same_set(sol.eigenvalues, {-0.15, 0.2}, 1e-8);
+  ASSERT_EQ(sol.complex_eigenvalues.size(), 2u);
+  for (const auto& z : sol.complex_eigenvalues) {
+    EXPECT_NEAR(z.real(), 0.02, 1e-8);
+    EXPECT_NEAR(std::abs(z.imag()), 0.1, 1e-8);
+  }
+  for (const auto& pr : r.pairs) EXPECT_LE(pr.backward_error, 1e-10);
+}
+
+TEST(DriverZeroCluster, SideShiftsBeyondAPlainRunsEdge) {
+  // sigma = 0.01: the plain run converges cluster copies and real pairs out to a disk whose edge
+  // is a double eigenvalue. The side shifts go mid-way between that edge pair and the next
+  // eigenvalue (a shift just inside the edge pair, 1e-6 r from it, left eta ~1e-12 near tol).
+  std::vector<double> lam = waveguide_like();
+  for (int i = 0; i < 6; ++i) lam.push_back(0.2 + 0.07 * i);  // doubles
+  const auto p = make_pencil(lam, 0.3);
+  for (index_t k : {12, 24}) {
+    auto cfg = nearest_cfg(0.01, k);
+    cfg.zero_filter_tol = 1e-9;
+    auto sol = hs::solve(p.a, &p.b, cfg);
+    expect_ok(sol);
+    expect_same_set(sol.eigenvalues, nearest_nonzero(lam, 0.01, k), 1e-8);
+    for (const auto& pr : sol.report.pairs) EXPECT_LE(pr.backward_error, 1e-13) << k;
+    ASSERT_FALSE(sol.report.slices.empty());
+    for (const auto& sl : sol.report.slices)
+      for (double x : lam)
+        if (x != 0.0) EXPECT_GT(std::abs(sl.sigma - x), 1e-3 * std::abs(x)) << "shift " << sl.sigma << " on " << x;
+  }
 }
 
 }  // namespace

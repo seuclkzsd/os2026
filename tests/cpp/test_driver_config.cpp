@@ -81,17 +81,39 @@ TEST(DriverReport, JsonHasDocumentedKeysAndNullForInfiniteBounds) {
   r.certificate.lower = -std::numeric_limits<double>::infinity();
   r.certificate.upper = 2.0;
   r.warnings.push_back("w");
+  hs::SliceReport sl;
+  sl.lower = -std::numeric_limits<double>::infinity();
+  sl.upper = 0.75;
+  sl.sigma = 0.75;
+  sl.which = "smallest_algebraic";
+  sl.count_inertia = 4;
+  sl.count_found = 4;
+  sl.nev = 4;
+  sl.passed = true;
+  r.slices.push_back(sl);
+  r.zero_cluster_dim = 30;
+  r.zero_modes_filtered = 12;
   const auto j = nlohmann::json::parse(r.to_json());
   for (const char* key : {"schema_version", "n", "nnz_a", "nnz_b", "complex_scalars", "problem", "norm2_a", "norm2_b",
                           "scale", "method", "sigma_requested", "sigma_used", "shift_retries", "factor_options",
                           "factor_stats", "restarts", "op_applies", "time_total_s", "time_setup_s", "time_factor_s",
-                          "time_iterate_s", "time_verify_s", "peak_rss_bytes", "pairs", "certificate", "success",
-                          "warnings"})
+                          "time_iterate_s", "time_verify_s", "peak_rss_bytes", "pairs", "certificate", "slices",
+                          "zero_cluster_dim", "zero_modes_filtered", "success", "warnings"})
     EXPECT_TRUE(j.contains(key)) << key;
   EXPECT_EQ(j["problem"], "generalized_definite");
   EXPECT_EQ(j["method"], "shift_invert_lanczos");
   EXPECT_TRUE(j["certificate"]["lower"].is_null());
   EXPECT_EQ(j["certificate"]["upper"], 2.0);
+  ASSERT_EQ(j["slices"].size(), 1u);
+  for (const char* key :
+       {"lower", "upper", "sigma", "which", "count_inertia", "count_found", "nev", "reruns", "restarts", "op_applies",
+        "passed"})
+    EXPECT_TRUE(j["slices"][0].contains(key)) << key;
+  EXPECT_TRUE(j["slices"][0]["lower"].is_null());  // open (-inf) slice end
+  EXPECT_EQ(j["slices"][0]["upper"], 0.75);
+  EXPECT_EQ(j["slices"][0]["which"], "smallest_algebraic");
+  EXPECT_EQ(j["zero_cluster_dim"], 30);
+  EXPECT_EQ(j["zero_modes_filtered"], 12);
   EXPECT_EQ(j["pairs"][0]["lambda_re"], 1.5);
   EXPECT_TRUE(j["factor_stats"].contains("estimate"));
 }
