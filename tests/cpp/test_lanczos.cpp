@@ -296,6 +296,40 @@ TYPED_TEST(LanczosTyped, DeflationInBInnerProductFindsTheNextPairs) {
   }
 }
 
+TYPED_TEST(LanczosTyped, DeflatedEstimatesExcludeTheSpanDComponent) {
+  // Documented contract (eigen.hpp): with deflation the estimates measure the residual of the
+  // deflated operator. The span(D) component of the full residual is R_D^H M x (R_D: residuals of
+  // D's columns) and bounded by ||R_D||, here clearly above the rerun's estimates because D comes
+  // from a loose first run.
+  using T = TypeParam;
+  const index_t n = 400;
+  DenseOperator<T> op(hs::test::to_dense(hs::test::laplacian_1d<T>(n)));
+  KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.tol = 1e-6;
+  const auto first = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  ASSERT_TRUE(first.converged);
+  double rd_fro2 = 0.0;  // ||R_D||_F^2 >= ||R_D||_2^2
+  for (double x : true_residuals<T>(op, nullptr, first, nullptr)) rd_fro2 += x * x;
+
+  opt.tol = 1e-12;
+  opt.deflation = &first.vectors;
+  const auto rerun = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  EXPECT_TRUE(rerun.converged);
+  check_contract<T>(op, nullptr, rerun, Which::LargestAlgebraic, opt);  // deflated residuals
+  const auto projected = true_residuals<T>(op, nullptr, rerun, &first.vectors);
+  const auto full = true_residuals<T>(op, nullptr, rerun, nullptr);
+  double max_span_d = 0.0, max_est = 0.0;
+  for (index_t i = 0; i < opt.nev; ++i) {
+    // The two parts are orthogonal: full^2 = projected^2 + |span(D) part|^2.
+    const double span_d = std::sqrt(std::max(0.0, full[i] * full[i] - projected[i] * projected[i]));
+    EXPECT_LE(span_d, std::sqrt(rd_fro2) * (1.0 + 1e-6) + 1e-14) << "pair " << i;
+    max_span_d = std::max(max_span_d, span_d);
+    max_est = std::max(max_est, rerun.estimate[i]);
+  }
+  EXPECT_GT(max_span_d, 100.0 * max_est);
+}
+
 TYPED_TEST(LanczosTyped, ClusteredSpectrum) {
   // Four eigenvalues 1e-3 apart, well separated from a bulk in [-1, 1], plus a tight pair 1e-6
   // apart at the other end: every member is resolved to the tolerance.
@@ -538,6 +572,68 @@ TYPED_TEST(LanczosTyped, StoredBvStaysOrthonormalOverManyRestarts) {
   const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::SmallestAlgebraic, opt);
   EXPECT_EQ(r.restarts, opt.max_restarts);
   check_contract<T>(op, &bop, r, Which::SmallestAlgebraic, opt, condition_number(lap));
+}
+
+TYPED_TEST(LanczosTyped, RowBlockedRotationAndChunkedDeflationCheck) {
+  // n > 2 * 4096 rotates the basis (and the stored M*V) in place in three row blocks, and d = 70
+  // deflation columns are checked chunk by chunk (in recompute mode the chunks of M*D are limited
+  // by the free Krylov columns, here ncv + 1 = 13). Op = diag(a) is self-adjoint in the inner
+  // product of M = diag(m) (they commute); its eigenvectors are e_i / sqrt(m_i). The largest 80
+  // values 1 + 1.1^k (k = 1..80, at the end) sit above a bulk in [0, 1): relative gaps of ~10%
+  // converge in a few restarts, so rounding accumulated by the rotations stays far below the
+  // contract's residual floor.
+  using T = TypeParam;
+  const index_t n = 9001, nev = 5, d = 70, top = 80;
+  std::vector<double> a(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n - top; ++i)
+    a[i] = static_cast<double>(i) / static_cast<double>(n - top);
+  for (index_t k = 0; k < top; ++k)
+    a[n - top + k] = 1.0 + std::pow(1.1, static_cast<double>(k + 1));
+  std::vector<double> m(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i)
+    m[i] = 1.0 + 3.0 * std::fmod(0.6180339887 * static_cast<double>(i), 1.0);
+  auto op = diagonal_operator<T>(a);
+  auto mop = diagonal_operator<T>(m);
+  KrylovSchurOptions<T> opt;
+  opt.nev = nev;
+  opt.ncv = 12;
+  for (bool store : {false, true}) {
+    SCOPED_TRACE(store ? "store_bv" : "recompute");
+    opt.store_bv = store;
+    const auto r = hs::lanczos_krylov_schur<T>(op, &mop, Which::LargestAlgebraic, opt);
+    EXPECT_TRUE(r.converged);
+    EXPECT_GT(r.restarts, 2);
+    check_contract<T>(op, &mop, r, Which::LargestAlgebraic, opt);
+    expect_values(r.theta, wanted(a, Which::LargestAlgebraic, nev), 1e-10);
+  }
+
+  // Deflate the exact eigenvectors of the d largest values: the rerun returns the next nev.
+  DenseMatrix<T> defl(n, d);
+  for (index_t c = 0; c < d; ++c) defl(n - 1 - c, c) = T(1.0 / std::sqrt(m[n - 1 - c]));
+  opt.deflation = &defl;
+  const auto all = wanted(a, Which::LargestAlgebraic, d + nev);
+  for (bool store : {false, true}) {
+    SCOPED_TRACE(store ? "deflated, store_bv" : "deflated, recompute");
+    opt.store_bv = store;
+    const auto r = hs::lanczos_krylov_schur<T>(op, &mop, Which::LargestAlgebraic, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, &mop, r, Which::LargestAlgebraic, opt);
+    expect_values(r.theta, std::vector<double>(all.begin() + d, all.end()), 1e-10);
+    EXPECT_LT(gram_deviation<T>(defl, &mop, r.vectors, false), 1e-13);
+  }
+  // A defect in a column beyond the first chunks is found as well.
+  DenseMatrix<T> bad = defl;
+  bad(n - 1 - 66, 66) *= T(1.001);
+  opt.deflation = &bad;
+  for (bool store : {false, true}) {
+    opt.store_bv = store;
+    try {
+      hs::lanczos_krylov_schur<T>(op, &mop, Which::LargestAlgebraic, opt);
+      ADD_FAILURE() << "non-orthonormal column 66 accepted (store_bv " << store << ")";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+    }
+  }
 }
 
 TYPED_TEST(LanczosTyped, ReproducibleForFixedSeed) {

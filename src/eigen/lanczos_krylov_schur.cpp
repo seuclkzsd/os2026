@@ -95,7 +95,8 @@ constexpr double kRandomMinRatio = 1e-8;
 /// Rows per block of the in-place basis rotation (temporary of kRowBlock x k scalars instead of
 /// a second n x k basis).
 constexpr index_t kRowBlock = 4096;
-/// Columns of M*D formed at a time when checking a deflation block in recompute mode.
+/// Largest number of columns of M*D formed at a time when checking a deflation block in
+/// recompute mode (the still unused Krylov part of the basis storage holds them).
 constexpr index_t kGramChunk = 64;
 
 /// Adds the lifetime of the scope to a counter.
@@ -235,7 +236,9 @@ void ThickRestartLanczos<T>::load_deflation() {
   if (d_ == 0) return;
   const DenseMatrix<T>& dm = *opt_.deflation;
   std::copy(dm.data(), dm.data() + n_ * d_, basis_.data());
-  // Gram matrix G = D^H M D, formed with the stored M*D or chunk by chunk.
+  // Gram matrix G = D^H M D, formed with the stored M*D or chunk by chunk. In recompute mode the
+  // chunks of M*D go to the Krylov part of the basis storage, which is not in use yet (the start
+  // vector overwrites it), so the check needs no memory beyond the documented basis.
   DenseMatrix<T> gram(d_, d_);
   const auto nn = static_cast<fint>(n_), dd = static_cast<fint>(d_);
   if (!b_inner_) {
@@ -244,12 +247,13 @@ void ThickRestartLanczos<T>::load_deflation() {
     b_inner_->apply(basis_.data(), n_, bbasis_.data(), n_, d_);
     linalg::gram(n_, d_, basis_.data(), n_, bbasis_.data(), n_, gram.data(), d_);
   } else {
-    DenseMatrix<T> md(n_, std::min(d_, kGramChunk));
-    for (index_t c0 = 0; c0 < d_; c0 += kGramChunk) {
-      const index_t nc = std::min(kGramChunk, d_ - c0);
-      b_inner_->apply(basis_.col(c0), n_, md.data(), n_, nc);
-      lapack::gemm('C', 'N', dd, static_cast<fint>(nc), nn, T(1), basis_.data(), nn, md.data(), nn,
-                   T(0), gram.col(c0), dd);
+    const index_t chunk = std::min(kGramChunk, ncv_ + 1);
+    T* md = vcol(0);
+    for (index_t c0 = 0; c0 < d_; c0 += chunk) {
+      const index_t nc = std::min(chunk, d_ - c0);
+      b_inner_->apply(basis_.col(c0), n_, md, n_, nc);
+      lapack::gemm('C', 'N', dd, static_cast<fint>(nc), nn, T(1), basis_.data(), nn, md, nn, T(0),
+                   gram.col(c0), dd);
     }
   }
   // NaN-propagating maximum (once NaN, `e > dev` is never true again): std::max(dev, NaN) would

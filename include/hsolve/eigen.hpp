@@ -61,7 +61,9 @@ template <class T>
 struct HermitianEigResult {
   std::vector<double> theta;     ///< m == nev Ritz values (contract above)
   DenseMatrix<T> vectors;        ///< n x m Ritz vectors, orthonormal in the solver inner product
-  std::vector<double> estimate;  ///< residual estimates ||Op x - theta x|| (inner-product norm)
+  std::vector<double> estimate;  ///< residual estimates ||Op x - theta x|| (inner-product norm);
+                                 ///< with deflation the span(D) component is excluded (see
+                                 ///< lanczos_krylov_schur)
   std::vector<double> ritz_all;  ///< all Ritz values of the final basis, ascending (gap hints)
   index_t nconv = 0;
   index_t restarts = 0;
@@ -74,8 +76,17 @@ struct HermitianEigResult {
 /// Requires Op to be self-adjoint in <x, y> = y^H M x with M = b_inner (Hermitian positive
 /// definite) or the identity when b_inner == nullptr. For shift-invert Op = (A - sigma B)^{-1} B
 /// with B HPD, pass b_inner = B.
-/// Cost per restart: O(ncv) operator applications + O(n ncv^2) flops (+ up to 3 M applications
-/// per step unless store_bv). Memory: n*ncv scalars (+ n*ncv with store_bv) + n*d for deflation.
+/// Deflation: the basis stays M-orthogonal to span(D), so the pairs are those of the deflated
+/// operator P Op P (P = I - D D^H M) and estimate[i] measures only ||P (Op x - theta x)||_M. The
+/// span(D) component, D^H M (Op x - theta x) = R_D^H M x with R_D the residuals of D's columns,
+/// is not included: it vanishes when span(D) is invariant and is bounded by ||R_D|| otherwise.
+/// Pass a D accurate to the wanted tolerance, or Rayleigh-Ritz over [D X] / verify the true
+/// residuals when the full residual matters.
+/// LargestMagnitude ranks equal |theta| with the positive value first.
+/// Cost per restart: O(ncv) operator applications + O(n ncv^2) flops (+ 3 M applications per
+/// step without store_bv, 1 with it). Memory (scalars): n*(d + ncv + 1) for the basis [D V]
+/// (twice that with store_bv, which also keeps M*[D V]) + n (M*w workspace without store_bv)
+/// + O(d^2 + ncv*(ncv + 4096)); the returned vectors add n*nev.
 template <class T>
 HermitianEigResult<T> lanczos_krylov_schur(LinearOperator<T>& op, LinearOperator<T>* b_inner,
                                            Which which, const KrylovSchurOptions<T>& options);
