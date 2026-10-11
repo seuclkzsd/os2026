@@ -144,6 +144,9 @@ int main(int argc, char** argv) {
     // Re-validate the merged configuration (overrides bypass parse_config's checks otherwise).
     cfg = hs::parse_config(hs::config_to_json(cfg));
 
+    // Create the output directory (and the log's directory) before anything writes into them.
+    fs::create_directories(out_dir);
+    if (!log_path.empty() && fs::path(log_path).has_parent_path()) fs::create_directories(fs::path(log_path).parent_path());
     hs::Logger log(quiet ? 0 : (verbose ? 2 : 1), log_path);
     log.event("start", {{"version", std::string(hs::version())}, {"A", a_path}, {"B", b_path}, {"out", out_dir}});
 
