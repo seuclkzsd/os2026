@@ -164,6 +164,9 @@ def test_slepc_style_report_and_guard_summary(tmp_path):
     assert doc["measured"] == {"wall_s": 4.5, "peak_rss_bytes": 2**28, "returncode": 0, "killed": None,
                                "cores": "28,29", "threads": 2}
     assert doc["verdict"] == "pass" and doc["summary"]["solver_claim"] == "underclaim"
+    text = report.render([doc], "t")
+    assert "| dense | 2 | 4.5 | 256 |" in text and "| under | pass |" in text
+    assert "**slepc-ks**: 1 pass / 0 fail, 1 underclaim(s)" in text
 
 
 # ------------------------------------------------------------------------- pooled references
@@ -466,13 +469,22 @@ def test_cli_and_report(tmp_path, monkeypatch):
     assert report.main([str(tmp_path / "good"), str(bad / evaluate.EVAL_FILE), "--out", str(md),
                         "--note", "x / scipy: killed by the guard"]) == 0
     text = md.read_text()
-    assert "| c | exact | HEP | 20 | 4 | 0.5 | 1 |" in text and "complete (4/4) | pass |" in text
-    row = next(line for line in text.splitlines() if line.startswith("| c | exact |"))
-    assert float(row.strip("|").split("|")[9]) < 1e-12        # the B-orth column
-    assert "incomplete (3/4) | **fail** |" in text and "c / truncated: " in text
+    assert "Verdicts - **exact**: 1 pass / 0 fail; **truncated**: 0 pass / 1 fail, 1 overclaim(s)" in text
+    rows = {line.split("|")[2].strip(): [x.strip() for x in line.strip("|").split("|")]
+            for line in text.splitlines() if line.startswith("| c |")}
+    good_row = rows["exact"]
+    # case, solver, problem, n, k, ref, time, wall (no guard summary), peak (solver-reported: *)
+    assert good_row[:9] == ["c", "exact", "HEP", "20", "4", "dense", "0.5", "-", "1*"]
+    # eta, rel res, eigenvalue errors, subspace angle, B-orth, completeness, claim, verdict
+    assert float(good_row[9]) < 1e-14 and float(good_row[10]) < 1e-13
+    assert all(float(x) < 1e-12 for x in good_row[11].split(" / ") + good_row[12:14])
+    assert good_row[14:] == ["complete (4/4)", "ok", "pass"]
+    assert rows["truncated"][14:] == ["incomplete (3/4)", "**over**", "**fail**"]
+    assert "c / truncated: " in text
     assert text.endswith("## Notes\n\n- x / scipy: killed by the guard\n")
     # pairs outside the target set are counted in the completeness column
     extra = _save(tmp_path / "extra", *_nearest(ref, SIGMA, 5))
     assert evaluate.main(["c", str(extra), "--root", str(tmp_path), "--solver", "five"]) == 0
     assert report.main([str(extra), "--out", str(md)]) == 0
-    assert "complete (4/4, +1 extra) | pass |" in md.read_text()
+    assert "complete (4/4, +1 extra) | ok | pass |" in md.read_text()
+

@@ -1,7 +1,8 @@
 """Aggregate evaluation JSONs (tools/eval/evaluate.py) into a markdown table under results/.
 
-Inputs are evaluation files or directories searched recursively for evaluation.json. One row per
-(case, solver), sorted; failing rows are explained below the table.
+Inputs are evaluation files or directories searched recursively for evaluation.json. Verdict counts
+per solver head the page; one row per (case, solver), sorted; failing rows are explained below the
+table, followed by result-format issues and free-form notes (e.g. runs that left no evaluation).
 """
 from __future__ import annotations
 
@@ -16,14 +17,26 @@ from tools.eval.evaluate import EVAL_FILE
 DEFAULT_OUT = cio.REPO_ROOT / "results" / "eval_summary.md"
 
 LEGEND = (
-    "Metrics (tools/eval/evaluate.py): time = solver-reported `time_total_s`; peak memory = solver-reported "
-    "`peak_rss_bytes`; backward error eta = ||Ax - lambda Bx||_2 / ((||A||_2 + |lambda| ||B||_2) ||x||_2) "
-    "recomputed independently; eigenvalue error vs the reference as relative |lambda - mu|/|mu| and scaled "
-    "|lambda - mu|/(|mu| + ||A||_2/||B||_2); B-orth = ||X^H B X - I||_2 (HEP/GHEP, whose vectors must be "
-    "B-orthonormal; not part of the verdict); completeness found/expected, + computed pairs outside the "
-    "target set (certified only against a complete reference; consistent/inconsistent = against an "
-    "uncertified solver reference)."
+    "Metrics (tools/eval/evaluate.py, recomputed from the case matrices and the returned vectors): "
+    "ref = reference kind used (discrete-exact / analytic / dense: certified complete; solver: ARPACK "
+    "shift-invert, uncertified; pooled: accepted pairs of all solvers of this run, uncertified; "
+    "n/c = not comparable, e.g. continuum-model values; - = none); time = solver-reported `time_total_s`; "
+    "wall / peak = wall time and peak RSS of the whole process tree measured by tools/run/guard.py "
+    "(peak marked * is solver-reported, when no guard summary exists); eta = backward error "
+    "||Ax - lambda Bx||_2 / ((||A||_2 + |lambda| ||B||_2) ||x||_2); rel res = ||Ax - lambda Bx||_2 / "
+    "(|lambda| ||Bx||_2), which stays informative where |lambda| ||B||_2 ||x||_2 dwarfs the residual "
+    "and eta tells little (e.g. a badly conditioned B); eig err = |lambda - mu|/|mu| / "
+    "|lambda - mu|/(|mu| + ||A||_2/||B||_2) against the matched reference value (not against a pooled "
+    "reference, which holds the solvers' own values); angle = largest "
+    "principal angle between computed and reference eigenspaces per eigenvalue cluster (needs "
+    "reference eigenvectors); B-orth = ||X^H B X - I||_2 (HEP/GHEP; not part of the verdict); "
+    "completeness = status (found/expected, + pairs outside the target set): complete/incomplete "
+    "against a certified reference, consistent/inconsistent against an uncertified one; claim = the "
+    "solver's own success flag vs the verdict (over = success claimed but the evaluation fails, "
+    "under = failure reported but the evaluation passes). Verdict pass = every eta <= tol, no "
+    "duplicate vectors, completeness not incomplete/inconsistent, no spurious eigenvalue."
 )
+CLAIM = {"agrees": "ok", "overclaim": "**over**", "underclaim": "under", None: "-"}
 
 
 def collect(paths: list[Path]) -> list[dict[str, Any]]:
@@ -33,12 +46,38 @@ def collect(paths: list[Path]) -> list[dict[str, Any]]:
     return [json.loads(f.read_text()) for f in files]
 
 
+def verdict_counts(docs: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Per solver: number of pass / fail verdicts and of overclaims / underclaims."""
+    out: dict[str, dict[str, int]] = {}
+    for d in docs:
+        c = out.setdefault(d["solver"], {"pass": 0, "fail": 0, "overclaim": 0, "underclaim": 0})
+        c["pass" if d["verdict"] == "pass" else "fail"] += 1
+        claim = d["summary"].get("solver_claim")
+        if claim in ("overclaim", "underclaim"):
+            c[claim] += 1
+    return dict(sorted(out.items()))
+
+
 def _num(x: float | None, spec: str) -> str:
     return "-" if x is None else format(x, spec)
 
 
 def _target(t: dict[str, Any]) -> str:
     return f"[{t['lower']:g}, {t['upper']:g}]" if t["mode"] == "interval" else str(t["k"])
+
+
+def _reference(r: dict[str, Any] | None) -> str:
+    if r is None:
+        return "-"
+    return r["kind"] if r.get("comparable", True) else f"{r['kind']} (n/c)"
+
+
+def _peak_mib(d: dict[str, Any]) -> str:
+    measured = (d.get("measured") or {}).get("peak_rss_bytes")
+    if measured is not None:
+        return f"{measured / 2**20:.0f}"
+    reported = d.get("peak_rss_bytes")
+    return f"{reported / 2**20:.0f}*" if reported else "-"
 
 
 def _completeness(c: dict[str, Any]) -> str:
@@ -50,28 +89,39 @@ def _completeness(c: dict[str, Any]) -> str:
     return f"{c['status']} ({c['found']}/{exp_s}{extra})"
 
 
-def render(docs: list[dict[str, Any]], title: str, notes: list[str] | None = None) -> str:
-    """Markdown summary; `notes` (e.g. runs killed by the guard, which leave no evaluation) are listed
-    verbatim after the failures."""
+def render(docs: list[dict[str, Any]], title: str, notes: list[str] | None = None,
+           preamble: list[str] | None = None) -> str:
+    """Markdown summary. `preamble` lines (e.g. provenance) go below the title; `notes` (e.g. runs
+    killed by the guard, which leave no evaluation) are listed verbatim at the end."""
     docs = sorted(docs, key=lambda d: (d["case"], d["solver"]))
-    lines = [f"# {title}", "", LEGEND, "",
-             "| case | solver | problem | n | k | time [s] | peak mem [MiB] | max backward error "
-             "| max eig err (rel / scaled) | B-orth | completeness | verdict |",
-             "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|"]
+    counts = "; ".join(f"**{s}**: {c['pass']} pass / {c['fail']} fail"
+                       + (f", {c['overclaim']} overclaim(s)" if c["overclaim"] else "")
+                       + (f", {c['underclaim']} underclaim(s)" if c["underclaim"] else "")
+                       for s, c in verdict_counts(docs).items())
+    lines = [f"# {title}", ""] + (list(preamble) + [""] if preamble else [])
+    lines += [f"Verdicts - {counts}", "", LEGEND, "",
+              "| case | solver | problem | n | k | ref | time [s] | wall [s] | peak [MiB] | max eta "
+              "| max rel res | max eig err (rel / scaled) | max angle | B-orth | completeness | claim | verdict |",
+              "|---|---|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|"]
     for d in docs:
         s = d["summary"]
-        mem = d.get("peak_rss_bytes")
         lines.append(
             f"| {d['case']} | {d['solver']} | {d['problem']} | {d['n']} | {_target(d['target'])} "
-            f"| {_num(d.get('time_total_s'), '.3g')} | {_num(mem / 2**20 if mem else None, '.0f')} "
-            f"| {_num(s['max_backward_error'], '.1e')} "
+            f"| {_reference(d.get('reference'))} | {_num(d.get('time_total_s'), '.3g')} "
+            f"| {_num((d.get('measured') or {}).get('wall_s'), '.3g')} | {_peak_mib(d)} "
+            f"| {_num(s['max_backward_error'], '.1e')} | {_num(s['max_rel_residual'], '.1e')} "
             f"| {_num(s['max_eig_rel_error'], '.1e')} / {_num(s['max_eig_scaled_error'], '.1e')} "
-            f"| {_num(s['b_orthogonality'], '.1e')} "
-            f"| {_completeness(d['completeness'])} | {'pass' if d['verdict'] == 'pass' else '**fail**'} |")
+            f"| {_num(s['max_subspace_angle'], '.1e')} | {_num(s['b_orthogonality'], '.1e')} "
+            f"| {_completeness(d['completeness'])} | {CLAIM[s.get('solver_claim')]} "
+            f"| {'pass' if d['verdict'] == 'pass' else '**fail**'} |")
     failing = [d for d in docs if d["verdict"] != "pass"]
     if failing:
         lines += ["", "## Failures", ""]
         lines += [f"- {d['case']} / {d['solver']}: " + "; ".join(d["reasons"]) for d in failing]
+    issues = [(d, i) for d in docs for i in (d.get("format") or {}).get("issues", [])]
+    if issues:
+        lines += ["", "## Result format issues (docs/FORMATS.md §3; not part of the verdict)", ""]
+        lines += [f"- {d['case']} / {d['solver']}: {i}" for d, i in issues]
     if notes:
         lines += ["", "## Notes", ""] + [f"- {note}" for note in notes]
     return "\n".join(lines) + "\n"
