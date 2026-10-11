@@ -3,7 +3,7 @@
 Formats are specified in docs/FORMATS.md; this module is the reference implementation. Nothing
 else in tools/ may parse case/ref/result files directly (import from here instead).
 
-Layout (root defaults to <repo>/data):
+Layout (root defaults to $HS_DATA_ROOT or <repo>/data):
     <root>/cases/<name>/A.npz          CSR, full Hermitian storage (scipy.sparse.save_npz)
     <root>/cases/<name>/B.npz          optional
     <root>/cases/<name>/meta.json      provenance / expectations (no reference values!)
@@ -18,6 +18,7 @@ Result directory (written by bin/hsolve and by tools/eval/baseline_scipy.py):
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,8 @@ import scipy.sparse.linalg  # noqa: F401  (registers sp.linalg)
 
 SCHEMA_VERSION = 1
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ROOT = REPO_ROOT / "data"
+# HS_DATA_ROOT lets git worktrees share one data directory (data/ is not version-controlled).
+DEFAULT_ROOT = Path(os.environ.get("HS_DATA_ROOT", str(REPO_ROOT / "data")))
 
 PROBLEMS = ("HEP", "GHEP", "GHIEP")
 REF_KINDS = ("analytic", "discrete-exact", "dense", "solver", "partial-analytic")
