@@ -44,6 +44,8 @@ endif()
 
 # ---- library: every src/**/*.cpp belongs to libhsolve (module = directory) ----
 file(GLOB_RECURSE HSOLVE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+# src/blas is the optional BLAS hook (block at the end of this file), not part of libhsolve.
+list(FILTER HSOLVE_SOURCES EXCLUDE REGEX "/src/blas/")
 add_library(hsolve ${HSOLVE_SOURCES})
 target_include_directories(hsolve
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -113,3 +115,30 @@ if(HSOLVE_BUILD_TESTS)
       PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1")
   endforeach()
 endif()
+
+# ---- BLAS hook (src/blas, docs/BLAS.md): profiler and shape routing of the dense BLAS under MUMPS ----
+# Always built (small): hsolve_blas (router, kernels, profiler; compiled without -march=native, the
+# AVX-512 kernels are selected at run time) and libhsolve_blashook.so for LD_PRELOAD. The option
+# links the hook into the hsolve executable instead; HS_BLAS_ROUTE then configures it at run time.
+option(HSOLVE_BLAS_HOOK "Link the BLAS hook (src/blas) into the hsolve executable" OFF)
+add_library(hsolve_blas STATIC src/blas/route.cpp src/blas/narrow_kernels.cpp src/blas/blas_profile.cpp)
+target_include_directories(hsolve_blas PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_options(hsolve_blas PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
+target_link_libraries(hsolve_blas PUBLIC OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
+add_library(hsolve_blashook SHARED src/blas/hook_symbols.cpp)
+target_include_directories(hsolve_blashook PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_options(hsolve_blashook PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
+target_link_libraries(hsolve_blashook PRIVATE hsolve_blas)
+if(HSOLVE_BLAS_HOOK AND HSOLVE_BUILD_APPS)
+  target_sources(hsolve_cli PRIVATE src/blas/hook_symbols.cpp)
+  target_include_directories(hsolve_cli PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(hsolve_cli PRIVATE hsolve_blas)
+endif()
+foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
+  get_filename_component(name "${src}" NAME_WE)
+  if(name MATCHES "^test_asmkern" AND TARGET ${name})
+    target_link_libraries(${name} PRIVATE hsolve_blas)
+  elseif(name MATCHES "^asmkern_" AND TARGET bench_${name})
+    target_link_libraries(bench_${name} PRIVATE hsolve_blas)
+  endif()
+endforeach()
