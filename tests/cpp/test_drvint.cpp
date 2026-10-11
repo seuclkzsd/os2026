@@ -159,8 +159,9 @@ TEST(DriverBlocks, RerunWidthAndBasisColumns) {
   using hs::driver::rerun_block_size;
   EXPECT_EQ(rerun_block_size(1, 1), 2);  // missing copies rounded up to even
   EXPECT_EQ(rerun_block_size(1, 3), 4);
+  EXPECT_EQ(rerun_block_size(1, 9), hs::driver::kMaxAutoBlockSize);  // capped
   EXPECT_EQ(rerun_block_size(4, 3), 4);  // never below the run's own width
-  EXPECT_EQ(rerun_block_size(4, 5), 6);
+  EXPECT_EQ(rerun_block_size(4, 5), 4);
   EXPECT_EQ(rerun_block_size(8, 2), 8);
   EXPECT_EQ(rerun_block_size(0, 0), 1);
   // p = 1: [D V v] + M*w with the auto ncv max(2 nev + 1, nev + 16).
@@ -173,6 +174,25 @@ TEST(DriverBlocks, RerunWidthAndBasisColumns) {
   EXPECT_EQ(lanczos_basis_columns(100, 10, 12, 0, 8), 10 + 32 + 16);
   // A free space too small for the block layout: one single-vector cycle over it.
   EXPECT_EQ(lanczos_basis_columns(60, 10, 12, 0, 8), 10 + 50 + 2);
+}
+
+// Auto rule: p = 4 from 8 wanted pairs on, single vector below; an explicit width wins.
+TEST(DriverBlocks, AutoRule) {
+  hs::SolverConfig cfg;
+  ASSERT_EQ(cfg.block_size, 0);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, 1), 1);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, 7), 1);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, 8), 4);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, 500), 4);
+  cfg.block_size = 1;
+  EXPECT_EQ(hs::driver::block_size_for(cfg, 500), 1);
+  cfg.block_size = 8;
+  EXPECT_EQ(hs::driver::block_size_for(cfg, 2), 8);
+  // End to end: the report carries the width used.
+  std::vector<double> w;
+  const auto a = shifted_laplacian(w);
+  EXPECT_EQ(hs::solve(a, nullptr, nearest_cfg(0.3, 10)).report.block_size, 4);
+  EXPECT_EQ(hs::solve(a, nullptr, nearest_cfg(0.3, 6)).report.block_size, 1);
 }
 
 // Memory: a budget that holds the p = 1 basis but not the p = 8 one halves the block width (with

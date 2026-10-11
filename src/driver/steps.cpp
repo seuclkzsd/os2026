@@ -459,17 +459,41 @@ index_t lanczos_basis_columns(index_t n, index_t d, index_t nev, index_t ncv, in
   return d + dims.ncv + 2 * p;
 }
 
+// Deflated reruns (missing copies found by the certificate). Without the cap, p = missing rounded
+// up to even cost more than the single-vector rerun it replaced (5 interleaved runs, 4 threads,
+// block_size = 1 so that reruns happen): syn-ghep-multiplicity-real-1e4 (9 missing): single
+// vector 59 applications in the rerun / iterate 0.221 s, p = 10: 200 / 0.314 s, cap 4: 0.226 s;
+// syn-multiplicity-complex-1e4 0.444 / 0.403 / 0.416 s (noise). After deflation the missing copies
+// dominate the operator, so a single-vector rerun usually gets them through rounding too; a block
+// of width >= the multiplicity gets them by construction. With the auto width (4) no data case
+// needed a rerun at all.
 index_t rerun_block_size(index_t p, index_t missing) {
-  return std::max<index_t>(std::max<index_t>(p, 1), (missing + 1) / 2 * 2);
+  return std::max<index_t>(std::max<index_t>(p, 1), std::min<index_t>(kMaxAutoBlockSize, (missing + 1) / 2 * 2));
 }
 
-template <class T>
-index_t block_size_for(const Ctx& c, const SparseFactorization<T>& fac, index_t n, index_t nev) {
-  (void)fac;
-  (void)n;
-  (void)nev;
-  if (c.cfg.block_size > 0) return c.cfg.block_size;
-  return 1;
+// Auto block width, from end-to-end runs of p = 1, 4, 8 (ncv auto) on the 30 HEP/GHEP data cases
+// (bench reproduction: tools/run/guard.py + hsolve --block-size, medians of 3 interleaved runs,
+// 4 threads; the full table is in the drvint report). Iterate-phase time p = 1 -> 4 -> 8:
+//   3-D, 1e5 (syn-mem27-46, yee-pec-cube-32, yee-pec-box-1e5, ss-2cubes_sphere, ss-qa8fk-qa8fm,
+//     syn-lap3d-aniso-1e5; k = 10..12): 1.4x .. 2.5x faster with p = 4; p = 8 better than 4 only
+//     where multiple eigenvalues dominate (syn-mem27-46 3.6x, yee-pec-cube-32 3.0x), worse on the
+//     others (distinct eigenvalues: p blocks need ~2x (p = 4) / ~3x (p = 8) the applications of
+//     p = 1, and a p-RHS solve costs 0.3..0.55 of p single ones per vector);
+//   low fill, 1e5 (syn-zero-cluster-real, syn-ghep-near-singular-real, syn-near-singular-complex;
+//     k = 10..21): 1.10x .. 1.16x with p = 4, p = 8 no gain or slower;
+//   3-D complex 1e4 (yee-bloch, yee-photonic-*): 2.0x; multiple eigenvalues (syn-multiplicity-*,
+//     syn-ghep-multiplicity; no certificate rerun needed with p = 4): 1.4x .. 2.2x in total;
+//   small low-fill 1e4 cases lose up to 0.1 s (syn-ghep-zero-cluster-complex-1e4 0.58 -> 0.80 s,
+//     syn-near-singular-complex-1e4 0.33 -> 0.46 s), the sum over the 11 syn-*-1e4 cases still
+//     drops (3.91 -> 3.73 s);
+//   k = 6, 7 (cav2d-rect-pert-1e5, cav2d-square-1e4): p = 4 is slower (0.37 -> 0.55 s, 22 -> 60
+//     applications: the single-vector first cycle of max(2k + 1, k + 16) vectors converges all k
+//     at once, a block run needs more applications for the same polynomial degree).
+// Hence p = 4 for nev >= 8, else 1. A timed 1-RHS vs p-RHS probe solve was not used: its outcome
+// would depend on the machine load, and the eigenvectors with it (reproducibility).
+index_t block_size_for(const SolverConfig& cfg, index_t nev) {
+  if (cfg.block_size > 0) return cfg.block_size;
+  return nev >= kAutoBlockMinNev ? kMaxAutoBlockSize : 1;
 }
 
 template <class T>
@@ -490,7 +514,6 @@ index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_
 }
 
 #define HS_INSTANTIATE_DRIVER_BLOCKS(T)                                                                     \
-  template index_t block_size_for<T>(const Ctx&, const SparseFactorization<T>&, index_t, index_t);           \
   template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_BLOCKS)
 #undef HS_INSTANTIATE_DRIVER_BLOCKS

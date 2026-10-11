@@ -399,8 +399,18 @@ TEST(DriverTargets, KthEigenvalueInsideAMultiplet) {
   std::vector<double> neg(lam);
   for (auto& x : neg) x = -x;
   auto an = hs::test::prescribed_spectrum<double>(neg, 4, 49);
+  // The 1e-12 bounds below detect that regression for single-vector runs, which overshoot tol by
+  // orders of magnitude; a block run stops as soon as its estimates meet tol (eigen.hpp), so the
+  // 11-pair window's auto block width is checked against tol only.
   for (index_t k : {6, 7}) {
-    auto s = hs::solve(a, nullptr, end_cfg(hs::TargetMode::Smallest, k));
+    auto cs = end_cfg(hs::TargetMode::Smallest, k);
+    cs.block_size = 0;
+    auto sb = hs::solve(a, nullptr, cs);
+    expect_window_ok(sb);
+    expect_same_set(sb.eigenvalues, {lam.begin(), lam.begin() + k}, 1e-10);
+    EXPECT_EQ(sb.report.block_size, 4);
+    cs.block_size = 1;
+    auto s = hs::solve(a, nullptr, cs);
     expect_window_ok(s);
     expect_same_set(s.eigenvalues, {lam.begin(), lam.begin() + k}, 1e-10);
     EXPECT_LE(worst_eta(s.report), 1e-12) << k;
@@ -408,7 +418,9 @@ TEST(DriverTargets, KthEigenvalueInsideAMultiplet) {
     ASSERT_EQ(s.report.slices.size(), 1u);
     EXPECT_GT(s.report.slices[0].sigma - 2.5, 0.01) << "one-sided shift hugs the multiplet";
     EXPECT_LT(s.report.slices[0].sigma, 2.87);
-    auto l = hs::solve(an, nullptr, end_cfg(hs::TargetMode::Largest, k));
+    auto cl = end_cfg(hs::TargetMode::Largest, k);
+    cl.block_size = 1;
+    auto l = hs::solve(an, nullptr, cl);
     expect_window_ok(l);
     expect_same_set(l.eigenvalues, {neg.begin(), neg.begin() + k}, 1e-10);
     EXPECT_LE(worst_eta(l.report), 1e-12) << k;

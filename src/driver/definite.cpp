@@ -313,7 +313,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
   const index_t nev = std::min<index_t>(n, k);
   // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis.
-  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c, fac, n, nev));
+  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c.cfg, nev));
   rep.block_size = p;
   DefiniteRun<T> run;
   lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev, p, static_cast<const DenseMatrix<T>*>(nullptr),
@@ -990,7 +990,7 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     return partial ? std::max<index_t>(0, s.want - inside) : count - inside - near_out;
   };
   sr.nev = std::min(n_, s.required());
-  const index_t p = fit_block_size<T>(c_, n_, sr.nev, 0, 4 * sr.nev, block_size_for(c_, fac_, n_, sr.nev));
+  const index_t p = fit_block_size<T>(c_, n_, sr.nev, 0, 4 * sr.nev, block_size_for(c_.cfg, sr.nev));
   if (id == 0) c_.rep.block_size = p;
   lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, p, static_cast<const DenseMatrix<T>*>(nullptr), run);
   select();

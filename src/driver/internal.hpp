@@ -263,13 +263,14 @@ CostModel make_cost_model(const FactorEstimate& est, index_t n, int threads, boo
 /// then runs one single-vector cycle over it). ncv: SolverConfig::ncv (0 = auto).
 index_t lanczos_basis_columns(index_t n, index_t d, index_t nev, index_t ncv, index_t p);
 
-/// Widest block the auto rule of block_size_for() chooses.
-constexpr index_t kMaxAutoBlockSize = 8;
+/// Block width of the auto rule, used for runs of at least kAutoBlockMinNev wanted pairs.
+constexpr index_t kMaxAutoBlockSize = 4;
+constexpr index_t kAutoBlockMinNev = 8;
 
-/// Block width of the definite path's first shift-invert Lanczos run for nev wanted pairs:
-/// SolverConfig::block_size if > 0, else the auto rule (see steps.cpp).
-template <class T>
-index_t block_size_for(const Ctx& c, const SparseFactorization<T>& fac, index_t n, index_t nev);
+/// Block width of a shift-invert Lanczos run of the definite path for nev wanted pairs:
+/// cfg.block_size if > 0, else the auto rule kMaxAutoBlockSize for nev >= kAutoBlockMinNev and 1
+/// below (measurements in steps.cpp). Deterministic (no timing enters).
+index_t block_size_for(const SolverConfig& cfg, index_t nev);
 
 /// p, halved while the basis of a run of width p (lanczos_basis_columns, plus `extra_columns`
 /// n-vectors the caller keeps, e.g. the candidate block X, AX, BX) would not fit the memory left
@@ -278,8 +279,9 @@ template <class T>
 index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p);
 
 /// Block width of a deflated rerun that misses `missing` pairs after a run with width p:
-/// max(p, missing rounded up to even), so that a random start block has components in every
-/// missing copy of a multiple eigenvalue and one run finds them all (eigen.hpp, block mode).
+/// max(p, missing rounded up to even, at most kMaxAutoBlockSize), so that a random start block has
+/// components in every missing copy of a multiple eigenvalue of multiplicity up to that width and
+/// one run finds them all (eigen.hpp, block mode); see steps.cpp for why it is capped.
 index_t rerun_block_size(index_t p, index_t missing);
 
 /// Ritz estimates of the ends of the spectrum of the pencil (from inside): lowest two and
