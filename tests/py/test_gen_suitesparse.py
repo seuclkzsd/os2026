@@ -1,4 +1,5 @@
 """Offline tests for tools/gen/suitesparse.py: a file:// mirror of tiny .tar.gz archives."""
+import gzip
 import io
 import json
 import tarfile
@@ -35,15 +36,20 @@ def _mtx_bytes(matrix, symmetry):
     return buf.getvalue()
 
 
-def _publish(mirror, name, matrix, symmetry, extra_members=()):
-    """Write MM/<GROUP>/<name>.tar.gz containing <name>/<name>.mtx (+ extra raw members)."""
+def _publish(mirror, name, matrix, symmetry, extra_members=(), compresslevel=9):
+    """Write MM/<GROUP>/<name>.tar.gz containing <name>/<name>.mtx (+ extra raw members);
+    returns its path. compresslevel=0 stores the tar verbatim in deflate 'stored' blocks."""
     folder = mirror / "MM" / GROUP
     folder.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(folder / f"{name}.tar.gz", "w:gz") as tf:
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w") as tf:
         for member, data in [(f"{name}/{name}.mtx", _mtx_bytes(matrix, symmetry)), *extra_members]:
             info = tarfile.TarInfo(member)
             info.size = len(data)
             tf.addfile(info, io.BytesIO(data))
+    path = folder / f"{name}.tar.gz"
+    path.write_bytes(gzip.compress(raw.getvalue(), compresslevel=compresslevel))
+    return path
 
 
 def _registry(*names):
@@ -197,6 +203,46 @@ def test_offline_size_cap_and_unsafe_archives_skip_cleanly(tmp_path):
     with pytest.raises(ss.Skipped, match="unusable archive"):
         _fetch(tmp_path, "t-evil", cases, reg)
     assert not (tmp_path / "data" / "downloads" / "Evil").exists()
+
+
+def test_damaged_archives_skip_cleanly(tmp_path):
+    """A truncated transfer the length check cannot see (file:// and some mirrors send no
+    Content-Length) and a corrupted payload that still inflates (a changed byte inside a stored
+    deflate block: only the gzip CRC-32 reveals it) are both skipped without leftovers."""
+    reg = _registry("Cut", "Bad")
+    cases = {"t-cut": ss.CaseSpec("Cut"), "t-bad": ss.CaseSpec("Bad")}
+    cut = _publish(tmp_path / "mirror", "Cut", _sym(60, 3), "symmetric")
+    cut.write_bytes(cut.read_bytes()[: cut.stat().st_size // 2])
+    with pytest.raises(ss.Skipped, match="unusable archive"):
+        _fetch(tmp_path, "t-cut", cases, reg)
+    bad = _publish(tmp_path / "mirror", "Bad", _sym(60, 3), "symmetric", compresslevel=0)
+    blob = bytearray(bad.read_bytes())
+    blob[blob.index(b"%%MatrixMarket") + 300] ^= 0x01                 # a digit of the data
+    bad.write_bytes(bytes(blob))
+    with pytest.raises(ss.Skipped, match="CRC check failed"):
+        _fetch(tmp_path, "t-bad", cases, reg)
+    for name in ("Cut", "Bad"):
+        assert not (tmp_path / "data" / "downloads" / name).exists()
+
+
+def test_deadline_unpack_cap_and_interrupt_leave_no_download(tmp_path, monkeypatch):
+    reg = _registry("M1", "Bomb")
+    cases = {"t-m1": ss.CaseSpec("M1"), "t-bomb": ss.CaseSpec("Bomb")}
+    _publish(tmp_path / "mirror", "M1", _sym(30, 1), "symmetric")
+    with pytest.raises(ss.Skipped, match="exceeded"):
+        _fetch(tmp_path, "t-m1", cases, reg, max_seconds=0.0)
+    # 3 MB of blanks compress to a few kB: under the 20 kB download cap, over the 400 kB unpack cap
+    _publish(tmp_path / "mirror", "Bomb", _sym(5, 1), "symmetric", [("Bomb/pad.txt", b" " * 3_000_000)])
+    with pytest.raises(ss.Skipped, match="unpacks to more than"):
+        _fetch(tmp_path, "t-bomb", cases, reg, max_mb=0.02)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ss, "_extract", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _fetch(tmp_path, "t-m1", cases, reg)
+    assert list((tmp_path / "data" / "downloads").iterdir()) == []
 
 
 def test_completed_download_is_reused_and_refresh_refetches(tmp_path):

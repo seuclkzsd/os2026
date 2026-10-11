@@ -6,8 +6,9 @@ Pipeline per matrix (archives are untrusted data):
      raise Skipped with the reason). A finished download is recorded in download.json (url,
      bytes, sha256) and reused on later runs; anything else in the directory is never trusted:
      an incomplete directory is only replaced with --refresh.
-  2. extract with tarfile filter='data' (no absolute paths, links out of the tree, devices) after
-     checking the total unpacked size, and pick <Name>.mtx or an auxiliary member such as
+  2. verify the gzip stream (CRC-32 and length, which tarfile alone never checks) and the unpacked
+     size, extract with tarfile filter='data' (no absolute paths, links out of the tree, devices)
+     and pick <Name>.mtx or an auxiliary member such as
      <Name>_M.mtx (the Guettel TEM archives ship the pencil (C, M): curl-curl and mass matrix).
   3. scipy.io.mmread (integer files become float64); explicit zeros are dropped, then a 'general'
      file holding a single triangle is symmetrized; the matrix must be Hermitian (complex-symmetric
@@ -28,6 +29,7 @@ Usage (from the repository root):
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import http.client
 import json
@@ -36,6 +38,7 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -185,15 +188,28 @@ def _download(url: str, dest: Path, *, max_bytes: int, timeout: float, max_secon
 
 
 def _extract(archive: Path, dest: Path, max_unpacked: int) -> None:
-    """Extract the archive into dest with filter='data' after checking its unpacked size."""
+    """Extract the archive into dest with filter='data' after verifying it.
+
+    The gzip stream is first decompressed to its end, because only there are its CRC-32 and
+    length checked: tarfile stops reading at the tar end-of-archive marker, so a corrupted
+    payload (e.g. a changed byte in a stored deflate block) would otherwise be extracted
+    silently. That pass stops after max_unpacked bytes (decompression bomb); the member sizes
+    are checked as well, since a sparse member unpacks to more than the data stored for it.
+    Truncated or corrupt streams (EOFError, zlib.error, gzip.BadGzipFile) raise Skipped.
+    """
+    over_cap = Skipped(f"{archive.name}: unpacks to more than the {max_unpacked / 1e6:.0f} MB cap")
     try:
+        streamed = 0
+        with gzip.open(archive, "rb") as stream:
+            while chunk := stream.read(1 << 20):
+                streamed += len(chunk)
+                if streamed > max_unpacked:
+                    raise over_cap
         with tarfile.open(archive, "r:gz") as tf:
-            unpacked = sum(m.size for m in tf.getmembers() if m.isfile())
-            if unpacked > max_unpacked:
-                raise Skipped(f"{archive.name}: unpacks to {unpacked / 1e6:.0f} MB "
-                              f"(cap {max_unpacked / 1e6:.0f} MB)")
+            if sum(m.size for m in tf.getmembers() if m.isfile()) > max_unpacked:
+                raise over_cap
             tf.extractall(dest, filter="data")
-    except (tarfile.TarError, OSError) as exc:
+    except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
         raise Skipped(f"{archive.name}: unusable archive ({exc})") from exc
 
 
@@ -212,8 +228,9 @@ def obtain(matrix: Matrix, downloads: Path, *, base_url: str = BASE_URL, max_mb:
     (extraction directory, download record {url, bytes, sha256}).
 
     The directory must be new and empty; a completed earlier download (download.json, written
-    last) is reused; refresh=True deletes the directory and starts over. A failed fresh download
-    removes the directory it created, so a rerun starts clean.
+    last) is reused; refresh=True deletes the directory and starts over. A fresh download that
+    fails in any way (including an interrupt) removes the directory it created, so a rerun
+    starts clean.
     """
     folder = downloads / matrix.name
     extract_dir = folder / "extract"
@@ -231,10 +248,10 @@ def obtain(matrix: Matrix, downloads: Path, *, base_url: str = BASE_URL, max_mb:
         max_bytes = int(max_mb * 1e6)
         record = _download(url, archive, max_bytes=max_bytes, timeout=timeout, max_seconds=max_seconds)
         _extract(archive, extract_dir, UNPACK_FACTOR * max_bytes)
-    except Skipped:
-        shutil.rmtree(folder)
+        record_path.write_text(json.dumps(record, indent=2) + "\n")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
         raise
-    record_path.write_text(json.dumps(record, indent=2) + "\n")
     return extract_dir, record
 
 
