@@ -1,0 +1,104 @@
+// Block orthonormalization kernel of the block Krylov-Schur solver (module-internal, src/eigen).
+// Scalar set: T in {double, cplx} (instantiated in src/eigen/block_ortho.cpp).
+//
+// Owner note: dense_ops (src/linalg) owns the single-vector CGS2; this is its block (BLAS3)
+// counterpart, built on top of it for the rank-deficient fallback.
+#pragma once
+
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+#include "hsolve/dense.hpp"
+#include "hsolve/linear_operator.hpp"
+#include "hsolve/types.hpp"
+
+namespace hs::eigen_detail {
+
+/// Orthonormalizes a block of p new columns against an M-orthonormal basis and within itself, in
+/// <x, y>_M = y^H M x with M = `m` (Hermitian positive definite) or the identity (m == nullptr):
+///   W = V C + Q R,  V = basis(:, 0:k) (M-orthonormal on entry), W = basis(:, k:k+p) on entry,
+///   Q = basis(:, k:k+p) on exit with [V Q] M-orthonormal, R (p x p) upper triangular.
+///
+/// Fast path: two passes of block classical Gram-Schmidt against V, each followed by Cholesky-QR
+/// of the block (BCGS2 with CholQR intra-orthogonalization; all products BLAS3):
+///   C1 = V^H M W, W1 = W - V C1;        G1 = W1^H M W1 = R1^H R1,         Q1 = W1 R1^{-1};
+///   [C2; G] = [V Q1]^H M Q1, W2 = Q1 - V C2;  G2 = G - C2^H C2 = R2^H R2,  Q = W2 R2^{-1};
+///   R = R2 R1, C = C1 + C2 R1.
+/// The second pass removes both the loss of orthogonality to V that R1^{-1} amplifies (by up to
+/// cond(W1)) and the O(eps cond(W1)^2) loss inside the block. G2 subtracts C2^H C2 (Pythagoras)
+/// instead of forming M W2: C2 is O(eps cond(W1)), so nothing cancels.
+/// Fallback, column by column (BLAS2, linalg::orthogonalize_cgs2): taken when the block is
+/// (nearly) rank deficient, i.e. some column of W1 keeps an M-norm <= ratio * (M-norm of the input
+/// column) (dependent on V to working precision: the block analogue of a Lanczos breakdown), G1 is
+/// not numerically positive definite, or the column-scaled condition number of R1 exceeds
+/// kMaxCholQrCond (Cholesky-QR could no longer restore orthogonality in the second pass). Each
+/// column of W1 is orthogonalized by CGS2 against V and the block's earlier columns; a column left
+/// with an M-norm <= ratio * (its input M-norm) gets R(i, i) = 0 and is replaced by a deterministic
+/// random vector (linalg::fill_random(seed, stream), stream = next_stream++) orthogonalized the
+/// same way. The dropped part has an M-norm below ratio * ||w_i||_M, as for a single-vector
+/// breakdown.
+///
+/// Modes (as in linalg::orthogonalize_cgs2):
+///   * Euclidean (m == nullptr): no M application.
+///   * Stored M*basis (store_m): run() gets mbasis with M*V in mbasis(:, 0:k) and stores M*Q in
+///     mbasis(:, k:k+p) (the slot is scratch before). M*Q comes from fresh M applications updated
+///     only by O(eps) terms (M Q = (M Q1 - (M V) C2) R2^{-1}, R2 = I + O(eps cond^2)), never by
+///     a recurrence that cancels. Cost: 2 block applications of M.
+///   * Recompute: M*W is formed in an n x p workspace held by the object. Cost: 3 block
+///     applications of M (before each pass and for G1).
+/// Cost (fast path): about 8 n k p + 6 n p^2 flops in gemm/trsm, O(p^3) dense work.
+/// Not thread-safe (workspace); m is applied, never retained beyond the object's lifetime.
+template <class T>
+class BlockOrthonormalizer {
+ public:
+  /// Largest accepted column-scaled condition number of R1 (Frobenius estimate): the second pass
+  /// then starts from Q1 with ||Q1^H M Q1 - I|| ~ eps * cond^2 <= 1e-5.
+  static constexpr double kMaxCholQrCond = 1e5;
+
+  BlockOrthonormalizer() = default;
+  /// n rows, block width p >= 1. m: inner-product operator (nullptr = Euclidean), not owned.
+  /// store_m: the caller keeps M*basis (run's mbasis); ignored (false) when m == nullptr.
+  BlockOrthonormalizer(index_t n, index_t p, LinearOperator<T>* m, bool store_m);
+
+  /// Runs the kernel on basis(:, k:k+p) (ld n, the k leading columns M-orthonormal). mbasis: M *
+  /// basis with the same layout in store mode, nullptr otherwise. ratio: deficiency threshold
+  /// (see above), in (0, 1). On exit coef (k x p) = C accumulated over all passes and r (p x p) =
+  /// R. Throws InvalidInput when a column or its M-image is not finite, and when a random
+  /// replacement loses its M-norm against the basis or the second Cholesky-QR pass fails (M not
+  /// Hermitian positive definite).
+  void run(T* basis, T* mbasis, index_t k, double ratio, std::uint64_t seed,
+           std::uint64_t& next_stream, DenseMatrix<T>& coef, DenseMatrix<T>& r);
+
+  /// M-norms of the input columns of the last run (sqrt(||C1(:, i)||^2 + G1(i, i)), Pythagoras).
+  const std::vector<double>& before() const noexcept { return before_; }
+  /// Column i of the last run was replaced by a random vector (R(i, i) = 0).
+  const std::vector<char>& deficient() const noexcept { return deficient_; }
+  /// Whether the last run took the column-by-column fallback.
+  bool used_fallback() const noexcept { return fallback_; }
+  /// Runs that took the fallback, over the object's lifetime.
+  index_t fallbacks() const noexcept { return fallbacks_; }
+
+ private:
+  /// "M X" for the p columns of x: x itself (Euclidean) or M x written to y.
+  const T* apply_m(const T* x, T* y);
+  /// CGS2 of column kk against basis(:, 0:kk) (single vector); h (length kk) receives the
+  /// coefficients. In store mode mbasis(:, kk) receives M * (the orthogonalized column).
+  /// Returns {M-norm before, M-norm after}.
+  std::pair<double, double> orthogonalize_column(T* basis, T* mbasis, index_t kk, T* h);
+  void scale_column(T* basis, T* mbasis, index_t kk, double norm);
+  void column_fallback(T* basis, T* mbasis, index_t k, double ratio, std::uint64_t seed,
+                       std::uint64_t& next_stream, DenseMatrix<T>& coef, DenseMatrix<T>& r);
+
+  index_t n_ = 0;
+  index_t p_ = 0;
+  LinearOperator<T>* m_ = nullptr;
+  bool store_m_ = false;
+  DenseMatrix<T> mw_;  ///< n x p workspace for M*W (recompute mode only)
+  std::vector<double> before_;
+  std::vector<char> deficient_;
+  bool fallback_ = false;
+  index_t fallbacks_ = 0;
+};
+
+}  // namespace hs::eigen_detail
