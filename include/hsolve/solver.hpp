@@ -25,8 +25,8 @@ namespace hs {
 
 enum class TargetMode {
   Nearest,   ///< the k eigenvalues closest to sigma
-  Interval,  ///< all eigenvalues in [lower, upper]
-  Smallest,  ///< the k algebraically smallest
+  Interval,  ///< all eigenvalues in [lower, upper]       (B HPD or B = I: they need inertia counts;
+  Smallest,  ///< the k algebraically smallest             indefinite B supports Nearest only)
   Largest,   ///< the k algebraically largest
 };
 
@@ -63,6 +63,8 @@ struct SolverConfig {
                                     ///< below it the driver replaces A by (A+A^H)/2
   double inner_tol_factor = 0.1;    ///< Krylov tolerance = tol * inner_tol_factor
   index_t ncv = 0;                  ///< 0 = auto
+  index_t slice_size = 0;           ///< spectrum slicing (interval / smallest / largest, B HPD): at
+                                    ///< most this many eigenvalues per shift; 0 = auto (cost model)
   index_t max_restarts = 1000;
   std::uint64_t seed = 2026;
   int threads = 0;                  ///< 0 = OMP_NUM_THREADS / all available
@@ -97,15 +99,41 @@ struct PairReport {
 /// Completeness certificate (HEP/GHEP only; DESIGN §3.6 step 8). Windows by target mode:
 /// Nearest: [a, b] with a <= sigma - r, b >= sigma + r (r = max |lambda_i - sigma|), endpoints
 /// pushed into spectral gaps; Smallest: (-inf, b]; Largest: [a, +inf); Interval: user bounds.
+/// Smallest / largest whose k-th eigenvalue lies in a large cluster of numerically equal
+/// eigenvalues (e.g. a null space without zero_filter_tol) require only the copies still needed
+/// from it: count_inertia then counts the eigenvalues before the cluster plus those copies (two
+/// counts prove the cluster's width; see note), and any such copies are a valid answer.
 struct InertiaCertificate {
   bool performed = false;
   double lower = 0.0;          ///< a (-inf for Smallest)
   double upper = 0.0;          ///< b (+inf for Largest)
-  index_t count_inertia = -1;  ///< eigenvalues in the window according to Sylvester inertia
+  index_t count_inertia = -1;  ///< eigenvalues required in the window according to Sylvester inertia
   index_t count_found = -1;    ///< distinct (B-orthogonal) computed eigenvectors in the window
   index_t endpoint_moves = 0;  ///< endpoints moved because inertia came back invalid
   bool passed = false;         ///< count_inertia == count_found
   std::string note;            ///< e.g. "not available for GHIEP"
+};
+
+/// One shift-invert Krylov run of a sliced or one-sided solve (DESIGN §3.6): spectrum slices of
+/// interval / smallest / largest targets, and the one-sided runs that keep the GHIEP zero
+/// cluster unwanted (plus GHIEP recovery runs for complex eigenvalues between them). Empty for
+/// single-shift nearest solves. reruns counts deflated reruns, including those at a multiple
+/// eigenvalue's own shift (sigma is the slice's first shift). A partial cluster slice (see
+/// InertiaCertificate) reports the cluster's count in count_inertia and passes with the copies
+/// required.
+struct SliceReport {
+  double lower = 0.0;          ///< slice window (-inf / +inf: one-sided)
+  double upper = 0.0;
+  double sigma = 0.0;          ///< shift of the run
+  std::string which;           ///< "largest_magnitude" (both sides of sigma), "smallest_algebraic"
+                               ///< (eigenvalues below sigma), "largest_algebraic" (above sigma)
+  index_t count_inertia = -1;  ///< eigenvalues in [lower, upper] by Sylvester inertia (-1: GHIEP)
+  index_t count_found = -1;    ///< distinct verified pairs found in [lower, upper]
+  index_t nev = 0;             ///< pairs requested from the Krylov solver (first run)
+  index_t reruns = 0;          ///< deflated / enlarged reruns
+  index_t restarts = 0;
+  index_t op_applies = 0;
+  bool passed = false;         ///< count_found == count_inertia (GHIEP: run converged)
 };
 
 struct SolveReport {
@@ -130,14 +158,22 @@ struct SolveReport {
   FactorStats factor_stats;
   index_t restarts = 0;
   index_t op_applies = 0;
+  // Wall time of hs::solve split into exclusive phases (each instant counted once), so
+  // time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s:
   double time_total_s = 0.0;
-  double time_factor_s = 0.0;
-  double time_iterate_s = 0.0;
-  double time_verify_s = 0.0;
+  double time_setup_s = 0.0;    ///< input checks, norm estimates, problem type, planning
+  double time_factor_s = 0.0;   ///< symbolic analyses + numeric factorizations (incl. inertia counts)
+  double time_iterate_s = 0.0;  ///< Krylov solvers (operator applications = solves, orthogonalization)
+  double time_verify_s = 0.0;   ///< Rayleigh-Ritz refinement, residuals, rescue, selection, certificate
   std::int64_t peak_rss_bytes = 0;
   // results
   std::vector<PairReport> pairs;
   InertiaCertificate certificate;
+  std::vector<SliceReport> slices;  ///< per-run records of sliced / one-sided solves
+  index_t zero_cluster_dim = -1;    ///< GHIEP: dim null(A) (zero pivots of A), when it was needed;
+                                    ///< -1 = not computed
+  index_t zero_modes_filtered = 0;  ///< eigenvalues with |lambda| <= zero_filter_tol*scale left out
+                                    ///< (counted by inertia for HEP/GHEP windows)
   bool success = false;
   std::vector<std::string> warnings;
 

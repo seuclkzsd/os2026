@@ -8,6 +8,7 @@
 
 #include "hsolve/error.hpp"
 #include "hsolve/solver.hpp"
+#include "hsolve/util.hpp"
 #include "linalg/blas_lapack.hpp"
 #include "support/fixtures.hpp"
 
@@ -41,8 +42,20 @@ hs::SolverConfig nearest_cfg(double sigma, index_t k) {
   return cfg;
 }
 
+// The phase times are exclusive: non-negative and summing to the total (report contract).
+void expect_times_add_up(const hs::SolveReport& r) {
+  EXPECT_GE(r.time_setup_s, 0.0);
+  EXPECT_GE(r.time_factor_s, 0.0);
+  EXPECT_GE(r.time_iterate_s, 0.0);
+  EXPECT_GE(r.time_verify_s, 0.0);
+  EXPECT_GT(r.time_total_s, 0.0);
+  EXPECT_NEAR(r.time_setup_s + r.time_factor_s + r.time_iterate_s + r.time_verify_s, r.time_total_s,
+              1e-12 * r.time_total_s);
+}
+
 template <class T>
 void expect_report_ok(const hs::Solution<T>& sol, bool expect_certificate) {
+  expect_times_add_up(sol.report);
   EXPECT_TRUE(sol.report.success);
   for (const auto& p : sol.report.pairs) {
     EXPECT_TRUE(p.accepted);
@@ -189,17 +202,59 @@ TEST(DriverSolve, IndefiniteBRealSpectrumWithZeroCluster) {
       bd(r, c) = bd(c, r);
     }
   auto a = hs::test::from_dense(ad), b = hs::test::from_dense(bd);
-  // Target band away from the zero cluster, which stays present (theta_zero = -1/sigma is a large,
-  // unwanted Ritz value) - the realistic waveguide query. Asking for several copies of the exact
-  // 20-fold zero itself is NOT reliable for indefinite B yet: a single-vector Krylov space holds one
-  // copy of a semisimple multiple eigenvalue (others only via rounding) and GHIEP has no inertia
-  // certificate to force the rest out. Roadmap P3: zero-cluster shift placement + block Krylov.
+  // Target band next to the zero cluster - the realistic waveguide query. The 5 nearest sigma = 0.3
+  // are 4 eigenvalues and then (distance 0.3) the 20-fold zero. The cluster (null space of A) is
+  // never wanted (DESIGN §3.6-9): the driver sees the selection disk reach it, counts dim null(A)
+  // = 20 and takes the 5th pair from one-sided runs on both sides of the cluster instead
+  // (test_driver_cluster.cpp covers this in detail). Before P3 one copy of the zero was returned.
   const double sigma = 0.3;
   auto sol = hs::solve(a, &b, nearest_cfg(sigma, 5));
   EXPECT_EQ(sol.report.problem, hs::ProblemType::GeneralizedIndefinite);
   EXPECT_TRUE(sol.complex_eigenvalues.empty());
   expect_report_ok(sol, false);
-  expect_same_set(sol.eigenvalues, nearest(lam, sigma, 5), 1e-8);
+  std::vector<double> nonzero;
+  for (double x : lam)
+    if (x != 0.0) nonzero.push_back(x);
+  expect_same_set(sol.eigenvalues, nearest(nonzero, sigma, 5), 1e-8);
+  EXPECT_EQ(sol.report.zero_cluster_dim, nzero);
+}
+
+TEST(DriverSolve, PhaseTimesCoverTheWallTime) {
+  // time_total_s is the sum of the phases by construction; what must hold is that it accounts
+  // for the wall time of hs::solve (a phase clock started late, or work outside it, would not).
+  // Nearest, interval (sliced), smallest (inertia search) and GHIEP paths. The margin covers the
+  // return and the factorization's destructor, and scheduling noise when tests run in parallel.
+  auto a = hs::test::laplacian_2d<double>(60, 59);
+  for (index_t i = 0; i < a.nrows; ++i)
+    for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p)
+      if (a.colind[p] == i) a.values[p] -= 4.0;
+  std::vector<hs::SolverConfig> cfgs(3, nearest_cfg(0.3, 20));
+  cfgs[1].target.mode = hs::TargetMode::Interval;
+  cfgs[1].target.lower = -0.15;
+  cfgs[1].target.upper = 0.15;
+  cfgs[1].slice_size = 40;
+  cfgs[2].target.mode = hs::TargetMode::Smallest;
+  for (const auto& cfg : cfgs) {
+    hs::Timer wall;
+    const auto sol = hs::solve(a, nullptr, cfg);
+    const double w = wall.seconds();
+    expect_times_add_up(sol.report);
+    EXPECT_LE(sol.report.time_total_s, w);
+    EXPECT_GE(sol.report.time_total_s, 0.8 * w - 5e-3) << static_cast<int>(cfg.target.mode);
+  }
+  // GHIEP: B = diag(+-1) congruent to an indefinite pencil.
+  const index_t n = 400;
+  auto l = hs::test::laplacian_1d<double>(n);
+  hs::DenseMatrix<double> bd(n, n);
+  for (index_t i = 0; i < n; ++i) bd(i, i) = (i % 4 == 0) ? -1.0 : 1.0;
+  const auto b = hs::test::from_dense(bd);
+  hs::Timer wall;
+  const auto sol = hs::solve(l, &b, nearest_cfg(0.5, 6));
+  const double w = wall.seconds();
+  EXPECT_EQ(sol.report.problem, hs::ProblemType::GeneralizedIndefinite);
+  expect_times_add_up(sol.report);
+  EXPECT_LE(sol.report.time_total_s, w);
+  EXPECT_GE(sol.report.time_total_s, 0.8 * w - 5e-3);
 }
 
 TEST(DriverSolve, RejectsNonHermitianAndSymmetrizesNearHermitian) {

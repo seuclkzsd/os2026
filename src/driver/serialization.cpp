@@ -149,6 +149,7 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "inner_tol_factor") c.inner_tol_factor = get_number(v, k);
     else if (key == "hermitian_tol") c.hermitian_tol = get_number(v, k);
     else if (key == "ncv") c.ncv = get_integer<index_t>(v, k);
+    else if (key == "slice_size") c.slice_size = get_integer<index_t>(v, k);
     else if (key == "max_restarts") c.max_restarts = get_integer<index_t>(v, k);
     else if (key == "seed") c.seed = get_integer<std::uint64_t>(v, k);
     else if (key == "threads") c.threads = get_integer<int>(v, k);
@@ -174,8 +175,8 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
   if (!(c.tol > 0.0) || !(c.tol < 1.0)) HS_THROW(InvalidInput, "config: tol must be in (0, 1)");
   if (!(c.inner_tol_factor > 0.0) || c.inner_tol_factor > 1.0)
     HS_THROW(InvalidInput, "config: inner_tol_factor must be in (0, 1]");
-  if (c.ncv < 0 || c.max_restarts < 1 || c.threads < 0 || c.max_shift_retries < 0)
-    HS_THROW(InvalidInput, "config: ncv, threads, max_shift_retries must be >= 0 and max_restarts >= 1");
+  if (c.ncv < 0 || c.slice_size < 0 || c.max_restarts < 1 || c.threads < 0 || c.max_shift_retries < 0)
+    HS_THROW(InvalidInput, "config: ncv, slice_size, threads, max_shift_retries must be >= 0 and max_restarts >= 1");
   if (!(c.memory_budget_gb > 0.0)) HS_THROW(InvalidInput, "config: memory_budget_gb must be > 0");
   if (c.ordering < -1 || c.ordering > 7) HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive) or a MUMPS ICNTL(7) value 0..7");
   return c;
@@ -194,6 +195,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"inner_tol_factor", c.inner_tol_factor},
             {"hermitian_tol", c.hermitian_tol},
             {"ncv", c.ncv},
+            {"slice_size", c.slice_size},
             {"max_restarts", c.max_restarts},
             {"seed", c.seed},
             {"threads", c.threads},
@@ -220,6 +222,20 @@ std::string SolveReport::to_json(int indent) const {
                        {"backward_error", p.backward_error},
                        {"accepted", p.accepted}});
   }
+  json slices_j = json::array();
+  for (const auto& sl : slices) {
+    slices_j.push_back({{"lower", finite_or_null(sl.lower)},
+                        {"upper", finite_or_null(sl.upper)},
+                        {"sigma", sl.sigma},
+                        {"which", sl.which},
+                        {"count_inertia", sl.count_inertia},
+                        {"count_found", sl.count_found},
+                        {"nev", sl.nev},
+                        {"reruns", sl.reruns},
+                        {"restarts", sl.restarts},
+                        {"op_applies", sl.op_applies},
+                        {"passed", sl.passed}});
+  }
   json j = {{"schema_version", 1},
             {"n", n},
             {"nnz_a", nnz_a},
@@ -240,6 +256,7 @@ std::string SolveReport::to_json(int indent) const {
             {"restarts", restarts},
             {"op_applies", op_applies},
             {"time_total_s", time_total_s},
+            {"time_setup_s", time_setup_s},
             {"time_factor_s", time_factor_s},
             {"time_iterate_s", time_iterate_s},
             {"time_verify_s", time_verify_s},
@@ -254,6 +271,9 @@ std::string SolveReport::to_json(int indent) const {
               {"endpoint_moves", certificate.endpoint_moves},
               {"passed", certificate.passed},
               {"note", certificate.note}}},
+            {"slices", slices_j},
+            {"zero_cluster_dim", zero_cluster_dim},
+            {"zero_modes_filtered", zero_modes_filtered},
             {"success", success},
             {"warnings", warnings}};
   return j.dump(indent);
