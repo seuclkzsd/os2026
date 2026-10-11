@@ -113,12 +113,13 @@ const char* which_name(Which w) {
   return "unknown";
 }
 
-// One shift-invert Lanczos run at the shift the factorization currently holds, optionally deflated.
+// One shift-invert Lanczos run at the shift the factorization currently holds, optionally deflated,
+// with Krylov blocks of p vectors (KrylovSchurOptions::block_size; p = 1: single vector).
 // theta = 1/(lambda - sigma): LargestMagnitude = nearest sigma, SmallestAlgebraic = the eigenvalues
 // just below sigma, LargestAlgebraic = just above.
 template <class T>
 void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma, Which which,
-                 index_t nev, const DenseMatrix<T>* deflation, DefiniteRun<T>& out) {
+                 index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out) {
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
   SolveRefinement refine;
@@ -136,6 +137,7 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   ko.tol = c.cfg.tol * c.cfg.inner_tol_factor;
   ko.seed = c.cfg.seed + static_cast<std::uint64_t>(out.restarts);  // fresh start for reruns
   ko.deflation = deflation;
+  ko.block_size = std::max<index_t>(p, 1);
   HermitianEigResult<T> res;
   {
     PhaseScope phase(c.clock, Phase::Iterate);
@@ -145,7 +147,8 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   out.applies += res.op_applies;
   out.converged = res.converged;
   event(c, "lanczos", {{"sigma", sigma}, {"which", std::string(which_name(which))},
-                       {"nev", static_cast<std::int64_t>(nev)}, {"nconv", static_cast<std::int64_t>(res.nconv)},
+                       {"nev", static_cast<std::int64_t>(nev)}, {"block_size", static_cast<std::int64_t>(ko.block_size)},
+                       {"nconv", static_cast<std::int64_t>(res.nconv)},
                        {"restarts", static_cast<std::int64_t>(res.restarts)},
                        {"op_applies", static_cast<std::int64_t>(res.op_applies)},
                        {"deflated", static_cast<std::int64_t>(deflation ? deflation->cols() : 0)}});
@@ -309,8 +312,12 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   // Converge exactly the k wanted pairs (most wanted by |theta| = nearest to sigma). Asking for
   // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
   const index_t nev = std::min<index_t>(n, k);
+  // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis.
+  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c, fac, n, nev));
+  rep.block_size = p;
   DefiniteRun<T> run;
-  lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
+  lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev, p, static_cast<const DenseMatrix<T>*>(nullptr),
+              run);
   if (!run.converged) warn(c, "Krylov-Schur did not converge all requested pairs within max_restarts");
 
   const double zero_tol = cfg.zero_filter_tol >= 0 ? cfg.zero_filter_tol * scale : -1.0;
@@ -388,7 +395,9 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     if (nev_rerun < 1) break;
     refactorize_at(c, fac, sigma, detection_off);
     DenseMatrix<T> defl = run.all.x;
-    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, &defl, run);
+    const index_t d = defl.cols();
+    const index_t p_rerun = fit_block_size<T>(c, n, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, missing));
+    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run);
     select_and_verify();
   }
   if (cert.performed && !cert.passed) {
@@ -981,7 +990,9 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     return partial ? std::max<index_t>(0, s.want - inside) : count - inside - near_out;
   };
   sr.nev = std::min(n_, s.required());
-  lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
+  const index_t p = fit_block_size<T>(c_, n_, sr.nev, 0, 4 * sr.nev, block_size_for(c_, fac_, n_, sr.nev));
+  if (id == 0) c_.rep.block_size = p;
+  lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, p, static_cast<const DenseMatrix<T>*>(nullptr), run);
   select();
   // Certificate of the slice: deflated reruns while pairs are missing and the reruns find new
   // ones. A multiple eigenvalue among the found pairs gets its own shift (multiplet_shift).
@@ -997,15 +1008,17 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     event(c_, "slice_rerun", {{"slice", static_cast<std::int64_t>(id)}, {"missing", static_cast<std::int64_t>(miss)},
                               {"multiplet", m_sigma}});
     DenseMatrix<T> defl = run.all.x;
+    const index_t d = defl.cols();
+    const index_t p_rerun = fit_block_size<T>(c_, n_, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, miss));
     if (std::isfinite(m_sigma)) {
       tried.push_back(m_sigma);
       bool off = false;
       const double ms = factorize_near(c_, fac_, multiplet_rerun_shift(m_sigma, sel, s), scale_, off,
                                        /*on_eigenvalue=*/true);
-      lanczos_run(c_, fac_, pencil_, ms, Which::LargestMagnitude, nev_rerun, &defl, run);
+      lanczos_run(c_, fac_, pencil_, ms, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run);
     } else {
       refactorize_at(c_, fac_, sigma, detection_off);
-      lanczos_run(c_, fac_, pencil_, sigma, which, nev_rerun, &defl, run);
+      lanczos_run(c_, fac_, pencil_, sigma, which, nev_rerun, p_rerun, &defl, run);
     }
     ++sr.reruns;
     select();

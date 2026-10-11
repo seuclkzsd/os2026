@@ -254,6 +254,34 @@ struct CostModel {
 
 CostModel make_cost_model(const FactorEstimate& est, index_t n, int threads, bool complex_scalars);
 
+// ------------------------------------------------------------------------------ block Krylov
+
+/// Columns of n-vectors a shift-invert lanczos_krylov_schur run holds (driver use: no store_bv):
+/// p = 1: the basis [D V v] plus the M*w workspace, d + ncv + 2; p > 1: [D V V_m] plus the n x p
+/// M*W workspace, d + ncv_b + 2p with ncv_b from eigen_detail::block_dimensions (the larger
+/// block basis), or d + n_free + 2 when the block layout does not fit the free space (the solver
+/// then runs one single-vector cycle over it). ncv: SolverConfig::ncv (0 = auto).
+index_t lanczos_basis_columns(index_t n, index_t d, index_t nev, index_t ncv, index_t p);
+
+/// Widest block the auto rule of block_size_for() chooses.
+constexpr index_t kMaxAutoBlockSize = 8;
+
+/// Block width of the definite path's first shift-invert Lanczos run for nev wanted pairs:
+/// SolverConfig::block_size if > 0, else the auto rule (see steps.cpp).
+template <class T>
+index_t block_size_for(const Ctx& c, const SparseFactorization<T>& fac, index_t n, index_t nev);
+
+/// p, halved while the basis of a run of width p (lanczos_basis_columns, plus `extra_columns`
+/// n-vectors the caller keeps, e.g. the candidate block X, AX, BX) would not fit the memory left
+/// in the budget (warning when reduced).
+template <class T>
+index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p);
+
+/// Block width of a deflated rerun that misses `missing` pairs after a run with width p:
+/// max(p, missing rounded up to even), so that a random start block has components in every
+/// missing copy of a multiple eigenvalue and one run finds them all (eigen.hpp, block mode).
+index_t rerun_block_size(index_t p, index_t missing);
+
 /// Ritz estimates of the ends of the spectrum of the pencil (from inside): lowest two and
 /// highest two Ritz values of a short Lanczos run (A alone for B = I, B^{-1}A otherwise).
 struct SpectrumEstimate {

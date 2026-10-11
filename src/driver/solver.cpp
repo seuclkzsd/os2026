@@ -140,7 +140,12 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   // 2. Memory budget for the factorization (DESIGN §3.6-3).
   const double budget = cfg.memory_budget_gb * 1073741824.0;
   const index_t k_guess = cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
-  const index_t ncv_guess = cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32);
+  // Krylov basis: the general solver's (GHIEP) or the block Lanczos basis of the widest block the
+  // definite path may use (DESIGN §3.6-3; block layout of eigen.hpp).
+  const index_t p_guess = cfg.block_size > 0 ? cfg.block_size : driver::kMaxAutoBlockSize;
+  const index_t ncv_guess =
+      std::max(cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32),
+               driver::lanczos_basis_columns(n, 0, std::min(n, k_guess), cfg.ncv, p_guess));
   const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(ncv_guess + 6 * k_guess);
   const double cap_mb = (budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)) - krylov_bytes) * 0.95 / 1e6;
   if (cap_mb <= 0)

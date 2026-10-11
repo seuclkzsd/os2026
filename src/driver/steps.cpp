@@ -11,6 +11,7 @@
 
 #include "driver/internal.hpp"
 #include "driver/projection.hpp"
+#include "eigen/block_lanczos.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
 #include "hsolve/util.hpp"
@@ -442,5 +443,56 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
       Ctx&, const FactorOptions&, const ShiftedPencil<T>&, double, index_t, index_t);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_STEPS)
 #undef HS_INSTANTIATE_DRIVER_STEPS
+
+// ------------------------------------------------------------------------------ block Krylov
+
+index_t lanczos_basis_columns(index_t n, index_t d, index_t nev, index_t ncv, index_t p) {
+  eigen_detail::LanczosSetup s;
+  s.n = n;
+  s.d = d;
+  s.nev = nev;
+  s.n_free = n - d;
+  s.ncv = ncv > 0 ? std::min(ncv, s.n_free) : std::min(s.n_free, std::max(2 * nev + 1, nev + 16));
+  if (p <= 1) return d + s.ncv + 2;
+  const eigen_detail::BlockDimensions dims = eigen_detail::block_dimensions(s, p, ncv == 0);
+  if (!dims.feasible) return d + s.n_free + 2;
+  return d + dims.ncv + 2 * p;
+}
+
+index_t rerun_block_size(index_t p, index_t missing) {
+  return std::max<index_t>(std::max<index_t>(p, 1), (missing + 1) / 2 * 2);
+}
+
+template <class T>
+index_t block_size_for(const Ctx& c, const SparseFactorization<T>& fac, index_t n, index_t nev) {
+  (void)fac;
+  (void)n;
+  (void)nev;
+  if (c.cfg.block_size > 0) return c.cfg.block_size;
+  return 1;
+}
+
+template <class T>
+index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p) {
+  const double vec = static_cast<double>(n) * sizeof(T);
+  const double avail =
+      c.cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  const auto bytes = [&](index_t q) {
+    return vec * static_cast<double>(lanczos_basis_columns(n, d, nev, c.cfg.ncv, q) + extra_columns);
+  };
+  const index_t wanted = std::max<index_t>(p, 1);
+  p = wanted;
+  while (p > 1 && bytes(p) > 0.9 * avail) p /= 2;
+  if (p < wanted)
+    warn(c, "Krylov block size reduced from " + std::to_string(wanted) + " to " + std::to_string(p) +
+                " by the memory budget");
+  return p;
+}
+
+#define HS_INSTANTIATE_DRIVER_BLOCKS(T)                                                                     \
+  template index_t block_size_for<T>(const Ctx&, const SparseFactorization<T>&, index_t, index_t);           \
+  template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t);
+HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_BLOCKS)
+#undef HS_INSTANTIATE_DRIVER_BLOCKS
 
 }  // namespace hs::driver

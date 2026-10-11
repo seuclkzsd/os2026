@@ -63,6 +63,12 @@ struct SolverConfig {
                                     ///< below it the driver replaces A by (A+A^H)/2
   double inner_tol_factor = 0.1;    ///< Krylov tolerance = tol * inner_tol_factor
   index_t ncv = 0;                  ///< 0 = auto
+  index_t block_size = 0;           ///< Krylov block width p of the shift-invert Lanczos runs (HEP /
+                                    ///< GHEP, incl. slices; KrylovSchurOptions::block_size): 0 = auto
+                                    ///< (driver rule from the factor estimate and nev, see
+                                    ///< internal.hpp choose_block_size), 1 = single vector. Deflated
+                                    ///< certificate reruns use max(p, missing rounded up to even).
+                                    ///< GHIEP runs are single-vector.
   index_t slice_size = 0;           ///< spectrum slicing (interval / smallest / largest, B HPD): at
                                     ///< most this many eigenvalues per shift; 0 = auto (cost model)
   index_t max_restarts = 1000;
@@ -159,6 +165,8 @@ struct SolveReport {
   double sigma_used = 0.0;       ///< after near-singular perturbation
   index_t shift_retries = 0;
   FactorOptions factor_options;
+  index_t block_size = 1;        ///< Krylov block width p of the first shift-invert run (resolved
+                                 ///< SolverConfig::block_size; 1 for GHIEP)
   // statistics
   FactorStats factor_stats;
   index_t restarts = 0;
