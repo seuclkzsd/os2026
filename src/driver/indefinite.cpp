@@ -354,13 +354,13 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     // whatever the user's band.
     const double band_place = std::max(band, kZeroBand * scale);
     // Side s (0: lambda > band, 1: lambda < -band) is searched outward from its inner edge.
-    // Without a plain run that is the band (shift placed mid-gap by a probe) and each side may
-    // hold all k. A plain run already holds every genuine eigenvalue in its disk |lambda - sigma|
-    // < r_plain (its converged pairs, cluster copies included): a side then only needs what lies
-    // beyond the disk - the shortfall - searched from the disk edge (or from the band, if the
-    // disk reaches it).
+    // Without a plain run that is the band, and each side may hold all k. A plain run already
+    // holds every genuine eigenvalue in its disk |lambda - sigma| < r_plain (its converged pairs,
+    // cluster copies included): a side then only needs what lies beyond the disk - the shortfall -
+    // searched from the disk edge (or from the band, if the disk reaches it). A probe at the inner
+    // edge finds the first eigenvalue beyond it; the shift goes mid-way between the cluster and
+    // that eigenvalue when this is farther out than the inner edge.
     index_t need_side[2] = {k, k};
-    bool from_band[2] = {true, true};
     double inner[2] = {band_place, -band_place};
     if (plain_runs > 0) {
       const auto& pr = runs.front().res;
@@ -371,14 +371,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
         if (cd.pm.backward_error <= std::max(kTrustworthy, cfg.tol) && std::abs(cd.lambda) > band) ++good_out;
       const index_t shortfall = k - good_out;
       const double edge_hi = t.sigma + r_plain * (1.0 - 1e-6), edge_lo = t.sigma - r_plain * (1.0 - 1e-6);
-      if (edge_hi > band_place) {
-        inner[0] = edge_hi;
-        from_band[0] = false;
-      }
-      if (edge_lo < -band_place) {
-        inner[1] = edge_lo;
-        from_band[1] = false;
-      }
+      if (edge_hi > band_place) inner[0] = edge_hi;
+      if (edge_lo < -band_place) inner[1] = edge_lo;
       for (int s = 0; s < 2; ++s) need_side[s] = std::min(k, shortfall + 2);
       event(c, "cluster_plain_disk", {{"radius", r_plain}, {"shortfall", static_cast<std::int64_t>(shortfall)}});
     }
@@ -422,9 +416,11 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
             rep.slices.push_back(sr);
             continue;
           }
-          if (from_band[s] && probe.res.nconv >= 1 && sgn * probe.res.theta[0].real() > 0) {
+          if (probe.res.nconv >= 1 && sgn * probe.res.theta[0].real() > 0) {
+            // Mid-gap between the cluster and the first eigenvalue beyond the inner edge, unless
+            // the inner edge (a plain disk's edge) is already farther out: no eigenvalue is skipped.
             const double first = probe.sigma + (1.0 / probe.res.theta[0]).real();
-            if (std::abs(first) > 4.0 * band_place) place[s] = 0.5 * first;  // mid-gap
+            if (std::abs(first) > 4.0 * band_place && sgn * (0.5 * first - probe.sigma) > 0) place[s] = 0.5 * first;
             event(c, "side_probe", {{"side", static_cast<std::int64_t>(s)}, {"first", first}, {"shift", place[s]}});
           }
         }
