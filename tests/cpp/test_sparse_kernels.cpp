@@ -352,6 +352,131 @@ TYPED_TEST(SparseKernelPaths, BackwardErrorIsAtRoundingLevelForAnAccurateSolve) 
   EXPECT_EQ(omega[1], 0.0);
 }
 
+// A residual entry that is +-Inf or NaN makes the backward error of its column infinite on every
+// path, for B and B = I, so that such a column never counts as "at the rounding level": whether
+// the Inf sits in Y itself or comes from an overflow of A Y (r = -inf with scale s = inf: inf / inf
+// must not become a NaN that the max reduction drops). Finite columns keep a finite value.
+TYPED_TEST(SparseKernelPaths, NonFiniteResidualHasInfiniteBackwardError) {
+  using T = TypeParam;
+  const double inf = std::numeric_limits<double>::infinity();
+  std::vector<KernelPath> all = fast_paths();
+  all.push_back(KernelPath::Reference);
+  {
+    // Y holds +Inf in row 7 of the even columns.
+    const index_t n = 50;
+    const auto a = hs::test::laplacian_1d<T>(n);
+    const auto b = hs::test::random_hpd<T>(n, 0.1, 3);
+    for (bool with_b : {false, true}) {
+      for (index_t p : {1, 2, 5}) {
+        const auto x = random_block<T>(n, p, n, 5);
+        auto y = random_block<T>(n, p, n, 6);
+        for (index_t k = 0; k < p; k += 2) y[7 + k * n] = T(inf);
+        for (KernelPath path : all) {
+          std::vector<T> r(static_cast<std::size_t>(n * p));
+          std::vector<double> omega(static_cast<std::size_t>(p), -1.0);
+          hs::shifted_residual(a, with_b ? &b : nullptr, -0.5, x.data(), n, y.data(), n, r.data(),
+                               n, p, {path}, omega.data());
+          for (index_t k = 0; k < p; ++k) {
+            if (k % 2 == 0) {
+              EXPECT_EQ(omega[k], inf) << name(path) << " with_b=" << with_b << " p=" << p
+                                       << " k=" << k << " r[7]=" << r[7 + k * n];
+            } else {
+              EXPECT_TRUE(std::isfinite(omega[k]) && omega[k] > 0.0) << name(path) << " k=" << k;
+            }
+          }
+        }
+      }
+    }
+  }
+  {
+    // Overflow: A = 4 I, B = I (implicit and explicit), sigma = 0.5, x = 0, y = 1e308 e_5:
+    // (A y)_5 = 4e308 = inf, so r_5 = 0.5e308 - inf = -inf and s_5 = inf.
+    const index_t n = 40;
+    auto a = hs::identity<T>(n);
+    for (auto& v : a.values) v = T(4);
+    const auto eye = hs::identity<T>(n);
+    for (bool explicit_b : {false, true}) {
+      for (index_t p : {1, 2, 5}) {
+        const std::vector<T> x(static_cast<std::size_t>(n * p), T(0));
+        std::vector<T> y(x.size(), T(0));
+        for (index_t k = 0; k < p; ++k) y[5 + k * n] = T(1e308);
+        for (KernelPath path : all) {
+          std::vector<T> r(x.size());
+          std::vector<double> omega(static_cast<std::size_t>(p), -1.0);
+          hs::shifted_residual(a, explicit_b ? &eye : nullptr, 0.5, x.data(), n, y.data(), n,
+                               r.data(), n, p, {path}, omega.data());
+          for (index_t k = 0; k < p; ++k) {
+            EXPECT_TRUE(std::isinf(std::abs(r[5 + k * n]))) << name(path) << " k=" << k;
+            EXPECT_EQ(omega[k], inf) << name(path) << " explicit_b=" << explicit_b << " p=" << p
+                                     << " k=" << k;
+          }
+        }
+      }
+    }
+  }
+}
+
+// "B = I when b == nullptr": a literal nullptr is accepted without naming the scalar type, and
+// gives the same bits as a typed null pointer.
+TYPED_TEST(SparseKernelPaths, ShiftedResidualTakesALiteralNullptrForTheIdentity) {
+  using T = TypeParam;
+  const index_t n = 64, p = 3;
+  const auto a = hs::test::laplacian_1d<T>(n);
+  const auto x = random_block<T>(n, p, n, 7);
+  const auto y = random_block<T>(n, p, n, 8);
+  std::vector<T> r1(static_cast<std::size_t>(n * p)), r2(r1.size());
+  std::vector<double> o1(static_cast<std::size_t>(p)), o2(o1.size());
+  hs::shifted_residual(a, nullptr, 0.25, x.data(), n, y.data(), n, r1.data(), n, p, {},
+                       o1.data());
+  const CsrMatrix<T>* none = nullptr;
+  hs::shifted_residual(a, none, 0.25, x.data(), n, y.data(), n, r2.data(), n, p, {}, o2.data());
+  EXPECT_TRUE(r1 == r2);
+  EXPECT_TRUE(o1 == o2);
+}
+
+// shifted_residual and its backward error are bitwise independent of the thread count and of the
+// workspace on every path (the per-column max of the backward error included), for B and B = I,
+// one column, several and more than one 16-column chunk.
+TYPED_TEST(SparseKernelPaths, ShiftedResidualBitsDoNotDependOnThreadsOrWorkspace) {
+  using T = TypeParam;
+  const index_t n = 5000, pmax = 19;
+  const auto a = random_csr<T>(n, n, 14, 7, 43);
+  const auto b = random_csr<T>(n, n, 9, 0, 44);
+  const auto x = random_block<T>(n, pmax, n, 45);
+  const auto y = random_block<T>(n, pmax, n, 46);
+  const int threads = omp_get_max_threads();
+  std::vector<KernelPath> all = fast_paths();
+  all.push_back(KernelPath::Reference);
+  for (KernelPath path : all) {
+    for (bool with_b : {true, false}) {
+      const CsrMatrix<T>* bp = with_b ? &b : nullptr;
+      for (index_t p : {1, 3, 16, 19}) {
+        const std::size_t len = static_cast<std::size_t>(n * p);
+        std::vector<T> r1(len), r2(len), r3(len);
+        std::vector<double> o1(static_cast<std::size_t>(p)), o2(o1.size()), o3(o1.size());
+        omp_set_num_threads(1);
+        hs::shifted_residual(a, bp, -0.3, x.data(), n, y.data(), n, r1.data(), n, p, {path},
+                             o1.data());
+        omp_set_num_threads(std::max(3, threads));
+        hs::shifted_residual(a, bp, -0.3, x.data(), n, y.data(), n, r2.data(), n, p, {path},
+                             o2.data());
+        std::vector<double> ws;
+        const KernelOptions with_ws{path, &ws};
+        for (int rep = 0; rep < 2; ++rep)  // the second call reuses the workspace
+          hs::shifted_residual(a, bp, -0.3, x.data(), n, y.data(), n, r3.data(), n, p, with_ws,
+                               o3.data());
+        omp_set_num_threads(threads);
+        EXPECT_TRUE(r1 == r2) << name(path) << " with_b=" << with_b << " p=" << p
+                              << ": R depends on the thread count";
+        EXPECT_TRUE(o1 == o2) << name(path) << " with_b=" << with_b << " p=" << p
+                              << ": the backward error depends on the thread count";
+        EXPECT_TRUE(r1 == r3 && o1 == o3)
+            << name(path) << " with_b=" << with_b << " p=" << p << ": the workspace changed bits";
+      }
+    }
+  }
+}
+
 TYPED_TEST(SparseKernelPaths, ShiftedResidualRejectsMismatchedOrders) {
   using T = TypeParam;
   const auto a = hs::test::laplacian_1d<T>(5);

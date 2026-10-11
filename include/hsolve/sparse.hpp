@@ -151,13 +151,16 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
 /// p >= 2 (a single column is computed straight from x and y).
 /// backward_error (optional, p entries): the componentwise backward error of every column,
 ///   omega_k = max_i |r_ik| / s_ik,  s = |B| |w| + |A| |y|,  w = x + sigma y  (B = I: |w| + |A| |y|),
-/// with |z| = |Re z| + |Im z| for complex entries, 0/0 = 0 and r/0 = inf. omega_k at the level of
+/// with |z| = |Re z| + |Im z| for complex entries, 0/0 = 0 and r/0 = inf; a row whose r or s is
+/// not finite (Inf / NaN in X or Y, or an overflow) gives omega_k = inf. omega_k at the level of
 /// a few eps means r_k is rounding noise of its own evaluation: no refinement step can reduce it.
 /// Computed in the same sweep (max is exact: deterministic for any thread count).
+/// b is not used for deducing T, so shifted_residual(a, nullptr, ...) compiles.
 template <class T>
-void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
-                      index_t ldx, const T* y, index_t ldy, T* r, index_t ldr, index_t p,
-                      const KernelOptions& options = {}, double* backward_error = nullptr);
+void shifted_residual(const CsrMatrix<T>& a, const non_deduced_t<CsrMatrix<T>>* b, double sigma,
+                      const T* x, index_t ldx, const T* y, index_t ldy, T* r, index_t ldr,
+                      index_t p, const KernelOptions& options = {},
+                      double* backward_error = nullptr);
 
 /// The pencil K(alpha, beta) = alpha*A + beta*B (B = I when b == nullptr) for REAL alpha, beta,
 /// stored as the index-only UPPER-triangle pattern of the union of A and B (the only part a

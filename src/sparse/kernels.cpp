@@ -88,11 +88,14 @@ inline double mag(cplx v) {
   return std::abs(v.real()) + std::abs(v.imag());
 }
 
-/// |r| / s, the componentwise backward error of one entry (0 / 0 = 0, r / 0 = inf, NaN = inf so
-/// that a NaN residual never looks converged).
+/// |r| / s, the componentwise backward error of one entry: 0 / 0 = 0, r / 0 = inf, and inf as
+/// soon as r or s is not finite, so that a residual holding an Inf or a NaN never looks
+/// converged (an overflowing row has r = +-inf and s = inf: inf / inf would be a NaN, which the
+/// max reductions silently drop). The result is never NaN.
 inline double ratio(double r, double s) {
   if (r == 0.0) return 0.0;
-  if (std::isnan(r) || std::isnan(s) || !(s > 0.0)) return std::numeric_limits<double>::infinity();
+  if (!std::isfinite(r) || !std::isfinite(s) || !(s > 0.0))
+    return std::numeric_limits<double>::infinity();
   return r / s;
 }
 
@@ -675,9 +678,9 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
 }
 
 template <class T>
-void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
-                      index_t ldx, const T* y, index_t ldy, T* r, index_t ldr, index_t p,
-                      const KernelOptions& options, double* backward_error) {
+void shifted_residual(const CsrMatrix<T>& a, const non_deduced_t<CsrMatrix<T>>* b, double sigma,
+                      const T* x, index_t ldx, const T* y, index_t ldy, T* r, index_t ldr,
+                      index_t p, const KernelOptions& options, double* backward_error) {
   if (!a.square() || (b && (b->nrows != a.nrows || !b->square())))
     HS_THROW(InvalidInput, "shifted_residual: A (" << a.nrows << "x" << a.ncols
                                                    << ") and B must be square "
@@ -716,9 +719,9 @@ void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma
   template void spmv<T>(const CsrMatrix<T>&, const T*, T*, T, T, const KernelOptions&);         \
   template void spmm<T>(const CsrMatrix<T>&, const T*, index_t, T*, index_t, index_t, T, T,     \
                         const KernelOptions&);                                                  \
-  template void shifted_residual<T>(const CsrMatrix<T>&, const CsrMatrix<T>*, double, const T*, \
-                                    index_t, const T*, index_t, T*, index_t, index_t,           \
-                                    const KernelOptions&, double*);
+  template void shifted_residual<T>(const CsrMatrix<T>&, const non_deduced_t<CsrMatrix<T>>*,    \
+                                    double, const T*, index_t, const T*, index_t, T*, index_t,  \
+                                    index_t, const KernelOptions&, double*);
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_KERNELS)
 #undef HS_INSTANTIATE_KERNELS
