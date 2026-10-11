@@ -401,29 +401,34 @@ TEST(DriverTargets, KthEigenvalueInsideAMultiplet) {
   auto an = hs::test::prescribed_spectrum<double>(neg, 4, 49);
   // The 1e-12 bounds below detect that regression for single-vector runs, which overshoot tol by
   // orders of magnitude; a block run stops as soon as its estimates meet tol (eigen.hpp), so the
-  // 11-pair window's auto block width is checked against tol only.
+  // 11-pair window's auto block width (the default) is checked against tol, with the same
+  // structural checks (shift placement, factorizations) as the single-vector runs.
+  // sign = +1: smallest of `a` (shift above the multiplet at 2.5); -1: largest of `an` (mirror).
+  auto expect_shift_placed = [](const hs::SolveReport& r, double sign, index_t k) {
+    EXPECT_LE(r.factor_stats.factorizations, 18) << k;
+    ASSERT_EQ(r.slices.size(), 1u) << k;
+    EXPECT_GT(sign * r.slices[0].sigma - 2.5, 0.01) << "one-sided shift hugs the multiplet, k = " << k;
+    EXPECT_LT(sign * r.slices[0].sigma, 2.87) << k;
+  };
   for (index_t k : {6, 7}) {
-    auto cs = end_cfg(hs::TargetMode::Smallest, k);
-    cs.block_size = 0;
-    auto sb = hs::solve(a, nullptr, cs);
-    expect_window_ok(sb);
-    expect_same_set(sb.eigenvalues, {lam.begin(), lam.begin() + k}, 1e-10);
-    EXPECT_EQ(sb.report.block_size, 4);
-    cs.block_size = 1;
-    auto s = hs::solve(a, nullptr, cs);
-    expect_window_ok(s);
-    expect_same_set(s.eigenvalues, {lam.begin(), lam.begin() + k}, 1e-10);
-    EXPECT_LE(worst_eta(s.report), 1e-12) << k;
-    EXPECT_LE(s.report.factor_stats.factorizations, 18) << k;
-    ASSERT_EQ(s.report.slices.size(), 1u);
-    EXPECT_GT(s.report.slices[0].sigma - 2.5, 0.01) << "one-sided shift hugs the multiplet";
-    EXPECT_LT(s.report.slices[0].sigma, 2.87);
-    auto cl = end_cfg(hs::TargetMode::Largest, k);
-    cl.block_size = 1;
-    auto l = hs::solve(an, nullptr, cl);
-    expect_window_ok(l);
-    expect_same_set(l.eigenvalues, {neg.begin(), neg.begin() + k}, 1e-10);
-    EXPECT_LE(worst_eta(l.report), 1e-12) << k;
+    for (const index_t p : {0, 1}) {  // auto (4: the window holds 11 pairs), single vector
+      auto cs = end_cfg(hs::TargetMode::Smallest, k);
+      cs.block_size = p;
+      auto s = hs::solve(a, nullptr, cs);
+      expect_window_ok(s);
+      expect_same_set(s.eigenvalues, {lam.begin(), lam.begin() + k}, 1e-10);
+      EXPECT_EQ(s.report.block_size, p == 0 ? 4 : 1);
+      EXPECT_LE(worst_eta(s.report), p == 1 ? 1e-12 : cs.tol) << k;
+      expect_shift_placed(s.report, +1.0, k);
+      auto cl = end_cfg(hs::TargetMode::Largest, k);
+      cl.block_size = p;
+      auto l = hs::solve(an, nullptr, cl);
+      expect_window_ok(l);
+      expect_same_set(l.eigenvalues, {neg.begin(), neg.begin() + k}, 1e-10);
+      EXPECT_EQ(l.report.block_size, p == 0 ? 4 : 1);
+      EXPECT_LE(worst_eta(l.report), p == 1 ? 1e-12 : cl.tol) << k;
+      expect_shift_placed(l.report, -1.0, k);
+    }
   }
 }
 
