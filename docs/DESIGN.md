@@ -316,7 +316,7 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    scale = ‖A‖₂/‖B‖₂。文件输入已由 io 用缩放算法精确厄密化；内存输入（Python）只经过这里未缩放的
    缺陷，元素 ≲ 1e-154 或 ≳ 1e154 时会下溢/溢出（已知差距，`docs/PYTHON.md` §4、§7）。
    `threads > 0` 时 `omp_set_num_threads(threads)`（不恢复；Python 前端自己恢复）。
-   B 正定性在分析之后判定（第 4 步）：对角 B 直接看符号（免分解）；否则在主分析上分解 0·A + 1·B
+   B 正定性在符号分析之后判定：对角 B 直接看符号（免分解）；否则在主分析上分解 0·A + 1·B
    读惯性（主对象为双精度非 BLR；否则 `compute_inertia`）。
 2. **策略**：
    - HEP/GHEP → 位移反演 + `lanczos_krylov_schur`（B 内积，block_size = 1）：nearest 用单位移
