@@ -9,16 +9,41 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 #include "hsolve/error.hpp"
 
 namespace hs::mumps {
 
+/// Serializes every MUMPS call of the process (all arithmetics, all instances).
+/// Sequential MUMPS 5.8.2 is NOT thread-safe across distinct instances: every factorization runs
+/// MUMPS_LOAD_INIT/END (process-global Fortran module arrays of mumps_common, allocated and freed
+/// per factorization; gdb: once per JOB=2, plus ~800 MUMPS_LOAD_UPDATE calls on a 100x100 grid),
+/// allocates the module communication buffers BUF_CB/BUF_SMALL and sets the module pointer
+/// DMUMPS_TMP_PTR. Two instances factorizing at the same time from two std::threads aborted with
+/// "PB allocation in MUMPS_LOAD_INIT" + SIGSEGV in the first concurrent round, 7 of 7 runs
+/// (bench/certpar_inertia.cpp --exp concurrent --mumps-lock 0). With this lock, objects used
+/// from different threads are safe; their MUMPS phases simply run one after the other.
+/// The lock is held for the duration of one MUMPS call (JOB = -1, -2, 1, 2, 3).
+inline std::mutex& call_mutex() {
+  static std::mutex m;
+  return m;
+}
+
 /// Fortran communicator understood by the sequential (libmpiseq) MUMPS build.
 inline constexpr int kUseCommWorld = -987654;
 
 /// MUMPS JOB codes.
-enum Job : int { kInit = -1, kTerminate = -2, kAnalyze = 1, kFactorize = 2, kSolve = 3 };
+/// kFreeFactors (JOB=-4) frees the factorization but keeps the analysis (verified on 5.8.2: RSS
+/// drops by the factor storage, a later JOB=2 and JOB=3 work).
+enum Job : int {
+  kInit = -1,
+  kTerminate = -2,
+  kFreeFactors = -4,
+  kAnalyze = 1,
+  kFactorize = 2,
+  kSolve = 3
+};
 
 template <class U>
 struct Api;
@@ -64,7 +89,8 @@ inline bool is_memory_error(int info1) {
 }
 
 /// One MUMPS instance with SYM=2 (symmetric indefinite LDL^T) and PAR=1 (host works).
-/// JOB=-1 runs at construction, JOB=-2 at destruction (which also deletes out-of-core files).
+/// JOB=-1 runs at construction, JOB=-2 at destruction (which also deletes out-of-core files);
+/// every job holds call_mutex().
 /// The control structure is heap-allocated and never moves; the wrapper is neither copyable
 /// nor movable. Accessors take the 1-based indices of the MUMPS user guide: icntl(14) is
 /// ICNTL(14).
@@ -82,6 +108,7 @@ class Instance {
                                         << infog(1) << ", INFOG(2)=" << infog(2));
   }
   ~Instance() {
+    std::lock_guard<std::mutex> lock(call_mutex());
     s_->job = kTerminate;
     Api<U>::call(s_.get());
   }
@@ -96,8 +123,9 @@ class Instance {
   double rinfog(int i) const { return static_cast<double>(s_->rinfog[i - 1]); }
   Struc& raw() { return *s_; }
 
-  /// Run one job; returns INFOG(1) (negative: error, positive: warning).
+  /// Run one job under call_mutex(); returns INFOG(1) (negative: error, positive: warning).
   int run(int job) {
+    std::lock_guard<std::mutex> lock(call_mutex());
     s_->job = job;
     Api<U>::call(s_.get());
     return s_->infog[0];
