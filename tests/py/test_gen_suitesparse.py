@@ -29,15 +29,18 @@ def _sym(n, seed, complex_=False):
     return (m + m.conj().T - 0.5 * sp.identity(n)).tocsr()
 
 
-def _publish(mirror, name, matrix, symmetry, extra_members=()):
-    """Write MM/<GROUP>/<name>.tar.gz containing <name>/<name>.mtx (+ extra raw members)."""
+def _mtx_bytes(matrix, symmetry):
     buf = io.BytesIO()
     scipy.io.mmwrite(buf, sp.coo_matrix(matrix), symmetry=symmetry)
-    payload = buf.getvalue()
+    return buf.getvalue()
+
+
+def _publish(mirror, name, matrix, symmetry, extra_members=()):
+    """Write MM/<GROUP>/<name>.tar.gz containing <name>/<name>.mtx (+ extra raw members)."""
     folder = mirror / "MM" / GROUP
     folder.mkdir(parents=True, exist_ok=True)
     with tarfile.open(folder / f"{name}.tar.gz", "w:gz") as tf:
-        for member, data in [(f"{name}/{name}.mtx", payload), *extra_members]:
+        for member, data in [(f"{name}/{name}.mtx", _mtx_bytes(matrix, symmetry)), *extra_members]:
             info = tarfile.TarInfo(member)
             info.size = len(data)
             tf.addfile(info, io.BytesIO(data))
@@ -113,6 +116,24 @@ def test_pencils_classified_by_inertia_of_b(tmp_path):
     assert c.meta["problem"] == "GHIEP" and "indefinite-B" in c.meta["scenarios"]
 
 
+def test_pencil_from_auxiliary_member_downloads_archive_once(tmp_path, monkeypatch):
+    """Guettel TEM layout: <Name>/<Name>.mtx (curl-curl C) and <Name>/<Name>_M.mtx (mass M)."""
+    c_mat, m_mat = _sym(30, 11), _spd(30, 12)
+    _publish(tmp_path / "mirror", "P", c_mat, "symmetric", [("P/P_M.mtx", _mtx_bytes(m_mat, "symmetric"))])
+    reg = _registry("P") | {"P_M": ss.Matrix(GROUP, "P", None, None, "real", True, 0.1, "mass", member="P_M")}
+    calls = []
+    download = ss._download
+    monkeypatch.setattr(ss, "_download", lambda *a, **kw: calls.append(a[0]) or download(*a, **kw))
+    c = case.load_case(_fetch(tmp_path, "t-p", {"t-p": ss.CaseSpec("P", "P_M")}, reg, refresh=True))
+    assert len(calls) == 1 and c.meta["problem"] == "GHEP"
+    assert abs(c.A - c_mat).max() < 1e-15 * abs(c_mat).max() and abs(c.B - m_mat).max() < 1e-15 * abs(m_mat).max()
+    files = [s["file"] for s in c.meta["params"]["matrices"]]
+    assert files == ["P.mtx", "P_M.mtx"] and c.meta["citation"].endswith("matrices: Test/P")
+    reg_missing = reg | {"P_K": ss.Matrix(GROUP, "P", None, None, "real", True, 0.1, "absent", member="P_K")}
+    with pytest.raises(ss.Skipped, match="P_K.mtx"):
+        _fetch(tmp_path, "t-pk", {"t-pk": ss.CaseSpec("P", "P_K")}, reg_missing)
+
+
 def test_complex_symmetric_and_nonsymmetric_rejected(tmp_path):
     rng = np.random.default_rng(7)
     m = sp.random(20, 20, density=0.3, random_state=rng) * (1 + 2j)
@@ -149,7 +170,7 @@ def test_completed_download_is_reused_and_refresh_refetches(tmp_path):
     _publish(tmp_path / "mirror", "M1", _sym(30, 1), "symmetric")
     _fetch(tmp_path, "t-m1", cases, reg)
     record = json.loads((tmp_path / "data" / "downloads" / "M1" / "download.json").read_text())
-    assert record["mtx"] == "M1/M1.mtx" and record["bytes"] > 0
+    assert record["bytes"] > 0 and record["url"].endswith(f"{GROUP}/M1.tar.gz")
     (tmp_path / "mirror" / "MM" / GROUP / "M1.tar.gz").unlink()      # go "offline"
     _fetch(tmp_path, "t-m1", cases, reg)                             # served from the record
     with pytest.raises(ss.Skipped):
@@ -192,11 +213,13 @@ def test_ritz_interval_is_inside_the_spectrum(complex_):
 def test_registry_and_cli(tmp_path, capsys):
     assert {"TEM27623", "qa8fk", "qa8fm", "helm3d01", "Si34H36", "Ge87H76", "2cubes_sphere",
             "3Dspectralwave2", "gsm_106857", "offshore", "helm2d03", "Ga10As10H30",
-            "TEM152078", "TEM181302"} <= set(ss.REGISTRY)
+            "TEM152078", "TEM181302", "TEM27623_M"} <= set(ss.REGISTRY)
     for spec in ss.CASES.values():
         assert spec.a in ss.REGISTRY and (spec.b is None or spec.b in ss.REGISTRY)
     assert ss.main(["--list"]) == 0
-    assert "Cunningham/qa8fk+Cunningham/qa8fm" in capsys.readouterr().out
+    listing = capsys.readouterr().out
+    assert "Cunningham/qa8fk+Cunningham/qa8fm" in listing
+    assert "Guettel/TEM27623+Guettel/TEM27623_M" in listing and "    6.2 MB" in listing
     rc = ss.main(["ss-tem27623", "--root", str(tmp_path), "--base-url", (tmp_path / "empty").as_uri()])
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["case"] == "ss-tem27623" and "skipped" in out

@@ -7,7 +7,8 @@ Pipeline per matrix (archives are untrusted data):
      bytes, sha256) and reused on later runs; anything else in the directory is never trusted:
      an incomplete directory is only replaced with --refresh.
   2. extract with tarfile filter='data' (no absolute paths, links out of the tree, devices) after
-     checking the total unpacked size, and pick <Name>.mtx.
+     checking the total unpacked size, and pick <Name>.mtx or an auxiliary member such as
+     <Name>_M.mtx (the Guettel TEM archives ship the pencil (C, M): curl-curl and mass matrix).
   3. scipy.io.mmread; a 'general' file holding a single triangle is symmetrized; explicit zeros are
      dropped; the matrix must be Hermitian (complex-symmetric matrices are rejected: they are not
      valid cases); an O(eps) defect is removed by taking the Hermitian part.
@@ -62,34 +63,48 @@ class Skipped(Exception):
 
 @dataclass(frozen=True)
 class Matrix:
-    """One collection matrix. n, nnz, field and spd are the collection index values (ssstats.csv,
-    2023-10); field/Hermitian-ness are re-checked on the downloaded file."""
+    """A collection matrix: the primary matrix of archive <group>/<name>.tar.gz or, when `member`
+    is set, an auxiliary matrix shipped in the same archive (e.g. the mass matrix TEM27623_M).
+
+    n, nnz, field and spd are the collection index values (ssstats.csv, 2023-10; n/nnz None where
+    the index has no entry, as for auxiliary members); field and Hermitian-ness are re-checked on
+    the downloaded file. archive_mb is the size of the (possibly shared) archive.
+    """
     group: str
     name: str
-    n: int
-    nnz: int
+    n: int | None
+    nnz: int | None
     field: str
     spd: bool
     archive_mb: float
     notes: str
+    member: str = ""
+
+    @property
+    def key(self) -> str:
+        """Registry key and .mtx file stem inside the archive."""
+        return self.member or self.name
 
 
 @dataclass(frozen=True)
 class CaseSpec:
-    """A case built from matrix `a` (and `b` for a pencil)."""
+    """A case built from registry matrix `a` (and `b` for a pencil)."""
     a: str
     b: str | None = None
     notes: str = ""
 
 
-REGISTRY: dict[str, Matrix] = {m.name: m for m in (
-    Matrix("Guettel", "TEM27623", 27623, 439469, "real", False, 6.2,
-           "electromagnetics (S. Guettel): FE matrix of a transient-electromagnetics (TEM) model; "
-           "real symmetric, not positive definite per the index"),
-    Matrix("Guettel", "TEM152078", 152078, 6459326, "real", False, 80.3,
-           "larger TEM electromagnetics model of the same family as TEM27623"),
-    Matrix("Guettel", "TEM181302", 181302, 7839010, "real", False, 98.7,
-           "largest TEM electromagnetics model of the family"),
+_TEM_NOTES = ("Nedelec FE curl-curl matrix C (symmetric positive semidefinite: gradient null space) of "
+              "3-D transient electromagnetic modelling (Boerner, Ernst, Guettel, GJI 2015)")
+_TEM_MASS = "Nedelec FE mass matrix M (SPD per the collection notes), pencil partner of C"
+
+REGISTRY: dict[str, Matrix] = {m.key: m for m in (
+    Matrix("Guettel", "TEM27623", 27623, 439469, "real", False, 6.2, _TEM_NOTES),
+    Matrix("Guettel", "TEM27623", None, None, "real", True, 6.2, _TEM_MASS, member="TEM27623_M"),
+    Matrix("Guettel", "TEM152078", 152078, 6459326, "real", False, 80.3, _TEM_NOTES),
+    Matrix("Guettel", "TEM152078", None, None, "real", True, 80.3, _TEM_MASS, member="TEM152078_M"),
+    Matrix("Guettel", "TEM181302", 181302, 7839010, "real", False, 98.7, _TEM_NOTES),
+    Matrix("Guettel", "TEM181302", None, None, "real", True, 98.7, _TEM_MASS, member="TEM181302_M"),
     Matrix("Um", "2cubes_sphere", 101492, 1647264, "real", True, 11.8,
            "electromagnetics FE model (two cubes inside a sphere), symmetric positive definite: "
            "interior sigma makes A - sigma I indefinite"),
@@ -116,10 +131,12 @@ REGISTRY: dict[str, Matrix] = {m.name: m for m in (
            "(complex-symmetric matrices are rejected after download)"),
 )}
 
+_TEM_CASE = "electromagnetic curl-curl/mass pencil C x = lambda M x"
+
 CASES: dict[str, CaseSpec] = {
-    "ss-tem27623": CaseSpec("TEM27623"),
-    "ss-tem152078": CaseSpec("TEM152078"),
-    "ss-tem181302": CaseSpec("TEM181302"),
+    "ss-tem27623": CaseSpec("TEM27623", "TEM27623_M", _TEM_CASE),
+    "ss-tem152078": CaseSpec("TEM152078", "TEM152078_M", _TEM_CASE),
+    "ss-tem181302": CaseSpec("TEM181302", "TEM181302_M", _TEM_CASE),
     "ss-2cubes_sphere": CaseSpec("2cubes_sphere"),
     "ss-offshore": CaseSpec("offshore"),
     "ss-gsm_106857": CaseSpec("gsm_106857"),
@@ -165,8 +182,8 @@ def _download(url: str, dest: Path, *, max_bytes: int, timeout: float, max_secon
     return {"url": url, "bytes": total, "sha256": digest.hexdigest()}
 
 
-def _extract_mtx(archive: Path, dest: Path, name: str, max_unpacked: int) -> Path:
-    """Extract the archive into dest (filter='data') and return the path of <name>.mtx."""
+def _extract(archive: Path, dest: Path, max_unpacked: int) -> None:
+    """Extract the archive into dest with filter='data' after checking its unpacked size."""
     try:
         with tarfile.open(archive, "r:gz") as tf:
             unpacked = sum(m.size for m in tf.getmembers() if m.isfile())
@@ -176,16 +193,21 @@ def _extract_mtx(archive: Path, dest: Path, name: str, max_unpacked: int) -> Pat
             tf.extractall(dest, filter="data")
     except (tarfile.TarError, OSError) as exc:
         raise Skipped(f"{archive.name}: unusable archive ({exc})") from exc
-    found = sorted(p for p in dest.rglob(f"{name}.mtx") if p.is_file())
+
+
+def find_mtx(extract_dir: Path, stem: str) -> Path:
+    """The unique <stem>.mtx below an extracted archive."""
+    found = sorted(p for p in extract_dir.rglob(f"{stem}.mtx") if p.is_file())
     if len(found) != 1:
-        raise Skipped(f"{archive.name}: expected exactly one {name}.mtx, found {len(found)}")
+        raise Skipped(f"{extract_dir}: expected exactly one {stem}.mtx, found {len(found)}")
     return found[0]
 
 
 def obtain(matrix: Matrix, downloads: Path, *, base_url: str = BASE_URL, max_mb: float = 200.0,
            timeout: float = 60.0, max_seconds: float = 1800.0,
            refresh: bool = False) -> tuple[Path, dict[str, Any]]:
-    """Download and extract one matrix into downloads/<Name>/; returns (.mtx path, download record).
+    """Download and extract the archive of `matrix` into downloads/<Name>/; returns
+    (extraction directory, download record {url, bytes, sha256}).
 
     The directory must be new and empty; a completed earlier download (download.json, written
     last) is reused; refresh=True deletes the directory and starts over. A failed fresh download
@@ -197,26 +219,21 @@ def obtain(matrix: Matrix, downloads: Path, *, base_url: str = BASE_URL, max_mb:
     if folder.exists() and refresh:
         shutil.rmtree(folder)
     if folder.exists():
-        if not record_path.is_file():
+        if not record_path.is_file() or not extract_dir.is_dir():
             raise Skipped(f"{folder} exists without a completed download; rerun with --refresh")
-        record = json.loads(record_path.read_text())
-        mtx = extract_dir / record["mtx"]
-        if not mtx.is_file():
-            raise Skipped(f"{mtx} is missing; rerun with --refresh")
-        return mtx, record
+        return extract_dir, json.loads(record_path.read_text())
     folder.mkdir(parents=True)
     try:
         url = f"{base_url}/{matrix.group}/{matrix.name}.tar.gz"
         archive = folder / f"{matrix.name}.tar.gz"
         max_bytes = int(max_mb * 1e6)
         record = _download(url, archive, max_bytes=max_bytes, timeout=timeout, max_seconds=max_seconds)
-        mtx = _extract_mtx(archive, extract_dir, matrix.name, UNPACK_FACTOR * max_bytes)
+        _extract(archive, extract_dir, UNPACK_FACTOR * max_bytes)
     except Skipped:
         shutil.rmtree(folder)
         raise
-    record["mtx"] = str(mtx.relative_to(extract_dir))
     record_path.write_text(json.dumps(record, indent=2) + "\n")
-    return mtx, record
+    return extract_dir, record
 
 
 # ============================================================================== conversion
@@ -367,21 +384,26 @@ def choose_targets(a: sp.spmatrix, b: sp.spmatrix | None, problem: str,
 def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[str, CaseSpec] = CASES,
                registry: dict[str, Matrix] = REGISTRY, base_url: str = BASE_URL, max_mb: float = 200.0,
                timeout: float = 60.0, max_seconds: float = 1800.0, refresh: bool = False) -> Path:
-    """Download, convert, inspect and save one case; returns the case directory. Raises Skipped."""
+    """Download, convert, inspect and save one case; returns the case directory. Raises Skipped.
+
+    Each archive is obtained once per call (a pencil may take both matrices from one archive, and
+    refresh must not discard the archive the first matrix came from).
+    """
     spec = cases[name]
     downloads = Path(root) / "downloads"
+    archives: dict[str, tuple[Path, dict[str, Any]]] = {}
     mats, sources = [], []
-    for key in (spec.a, spec.b):
-        if key is None:
-            continue
+    for key in filter(None, (spec.a, spec.b)):
         matrix = registry[key]
-        mtx, record = obtain(matrix, downloads, base_url=base_url, max_mb=max_mb, timeout=timeout,
-                             max_seconds=max_seconds, refresh=refresh)
-        m, info = read_hermitian(mtx)
+        if matrix.name not in archives:
+            archives[matrix.name] = obtain(matrix, downloads, base_url=base_url, max_mb=max_mb,
+                                           timeout=timeout, max_seconds=max_seconds, refresh=refresh)
+        extract_dir, record = archives[matrix.name]
+        m, info = read_hermitian(find_mtx(extract_dir, matrix.key))
         mats.append(m)
-        sources.append({"group": matrix.group, "name": matrix.name, "url": record["url"],
-                        "archive_bytes": record["bytes"], "archive_sha256": record["sha256"],
-                        "collection_notes": matrix.notes, **info})
+        sources.append({"group": matrix.group, "name": matrix.name, "file": f"{matrix.key}.mtx",
+                        "url": record["url"], "archive_bytes": record["bytes"],
+                        "archive_sha256": record["sha256"], "collection_notes": matrix.notes, **info})
     a = mats[0]
     b = mats[1] if len(mats) > 1 else None
     inertia: dict[str, list[int]] = {}
@@ -403,7 +425,7 @@ def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[s
             "params": {"source": "SuiteSparse Matrix Collection", "matrices": sources,
                        "target_selection": selection},
             "targets": targets, "scenarios": scenarios, "license": LICENSE,
-            "citation": f"{CITATION}; matrices: " + ", ".join(f"{s['group']}/{s['name']}" for s in sources)}
+            "citation": f"{CITATION}; matrices: " + ", ".join(sorted({f"{s['group']}/{s['name']}" for s in sources}))}
     if inertia:
         meta["inertia"] = inertia
     return case.save_case(name, a, b, meta=meta, config=case.default_config(targets[0]["sigma"], targets[0]["k"]),
@@ -424,9 +446,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.list or not args.cases:
         for cname, spec in CASES.items():
-            keys = [k for k in (spec.a, spec.b) if k]
-            mb = sum(REGISTRY[k].archive_mb for k in keys)
-            print(f"{cname:22s} {'+'.join(REGISTRY[k].group + '/' + k for k in keys):40s} {mb:7.1f} MB")
+            mats = [REGISTRY[k] for k in filter(None, (spec.a, spec.b))]
+            mb = sum({m.name: m.archive_mb for m in mats}.values())   # shared archives count once
+            print(f"{cname:22s} {'+'.join(f'{m.group}/{m.key}' for m in mats):40s} {mb:7.1f} MB")
         return 0
     unknown = [c for c in args.cases if c not in CASES]
     if unknown:
