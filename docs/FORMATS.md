@@ -34,6 +34,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 {
   "target": {"mode": "nearest", "sigma": -2.5e5, "k": 10},
   "tol": 1e-10,
+  "inner_tol_factor": 0.1,
   "problem": "auto",
   "method": "auto",
   "ncv": 0,

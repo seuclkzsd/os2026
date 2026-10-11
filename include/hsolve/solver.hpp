@@ -156,6 +156,13 @@ struct Solution {
   SolveReport report;
 };
 
+/// Parse a config.json document (docs/FORMATS.md §2): keys are SolverConfig / Target field names,
+/// enums are snake_case strings. Keys absent from the document keep the values of `base`;
+/// unknown keys, wrong types and invalid enum strings throw InvalidInput.
+SolverConfig parse_config(const std::string& json_text, const SolverConfig& base = {});
+/// Serialize every field of cfg (round-trips through parse_config).
+std::string config_to_json(const SolverConfig& cfg, int indent = 2);
+
 /// Solve A x = lambda B x (B == nullptr -> B = I) according to cfg. A and B must be square,
 /// full storage, same order, Hermitian within cfg.hermitian_tol (symmetrized internally).
 /// Throws hs::Error on unrecoverable failure (NotHermitian, OutOfMemoryBudget, ...); a run that
