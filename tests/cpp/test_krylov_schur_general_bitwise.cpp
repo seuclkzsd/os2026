@@ -19,13 +19,16 @@
 // and src directories and link it with this tree's libhsolve_test_support.a - the fixtures are
 // unchanged - and gtest_main) and run it with HS_KSG_GOLDEN_PRINT=1 under guard.py --threads 1 and
 // --threads 2; it prints the tables below. Recorded on the project server (Xeon Gold 6336Y, conda
-// env os2026 OpenBLAS, -march=native release build).
+// env os2026 OpenBLAS, -march=native release build). The Silver 4314 entries (cluster nodes) were
+// recorded from the merged P4 main, whose output there equals the pre-merge ghiep branch bit for
+// bit; they differ from the Gold entries only in configuration 10 (OpenBLAS product bits).
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -151,6 +154,31 @@ std::uint64_t platform_fingerprint() {
   return f.get();
 }
 
+/// CPU model name from /proc/cpuinfo ("" where unavailable).
+std::string cpu_model() {
+  std::ifstream in("/proc/cpuinfo");
+  std::string line;
+  while (std::getline(in, line))
+    if (line.rfind("model name", 0) == 0) {
+      const auto colon = line.find(':');
+      return colon == std::string::npos ? std::string() : line.substr(colon + 2);
+    }
+  return {};
+}
+
+/// Key of the reference tables: the kernel fingerprint and the CPU model name. The fingerprint
+/// alone does not separate every platform: on a Xeon Silver 4314 (cluster nodes) it equals the
+/// Gold 6336Y's, yet OpenBLAS's products in the row-blocked basis compression of configuration 10
+/// (n = 5000) differ in the last bits there.
+template <class T>
+std::uint64_t platform_key() {
+  Fnv f;
+  f.value(platform_fingerprint<T>());
+  const std::string model = cpu_model();
+  f.bytes(model.data(), model.size());
+  return f.get();
+}
+
 /// One configuration's pinned outcome.
 struct Pinned {
   index_t op_applies, restarts, nconv, history, m;
@@ -174,16 +202,26 @@ struct Reference<double> {
             {20, 0, 5, 1, 5},     {811, 159, 6, 160, 6}};
   }
   static HashTable hashes() {
-    return {{0x543819d6bf4fef43ull,  // 1 OpenMP thread
+    return {{0x0f5e00d0742da95aull,  // Gold 6336Y, 1 OpenMP thread
              {0x7a5a1f9682fc24edull, 0x8d607ba91bf7376cull, 0x55d17b44b4975a44ull,
               0x9bf17c8fe34ffdccull, 0xb2122ae4cb21a904ull, 0x20b251044c17515dull,
               0x929968989cfdac79ull, 0x8a34eaab4b933772ull, 0xe1cf25a2e4731927ull,
               0x2b07ac339c8c813eull}},
-            {0xe5ec73e3bc29e284ull,  // 2 OpenMP threads
+            {0xd6d71beb0098222aull,  // Silver 4314, 1 OpenMP thread
+             {0x7a5a1f9682fc24edull, 0x8d607ba91bf7376cull, 0x55d17b44b4975a44ull,
+              0x9bf17c8fe34ffdccull, 0xb2122ae4cb21a904ull, 0x20b251044c17515dull,
+              0x929968989cfdac79ull, 0x8a34eaab4b933772ull, 0xe1cf25a2e4731927ull,
+              0x5ea1df0473fef69full}},
+            {0x69757057ab63eb0bull,  // Gold 6336Y, 2 OpenMP threads
              {0x7a5a1f9682fc24edull, 0x8d607ba91bf7376cull, 0x55d17b44b4975a44ull,
               0x9bf17c8fe34ffdccull, 0xaeab3818622ebd7bull, 0x20b251044c17515dull,
               0x929968989cfdac79ull, 0x8a34eaab4b933772ull, 0xe1cf25a2e4731927ull,
-              0x2b07ac339c8c813eull}}};
+              0x2b07ac339c8c813eull}},
+            {0x4448d7dab7709f2dull,  // Silver 4314, 2 OpenMP threads
+             {0x7a5a1f9682fc24edull, 0x8d607ba91bf7376cull, 0x55d17b44b4975a44ull,
+              0x9bf17c8fe34ffdccull, 0xaeab3818622ebd7bull, 0x20b251044c17515dull,
+              0x929968989cfdac79ull, 0x8a34eaab4b933772ull, 0xe1cf25a2e4731927ull,
+              0x5ea1df0473fef69full}}};
   }
 };
 template <>
@@ -194,16 +232,26 @@ struct Reference<cplx> {
             {20, 0, 4, 1, 4},     {816, 160, 6, 161, 6}};
   }
   static HashTable hashes() {
-    return {{0xb91abbb6b5fc5ebaull,  // 1 OpenMP thread
+    return {{0x33fac1891f08003eull,  // Gold 6336Y, 1 OpenMP thread
              {0xc0d1c122c9a49a16ull, 0xc16937381e759a2cull, 0xf5efd51a09ec5c12ull,
               0xdebec9bec91778c6ull, 0x16e2ed4ca2e24c89ull, 0xb2f0a515d37b0255ull,
               0x9bbc07824f1e81dfull, 0x22cbb3d2d8e64e74ull, 0xb14b46c602d50f50ull,
               0x06640797c48173e6ull}},
-            {0x95c8c2e3edca9b56ull,  // 2 OpenMP threads
+            {0xbaca0d5bfe40729eull,  // Silver 4314, 1 OpenMP thread
+             {0xc0d1c122c9a49a16ull, 0xc16937381e759a2cull, 0xf5efd51a09ec5c12ull,
+              0xdebec9bec91778c6ull, 0x16e2ed4ca2e24c89ull, 0xb2f0a515d37b0255ull,
+              0x9bbc07824f1e81dfull, 0x22cbb3d2d8e64e74ull, 0xb14b46c602d50f50ull,
+              0x83e81889c111a01eull}},
+            {0x9fe534884bf12975ull,  // Gold 6336Y, 2 OpenMP threads
              {0xc0d1c122c9a49a16ull, 0xc16937381e759a2cull, 0xf5efd51a09ec5c12ull,
               0xdebec9bec91778c6ull, 0x07afd6c4e70abf26ull, 0xb2f0a515d37b0255ull,
               0x9bbc07824f1e81dfull, 0x22cbb3d2d8e64e74ull, 0xb14b46c602d50f50ull,
-              0x06640797c48173e6ull}}};
+              0x06640797c48173e6ull}},
+            {0xb654ce601069c3a3ull,  // Silver 4314, 2 OpenMP threads
+             {0xc0d1c122c9a49a16ull, 0xc16937381e759a2cull, 0xf5efd51a09ec5c12ull,
+              0xdebec9bec91778c6ull, 0x07afd6c4e70abf26ull, 0xb2f0a515d37b0255ull,
+              0x9bbc07824f1e81dfull, 0x22cbb3d2d8e64e74ull, 0xb14b46c602d50f50ull,
+              0x83e81889c111a01eull}}};
   }
 };
 
@@ -301,7 +349,7 @@ TYPED_TEST_SUITE(KrylovSchurGeneralBitwise, Scalars);
 TYPED_TEST(KrylovSchurGeneralBitwise, BlockSizeOneReproducesTheBaseCommitSolver) {
   using T = TypeParam;
   const auto results = run_configurations<T>();
-  const std::uint64_t fingerprint = platform_fingerprint<T>();
+  const std::uint64_t fingerprint = platform_key<T>();
   if (std::getenv("HS_KSG_GOLDEN_PRINT")) {
     std::printf("[golden] %s counts:", hs::is_complex_v<T> ? "cplx" : "double");
     for (const auto& r : results)
@@ -331,8 +379,8 @@ TYPED_TEST(KrylovSchurGeneralBitwise, BlockSizeOneReproducesTheBaseCommitSolver)
       EXPECT_EQ(result_hash(results[i]), hashes[i]) << "configuration " << i + 1;
     return;
   }
-  std::cout << "[ info     ] platform fingerprint 0x" << std::hex << fingerprint << std::dec
-            << " has no recorded reference: bitwise check skipped (counts checked)\n";
+  std::cout << "[ info     ] platform key 0x" << std::hex << fingerprint << std::dec
+            << " (" << cpu_model() << ") has no recorded reference: bitwise check skipped (counts checked)\n";
 }
 
 }  // namespace
