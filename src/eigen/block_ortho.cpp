@@ -20,9 +20,11 @@ using lapack::fint;
 // A random replacement losing more than kRandomMinRatio of its M-norm (block_lanczos.hpp, shared
 // with the single-vector solver) means that M is not positive definite.
 
-/// Largest accepted ||Q1^H M Q1 - I||_F before the second Cholesky-QR pass. The column-scaled
-/// condition test bounds it by ~eps * kMaxCholQrCond^2 for any Hermitian M, so failing it means
-/// non-finite or inconsistent arithmetic.
+/// Largest accepted ||G2 - I||_F in the second Cholesky-QR pass (G2 = W2^H M W2, W2 = Q1 with V
+/// projected out). The column-scaled condition test bounds ||Q1^H M Q1 - I|| by ~eps *
+/// kMaxCholQrCond^2, so a larger deviation means that the second projection removed a large part
+/// of a column (it was dependent on a V that is M-orthonormal only to more than rounding), or
+/// non-finite values, or an M that is not positive definite: the column-wise path then decides.
 constexpr double kMaxSecondPassDeviation = 0.5;
 
 /// a <- (a + a^H) / 2 for a square matrix (real diagonal for complex T).
@@ -61,6 +63,16 @@ double scaled_condition(const DenseMatrix<T>& r, const DenseMatrix<T>& g) {
   for (index_t j = 0; j < p; ++j)
     for (index_t i = 0; i <= j; ++i) fro_inv += abs2(inv(i, j));
   return std::sqrt(fro) * std::sqrt(fro_inv);
+}
+
+/// X <- X U in place for X (n x p, ld n) and an upper triangular U (p x p): column j becomes
+/// sum_{i <= j} U(i, j) X(:, i), so the columns are rewritten last to first.
+template <class T>
+void multiply_upper_right(T* x, index_t n, const DenseMatrix<T>& u) {
+  for (index_t j = u.cols() - 1; j >= 0; --j) {
+    linalg::scal(n, u(j, j), x + j * n);
+    for (index_t i = 0; i < j; ++i) linalg::axpy(n, u(i, j), x + i * n, x + j * n);
+  }
 }
 
 }  // namespace
@@ -193,20 +205,31 @@ void BlockOrthonormalizer<T>::run(T* basis, T* mbasis, index_t k, double ratio, 
   double dev2 = 0.0;
   for (index_t j = 0; j < p; ++j)
     for (index_t i = 0; i < p; ++i) dev2 += abs2(g2(i, j) - T(i == j ? 1.0 : 0.0));
-  if (!(std::sqrt(dev2) <= kMaxSecondPassDeviation) || lapack::potrf('U', pp, g2.data(), pp) != 0)
-    HS_THROW(InvalidInput,
-             "lanczos_krylov_schur: block orthonormalization failed (||Q^H M Q - I||_F = "
-                 << std::sqrt(dev2)
-                 << " after the first Cholesky-QR pass): non-finite values, or "
-                    "b_inner is not Hermitian positive definite");
-  for (index_t j = 0; j < p; ++j)
-    for (index_t i = j + 1; i < p; ++i) g2(i, j) = T(0);
+  bool second = std::sqrt(dev2) <= kMaxSecondPassDeviation &&
+                lapack::potrf('U', pp, g2.data(), pp) == 0;
+  if (second) {
+    for (index_t j = 0; j < p; ++j)
+      for (index_t i = j + 1; i < p; ++i) g2(i, j) = T(0);
+    // R = R2 R1 (upper triangular: the strictly lower products are exact zeros).
+    lapack::gemm('N', 'N', pp, pp, pp, T(1), g2.data(), pp, r1.data(), pp, T(0), r.data(), pp);
+    // Deficiency after both passes, as the single-vector solver tests beta after CGS2: R(i, i) is
+    // the M-norm of the part of column i orthogonal to V and the block's earlier columns.
+    for (index_t i = 0; i < p; ++i)
+      if (!(std::abs(r(i, i)) > ratio * before_[i])) second = false;
+  }
+  if (k > 0)  // C = C1 + C2 R1 (both outcomes: W = V C + W2 R1 holds exactly in exact arithmetic)
+    lapack::gemm('N', 'N', kk, pp, pp, T(1), cg.data(), kp, r1.data(), pp, T(1), coef.data(), kk);
+  if (!second) {
+    // A column dependent on V to working precision whose first-pass remainder stayed above the
+    // threshold (V M-orthonormal only to more than ~ratio, e.g. a deflation block accepted at
+    // 1e-8): the second pass removes it and G2 is singular or R(i, i) tiny. Rebuild the block as
+    // W2 R1 = W - V C and let the column-wise CGS2 path decide which columns are dependent.
+    multiply_upper_right(w, n, r1);
+    column_fallback(basis, mbasis, k, ratio, seed, next_stream, coef, r);
+    return;
+  }
   lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), g2.data(), pp, w, nn);
   if (store_m_) lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), g2.data(), pp, slot, nn);
-  // R = R2 R1 (upper triangular: the strictly lower products are exact zeros), C = C1 + C2 R1.
-  lapack::gemm('N', 'N', pp, pp, pp, T(1), g2.data(), pp, r1.data(), pp, T(0), r.data(), pp);
-  if (k > 0)
-    lapack::gemm('N', 'N', kk, pp, pp, T(1), cg.data(), kp, r1.data(), pp, T(1), coef.data(), kk);
 }
 
 template <class T>

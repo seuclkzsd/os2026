@@ -1149,6 +1149,53 @@ TYPED_TEST(LanczosBlockTyped, InvariantSubspaceBreakdownOfWholeBlocks) {
   }
 }
 
+TYPED_TEST(LanczosBlockTyped, BreakdownAgainstADeflationBlockOrthonormalOnlyToDelta) {
+  // Review finding (P3 blockks): D orthonormal only to delta >> eps (the deflation check accepts
+  // up to 1e-8; driver reruns pass Ritz vectors that are M-orthonormal to rounding times
+  // cond(B)). Three distinct eigenvalues: the deflated block Krylov space becomes invariant after
+  // a few blocks, the next block lies in span([D V]) up to delta, its first-pass remainder (~delta)
+  // passed the breakdown test and the second Cholesky-QR pass threw InvalidInput. Every block size
+  // must converge like p = 1. The deflated operator keeps >= 37 copies of 1 and of 3 (D has 3
+  // columns), so the 5 wanted values are copies of the extreme eigenvalue.
+  using T = TypeParam;
+  const index_t n = 100;
+  std::vector<double> spectrum;
+  for (index_t i = 0; i < n; ++i) spectrum.push_back(i < 30 ? 1.0 : (i < 60 ? 2.0 : 3.0));
+  auto op = operator_with_spectrum<T>(spectrum, 51);
+  for (double delta : {1e-12, 1e-10}) {
+    DenseMatrix<T> d(n, 3);
+    for (index_t j = 0; j < 3; ++j) {
+      hs::linalg::fill_random(d.col(j), n, 4242, static_cast<std::uint64_t>(j));
+      std::vector<T> h(static_cast<std::size_t>(j) + 1);
+      const double nrm =
+          hs::linalg::orthogonalize_cgs2<T>(n, j, d.data(), n, nullptr, n, d.col(j), nullptr,
+                                            h.data());
+      hs::linalg::scal(n, T(1.0 / nrm), d.col(j));
+    }
+    std::vector<T> noise(static_cast<std::size_t>(n));
+    for (index_t j = 0; j < 3; ++j) {
+      hs::linalg::fill_random(noise.data(), n, 77, static_cast<std::uint64_t>(j));
+      hs::linalg::axpy(n, T(delta), noise.data(), d.col(j));
+    }
+    for (index_t p : {1, 2, 4}) {
+      for (Which which : {Which::LargestAlgebraic, Which::SmallestAlgebraic}) {
+        SCOPED_TRACE("delta " + std::to_string(delta) + ", p = " + std::to_string(p) +
+                     ", which " + std::to_string(static_cast<int>(which)));
+        KrylovSchurOptions<T> opt;
+        opt.nev = 5;
+        opt.block_size = p;
+        opt.deflation = &d;
+        const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, which, opt);
+        EXPECT_TRUE(r.converged);
+        const double value = which == Which::LargestAlgebraic ? 3.0 : 1.0;
+        expect_values(r.theta, std::vector<double>(5, value), 1e-8);
+        EXPECT_LT(gram_deviation<T>(r.vectors, nullptr, r.vectors, true), 1e-12);
+        EXPECT_LT(gram_deviation<T>(d, nullptr, r.vectors, false), 1e-9);
+      }
+    }
+  }
+}
+
 TYPED_TEST(LanczosBlockTyped, DeflationInBInnerProduct) {
   using T = TypeParam;
   const index_t n = 160;

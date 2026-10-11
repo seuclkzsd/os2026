@@ -32,7 +32,12 @@ namespace hs::eigen_detail {
 /// (nearly) rank deficient, i.e. some column of W1 keeps an M-norm <= ratio * (M-norm of the input
 /// column) (dependent on V to working precision: the block analogue of a Lanczos breakdown), G1 is
 /// not numerically positive definite, or the column-scaled condition number of R1 exceeds
-/// kMaxCholQrCond (Cholesky-QR could no longer restore orthogonality in the second pass). Each
+/// kMaxCholQrCond (Cholesky-QR could no longer restore orthogonality in the second pass); and
+/// after the second pass when G2 is far from I or not positive definite, or some |R(i, i)| <=
+/// ratio * (M-norm of input column i). The test after both passes is the one of the single-vector
+/// solver (beta after CGS2): a column dependent on a V that is M-orthonormal only to delta >>
+/// ratio (e.g. a deflation block accepted at 1e-8) keeps a first-pass remainder of size ~delta
+/// that the second pass removes; the block W2 R1 = W - V C is then handed to this path. Each
 /// column of W1 is orthogonalized by CGS2 against V and the block's earlier columns; a column left
 /// with an M-norm <= ratio * (its input M-norm) gets R(i, i) = 0 and is replaced by a deterministic
 /// random vector (linalg::fill_random(seed, stream), stream = next_stream++) orthogonalized the
@@ -65,8 +70,7 @@ class BlockOrthonormalizer {
   /// basis with the same layout in store mode, nullptr otherwise. ratio: deficiency threshold
   /// (see above), in (0, 1). On exit coef (k x p) = C accumulated over all passes and r (p x p) =
   /// R. Throws InvalidInput when a column or its M-image is not finite, and when a random
-  /// replacement loses its M-norm against the basis or the second Cholesky-QR pass fails (M not
-  /// Hermitian positive definite).
+  /// replacement loses its M-norm against the basis (M not Hermitian positive definite).
   void run(T* basis, T* mbasis, index_t k, double ratio, std::uint64_t seed,
            std::uint64_t& next_stream, DenseMatrix<T>& coef, DenseMatrix<T>& r);
 

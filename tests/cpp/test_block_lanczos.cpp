@@ -247,6 +247,72 @@ TYPED_TEST(LanczosBlockOrthoTyped, DependentColumnsAreReplacedByRandomVectors) {
   }
 }
 
+TYPED_TEST(LanczosBlockOrthoTyped, BlockInsideANearlyOrthonormalBasisIsReplaced) {
+  // Review finding (P3 blockks): V M-orthonormal only to `loss` >> eps (as a deflation block
+  // accepted by the 1e-8 check), W = V X entirely inside span(V). The first pass leaves a
+  // remainder of size ~loss made of V components, far above the rounding threshold, so the
+  // Cholesky-QR path normalizes it and the second pass removes it again. Every column must come
+  // out dependent and replaced by a random direction (the first-pass-only test used to throw
+  // InvalidInput "b_inner is not Hermitian positive definite" here).
+  using T = TypeParam;
+  const index_t n = 200, k = 40, p = 4;
+  DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.05, 9)));
+  for (Mode mode : kModes) {
+    for (double loss : {3e-14, 1e-12, 1e-10}) {
+      SCOPED_TRACE("mode " + std::to_string(static_cast<int>(mode)) + ", loss " +
+                   std::to_string(loss));
+      LinearOperator<T>* mm = mode == Mode::Euclidean ? nullptr : &m;
+      DenseMatrix<T> basis = basis_with_block<T>(mm, n, k, DenseMatrix<T>(n, p));
+      const DenseMatrix<T> noise = random_block<T>(n, k, 62);
+      for (index_t j = 0; j < k; ++j)
+        hs::linalg::axpy(n, T(loss / std::sqrt(static_cast<double>(n))), noise.col(j),
+                         basis.col(j));
+      DenseMatrix<T> v(n, k);
+      std::copy(basis.data(), basis.data() + n * k, v.data());
+      const DenseMatrix<T> w = mat_mul(v, random_block<T>(k, p, 63));
+      std::copy(w.data(), w.data() + n * p, basis.col(k));
+      DenseMatrix<T> mbasis;
+      if (mode == Mode::Stored) mbasis = times_m(mm, basis);
+      BlockOrthonormalizer<T> ortho(n, p, mm, mode == Mode::Stored);
+      std::uint64_t stream = 100;
+      DenseMatrix<T> coef, r;
+      ortho.run(basis.data(), mode == Mode::Stored ? mbasis.data() : nullptr, k, 64 * kEps, 7,
+                stream, coef, r);
+      EXPECT_TRUE(ortho.used_fallback());
+      for (char c : ortho.deficient()) EXPECT_EQ(c, 1);
+      EXPECT_EQ(stream, 100u + static_cast<std::uint64_t>(p));
+      DenseMatrix<T> q(n, p);
+      std::copy(basis.col(k), basis.col(k) + n * p, q.data());
+      EXPECT_LT(orthonormality_error(mm, q), 1e-14);
+      // Q is orthogonal to V to second order in the loss.
+      const DenseMatrix<T> mq = times_m(mm, q);
+      double cross = 0.0;
+      for (index_t j = 0; j < p; ++j)
+        for (index_t i = 0; i < k; ++i)
+          cross = std::max(cross, std::abs(hs::linalg::dot(n, v.col(i), mq.col(j))));
+      EXPECT_LT(cross, 1e-13);
+      // W = V C + Q R with R(i, i) = 0 (only rounding-level couplings).
+      const DenseMatrix<T> vc = mat_mul(v, coef), qr = mat_mul(q, r);
+      double res = 0.0, wmax = 0.0;
+      for (index_t j = 0; j < p; ++j) {
+        EXPECT_EQ(r(j, j), T(0));
+        for (index_t i = 0; i < n; ++i) {
+          wmax = std::max(wmax, std::abs(w(i, j)));
+          res = std::max(res, std::abs(w(i, j) - vc(i, j) - qr(i, j)));
+        }
+      }
+      EXPECT_LT(res / wmax, 1e-13);
+      if (mode == Mode::Stored) {
+        double dmax = 0.0;
+        for (index_t j = 0; j < p; ++j)
+          for (index_t i = 0; i < n; ++i)
+            dmax = std::max(dmax, std::abs(mbasis(i, k + j) - mq(i, j)));
+        EXPECT_LT(dmax, 1e-13);
+      }
+    }
+  }
+}
+
 TYPED_TEST(LanczosBlockOrthoTyped, NonFiniteOrIndefiniteInputThrowsInvalidInput) {
   using T = TypeParam;
   const index_t n = 60, k = 0, p = 3;  // start-block situation: no basis yet

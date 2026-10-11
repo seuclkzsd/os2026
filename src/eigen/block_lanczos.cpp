@@ -25,11 +25,11 @@
 // Block steps. W = Op V_j (one op.apply of p columns) is orthonormalized against [D V] and within
 // itself by BlockOrthonormalizer (block CGS2 + Cholesky-QR, BLAS3): W = [D V] C + V_{j+1} R_j.
 // A column that is dependent on [D V] and the block's earlier columns to working precision,
-// ||new part||_M <= kBreakdownTol * ||Op v||_M (the local test of the single-vector solver applied
-// per column), gets R_j(i, i) = 0 and a deterministic random replacement; the dropped part is a
-// rounding-level coupling as for a single-vector breakdown. A block keeps its width p throughout,
-// which needs d + ncv + p <= n (else the dispatcher solves the free space exactly with one
-// single-vector cycle).
+// ||new part||_M <= kBreakdownTol * ||Op v||_M after both passes (the local test of the
+// single-vector solver applied per column), gets R_j(i, i) = 0 and a deterministic random
+// replacement; the dropped part is a rounding-level coupling as for a single-vector breakdown.
+// A block keeps its width p throughout, which needs d + ncv + p <= n (else the dispatcher solves
+// the free space exactly with one single-vector cycle).
 //
 // Early stop. Every block boundary m also satisfies the relation, with the next block as residual
 // block. A Rayleigh-Ritz probe at the boundaries ends a cycle as soon as all nev wanted pairs have
