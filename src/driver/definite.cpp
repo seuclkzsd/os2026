@@ -11,9 +11,21 @@
 //     de-duplication at the cuts. Slice shifts: the centre (LargestMagnitude) for interior slices;
 //     one-sided at a slice end (SmallestAlgebraic: the eigenvalues below the shift, or
 //     LargestAlgebraic: above) when nothing lies beyond the other end (spectrum end) or the other
-//     end borders the excluded zero band. One-sided runs at a count point reuse its factorization.
+//     end borders the excluded zero band. One-sided runs at a count point reuse its factorization;
+//     a count point on an eigenvalue (a user bound, say) is no shift: such a slice takes the centre,
+//     an open one a shift mid-way in the certified gap beside that point.
 //     Smallest / largest locate the window end U (L) by inertia search: counts are exact for B HPD.
 //     The zero band (zero_filter_tol) is cut out of every window between two counted points.
+//   * Clusters that counts cannot split (a multiple eigenvalue straddling the wanted count): the
+//     search stops after a few bisections and returns a point mid-way in the certified gap beside
+//     the cluster, on the side that keeps it in the window (largest k: below it). A smallest /
+//     largest window whose k-th eigenvalue lies in a large cluster of numerically equal
+//     eigenvalues (a null space) asks only for the copies still needed, verified by two counts.
+//   * Every computed block passes a rank-revealing Rayleigh-Ritz, so counts of found pairs are
+//     counts of distinct B-orthonormal vectors. A slice missing pairs reruns deflated while the
+//     reruns find new ones, with its own shift on a multiple eigenvalue among the found pairs
+//     (single-vector Krylov sees further copies only where the multiplet dominates); a slice still
+//     short after de-duplication is repaired with its pairs as deflation.
 // A nearest target whose selection or certificate window reaches the zero band is handed to the
 // windows as [sigma - r, sigma + r] minus the band, r grown from the plain run's Ritz hints until
 // the counts hold k eigenvalues outside the band (a single shift there converges null-space copies).
@@ -391,20 +403,62 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
 // ======================================================================== windows and slices
 
 /// A point with its exact Sylvester count nu(s) = #{eigenvalues < s}; s = -inf (nu = 0) and
-/// s = +inf (nu = n) stand for open window ends.
+/// s = +inf (nu = n) stand for open window ends. A point inside a certified gap (between two
+/// counted points with equal counts) carries that count without a factorization of its own.
 struct CountPoint {
   double s = 0.0;
   index_t nu = 0;
   bool detection_off = false;  ///< counted without null-pivot detection (dense cluster)
+  bool near = false;           ///< K(s) was singular before s moved off an eigenvalue (or s hugs an
+                               ///< unsplittable cluster): a valid count, but no place for a shift
 };
 
-/// Part of a target window with exact counts at both ends.
+/// Part of a target window with exact counts at both ends. want >= 0: the slice is a cluster of
+/// numerically equal eigenvalues (smallest / largest k ending inside it) of which any `want`
+/// are a valid answer; focus is a point of the cluster's tight bracket.
 struct Slice {
   CountPoint lo, hi;
+  index_t want = -1;
+  double focus = std::numeric_limits<double>::quiet_NaN();
   index_t count() const { return hi.nu - lo.nu; }
+  index_t required() const { return want >= 0 ? want : count(); }
 };
 
+/// Result of an inertia search. cluster: eigenvalues too close to be split by counts straddle the
+/// requested count range; (cl_lo, cl_hi) is their tight bracket (cl_lo.nu < g_lo, cl_hi.nu > g_hi,
+/// every eigenvalue counted between them lies in (cl_lo.s, cl_hi.s)) and p lies in the gap beside
+/// the cluster on the requested side.
+struct Search {
+  CountPoint p;
+  bool cluster = false;
+  CountPoint cl_lo, cl_hi;
+  static Search at(const CountPoint& q) {
+    Search r;
+    r.p = q;
+    return r;
+  }
+};
+
+/// Side of an unsplittable cluster an inertia search returns: Above (the window must contain the
+/// cluster: smallest k, slice cuts) or Below (largest k).
+enum class Side { Above, Below };
+
 enum class Anchor { Centre, Lower, Upper };
+
+/// Bracket of a cluster that counts cannot split: narrower than this fraction of the bracket in
+/// which the same two counts were first seen (the eigenvalues between them are then >= 32x
+/// denser than that bracket suggested; five bisections), or than width_min().
+constexpr double kClusterShrink = 1.0 / 32.0;
+/// Smallest / largest: a cluster at the k-th position with more than max(this, k) copies beyond
+/// the k needed is solved partially (any `want` copies of numerically equal eigenvalues).
+constexpr index_t kPartialClusterMin = 16;
+/// Numerically equal: all eigenvalues of a partial cluster within this relative width.
+constexpr double kEqualWidth = 1e-8;
+/// Deflated reruns of a slice: at most this many beyond the initial deficit, and stop after
+/// kStallRounds rounds without a new pair.
+constexpr int kExtraRerunRounds = 4;
+constexpr int kMaxRerunRounds = 32;
+constexpr int kStallRounds = 2;
 
 /// Pairs accepted from all slices, eigenvalue order maintained per slice.
 template <class T>
@@ -415,6 +469,9 @@ struct Pool {
   std::vector<PairMetrics> metrics;
   std::vector<index_t> slice;  ///< producing slice of each pair
 };
+
+/// A target window: [lo, hi] with exact counts; want >= 0 marks a partial cluster (see Slice).
+using Window = Slice;
 
 template <class T>
 class WindowSolver {
@@ -431,22 +488,36 @@ class WindowSolver {
   void set_nearest_radius(double r0) { nearest_r0_ = r0; }
 
  private:
+  /// Shift of a slice's runs (kept for its repair).
+  struct SliceShift {
+    double sigma = std::numeric_limits<double>::quiet_NaN();
+    Which which = Which::LargestMagnitude;
+    bool detection_off = false;
+  };
+
   // ---- counts and cuts
   CountPoint count(double s, double outward);
-  CountPoint minus_inf() const { return {-kInf, 0, false}; }
-  CountPoint plus_inf() const { return {kInf, n_, false}; }
+  void remember(const CountPoint& p);
+  CountPoint minus_inf() const { return {-kInf, 0, false, false}; }
+  CountPoint plus_inf() const { return {kInf, n_, false, false}; }
   double width_min(double x, double y) const {
     return 1e-8 * std::max({scale_, std::abs(x), std::abs(y)});
   }
   double expansion_step() const;
-  CountPoint find_count(const CountPoint& a, const CountPoint& b, index_t g_lo, index_t g, index_t g_hi,
-                        double start, double guess = std::numeric_limits<double>::quiet_NaN());
-  std::vector<Slice> plan(const CountPoint& a, const CountPoint& b);
+  Search find_count(const CountPoint& a, const CountPoint& b, index_t g_lo, index_t g, index_t g_hi, double start,
+                    Side side, double guess = std::numeric_limits<double>::quiet_NaN());
+  CountPoint gap_point(const CountPoint& p, double dir, const CountPoint& limit);
+  std::vector<Slice> plan(const Window& w);
   Anchor anchor_of(const Slice& s) const;
   // ---- runs
-  void run_slice(const Slice& s, index_t id);
+  bool run_slice(const Slice& s, index_t id, const Block<T>* seed = nullptr);
+  double multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const;
+  bool cluster_verified(const Slice& s, const std::vector<double>& lambda, double& mean, double& delta);
   void reserve_pool(index_t pairs);
   void append_to_pool(const Block<T>& blk, const std::vector<PairMetrics>& m, index_t id);
+  void compact_pool(const std::vector<char>& drop);
+  Block<T> take_from_pool(const std::vector<index_t>& cols);
+  index_t repair();
   index_t deduplicate();
   bool in_band(double l) const { return band_ >= 0.0 && l > band_lo_ && l < band_hi_; }
   double factorize_anchor(const CountPoint& p, bool& detection_off);
@@ -461,28 +532,35 @@ class WindowSolver {
   index_t c_target_ = 0, c_max_ = 0;
   double band_ = -1.0;                ///< zero band half-width (zero_filter_tol * scale), < 0: none
   double band_lo_ = 0.0, band_hi_ = 0.0;  ///< the band as counted: (band_lo_, band_hi_) is excluded
-  std::vector<CountPoint> known_;     ///< every count evaluated, ascending in s
+  std::vector<CountPoint> known_;     ///< every count evaluated (or certified), ascending in s
   std::vector<Slice> slices_;
+  std::vector<SliceShift> shifts_;    ///< per slice
+  std::vector<SliceReport> reports_;  ///< per slice
   Pool<T> pool_;
   index_t restarts_ = 0, applies_ = 0;
   double nearest_r0_ = -1.0;
 };
 
 template <class T>
-CountPoint WindowSolver<T>::count(double s, double outward) {
-  for (const auto& p : known_)
-    if (p.s == s) return p;
-  const double step = 1e-10 * std::max(scale_, std::abs(s));
-  bool off = false;
-  const index_t nu = count_below(c_, fac_, pencil_, s, outward, step, &off);
-  const CountPoint p{s, nu, off};
-  auto it = std::lower_bound(known_.begin(), known_.end(), s, [](const CountPoint& q, double v) { return q.s < v; });
-  if (it != known_.end() && it->s == s) {
+void WindowSolver<T>::remember(const CountPoint& p) {
+  auto it = std::lower_bound(known_.begin(), known_.end(), p.s, [](const CountPoint& q, double v) { return q.s < v; });
+  if (it != known_.end() && it->s == p.s) {
     *it = p;
   } else {
     known_.insert(it, p);
   }
-  event(c_, "count", {{"s", s}, {"nu", static_cast<std::int64_t>(nu)}});
+}
+
+template <class T>
+CountPoint WindowSolver<T>::count(double s, double outward) {
+  for (const auto& p : known_)
+    if (p.s == s) return p;
+  const double step = 1e-10 * std::max(scale_, std::abs(s));
+  bool off = false, near = false;
+  const index_t nu = count_below(c_, fac_, pencil_, s, outward, step, &off, false, &near);
+  const CountPoint p{s, nu, off, near};
+  remember(p);
+  event(c_, "count", {{"s", s}, {"nu", static_cast<std::int64_t>(nu)}, {"near_eigenvalue", near}});
   return p;
 }
 
@@ -497,17 +575,27 @@ double WindowSolver<T>::expansion_step() const {
 
 // A point p in (a, b) with g_lo <= nu(p) <= g_hi, aiming at g (a.nu < g_lo <= g <= g_hi < b.nu).
 // Brackets from the known counts are narrowed by count interpolation (regula falsi with the
-// Illinois modification: the end retained twice in a row gets half the weight; steps kept 5% inside
-// the bracket); open ends are found by geometric expansion from the spectrum estimates. If a cluster narrower than width_min() straddles the target count, the
-// smallest known point above the cluster is returned (its count exceeds g_hi).
+// Illinois modification: the end retained twice in a row gets half the weight; steps kept 5%
+// inside the bracket) - by bisection after a count that equals one of the bracket's end counts,
+// a sign that the eigenvalues between are not spread as interpolation assumes; an open end is
+// found by geometric expansion from the finite point (start, or the bracket end that overshot).
+// Eigenvalues too close together to be split by counts (the bracket of the same two counts shrank
+// by kClusterShrink, or to width_min) end the search: the result is then a point in the gap
+// beside that cluster on the requested side (gap_point), never one hugging it - such a point
+// would be a poor shift, and reaching it took ~20 more counts.
 template <class T>
-CountPoint WindowSolver<T>::find_count(const CountPoint& a, const CountPoint& b, index_t g_lo, index_t g,
-                                       index_t g_hi, double start, double guess) {
+Search WindowSolver<T>::find_count(const CountPoint& a, const CountPoint& b, index_t g_lo, index_t g, index_t g_hi,
+                                   double start, Side side, double guess) {
   int same_side = 0, last_side = 0;
   double lft_weight = 1.0, rgt_weight = 1.0;  // Illinois weights of the retained ends
   index_t expansions = 0;
-  for (int it = 0; it < 40; ++it) {
-    CountPoint lft = a, rgt = b;
+  index_t pair_lo = -1, pair_hi = -1;
+  double pair_width = kInf;  // bracket width when its two end counts were first seen
+  bool bisect = false;       // the last count repeated an end count of the bracket
+  CountPoint lft = a, rgt = b;
+  auto bracket = [&]() -> const CountPoint* {
+    lft = a;
+    rgt = b;
     const CountPoint* best = nullptr;
     for (const auto& p : known_) {
       if (!(p.s > a.s && p.s < b.s)) continue;
@@ -519,53 +607,118 @@ CountPoint WindowSolver<T>::find_count(const CountPoint& a, const CountPoint& b,
         rgt = p;  // the first one above g_hi
       }
     }
-    if (best) return *best;
-    double s = 0.0;
+    return best;
+  };
+  auto beside_cluster = [&]() {
+    Search r;
+    r.cluster = true;
+    r.cl_lo = lft;
+    r.cl_hi = rgt;
+    r.p = side == Side::Above ? gap_point(rgt, +1.0, b) : gap_point(lft, -1.0, a);
+    event(c_, "count_cluster", {{"lower", lft.s}, {"upper", rgt.s},
+                                {"eigenvalues", static_cast<std::int64_t>(rgt.nu - lft.nu)}, {"point", r.p.s}});
+    return r;
+  };
+  for (int it = 0; it < 40; ++it) {
+    if (const CountPoint* best = bracket()) return Search::at(*best);
     const bool lf = std::isfinite(lft.s), rf = std::isfinite(rgt.s);
+    if (lf && rf) {
+      if (lft.nu != pair_lo || rgt.nu != pair_hi) {
+        pair_lo = lft.nu;
+        pair_hi = rgt.nu;
+        pair_width = rgt.s - lft.s;
+      }
+      if (rgt.s - lft.s <= std::max(width_min(lft.s, rgt.s), kClusterShrink * pair_width)) return beside_cluster();
+    }
+    double s = 0.0;
     const double d = expansion_step() * std::pow(4.0, static_cast<double>(expansions));
     if (std::isfinite(guess) && guess > lft.s && guess < rgt.s) {
       s = guess;  // caller's estimate (local eigenvalue density), tried once
       guess = std::numeric_limits<double>::quiet_NaN();
     } else if (!lf && !rf) {
       s = start;
-    } else if (!lf) {
-      s = (est_.valid ? std::min(rgt.s, est_.lo1) : rgt.s) - d;
+    } else if (!lf) {  // expand downward from the point that overshot
+      s = rgt.s - d;
       ++expansions;
     } else if (!rf) {
-      s = (est_.valid ? std::max(lft.s, est_.hi1) : lft.s) + d;
+      s = lft.s + d;
       ++expansions;
+    } else if (bisect) {
+      s = 0.5 * (lft.s + rgt.s);
     } else {
-      if (rgt.s - lft.s <= width_min(lft.s, rgt.s)) return rgt;  // unsplittable cluster
       const double fl = lft_weight * (static_cast<double>(lft.nu) - static_cast<double>(g));  // < 0
       const double fr = rgt_weight * (static_cast<double>(rgt.nu) - static_cast<double>(g));  // > 0
       const double frac = std::clamp(-fl / (fr - fl), 0.05, 0.95);
       s = lft.s + frac * (rgt.s - lft.s);
     }
     const CountPoint p = count(s, +1.0);
-    const int side = p.nu < g_lo ? -1 : (p.nu > g_hi ? +1 : 0);
-    same_side = (side != 0 && side == last_side) ? same_side + 1 : 1;
-    last_side = side;
+    bisect = lf && rf && (p.nu == lft.nu || p.nu == rgt.nu);
+    const int sd = p.nu < g_lo ? -1 : (p.nu > g_hi ? +1 : 0);
+    same_side = (sd != 0 && sd == last_side) ? same_side + 1 : 1;
+    last_side = sd;
     // Illinois: a new left end twice in a row halves the weight of the retained right end, and
     // vice versa; a switch of sides resets both.
-    if (same_side >= 2 && side < 0) rgt_weight *= 0.5;
-    if (same_side >= 2 && side > 0) lft_weight *= 0.5;
+    if (same_side >= 2 && sd < 0) rgt_weight *= 0.5;
+    if (same_side >= 2 && sd > 0) lft_weight *= 0.5;
     if (same_side == 1) lft_weight = rgt_weight = 1.0;
   }
-  // Give up refining: the closest known point above the target.
-  CountPoint rgt = b;
-  for (const auto& p : known_)
-    if (p.s > a.s && p.s < b.s && p.nu >= g_lo) {
-      rgt = p;
-      break;
-    }
-  if (!std::isfinite(rgt.s)) HS_THROW(NotConverged, "inertia search found no point with " << g << " eigenvalues below it");
-  return rgt;
+  if (const CountPoint* best = bracket()) return Search::at(*best);
+  if (!std::isfinite(lft.s) || !std::isfinite(rgt.s))
+    HS_THROW(NotConverged, "inertia search found no point with " << g << " eigenvalues below it");
+  return beside_cluster();  // out of iterations: treat the bracket as unsplittable
 }
 
-// Cuts window (a, b) into slices of at most c_max_ eigenvalues (aiming at c_target_), marching
-// upward from the finite lower end (an open lower end first gets its own leftmost slice).
+// A point beside p on side dir (+1: above p, -1: below), in the same spectral gap (count p.nu),
+// strictly between p and limit: the middle of the part of the gap that known counts certify (they
+// share p's count, so no eigenvalue lies between them). Without such a point, up to three counts
+// at p + dir * delta (delta: half the distance to the next known count, else the expansion step,
+// quartered while the count differs) certify one. Each half of a certified gap keeps the point
+// away from both the eigenvalues at p's side and the next ones beyond. If no gap is found, p is
+// returned flagged near.
 template <class T>
-std::vector<Slice> WindowSolver<T>::plan(const CountPoint& a, const CountPoint& b) {
+CountPoint WindowSolver<T>::gap_point(const CountPoint& p, double dir, const CountPoint& limit) {
+  CountPoint far = p, next = limit;
+  auto consider = [&](const CountPoint& q) {  // q beyond p, in order of distance; false: stop
+    if (q.nu != p.nu) {
+      next = q;
+      return false;
+    }
+    far = q;
+    return true;
+  };
+  if (dir > 0) {
+    for (const auto& q : known_)
+      if (q.s > p.s && q.s < limit.s && !consider(q)) break;
+  } else {
+    for (auto it = known_.rbegin(); it != known_.rend(); ++it)
+      if (it->s < p.s && it->s > limit.s && !consider(*it)) break;
+  }
+  if (next.s == limit.s && std::isfinite(limit.s) && limit.nu == p.nu) far = limit;  // the gap reaches limit
+  auto middle = [&](double x) {
+    const CountPoint m{0.5 * (p.s + x), p.nu, false, false};
+    remember(m);
+    return m;
+  };
+  if (far.s != p.s) return middle(far.s);
+  double delta = std::isfinite(next.s) ? 0.5 * std::abs(next.s - p.s) : expansion_step();
+  for (int t = 0; t < 3; ++t) {
+    const CountPoint q = count(p.s + dir * delta, dir);
+    if (q.nu == p.nu && dir * (q.s - p.s) > 0) return middle(q.s);
+    delta *= 0.25;
+  }
+  CountPoint out = p;
+  out.near = true;
+  return out;
+}
+
+// Cuts window w into slices of at most c_max_ eigenvalues (aiming at c_target_), marching upward
+// from the finite lower end (an open lower end first gets its own leftmost slice). A partial
+// cluster window is one slice.
+template <class T>
+std::vector<Slice> WindowSolver<T>::plan(const Window& w) {
+  const CountPoint& a = w.lo;
+  const CountPoint& b = w.hi;
+  if (w.want >= 0) return {Slice{a, b, w.want, w.focus}};
   std::vector<CountPoint> cuts{a};
   CountPoint cur = a;
   auto next_cut = [&](index_t remaining) {
@@ -585,7 +738,7 @@ std::vector<Slice> WindowSolver<T>::plan(const CountPoint& a, const CountPoint& 
     } else if (std::isfinite(from) && std::isfinite(to) && to > from) {
       guess = from + (to - from) * static_cast<double>(step) / static_cast<double>(b.nu - cur.nu);
     }
-    return find_count(cur, b, g_lo, cur.nu + step, std::max(g_lo, g_hi), start, guess);
+    return find_count(cur, b, g_lo, cur.nu + step, std::max(g_lo, g_hi), start, Side::Above, guess).p;
   };
   while (b.nu - cur.nu > c_max_) {
     const CountPoint p = next_cut(b.nu - cur.nu);
@@ -601,15 +754,19 @@ std::vector<Slice> WindowSolver<T>::plan(const CountPoint& a, const CountPoint& 
 }
 
 // Shift placement (see the file comment): one-sided toward the side that holds nothing or borders
-// the zero band, else the centre.
+// the zero band, else the centre. A finite end flagged near (an eigenvalue on it, e.g. a user
+// bound) is no anchor: such a slice takes the centre shift; an open slice moves its shift into the
+// gap beside that end (run_slice).
 template <class T>
 Anchor WindowSolver<T>::anchor_of(const Slice& s) const {
   if (!std::isfinite(s.hi.s)) return Anchor::Lower;  // windows have at least one finite end
   if (!std::isfinite(s.lo.s)) return Anchor::Upper;
-  if (band_ >= 0 && s.hi.s == band_lo_) return Anchor::Lower;  // keep the shift away from the band
-  if (band_ >= 0 && s.lo.s == band_hi_) return Anchor::Upper;
-  if (s.lo.nu == 0) return Anchor::Upper;  // nothing below: a centre shift could be far from all
-  if (s.hi.nu == n_) return Anchor::Lower;
+  // Next to the band: the shift at the far end, away from the band's cluster.
+  if (band_ >= 0 && s.hi.s == band_lo_) return s.lo.near ? Anchor::Centre : Anchor::Lower;
+  if (band_ >= 0 && s.lo.s == band_hi_) return s.hi.near ? Anchor::Centre : Anchor::Upper;
+  // Nothing below (above): a centre shift could be far from all of the slice's eigenvalues.
+  if (s.lo.nu == 0) return s.hi.near ? Anchor::Centre : Anchor::Upper;
+  if (s.hi.nu == n_) return s.lo.near ? Anchor::Centre : Anchor::Lower;
   return Anchor::Centre;
 }
 
@@ -631,42 +788,146 @@ void WindowSolver<T>::append_to_pool(const Block<T>& blk, const std::vector<Pair
   }
 }
 
-// One slice: shift, Krylov run for exactly its count, verification, certificate with deflated
-// reruns. Pairs within an ambiguity margin delta outside the slice are kept too (an eigenvalue
-// that close to a cut may be computed on the other side of it); deduplicate() resolves them.
+// Removes the flagged pool columns (keeps the column order of the survivors).
 template <class T>
-void WindowSolver<T>::run_slice(const Slice& s, index_t id) {
+void WindowSolver<T>::compact_pool(const std::vector<char>& drop) {
+  index_t w = 0;
+  for (index_t q = 0; q < pool_.used; ++q) {
+    if (drop[q]) continue;
+    if (w != q) {
+      std::copy(pool_.x.col(q), pool_.x.col(q) + n_, pool_.x.col(w));
+      pool_.lambda[w] = pool_.lambda[q];
+      pool_.metrics[w] = pool_.metrics[q];
+      pool_.slice[w] = pool_.slice[q];
+    }
+    ++w;
+  }
+  pool_.used = w;
+  pool_.lambda.resize(static_cast<std::size_t>(w));
+  pool_.metrics.resize(static_cast<std::size_t>(w));
+  pool_.slice.resize(static_cast<std::size_t>(w));
+}
+
+// Moves the given pool columns into a block (products recomputed) and removes them from the pool.
+template <class T>
+Block<T> WindowSolver<T>::take_from_pool(const std::vector<index_t>& cols) {
+  Block<T> blk;
+  blk.x.resize(n_, static_cast<index_t>(cols.size()));
+  std::vector<char> drop(static_cast<std::size_t>(pool_.used), 0);
+  for (std::size_t q = 0; q < cols.size(); ++q) {
+    std::copy(pool_.x.col(cols[q]), pool_.x.col(cols[q]) + n_, blk.x.col(static_cast<index_t>(q)));
+    blk.lambda.push_back(pool_.lambda[cols[q]]);
+    drop[cols[q]] = 1;
+  }
+  recompute_products(pencil_.a(), pencil_.b(), blk);
+  compact_pool(drop);
+  return blk;
+}
+
+// A multiple eigenvalue among the pairs found inside the slice (two or more within kEqualWidth,
+// not tried before): its copies sit at one theta, and a single-vector Krylov run at a shift on it
+// - where it dominates the operator - recovers the missing copies through rounding, while a run at
+// a distant shift does not. Returns its mean, or NaN.
+template <class T>
+double WindowSolver<T>::multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const {
+  std::vector<double> l;
+  for (double x : sel.lambda)
+    if (x >= s.lo.s && x <= s.hi.s) l.push_back(x);
+  std::sort(l.begin(), l.end());
+  double best = std::numeric_limits<double>::quiet_NaN();
+  std::size_t best_size = 1;
+  for (std::size_t i = 0; i < l.size();) {
+    std::size_t j = i + 1;
+    while (j < l.size() && l[j] - l[j - 1] <= kEqualWidth * std::max({scale_, std::abs(l[j])})) ++j;
+    const double mean = std::accumulate(l.begin() + static_cast<std::ptrdiff_t>(i),
+                                        l.begin() + static_cast<std::ptrdiff_t>(j), 0.0) /
+                        static_cast<double>(j - i);
+    bool seen = false;
+    for (double t : tried) seen = seen || std::abs(t - mean) <= kEqualWidth * std::max(scale_, std::abs(mean));
+    if (j - i > best_size && !seen) {
+      best_size = j - i;
+      best = mean;
+    }
+    i = j;
+  }
+  return best;
+}
+
+// A partial cluster slice's copies (lambda, inside the slice) prove the whole cluster numerically
+// equal when two counts at their mean -+ Delta (Delta = 16x their spread, >= 1e-9 relative, at
+// most kEqualWidth relative) hold all of its eigenvalues: then any `want` of them are a valid answer.
+template <class T>
+bool WindowSolver<T>::cluster_verified(const Slice& s, const std::vector<double>& lambda, double& mean,
+                                       double& delta) {
+  if (lambda.empty()) return false;
+  const auto [mn, mx] = std::minmax_element(lambda.begin(), lambda.end());
+  mean = std::accumulate(lambda.begin(), lambda.end(), 0.0) / static_cast<double>(lambda.size());
+  const double rel = std::max(scale_, std::abs(mean));
+  delta = std::max(16.0 * (*mx - *mn), 1e-9 * rel);
+  if (delta > kEqualWidth * rel) return false;
+  const CountPoint lo = count(mean - delta, -1.0);
+  const CountPoint hi = count(mean + delta, +1.0);
+  return lo.nu == s.lo.nu && hi.nu == s.hi.nu;
+}
+
+// One slice: shift, Krylov run for exactly its count (or the copies wanted of a partial cluster),
+// verification, certificate with deflated reruns. Pairs within an ambiguity margin delta outside
+// the slice are kept too (an eigenvalue that close to a cut may be computed on the other side of
+// it); deduplicate() resolves them. seed (repair): pairs of this slice found before, kept as the
+// deflation of a first rerun for the missing ones. Returns false only for a partial cluster that
+// turned out not to be numerically equal (the caller then solves it in full).
+template <class T>
+bool WindowSolver<T>::run_slice(const Slice& s, index_t id, const Block<T>* seed) {
   const SolverConfig& cfg = c_.cfg;
   const index_t count = s.count();
-  const Anchor anchor = anchor_of(s);
-  double sigma = 0.0;
-  bool detection_off = false;
-  Which which = Which::LargestMagnitude;
-  switch (anchor) {
-    case Anchor::Centre:
-      sigma = factorize_near(c_, fac_, 0.5 * (s.lo.s + s.hi.s), scale_, detection_off);
-      break;
-    case Anchor::Upper:  // eigenvalues below the shift: theta < 0, most negative = nearest below
-      sigma = factorize_anchor(s.hi, detection_off);
-      which = Which::SmallestAlgebraic;
-      break;
-    case Anchor::Lower:  // eigenvalues above the shift: theta > 0, largest = nearest above
-      sigma = factorize_anchor(s.lo, detection_off);
-      which = Which::LargestAlgebraic;
-      break;
+  const bool partial = s.want >= 0;
+  if (static_cast<index_t>(shifts_.size()) <= id) {
+    shifts_.resize(static_cast<std::size_t>(id + 1));
+    reports_.resize(static_cast<std::size_t>(id + 1));
   }
-  SliceReport sr;
-  sr.lower = s.lo.s;
-  sr.upper = s.hi.s;
-  sr.sigma = sigma;
-  sr.which = which_name(which);
-  sr.count_inertia = count;
-  sr.nev = std::min(n_, count);
-  DefiniteRun<T> run;
-  lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
+  SliceShift& sh = shifts_[static_cast<std::size_t>(id)];
+  if (seed && std::isfinite(sh.sigma)) {
+    if (!try_refactorize_at(c_, fac_, sh.sigma, sh.detection_off))
+      sh.sigma = factorize_near(c_, fac_, sh.sigma, scale_, sh.detection_off);
+  } else if (partial) {  // shift on the cluster: it dominates, rounding brings out its copies
+    sh.sigma = factorize_near(c_, fac_, s.focus, scale_, sh.detection_off, /*on_eigenvalue=*/true);
+    sh.which = Which::LargestMagnitude;
+  } else {
+    switch (anchor_of(s)) {
+      case Anchor::Centre:
+        sh.sigma = factorize_near(c_, fac_, 0.5 * (s.lo.s + s.hi.s), scale_, sh.detection_off);
+        sh.which = Which::LargestMagnitude;
+        break;
+      case Anchor::Upper: {  // eigenvalues below the shift: theta < 0, most negative = nearest below
+        const CountPoint p = s.hi.near ? gap_point(s.hi, +1.0, plus_inf()) : s.hi;
+        sh.sigma = factorize_anchor(p, sh.detection_off);
+        sh.which = Which::SmallestAlgebraic;
+        break;
+      }
+      case Anchor::Lower: {  // eigenvalues above the shift: theta > 0, largest = nearest above
+        const CountPoint p = s.lo.near ? gap_point(s.lo, -1.0, minus_inf()) : s.lo;
+        sh.sigma = factorize_anchor(p, sh.detection_off);
+        sh.which = Which::LargestAlgebraic;
+        break;
+      }
+    }
+  }
+  const double sigma = sh.sigma;
+  const Which which = sh.which;
+  const bool detection_off = sh.detection_off;
+  SliceReport& sr = reports_[static_cast<std::size_t>(id)];
+  if (!seed) {
+    sr = SliceReport{};
+    sr.lower = s.lo.s;
+    sr.upper = s.hi.s;
+    sr.sigma = sigma;
+    sr.which = which_name(which);
+    sr.count_inertia = count;
+  }
 
   const double d_lo = std::isfinite(s.lo.s) ? 1e-9 * std::max(scale_, std::abs(s.lo.s)) : 0.0;
   const double d_hi = std::isfinite(s.hi.s) ? 1e-9 * std::max(scale_, std::abs(s.hi.s)) : 0.0;
+  DefiniteRun<T> run;
   Block<T> sel;
   std::vector<PairMetrics> metrics;
   index_t inside = 0, near_in = 0, near_out = 0;
@@ -699,42 +960,95 @@ void WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     sel = take_columns(sel, keep);
     metrics = std::move(mk);
   };
-  select();
-  // Certificate of the slice: count in [lo, hi] up to the pairs within delta of its ends.
-  for (int round = 0; round < 2; ++round) {
-    if (count <= inside + near_out) break;
-    const index_t missing = count - inside - near_out;
-    keep_converged(run, n2a_, n2b_, cfg.tol);
-    const index_t nev_rerun = std::min<index_t>(n_ - run.all.size(), missing + 2);
-    if (nev_rerun < 1) break;
-    event(c_, "slice_rerun", {{"slice", static_cast<std::int64_t>(id)}, {"missing", static_cast<std::int64_t>(missing)}});
-    refactorize_at(c_, fac_, sigma, detection_off);
-    DenseMatrix<T> defl = run.all.x;
-    lanczos_run(c_, fac_, pencil_, sigma, which, nev_rerun, &defl, run);
-    ++sr.reruns;
+  // Pairs still missing by the slice's count (partial cluster: by its want), up to the pairs
+  // within delta of its ends.
+  auto missing = [&]() {
+    return partial ? std::max<index_t>(0, s.want - inside) : count - inside - near_out;
+  };
+  if (seed) {  // B-orthonormal (merged across slices) before it serves as deflation
+    run.all = *seed;
+    driver::rayleigh_ritz_definite(run.all.x, run.all.ax, run.all.bx, run.all.lambda, kDependentGram);
+    select();
+  } else {
+    sr.nev = std::min(n_, s.required());
+    lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
     select();
   }
+  // Certificate of the slice: deflated reruns while pairs are missing and the reruns find new
+  // ones. A multiple eigenvalue among the found pairs gets its own shift (multiplet_shift).
+  std::vector<double> tried;
+  int stalls = 0;
+  const int max_rounds = static_cast<int>(std::min<index_t>(kMaxRerunRounds, missing() + kExtraRerunRounds));
+  for (int round = 0; missing() > 0 && round < max_rounds && stalls < kStallRounds; ++round) {
+    const index_t miss = missing();
+    keep_converged(run, n2a_, n2b_, cfg.tol);
+    const index_t nev_rerun = std::min<index_t>(n_ - run.all.size(), miss + 2);
+    if (nev_rerun < 1) break;
+    const double m_sigma = multiplet_shift(sel, s, tried);
+    event(c_, "slice_rerun", {{"slice", static_cast<std::int64_t>(id)}, {"missing", static_cast<std::int64_t>(miss)},
+                              {"multiplet", m_sigma}});
+    DenseMatrix<T> defl = run.all.x;
+    if (std::isfinite(m_sigma)) {
+      tried.push_back(m_sigma);
+      bool off = false;
+      const double ms = factorize_near(c_, fac_, m_sigma, scale_, off, /*on_eigenvalue=*/true);
+      lanczos_run(c_, fac_, pencil_, ms, Which::LargestMagnitude, nev_rerun, &defl, run);
+    } else {
+      refactorize_at(c_, fac_, sigma, detection_off);
+      lanczos_run(c_, fac_, pencil_, sigma, which, nev_rerun, &defl, run);
+    }
+    ++sr.reruns;
+    select();
+    stalls = missing() < miss ? 0 : stalls + 1;
+  }
+  if (partial) {
+    // Any `want` copies of a numerically equal cluster: verified by two counts, then trimmed.
+    std::vector<double> l;
+    std::vector<index_t> in_cl;
+    for (index_t j = 0; j < sel.size(); ++j)
+      if (sel.lambda[j] >= s.lo.s && sel.lambda[j] <= s.hi.s) {
+        l.push_back(sel.lambda[j]);
+        in_cl.push_back(j);
+      }
+    double mean = 0.0, delta = 0.0;
+    if (inside < s.want || !cluster_verified(s, l, mean, delta)) {
+      restarts_ += run.restarts;
+      applies_ += run.applies;
+      return false;
+    }
+    warn(c_, "the target ends inside a cluster of " + std::to_string(count) + " numerically equal eigenvalues " +
+                 fmt(mean) + " +- " + fmt(delta) + ": " + std::to_string(s.want) +
+                 " of its copies are returned (a null space? see zero_filter_tol)");
+    in_cl.resize(static_cast<std::size_t>(s.want));
+    std::vector<PairMetrics> mk;
+    for (index_t j : in_cl) mk.push_back(metrics[j]);
+    sel = take_columns(sel, in_cl);
+    metrics = std::move(mk);
+    inside = s.want;
+    near_in = near_out = 0;
+  }
   sr.count_found = inside;
-  sr.passed = inside - near_in <= count && count <= inside + near_out;
-  sr.restarts = run.restarts;
-  sr.op_applies = run.applies;
+  sr.passed = partial ? inside == s.want : (inside - near_in <= count && count <= inside + near_out);
+  sr.restarts += run.restarts;
+  sr.op_applies += run.applies;
   restarts_ += run.restarts;
   applies_ += run.applies;
   event(c_, "slice", {{"slice", static_cast<std::int64_t>(id)}, {"lower", s.lo.s}, {"upper", s.hi.s}, {"sigma", sigma},
                       {"which", std::string(sr.which)}, {"count", static_cast<std::int64_t>(count)},
-                      {"found", static_cast<std::int64_t>(inside)}, {"passed", sr.passed},
+                      {"want", static_cast<std::int64_t>(s.want)}, {"found", static_cast<std::int64_t>(inside)},
+                      {"passed", sr.passed}, {"reruns", static_cast<std::int64_t>(sr.reruns)},
                       {"restarts", static_cast<std::int64_t>(run.restarts)},
                       {"op_applies", static_cast<std::int64_t>(run.applies)}});
   if (!sr.passed)
-    warn(c_, "slice [" + fmt(s.lo.s) + ", " + fmt(s.hi.s) + "]: inertia " + std::to_string(count) + " vs found " +
-                 std::to_string(inside));
-  c_.rep.slices.push_back(sr);
+    warn(c_, "slice [" + fmt(s.lo.s) + ", " + fmt(s.hi.s) + "]: inertia " + std::to_string(s.required()) +
+                 " vs found " + std::to_string(inside));
   append_to_pool(sel, metrics, id);
+  return true;
 }
 
-// Factorization at a counted slice end used as a one-sided shift: the count's own factorization
-// when the object still holds it, else a refactorization with the same null-pivot setting; if that
-// is flagged singular now (last-bit differences of the parallel factorization), the shift moves a
+// Factorization at a slice end used as a one-sided shift: the count's own factorization when the
+// object still holds it, else a refactorization with the same null-pivot setting; if that is
+// flagged singular now (last-bit differences of the parallel factorization), the shift moves a
 // little like any near-singular shift.
 template <class T>
 double WindowSolver<T>::factorize_anchor(const CountPoint& p, bool& detection_off) {
@@ -756,8 +1070,6 @@ index_t WindowSolver<T>::deduplicate() {
   std::stable_sort(order.begin(), order.end(), [&](index_t p, index_t q) { return pool_.lambda[p] < pool_.lambda[q]; });
   std::vector<char> drop(static_cast<std::size_t>(m), 0);
   index_t removed = 0;
-  const CsrMatrix<T>& a = pencil_.a();
-  const CsrMatrix<T>* b = pencil_.b();
   for (index_t i = 0; i < m;) {
     index_t j = i + 1;
     bool multi = false;  // members from more than one slice
@@ -775,7 +1087,7 @@ index_t WindowSolver<T>::deduplicate() {
         std::copy(pool_.x.col(order[i + q]), pool_.x.col(order[i + q]) + n_, grp.x.col(q));
         grp.lambda.push_back(pool_.lambda[order[i + q]]);
       }
-      recompute_products(a, b, grp);
+      recompute_products(pencil_.a(), pencil_.b(), grp);
       const index_t r = driver::rayleigh_ritz_definite(grp.x, grp.ax, grp.bx, grp.lambda, 1e-4);
       if (r < g) {
         const auto mr = block_metrics(grp, n2a_, n2b_);
@@ -794,25 +1106,37 @@ index_t WindowSolver<T>::deduplicate() {
     }
     i = j;
   }
-  if (removed > 0) {
-    // Compact the pool (keeps the column order of the survivors).
-    index_t w = 0;
-    for (index_t q = 0; q < m; ++q) {
-      if (drop[q]) continue;
-      if (w != q) {
-        std::copy(pool_.x.col(q), pool_.x.col(q) + n_, pool_.x.col(w));
-        pool_.lambda[w] = pool_.lambda[q];
-        pool_.metrics[w] = pool_.metrics[q];
-        pool_.slice[w] = pool_.slice[q];
-      }
-      ++w;
-    }
-    pool_.used = w;
-    pool_.lambda.resize(static_cast<std::size_t>(w));
-    pool_.metrics.resize(static_cast<std::size_t>(w));
-    pool_.slice.resize(static_cast<std::size_t>(w));
-  }
+  if (removed > 0) compact_pool(drop);
   return removed;
+}
+
+// Global repair: a full slice holding fewer pool pairs than its count (after de-duplication at the
+// cuts) is rerun at its shift with its pairs as deflation (run_slice with a seed). Returns the
+// number of slices repaired.
+template <class T>
+index_t WindowSolver<T>::repair() {
+  index_t repaired = 0;
+  for (std::size_t i = 0; i < slices_.size(); ++i) {
+    const Slice& s = slices_[i];
+    if (s.want >= 0) continue;
+    const double d_lo = std::isfinite(s.lo.s) ? 1e-9 * std::max(scale_, std::abs(s.lo.s)) : 0.0;
+    const double d_hi = std::isfinite(s.hi.s) ? 1e-9 * std::max(scale_, std::abs(s.hi.s)) : 0.0;
+    index_t inside = 0;
+    std::vector<index_t> cols;
+    for (index_t j = 0; j < pool_.used; ++j) {
+      const double l = pool_.lambda[j];
+      if (in_band(l)) continue;
+      if (l >= s.lo.s && l <= s.hi.s) ++inside;
+      if (l >= s.lo.s - d_lo && l <= s.hi.s + d_hi) cols.push_back(j);
+    }
+    if (inside >= s.count()) continue;
+    event(c_, "slice_repair",
+          {{"slice", static_cast<std::int64_t>(i)}, {"missing", static_cast<std::int64_t>(s.count() - inside)}});
+    Block<T> seed = take_from_pool(cols);
+    run_slice(s, static_cast<index_t>(i), &seed);
+    ++repaired;
+  }
+  return repaired;
 }
 
 /// Columns of x reordered in place so that new column j = old column perm[j] (perm a permutation
@@ -863,8 +1187,9 @@ Solution<T> WindowSolver<T>::solve() {
 
   // ---- 1. Target windows with exact counts at their ends. The zero band (|lambda| <= band) is
   //         cut out between two counted points, so filtering and counting agree exactly.
-  std::vector<std::pair<CountPoint, CountPoint>> windows;
+  std::vector<Window> windows;
   const index_t k = t.k;
+  bool short_warned = false;  // "fewer eigenvalues than k" already explained
   auto band_edges = [&]() {
     const CountPoint neg = count(-band_, +1.0);  // moved into the band if singular
     const CountPoint pos = count(band_, -1.0);
@@ -914,9 +1239,17 @@ Solution<T> WindowSolver<T>::solve() {
     rep.zero_modes_filtered = tot >= 0 ? (hi.nu - lo.nu) - tot : 0;
     rep.certificate.lower = lo.s;
     rep.certificate.upper = hi.s;
+    if (tot < k) {
+      warn(c_, "only " + std::to_string(tot) + " eigenvalues lie outside the zero band (k = " + std::to_string(k) +
+                   ")");
+      short_warned = true;
+    }
   } else {
     // Smallest: window (-inf, U] with nu(U) >= k; largest: [L, +inf) with n - nu(L) >= k. The
-    // search stops refining once the extra pairs cost less than another count (slack).
+    // search stops refining once the extra pairs cost less than another count (slack). When the
+    // k-th eigenvalue belongs to a cluster that counts cannot split, the window takes the whole
+    // cluster - or, for a large cluster of numerically equal eigenvalues, a partial cluster
+    // window that asks only for the copies still needed (any of them is a valid answer).
     const bool smallest = mode == TargetMode::Smallest;
     const index_t slack = std::clamp<index_t>(
         static_cast<index_t>(cost_.t_factor / std::max(cost_.marginal_pair(std::min(k, c_target_)), 1e-300)), 1,
@@ -945,58 +1278,84 @@ Solution<T> WindowSolver<T>::solve() {
       }
       if (need > b.nu - a.nu) {
         warn(c_, "only " + std::to_string(b.nu - a.nu + k - need) + " eigenvalues lie outside the zero band");
+        short_warned = true;
         need = b.nu - a.nu;
       }
     }
     if (need > 0 && smallest) {
       const index_t g_lo = a.nu + need;
       const index_t g_hi = std::min(g_lo + slack, std::max(g_lo, b.nu - 1));
-      CountPoint u = b;
+      Search r = Search::at(b);
       if (!(std::isfinite(b.s) && b.nu <= g_lo + slack))
-        u = find_count(a, b, g_lo, std::min(g_lo + slack / 2, g_hi), g_hi,
-                       std::isfinite(a.s) ? a.s : (est_.valid ? est_.lo1 : 0.0));
-      windows.push_back({a, u});
+        r = find_count(a, b, g_lo, std::min(g_lo + slack / 2, g_hi), g_hi,
+                       std::isfinite(a.s) ? a.s : (est_.valid ? est_.lo1 : 0.0), Side::Above);
+      if (r.cluster && r.cl_hi.nu - g_lo > std::max(kPartialClusterMin, need)) {
+        const CountPoint below = gap_point(r.cl_lo, -1.0, a);
+        if (below.nu > a.nu) windows.push_back({a, below});
+        windows.push_back({below, r.p, g_lo - below.nu, 0.5 * (r.cl_lo.s + r.cl_hi.s)});
+      } else {
+        windows.push_back({a, r.p});
+      }
     } else if (need > 0) {
       const index_t g_hi = b.nu - need;  // nu(L) <= n - need
       const index_t g_lo = std::max(g_hi - slack, std::min(g_hi, a.nu + 1));
-      CountPoint l = a;
+      Search r = Search::at(a);
       if (!(std::isfinite(a.s) && a.nu >= g_hi - slack))
-        l = find_count(a, b, g_lo, std::max(g_hi - slack / 2, g_lo), g_hi,
-                       std::isfinite(b.s) ? b.s : (est_.valid ? est_.hi1 : 0.0));
-      windows.push_back({l, b});
+        r = find_count(a, b, g_lo, std::max(g_hi - slack / 2, g_lo), g_hi,
+                       std::isfinite(b.s) ? b.s : (est_.valid ? est_.hi1 : 0.0), Side::Below);
+      if (r.cluster && g_hi - r.cl_lo.nu > std::max(kPartialClusterMin, need)) {
+        const CountPoint above = gap_point(r.cl_hi, +1.0, b);
+        if (b.nu > above.nu) windows.push_back({above, b});
+        windows.push_back({r.p, above, above.nu - g_hi, 0.5 * (r.cl_lo.s + r.cl_hi.s)});
+      } else {
+        windows.push_back({r.p, b});
+      }
     }
     // A window from -inf up to the band (or from the band to +inf) would put a one-sided shift
     // next to the zero cluster; close it at a point beyond the end of the spectrum instead.
     for (auto& w : windows) {
-      if (!std::isfinite(w.first.s) && w.second.s == band_lo_)
-        w.first = find_count(minus_inf(), w.second, 0, 0, 0, est_.valid ? est_.lo1 : w.second.s);
-      if (!std::isfinite(w.second.s) && w.first.s == band_hi_)
-        w.second = find_count(w.first, plus_inf(), n_, n_, n_, est_.valid ? est_.hi1 : w.first.s);
+      if (!std::isfinite(w.lo.s) && w.hi.s == band_lo_)
+        w.lo = find_count(minus_inf(), w.hi, 0, 0, 0, est_.valid ? est_.lo1 : w.hi.s, Side::Below).p;
+      if (!std::isfinite(w.hi.s) && w.lo.s == band_hi_)
+        w.hi = find_count(w.lo, plus_inf(), n_, n_, n_, est_.valid ? est_.hi1 : w.lo.s, Side::Above).p;
     }
   }
-  std::sort(windows.begin(), windows.end(), [](const auto& p, const auto& q) { return p.first.s < q.first.s; });
-  index_t total = 0;
-  for (const auto& w : windows) total += w.second.nu - w.first.nu;
-  event(c_, "windows", {{"windows", static_cast<std::int64_t>(windows.size())}, {"count", static_cast<std::int64_t>(total)}});
+  std::sort(windows.begin(), windows.end(), [](const Window& p, const Window& q) { return p.lo.s < q.lo.s; });
+  index_t total = 0, required = 0;
+  for (const auto& w : windows) {
+    total += w.count();
+    required += w.required();
+  }
+  event(c_, "windows",
+        {{"windows", static_cast<std::int64_t>(windows.size())}, {"count", static_cast<std::int64_t>(total)},
+         {"required", static_cast<std::int64_t>(required)}});
 
   InertiaCertificate& cert = rep.certificate;
   cert.performed = true;
   if (mode == TargetMode::Smallest) {
     cert.lower = -kInf;
-    cert.upper = windows.empty() ? -kInf : windows.back().second.s;
+    cert.upper = windows.empty() ? -kInf : windows.back().hi.s;
   } else if (mode == TargetMode::Largest) {
-    cert.lower = windows.empty() ? kInf : windows.front().first.s;
+    cert.lower = windows.empty() ? kInf : windows.front().lo.s;
     cert.upper = kInf;
   }
-  cert.count_inertia = total;
+  cert.count_inertia = required;
   if (band_ >= 0)
     cert.note = "zero band (" + fmt(band_lo_) + ", " + fmt(band_hi_) + ") excluded: " +
                 std::to_string(rep.zero_modes_filtered) + " eigenvalue(s) by inertia";
+  for (const auto& w : windows)
+    if (w.want >= 0) {
+      const std::string cl = "cluster [" + fmt(w.lo.s) + ", " + fmt(w.hi.s) + "] of " + std::to_string(w.count()) +
+                             " numerically equal eigenvalues: " + std::to_string(w.want) + " required";
+      cert.note = cert.note.empty() ? cl : cert.note + "; " + cl;
+    }
   if (rep.zero_modes_filtered > 0)
     warn(c_, std::to_string(rep.zero_modes_filtered) + " zero modes filtered (|lambda| <= zero_filter_tol*scale)");
+  if (mode != TargetMode::Interval && required < k && !short_warned)
+    warn(c_, "the target window holds only " + std::to_string(required) + " eigenvalue(s), fewer than k = " +
+                 std::to_string(k));
 
   Solution<T> sol;
-  const index_t expected = mode == TargetMode::Interval ? total : std::min(k, total);
   if (total == 0) {
     sol.eigenvectors.resize(n_, 0);
     cert.count_found = 0;
@@ -1006,15 +1365,16 @@ Solution<T> WindowSolver<T>::solve() {
     return sol;
   }
 
-  // ---- 2. Memory: the n x total output plus one slice's working set must fit the budget.
+  // ---- 2. Memory: the n x required output plus one slice's working set must fit the budget.
   {
     const double vec = static_cast<double>(n_) * sizeof(T);
     const double avail =
         cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
     // + up to 4 pairs per slice found just outside it (see step 3)
-    const double out_bytes = vec * static_cast<double>(total + 4 * (total / std::max<index_t>(c_target_, 1) + 2) + 8);
+    const double out_bytes =
+        vec * static_cast<double>(required + 4 * (total / std::max<index_t>(c_target_, 1) + 2) + 8);
     if (out_bytes > 0.9 * avail)
-      HS_THROW(OutOfMemoryBudget, "the target holds " << total << " eigenvalues: their eigenvectors need "
+      HS_THROW(OutOfMemoryBudget, "the target holds " << required << " eigenvalues: their eigenvectors need "
                                                       << out_bytes / 1073741824.0 << " GiB, "
                                                       << std::max(avail, 0.0) / 1073741824.0
                                                       << " GiB of the memory budget remain");
@@ -1032,26 +1392,49 @@ Solution<T> WindowSolver<T>::solve() {
   // ---- 3. Slices, runs, merge. The pool holds the output plus the few pairs per slice found just
   //         outside it (resolved by deduplicate()), reserved once: growing it would copy it.
   for (const auto& w : windows) {
-    const auto s = plan(w.first, w.second);
+    const auto s = plan(w);
     slices_.insert(slices_.end(), s.begin(), s.end());
   }
-  reserve_pool(total + 4 * static_cast<index_t>(slices_.size()) + 8);
+  reserve_pool(required + 4 * static_cast<index_t>(slices_.size()) + 8);
   event(c_, "slices", {{"slices", static_cast<std::int64_t>(slices_.size())}});
-  for (std::size_t i = 0; i < slices_.size(); ++i) run_slice(slices_[i], static_cast<index_t>(i));
-  const index_t removed = deduplicate();
+  for (std::size_t i = 0; i < slices_.size(); ++i) {
+    if (run_slice(slices_[i], static_cast<index_t>(i))) continue;
+    // A partial cluster that is not numerically equal: all of its eigenvalues are needed.
+    Slice& s = slices_[i];
+    warn(c_, "cluster [" + fmt(s.lo.s) + ", " + fmt(s.hi.s) + "] is not numerically multiple: all " +
+                 std::to_string(s.count()) + " of its eigenvalues computed");
+    for (auto& w : windows)
+      if (w.lo.s == s.lo.s && w.hi.s == s.hi.s) w.want = -1;
+    required += s.count() - s.want;
+    cert.count_inertia = required;
+    s.want = -1;
+    run_slice(s, static_cast<index_t>(i));
+  }
+  index_t removed = deduplicate();
+  if (repair() > 0) removed += deduplicate();
   if (removed > 0) event(c_, "deduplicate", {{"removed", static_cast<std::int64_t>(removed)}});
+  rep.slices = reports_;
 
-  // ---- 4. Global certificate: distinct pairs inside the windows vs the inertia counts.
-  auto inside_windows = [&](double l) {
-    for (const auto& w : windows)
-      if (l >= w.first.s && l <= w.second.s) return true;
-    return false;
+  // ---- 4. Global certificate: distinct pairs per window vs its inertia count (partial cluster:
+  //         at least the copies required, of which exactly that many are kept).
+  auto window_of = [&](double l) -> index_t {
+    if (in_band(l)) return -1;
+    for (std::size_t w = 0; w < windows.size(); ++w)
+      if (l >= windows[w].lo.s && l <= windows[w].hi.s) return static_cast<index_t>(w);
+    return -1;
   };
-  std::vector<index_t> in;
-  for (index_t j = 0; j < pool_.used; ++j)
-    if (inside_windows(pool_.lambda[j]) && !in_band(pool_.lambda[j])) in.push_back(j);
+  std::vector<index_t> in, found(windows.size(), 0);
+  for (index_t j = 0; j < pool_.used; ++j) {
+    const index_t w = window_of(pool_.lambda[j]);
+    if (w < 0) continue;
+    const Window& win = windows[static_cast<std::size_t>(w)];
+    if (win.want >= 0 && found[static_cast<std::size_t>(w)] >= win.want) continue;
+    ++found[static_cast<std::size_t>(w)];
+    in.push_back(j);
+  }
   cert.count_found = static_cast<index_t>(in.size());
-  cert.passed = cert.count_found == cert.count_inertia;
+  cert.passed = true;
+  for (std::size_t w = 0; w < windows.size(); ++w) cert.passed = cert.passed && found[w] == windows[w].required();
   event(c_, "certificate", {{"lower", cert.lower}, {"upper", cert.upper},
                             {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
                             {"count_found", static_cast<std::int64_t>(cert.count_found)}, {"passed", cert.passed}});
@@ -1087,7 +1470,9 @@ Solution<T> WindowSolver<T>::solve() {
     sol.eigenvalues.push_back(pool_.lambda[j]);
     metrics.push_back(pool_.metrics[j]);
   }
-  bool all_ok = static_cast<index_t>(sol.eigenvalues.size()) == expected && expected == (mode == TargetMode::Interval ? total : k);
+  const index_t expected = mode == TargetMode::Interval ? total : std::min(k, required);
+  const index_t want_out = mode == TargetMode::Interval ? total : k;
+  bool all_ok = static_cast<index_t>(sol.eigenvalues.size()) == want_out;
   if (static_cast<index_t>(sol.eigenvalues.size()) != expected)
     warn(c_, "only " + std::to_string(sol.eigenvalues.size()) + " of " + std::to_string(expected) + " pairs found");
   add_pair_reports<T>(rep, sol.eigenvalues, metrics, cfg.tol, all_ok);
