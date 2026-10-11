@@ -111,9 +111,10 @@ struct FactorOptions {
   double single_null_pivot_tol = 1e-4;  ///< the same for Single factorizations (smumps)
   bool deterministic = true;  ///< ICNTL(48)=0: no L0-OpenMP tree parallelism, so factorizations and
                               ///< solves are bitwise reproducible for a fixed thread count. false
-                              ///< (ICNTL(48)=1) took 12% less time to factorize and 14% less to
-                              ///< solve on a 2-D Laplacian, n = 2.5e5, 2 threads (likely more with
-                              ///< many threads and small fronts); results then vary in the last bits
+                              ///< (ICNTL(48)=1) saved 10-12% of the factorization time and 20-26%
+                              ///< of 16-RHS solve time (2-D Laplacian n = 2.5e5, complex Hermitian
+                              ///< n = 1e5; 2 threads, likely more with many threads); results then
+                              ///< vary in the last bits from run to run
   int verbosity = 0;          ///< 0 silent; > 0 MUMPS diagnostics (ICNTL(4) = min(verbosity, 4)) on
                               ///< stdout: MUMPS treats Fortran unit 0 (stderr) as "off"
 };
