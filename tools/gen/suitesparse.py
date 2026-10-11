@@ -9,9 +9,10 @@ Pipeline per matrix (archives are untrusted data):
   2. extract with tarfile filter='data' (no absolute paths, links out of the tree, devices) after
      checking the total unpacked size, and pick <Name>.mtx or an auxiliary member such as
      <Name>_M.mtx (the Guettel TEM archives ship the pencil (C, M): curl-curl and mass matrix).
-  3. scipy.io.mmread; a 'general' file holding a single triangle is symmetrized; explicit zeros are
-     dropped; the matrix must be Hermitian (complex-symmetric matrices are rejected: they are not
-     valid cases); an O(eps) defect is removed by taking the Hermitian part.
+  3. scipy.io.mmread (integer files become float64); explicit zeros are dropped, then a 'general'
+     file holding a single triangle is symmetrized; the matrix must be Hermitian (complex-symmetric
+     matrices are rejected: they are not valid cases); an O(eps) defect is removed by taking the
+     Hermitian part.
   4. problem by inspection: one matrix -> HEP; a pair -> GHEP when B is proven HPD by a symmetric
      diagonal-pivoting factorization (Sylvester inertia), GHIEP otherwise.
   5. targets: sigma inside the spectrum from a cheap Rayleigh-Ritz estimate (never from reference
@@ -255,28 +256,40 @@ def _restore_triangle(a: sp.csr_matrix) -> tuple[sp.csr_matrix, str | None]:
 
 
 def read_hermitian(path: Path) -> tuple[sp.csr_matrix, dict[str, Any]]:
-    """Read a MatrixMarket file as a full Hermitian CSR matrix. Raises Skipped otherwise.
+    """Read a MatrixMarket file as a full Hermitian CSR matrix (float64 or complex128). Raises
+    Skipped otherwise, also for malformed files.
 
+    Explicit zeros are dropped before the storage rule is applied: a 'general' file that stores
+    one triangle plus explicit zeros in the other still stores a single triangle numerically.
     Returns (A, info) with info = {mm_header, notes}.
     """
-    rows, cols, entries, fmt, field, symmetry = scipy.io.mminfo(path)
+    try:
+        rows, cols, entries, fmt, field, symmetry = scipy.io.mminfo(path)
+    except ValueError as exc:
+        raise Skipped(f"{path.name}: not a MatrixMarket file ({exc})") from exc
     header = {"rows": rows, "cols": cols, "entries": entries, "format": fmt, "field": field,
               "symmetry": symmetry}
     if rows != cols:
         raise Skipped(f"{path.name}: not square ({rows} x {cols})")
     if field == "pattern" or symmetry == "skew-symmetric":
         raise Skipped(f"{path.name}: {field}/{symmetry} matrix is not a Hermitian operator")
-    a = sp.csr_matrix(scipy.io.mmread(path, spmatrix=False))
-    a.sum_duplicates()
+    try:
+        a = sp.csr_matrix(scipy.io.mmread(path, spmatrix=False))
+    except ValueError as exc:
+        raise Skipped(f"{path.name}: unreadable MatrixMarket data ({exc})") from exc
     notes = []
-    if symmetry == "general":
-        a, note = _restore_triangle(a)
-        if note:
-            notes.append(note)
+    if field == "integer":
+        a = a.astype(np.float64)   # the case format stores float64 or complex128 only
+        notes.append("integer file stored as float64")
+    a.sum_duplicates()
     stored = a.nnz
     a.eliminate_zeros()
     if a.nnz < stored:
         notes.append(f"dropped {stored - a.nnz} explicit zeros")
+    if symmetry == "general":
+        a, note = _restore_triangle(a)
+        if note:
+            notes.append(note)
     defect = case.hermitian_defect(a)
     if defect > HERMITIAN_TOL:
         if np.iscomplexobj(a.data) and spla.norm(a - a.T) <= HERMITIAN_TOL * spla.norm(a):

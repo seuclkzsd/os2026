@@ -101,6 +101,41 @@ def test_explicit_zeros_dropped_and_real_complex_demoted(tmp_path):
         ss.read_hermitian(path)
 
 
+def test_single_triangle_with_explicit_zeros_in_the_other_is_symmetrized(tmp_path):
+    """The storage rule looks at numerical nonzeros: a stored zero in the upper triangle of a
+    lower-triangle file must not turn it into a (non-Hermitian) full matrix."""
+    path = tmp_path / "lowz.mtx"
+    path.write_text("%%MatrixMarket matrix coordinate real general\n3 3 6\n"
+                    "1 1 2\n2 1 -1\n3 2 -0.5\n2 2 3\n3 3 1\n1 2 0\n")
+    m, info = ss.read_hermitian(path)
+    assert m.toarray().tolist() == [[2.0, -1.0, 0.0], [-1.0, 3.0, -0.5], [0.0, -0.5, 1.0]]
+    assert info["notes"] == ["dropped 1 explicit zeros",
+                             "'general' file stores only the lower triangle: symmetrized"]
+
+
+def test_integer_file_becomes_float64_case(tmp_path):
+    path = tmp_path / "int.mtx"
+    path.write_text("%%MatrixMarket matrix coordinate integer symmetric\n3 3 4\n1 1 2\n2 1 -1\n2 2 2\n3 3 5\n")
+    m, info = ss.read_hermitian(path)
+    assert m.dtype == np.float64 and m.toarray().tolist() == [[2.0, -1.0, 0.0], [-1.0, 2.0, 0.0], [0.0, 0.0, 5.0]]
+    assert info["notes"] == ["integer file stored as float64"]
+    c = case.load_case(case.save_case("t-int", m, meta={"family": "t", "problem": "HEP"}, root=tmp_path))
+    assert c.A.dtype == np.float64 and c.meta["dtype"] == "float64"
+
+
+@pytest.mark.parametrize("text", [
+    "%%MatrixMarket matrix coordinate real symmetric\n3 3 2\n1 1 2\n9 1 1\n",
+    "%%MatrixMarket matrix coordinate real symmetric\n3 3 4\n1 1 2\n2 1 1\n",
+    "%%MatrixMarket matrix coordinate realx symmetric\n3 3 1\n1 1 2\n",
+    "\0" * 64,
+], ids=["index-out-of-range", "truncated", "bad-banner", "binary"])
+def test_malformed_files_are_skipped(tmp_path, text):
+    path = tmp_path / "bad.mtx"
+    path.write_text(text)
+    with pytest.raises(ss.Skipped, match="bad.mtx"):
+        ss.read_hermitian(path)
+
+
 def test_pencils_classified_by_inertia_of_b(tmp_path):
     mirror = tmp_path / "mirror"
     _publish(mirror, "K", _sym(30, 4), "symmetric")
