@@ -9,7 +9,9 @@
 //   assemble: R calls of assemble(1, -sigma, vals) into a preallocated double (and float) array;
 //             peak = VmHWM growth over the calls (the transient workspace of assemble);
 //   check:    the assembled values against assemble_full (to 4e-16 relative on the upper pattern),
-//             plus an FNV-1a hash of the assembled bits, to compare implementations exactly.
+//             plus an FNV-1a hash of the assembled bits, to compare implementations exactly;
+//   mumps:    retained memory of the factor module's MUMPS input arrays (mumps::Input) for the
+//             pencil, i.e. what the factorization keeps besides it.
 // Prints one JSON line. Run through tools/run/guard.py.
 #include <malloc.h>
 
@@ -27,6 +29,7 @@
 #include <variant>
 #include <vector>
 
+#include "factor/mumps_input.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/io.hpp"
 #include "hsolve/sparse.hpp"
@@ -133,6 +136,20 @@ std::string run(const CsrMatrix<T>& a, const CsrMatrix<T>* b, int reps) {
   std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(h));
   os << ", \"check\": \"" << (bad == 0 ? "ok" : "FAIL " + std::to_string(bad)) << "\", \"values_fnv1a\": \"" << hex
      << "\"";
+
+  // What the factor module keeps besides the pencil: its MUMPS input arrays (src/factor, read
+  // only here). Real T: 1-based irn/jcn + values per pattern entry; complex T: the 2n real
+  // embedding plus a complex scratch copy and int64 source indices.
+  {
+    const ProcMem f0 = fresh_baseline();
+    std::optional<hs::mumps::Input<T, double>> input;
+    input.emplace(*pencil);
+    input->assemble(1.0, -sigma);
+    const ProcMem f1 = proc_mem();
+    os << ", \"mumps_input_entries\": " << input->nnz()
+       << ", \"mumps_input_retained_mb\": " << static_cast<double>(f1.rss - f0.rss) / 1e6
+       << ", \"mumps_input_bytes_per_pattern_entry\": " << static_cast<double>(f1.rss - f0.rss) / static_cast<double>(nnz);
+  }
   return os.str();
 }
 
