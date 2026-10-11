@@ -13,6 +13,10 @@
 //     LargestAlgebraic: above) when nothing lies beyond the other end (spectrum end) or the other
 //     end borders the excluded zero band. One-sided runs at a count point reuse its factorization.
 //     Smallest / largest locate the window end U (L) by inertia search: counts are exact for B HPD.
+//     The zero band (zero_filter_tol) is cut out of every window between two counted points.
+// A nearest target whose selection or certificate window reaches the zero band is handed to the
+// windows as [sigma - r, sigma + r] minus the band, r grown from the plain run's Ritz hints until
+// the counts hold k eigenvalues outside the band (a single shift there converges null-space copies).
 #include <algorithm>
 #include <cmath>
 #include <limits>
