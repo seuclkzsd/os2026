@@ -136,6 +136,9 @@ class BlockKrylovSchurBasis {
   double op_scale() const noexcept { return std::ldexp(1.0, scale_exponent_); }
   /// Columns replaced by random vectors so far (breakdowns), start block included.
   index_t replacements() const noexcept { return replacements_; }
+  /// Block steps orthonormalized by the fast path / by the two-pass fallback (block_general.cpp).
+  index_t fast_steps() const noexcept { return fast_steps_; }
+  index_t fallback_steps() const noexcept { return fallback_steps_; }
 
   /// Start block V(:, 0:p): the first min(p, initial->cols()) columns of *initial (validated by
   /// the caller: column 0 nonzero, the used columns finite), the others deterministic random
@@ -143,10 +146,10 @@ class BlockKrylovSchurBasis {
   /// are replaced. m = 0. Throws InvalidInput when column 0 is numerically zero after scaling.
   void start(const DenseMatrix<T>* initial);
 
-  /// One block step: W = Op U (one apply of p columns), orthonormalized against V(:, 0:m+p) by
-  /// block CGS2 + Cholesky-QR, W = V C + U' R; H(0:m+p, m:m+p) <- C, H(m+p:m+2p, m:m+p) <- R,
-  /// U' becomes the residual block and m grows by p. Requires m + p <= capacity. Throws
-  /// InvalidInput when the operator output is not finite.
+  /// One block step: W = Op U (one apply of p columns), orthonormalized against V(:, 0:m+p)
+  /// (block CGS with DGKS + CholQR2, or the two-pass kernel; block_general.cpp), W = V C + U' R;
+  /// H(0:m+p, m:m+p) <- C, H(m+p:m+2p, m:m+p) <- R, U' becomes the residual block and m grows by
+  /// p. Requires m + p <= capacity. Throws InvalidInput when the operator output is not finite.
   void add_block(LinearOperator<T>& op, GeneralPhaseTimes* times);
 
   /// C = H(m:m+p, 0:m), the coupling of the basis to the residual block (p x m).
@@ -183,6 +186,9 @@ class BlockKrylovSchurBasis {
   /// Divides the p operator outputs at V(:, j:j+p) by the operator scale, fixing the scale at the
   /// first nonzero output block, and throws InvalidInput for non-finite output.
   void scale_output(index_t j);
+  /// Fast path of a block step on V(:, j:j+p) against V(:, 0:j): coef_ and rblk_ receive C and R
+  /// and true is returned; on false the block holds W1 = W - V C1 with C1 in coef_.
+  bool fast_orthonormalize(index_t j);
 
   index_t n_;
   index_t capacity_;
@@ -191,6 +197,8 @@ class BlockKrylovSchurBasis {
   index_t m_ = 0;
   std::uint64_t next_stream_ = 0;  ///< fill_random stream: 0..p-1 start block, then replacements
   index_t replacements_ = 0;
+  index_t fast_steps_ = 0;
+  index_t fallback_steps_ = 0;
   bool scale_fixed_ = false;
   int scale_exponent_ = 0;  ///< the iteration works with Op / 2^scale_exponent_
   DenseMatrix<T> v_;

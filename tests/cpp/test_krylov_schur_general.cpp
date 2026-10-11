@@ -1505,6 +1505,82 @@ TYPED_TEST(KrylovSchurGeneralTyped, BlockPhaseTimesAccountForTheRun) {
             times.total_s * (1.0 + 1e-9));
 }
 
+/// The block Krylov-Schur relation of a basis: V = V(:, 0:m) orthonormal and
+/// ||Op V / s - V H(0:m, 0:m)||_F = ||C||_F (s = op_scale(); the residual block U is orthonormal
+/// and orthogonal to V, so Op V / s - V H = U C).
+template <class T>
+void check_block_relation(hs::LinearOperator<T>& op,
+                          const hs::eigen_detail::BlockKrylovSchurBasis<T>& basis, double tol) {
+  const index_t n = basis.n(), m = basis.size();
+  DenseMatrix<T> eye(m, m);
+  for (index_t i = 0; i < m; ++i) eye(i, i) = T(1);
+  DenseMatrix<T> v(n, m), ov(n, m), h(m, m);
+  basis.combine(eye.data(), m, m, v.data(), n);
+  DenseMatrix<T> g(m, m);
+  hs::linalg::gram(n, m, v.data(), n, v.data(), n, g.data(), m);
+  for (index_t j = 0; j < m; ++j)
+    for (index_t i = 0; i < m; ++i) EXPECT_NEAR(std::abs(g(i, j) - T(i == j ? 1.0 : 0.0)), 0.0, tol);
+  op.apply(v.data(), n, ov.data(), n, m);
+  for (index_t j = 0; j < m; ++j) {
+    for (index_t i = 0; i < m; ++i) h(i, j) = basis.h()[i + j * basis.ldh()];
+    hs::linalg::scal(n, T(1.0 / basis.op_scale()), ov.col(j));
+  }
+  const DenseMatrix<T> vh = product(v, h);
+  for (index_t j = 0; j < m; ++j)
+    for (index_t i = 0; i < n; ++i) ov(i, j) -= vh(i, j);
+  const double c = frobenius(basis.coupling());
+  EXPECT_NEAR(frobenius(ov), c, tol * std::max(1.0, c));
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockBasisStepsKeepTheRelation) {
+  // Generic blocks take the fast path (DGKS block CGS + CholQR2); a start block inside an
+  // invariant subspace makes the first step dependent on the basis, which the two-pass fallback
+  // continues with random replacements. Both keep V orthonormal and the relation exact, also
+  // through a thick restart.
+  using T = TypeParam;
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(150), &all), 23);
+  const index_t n = a.rows();
+  hs::test::DenseOperator<T> op(a);
+  hs::eigen_detail::BlockKrylovSchurBasis<T> basis(n, 40, 4, 2026);
+  basis.start(nullptr);
+  for (index_t step = 0; step < 10; ++step) basis.add_block(op, nullptr);
+  EXPECT_EQ(basis.size(), 40);
+  EXPECT_EQ(basis.fast_steps(), 10);
+  EXPECT_EQ(basis.fallback_steps(), 0);
+  EXPECT_EQ(basis.replacements(), 0);
+  check_block_relation(op, basis, 1e-12);
+  // Thick restart keeping a leading block of the Schur form, then two more blocks.
+  const DenseMatrix<T> c = basis.coupling();
+  hs::eigen_detail::ProjectedSchur<T> ps(basis.size(), basis.h(), basis.ldh());
+  index_t k = 20;
+  if (!ps.is_boundary(k)) ++k;
+  basis.compress(ps, c, k, nullptr);
+  EXPECT_EQ(basis.size(), k);
+  check_block_relation(op, basis, 1e-12);
+  basis.add_block(op, nullptr);
+  basis.add_block(op, nullptr);
+  check_block_relation(op, basis, 1e-12);
+
+  std::vector<T> diag(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) diag[i] = T(1.0 + 0.5 * static_cast<double>(i));
+  hs::test::DiagonalOperator<T> dop(diag);
+  DenseMatrix<T> start(n, 4);
+  for (index_t col = 0; col < 4; ++col) {
+    const double x = static_cast<double>(col);
+    start(2, col) = T(1.0 + x);
+    start(10, col) = T(-2.0 + 0.5 * x);
+    start(30, col) = T(0.5 - 0.25 * x * x);
+  }
+  hs::eigen_detail::BlockKrylovSchurBasis<T> inv(n, 40, 4, 2026);
+  inv.start(&start);
+  EXPECT_EQ(inv.replacements(), 1);  // rank 3 start block
+  for (index_t step = 0; step < 4; ++step) inv.add_block(dop, nullptr);
+  EXPECT_GE(inv.fallback_steps(), 1);
+  EXPECT_GE(inv.replacements(), 4);  // the three invariant directions are exhausted at once
+  check_block_relation(dop, inv, 1e-12);
+}
+
 TEST(KrylovSchurGeneral, BlockLayoutRules) {
   using hs::eigen_detail::block_general_layout;
   // Real T, nev = 18, auto ncv (single-vector 37), p = 8: spare = 20 -> 24, base = 40, + 4 blocks.
