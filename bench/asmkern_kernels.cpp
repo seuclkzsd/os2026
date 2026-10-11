@@ -7,6 +7,7 @@
 //       threads): read (sum of one array), triad (a = b + s c; 3 arrays counted, no write
 //       allocate) and update (y += s x; 3 transfers per element counted), GB/s, best of reps.
 //   bench_asmkern_kernels shapes [--shapes SPEC] [--routes LIST] [--reps 7] [--pool-mb 1024]
+//       [--inpar 0|1]
 //       per-call time of BLAS calls of the given shapes, the real routine against hook routes,
 //       interleaved (variant order rotated per repetition), median over repetitions; each
 //       repetition cycles through a pool of distinct operands (pool-mb in total) so that the
@@ -16,7 +17,9 @@
 //       gemv (flags N/T, n unused: m x k matrix). LIST: ','-separated route specifications
 //       (HS_BLAS_ROUTE syntax) with '+' instead of ',' inside one, e.g. "gemv1,narrow+par".
 //       Prints per shape: real time, each route's time, speedup, GB/s of the matrix, and the max
-//       relative difference to the real routine's result.
+//       relative difference to the real routine's result. --inpar 1: every thread makes its own
+//       calls (own operand pool) at the same time inside one parallel region, as MUMPS' L0
+//       subtrees do (concurrent callers, the BLAS single-threaded); times are per thread.
 // Output: markdown tables on stdout. Run through tools/run/guard.py (cores, OMP_NUM_THREADS).
 #include <omp.h>
 
@@ -321,6 +324,7 @@ int run_shapes(const std::map<std::string, std::string>& o) {
   const std::string routes_spec = o.count("--routes") ? o.at("--routes") : "gemv1,trsv1,narrow,par";
   const int reps = o.count("--reps") ? std::atoi(o.at("--reps").c_str()) : 7;
   const double pool_mb = o.count("--pool-mb") ? std::atof(o.at("--pool-mb").c_str()) : 1024.0;
+  const bool inpar = o.count("--inpar") && std::atoi(o.at("--inpar").c_str()) != 0;
   std::vector<std::string> names;
   std::vector<hs::blas::RouteConfig> cfgs;
   std::size_t pos = 0;
@@ -338,7 +342,10 @@ int run_shapes(const std::map<std::string, std::string>& o) {
       return 2;
     }
   }
-  std::printf("threads %d, BLAS %s, AVX-512 %d, pool %.0f MB, reps %d\n\n", omp_get_max_threads(),
+  std::printf("threads %d, %s, BLAS %s, AVX-512 %d, pool %.0f MB, reps %d\n\n",
+              omp_get_max_threads(),
+              inpar ? "calls inside a parallel region by every thread (us and GB/s per thread)"
+                    : "calls from one thread",
               hs::blas::real_blas().library.c_str(), hs::blas::cpu_has_avx512f() ? 1 : 0, pool_mb,
               reps);
   std::printf("| shape | real us | real GB/s |");
@@ -347,30 +354,49 @@ int run_shapes(const std::map<std::string, std::string>& o) {
   for (std::size_t i = 0; i < names.size(); ++i) std::printf("---|---|---|---|");
   std::printf("\n");
   for (const Shape& sh : parse_shapes(spec)) {
-    Case cs;
-    cs.setup(sh, pool_mb);
+    // inpar: one operand set per thread, every call made inside a parallel region by all threads
+    // at once (as in MUMPS' L0 subtrees: concurrent callers, no nested threading).
+    const int nthr = inpar ? omp_get_max_threads() : 1;
+    std::vector<Case> cs(nthr);
+    if (inpar) {
+#pragma omp parallel num_threads(nthr)
+      cs[omp_get_thread_num()].setup(sh, pool_mb / nthr);
+    } else {
+      cs[0].setup(sh, pool_mb);
+    }
+    auto timed = [&](const hs::blas::RouteConfig* cfg) {
+      if (!inpar) return cs[0].time(cfg);
+      std::vector<double> tt(nthr);
+#pragma omp parallel num_threads(nthr)
+      tt[omp_get_thread_num()] = cs[omp_get_thread_num()].time(cfg);
+      double sum = 0;
+      for (double x : tt) sum += x;
+      return sum / nthr;
+    };
     const std::size_t nv = cfgs.size() + 1;
     std::vector<std::vector<double>> t(nv);
-    cs.time(nullptr);  // warm-up
+    timed(nullptr);  // warm-up
     for (int r = 0; r < reps; ++r)
       for (std::size_t q = 0; q < nv; ++q) {
         const std::size_t v = (q + r) % nv;
-        t[v].push_back(cs.time(v == 0 ? nullptr : &cfgs[v - 1]));
+        t[v].push_back(timed(v == 0 ? nullptr : &cfgs[v - 1]));
       }
     const double t_real = median(t[0]);
-    std::printf("| %s %s %dx%dx%d | %.1f | %.1f |", sh.op.c_str(), sh.flags.c_str(), sh.m, sh.n,
-                sh.k, t_real * 1e6, cs.a_bytes / t_real * 1e-9);
+    std::printf("| %s %s %dx%dx%d | %.2f | %.1f |", sh.op.c_str(), sh.flags.c_str(), sh.m, sh.n,
+                sh.k, t_real * 1e6, cs[0].a_bytes / t_real * 1e-9);
     for (std::size_t v = 1; v < nv; ++v) {
       const double tv = median(t[v]);
-      std::printf(" %.1f | %.2f | %.1f | %.1e |", tv * 1e6, t_real / tv, cs.a_bytes / tv * 1e-9,
-                  cs.check(&cfgs[v - 1]));
+      std::printf(" %.2f | %.2f | %.1f | %.1e |", tv * 1e6, t_real / tv,
+                  cs[0].a_bytes / tv * 1e-9, cs[0].check(&cfgs[v - 1]));
     }
     std::printf("\n");
     std::fflush(stdout);
-    for (double* a : cs.as) std::free(a);
-    std::free(cs.b);
-    std::free(cs.c0);
-    std::free(cs.c);
+    for (Case& c : cs) {
+      for (double* a : c.as) std::free(a);
+      std::free(c.b);
+      std::free(c.c0);
+      std::free(c.c);
+    }
   }
   return 0;
 }

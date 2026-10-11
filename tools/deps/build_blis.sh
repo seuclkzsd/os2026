@@ -37,6 +37,8 @@ main() {
   (cd "$build" && CC="$CC" CXX="$CXX" ./configure "${args[@]}" >"$build/configure.log" 2>&1 &&
      make -j"$(deps_jobs)" >"$build/build.log" 2>&1 && make install >"$build/install.log" 2>&1) ||
     { tail -40 "$build"/*.log >&2; deps_die "build failed (logs in $build)"; }
+  local lib
+  for lib in "$prefix"/lib/libblis.so.?; do deps_check_glibc "$lib"; done
   deps_info "$prefix" "$tarball" "$sha" "${args[@]}"
   echo "done: $prefix"
 }

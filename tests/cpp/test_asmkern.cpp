@@ -417,6 +417,67 @@ TEST(BlasHookRouter, GemvRouteAndParallelSplitPropagateNaN) {
   for (fint i = 0; i < m; ++i) EXPECT_EQ(std::isnan(c[i]), i == 10) << i;
 }
 
+// The small triangular solve against the real dtrsm: every uplo / trans / diag, edge orders,
+// padded leading dimensions; a unit diagonal is never read (NaN there), NaN in B propagates.
+TEST(BlasHookKernels, SmallTrsmMatchesRealDtrsm) {
+  std::uint64_t seed = 500;
+  for (Isa isa : isas())
+    for (char uplo : {'U', 'L', 'u'})
+      for (char tr : {'N', 'T', 'C'})
+        for (char diag : {'N', 'U'})
+          for (fint m : {1, 2, 7, 8, 9, 17, 64, 100})
+            for (fint n : {1, 2, 4, 5}) {
+              const fint lda = m + 3, ldb = m + 1;
+              auto a = random_vec(static_cast<std::size_t>(lda) * m, ++seed);
+              for (fint j = 0; j < m; ++j)
+                for (fint i = 0; i < m; ++i) {
+                  double& v = a[i + static_cast<std::size_t>(j) * lda];
+                  v = i == j ? (diag == 'U' ? kNaN : 2.0 + 0.5 * v) : v / m;
+                }
+              const auto b0 = random_vec(static_cast<std::size_t>(ldb) * n, ++seed);
+              std::vector<double> got = b0, want = b0;
+              hs::blas::small_trsm_left(isa, uplo, tr, diag, m, n, a.data(), lda, got.data(), ldb);
+              const char s = 'L';
+              const double one = 1.0;
+              hs::blas::real_blas().dtrsm(&s, &uplo, &tr, &diag, &m, &n, &one, a.data(), &lda,
+                                          want.data(), &ldb, 1, 1, 1, 1);
+              for (std::size_t i = 0; i < got.size(); ++i)
+                ASSERT_NEAR(got[i], want[i], 1e-13 * (1.0 + std::abs(want[i])))
+                    << (isa == Isa::Avx512 ? "avx512 " : "portable ") << uplo << tr << diag
+                    << " m=" << m << " n=" << n << " at " << i;
+            }
+  // NaN in B: the solved entries that depend on it become NaN, the others stay finite.
+  for (Isa isa : isas()) {
+    const fint m = 20;
+    std::vector<double> a(static_cast<std::size_t>(m) * m, 0.0);
+    for (fint i = 0; i < m; ++i) a[i + static_cast<std::size_t>(i) * m] = 1.0;
+    for (fint i = 1; i < m; ++i) a[i + static_cast<std::size_t>(i - 1) * m] = 0.5;  // lower band
+    std::vector<double> b(m, 1.0);
+    b[5] = kNaN;
+    hs::blas::small_trsm_left(isa, 'L', 'N', 'N', m, 1, a.data(), m, b.data(), m);
+    for (fint i = 0; i < m; ++i) EXPECT_EQ(std::isnan(b[i]), i >= 5) << i;
+  }
+}
+
+TEST(BlasHookRouter, DtrsmSmallRoute) {
+  const RouteConfig cfg = hs::blas::parse_route_config("strsm=32,trsv=4,maxn=8");
+  const fint lda = 70;
+  auto a = random_vec(static_cast<std::size_t>(lda) * 64, 600);
+  for (fint i = 0; i < 64; ++i) a[i + static_cast<std::size_t>(i) * lda] += 4.0;
+  for (fint m : {8, 32, 33})
+    for (fint n : {1, 4, 8, 9})
+      for (double alpha : {1.0, 2.0}) {
+        auto b = random_vec(static_cast<std::size_t>(m) * n, 601);
+        const Route r =
+            hs::blas::dtrsm(cfg, 'L', 'U', 'T', 'U', m, n, alpha, a.data(), lda, b.data(), m);
+        const Route want = alpha != 1.0                ? Route::Real
+                           : (m <= 32 && n <= 8)       ? Route::SmallTrsm
+                           : n <= 4                    ? Route::Trsv
+                                                       : Route::Real;
+        EXPECT_EQ(r, want) << m << " " << n << " " << alpha;
+      }
+}
+
 TEST(BlasHookRouter, DtrsmNarrowRoutesToTrsvAndMatchesReal) {
   const RouteConfig on = hs::blas::parse_route_config("trsv=2");
   const RouteConfig off = hs::blas::parse_route_config("off");

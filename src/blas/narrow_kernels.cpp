@@ -1,5 +1,5 @@
-// BLAS hook: narrow dgemm kernels, C = alpha * op(A) * B + beta * C for 1 <= N <= 64 columns
-// (blas_hook.hpp). Shapes of MUMPS' multi-right-hand-side solves (N = p = 2..16) and of narrow
+// BLAS hook: narrow dgemm kernels, C = alpha * op(A) * B + beta * C for 1 <= N <= 64 columns,
+// and a small triangular solve (blas_hook.hpp). Shapes of MUMPS' multi-right-hand-side solves (N = p = 2..16) and of narrow
 // panel updates: memory-bound, so the kernels stream A exactly once and never pack it (OpenBLAS'
 // level-3 path copies A into a packed buffer first, which for N <= 8 costs about as much as the
 // multiplication; its small-matrix kernels only take M*N*K <= 1e6).
@@ -280,6 +280,88 @@ HS_AVX512 void tn_rows_avx512(fint i0, fint i1, fint n, fint k, double alpha, co
   }
 }
 
+// ------------------------------------------------------------------------- small triangular solve
+// B(m x n) := op(A)^{-1} B (side L, alpha = 1), the reference BLAS loop orders: op(A) = A with
+// A lower / upper - column-oriented forward / backward substitution (axpy with the contiguous
+// column of A, vectorized over rows); op(A) = A^T - dot products of the contiguous column i of A
+// with the solved part of the column of B. No skipping of zero entries (as OpenBLAS). The unit
+// diagonal is never read.
+
+struct DotPortable {
+  static double dot(const double* x, const double* y, fint len) {
+    double s = 0.0;
+    for (fint j = 0; j < len; ++j) s += x[j] * y[j];
+    return s;
+  }
+};
+
+struct DotAvx512 {
+  HS_AVX512 static double dot(const double* x, const double* y, fint len) {
+    __m512d acc = _mm512_setzero_pd();
+    fint j = 0;
+    for (; j + 8 <= len; j += 8)
+      acc = _mm512_fmadd_pd(_mm512_loadu_pd(x + j), _mm512_loadu_pd(y + j), acc);
+    if (j < len) {
+      const __mmask8 tail = static_cast<__mmask8>((1u << (len - j)) - 1u);
+      acc = _mm512_fmadd_pd(_mm512_maskz_loadu_pd(tail, x + j), _mm512_maskz_loadu_pd(tail, y + j),
+                            acc);
+    }
+    return _mm512_reduce_add_pd(acc);
+  }
+};
+
+template <class Dot, bool kUnit>
+inline __attribute__((always_inline)) void trsm_small_body(bool upper, bool trans, fint m, fint n,
+                                                           const double* a, fint lda, double* b,
+                                                           fint ldb) {
+  if (!trans) {
+    // op(A) = A: column-oriented; forward for lower, backward for upper.
+    for (fint step = 0; step < m; ++step) {
+      const fint j = upper ? m - 1 - step : step;
+      const double* aj = a + static_cast<idx>(j) * lda;
+      const fint i0 = upper ? 0 : j + 1;
+      const fint i1 = upper ? j : m;
+      for (fint c = 0; c < n; ++c) {
+        double* bc = b + static_cast<idx>(c) * ldb;
+        double x = bc[j];
+        if (!kUnit) x /= aj[j];
+        bc[j] = x;
+        for (fint i = i0; i < i1; ++i) bc[i] -= aj[i] * x;
+      }
+    }
+  } else {
+    // op(A) = A^T: dot form; forward for upper A (A^T lower), backward for lower A.
+    for (fint step = 0; step < m; ++step) {
+      const fint i = upper ? step : m - 1 - step;
+      const double* ai = a + static_cast<idx>(i) * lda;
+      const fint j0 = upper ? 0 : i + 1;
+      const fint len = upper ? i : m - 1 - i;
+      for (fint c = 0; c < n; ++c) {
+        double* bc = b + static_cast<idx>(c) * ldb;
+        double x = bc[i] - Dot::dot(ai + j0, bc + j0, len);
+        if (!kUnit) x /= ai[i];
+        bc[i] = x;
+      }
+    }
+  }
+}
+
+void trsm_small_portable(bool upper, bool trans, bool unit, fint m, fint n, const double* a,
+                         fint lda, double* b, fint ldb) {
+  if (unit)
+    trsm_small_body<DotPortable, true>(upper, trans, m, n, a, lda, b, ldb);
+  else
+    trsm_small_body<DotPortable, false>(upper, trans, m, n, a, lda, b, ldb);
+}
+
+HS_AVX512 void trsm_small_avx512(bool upper, bool trans, bool unit, fint m, fint n,
+                                 const double* a, fint lda, double* b, fint ldb) {
+  if (unit)
+    trsm_small_body<DotAvx512, true>(upper, trans, m, n, a, lda, b, ldb);
+  else
+    trsm_small_body<DotAvx512, false>(upper, trans, m, n, a, lda, b, ldb);
+}
+
 #undef HS_AVX512
 
 }  // namespace
@@ -306,6 +388,19 @@ void narrow_gemm_tn(Isa isa, int threads, fint m, fint n, fint k, double alpha, 
     else
       tn_rows_portable(i0, i1, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
   });
+}
+
+
+void small_trsm_left(Isa isa, char uplo, char trans, char diag, fint m, fint n, const double* a,
+                     fint lda, double* b, fint ldb) {
+  if (m <= 0 || n <= 0) return;
+  const bool upper = uplo == 'U' || uplo == 'u';
+  const bool tr = !(trans == 'N' || trans == 'n');
+  const bool unit = diag == 'U' || diag == 'u';
+  if (isa == Isa::Avx512)
+    trsm_small_avx512(upper, tr, unit, m, n, a, lda, b, ldb);
+  else
+    trsm_small_portable(upper, tr, unit, m, n, a, lda, b, ldb);
 }
 
 }  // namespace hs::blas

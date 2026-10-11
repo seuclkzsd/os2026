@@ -94,6 +94,9 @@ struct RouteConfig {
   /// column (no level-3 packing; OpenBLAS' dtrsm costs ~1 us even for an 8 x 8 triangle).
   /// 0 = off.
   int trsv_max_n = 0;
+  /// dtrsm with SIDE = 'L', M <= small_trsm_max_m, 1 <= N <= narrow_max_n, alpha = 1 -> the
+  /// hook's small_trsm_left (before the trsv route). 0 = off.
+  int small_trsm_max_m = 0;
   /// dgemm with 2 <= N <= narrow_max_n, op(B) = B, alpha != 0, Isa::Avx512 -> the hook's narrow
   /// kernels (narrow_gemm_nn / narrow_gemm_tn: A streamed once, no packing).
   bool narrow = false;
@@ -113,9 +116,10 @@ struct RouteConfig {
 };
 
 /// Parses a route specification: comma-separated tokens
-///   off | gemv1 | trsv1 | trsv=<1..64> | narrow | par | all | maxn=<1..64> | minkb=<int> |
-///   threads=<int> | portable
-/// ("trsv1" = trsv=1, "all" = gemv1,trsv=16,narrow,par). isa is Avx512 when cpu_has_avx512f(),
+///   off | gemv1 | trsv1 | trsv=<1..64> | strsm=<1..4096> | narrow | par | all | maxn=<1..64> |
+///   minkb=<int> | threads=<int> | portable
+/// ("trsv1" = trsv=1, "all" = gemv1,trsv=16,strsm=64,narrow,par). isa is Avx512 when
+/// cpu_has_avx512f(),
 /// unless "portable" is
 /// given. Unknown or malformed tokens are skipped and appended (comma-separated) to `unknown`
 /// when given.
@@ -135,7 +139,8 @@ enum class Route : std::uint8_t {
   Trsv = 2,
   Narrow = 3,
   Parallel = 4,
-  SplitK = 5
+  SplitK = 5,
+  SmallTrsm = 6
 };
 const char* route_name(Route r) noexcept;
 
@@ -164,6 +169,15 @@ void narrow_gemm_nn(Isa isa, int threads, fint m, fint n, fint k, double alpha, 
 /// C(m x n) = alpha * A^T * B + beta * C, A k x m (lda), B k x n (ldb), C m x n (ldc).
 void narrow_gemm_tn(Isa isa, int threads, fint m, fint n, fint k, double alpha, const double* a,
                     fint lda, const double* b, fint ldb, double beta, double* c, fint ldc);
+
+/// B(m x n) := op(A)^{-1} B for side L and alpha = 1 (dtrsm semantics; uplo / trans / diag
+/// characters in any case, 'C' = 'T'), the reference BLAS loop orders without level-3 packing:
+/// for the small triangles of MUMPS' solves (m <= 64 or so), where OpenBLAS' dtrsm spends ~1 us
+/// per call in overhead. Serial; a diagonal marked unit is never read. This kernel is the
+/// project's own (no existing open-source small-trsm kernel fits: LIBXSMM's is for packed
+/// batches, BLIS' small trsm is in AMD's fork only); provenance in docs/BLAS.md.
+void small_trsm_left(Isa isa, char uplo, char trans, char diag, fint m, fint n, const double* a,
+                     fint lda, double* b, fint ldb);
 
 /// Threads the parallel route would use for a call touching `bytes` of matrix data: 1 inside a
 /// parallel region or for bytes < 2 * parallel_min_bytes, else

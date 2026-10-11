@@ -29,12 +29,16 @@ main() {
   local prefix="$HS_DEPS/libxsmm-$ver-$name"
   deps_check "$tarball" "$sha"
   deps_unpack "$tarball" "$build"
+  # glibc 2.17 compatibility of libm calls (common.sh, deps_glibc_compat).
+  export LDFLAGS="${LDFLAGS:-} $(deps_glibc_compat "$build")"
   local flags=(STATIC=0 BLAS=0 WRAP=1 OMP=0 "CC=$CC" "CXX=$CXX" "FC=$FC" FORTRAN=0 "$@")
   echo "libxsmm $ver -> $prefix: ${flags[*]}"
   rm -rf "$prefix"
   (cd "$build" && make -j"$(deps_jobs)" "${flags[@]}" PREFIX="$prefix" >"$build/build.log" 2>&1 &&
      make "${flags[@]}" PREFIX="$prefix" install-minimal >"$build/install.log" 2>&1) ||
     { tail -40 "$build"/*.log >&2; deps_die "build failed (logs in $build)"; }
+  local lib
+  for lib in "$prefix"/lib/libxsmm*.so.1; do deps_check_glibc "$lib"; done
   deps_info "$prefix" "$tarball" "$sha" "${flags[@]}"
   echo "done: $prefix"
 }

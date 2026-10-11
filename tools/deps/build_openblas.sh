@@ -32,8 +32,9 @@ main() {
   local prefix="$HS_DEPS/openblas-$ver-$name"
   deps_check "$tarball" "$sha"
   deps_unpack "$tarball" "$build"
-  # conda-forge drops --gc-sections (breaks OpenBLAS' tests and symbol export); FFLAGS as theirs.
-  export LDFLAGS="${LDFLAGS//-Wl,--gc-sections/}"
+  # conda-forge drops --gc-sections (breaks OpenBLAS' tests and symbol export); FFLAGS as theirs;
+  # glibc 2.17 compatibility of libm calls (common.sh, deps_glibc_compat).
+  export LDFLAGS="${LDFLAGS//-Wl,--gc-sections/} $(deps_glibc_compat "$build")"
   export FFLAGS="${FFLAGS:-} -frecursive"
   local flags=(DYNAMIC_ARCH=1 TARGET=PRESCOTT BINARY=64 NO_LAPACK=0 BUILD_BFLOAT16=1
                NO_AFFINITY=1 USE_THREAD=1 USE_OPENMP=1 NUM_THREADS=128 "CC=$CC" "FC=$FC"
@@ -49,6 +50,7 @@ main() {
   local so
   so="$(cd "$prefix/lib" && ls libopenblas*-r$ver.so | head -1)"
   for l in libblas.so.3 liblapack.so.3 libcblas.so.3; do ln -sf "$so" "$prefix/lib/$l"; done
+  deps_check_glibc "$prefix/lib/$so"
   deps_info "$prefix" "$tarball" "$sha" "${flags[@]}"
   grep -E "^(Core|Library|Architecture)" "$build/Makefile.conf_last" 2>/dev/null >>"$prefix/BUILD-INFO.txt" || true
   echo "done: $prefix"

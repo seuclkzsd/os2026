@@ -196,11 +196,14 @@ RouteConfig parse_route_config(const std::string& spec, std::string* unknown) {
       } else if (key == "all") {
         c.gemm_n1_gemv = c.narrow = c.parallel = true;
         c.trsv_max_n = 16;
+        c.small_trsm_max_m = 64;
       } else if (key == "portable") {
         portable = true;
       } else {
         ok = false;
       }
+    } else if (key == "strsm" && parse_int(val, 1, 4096, &v)) {
+      c.small_trsm_max_m = static_cast<int>(v);
     } else if (key == "trsv" && parse_int(val, 1, 64, &v)) {
       c.trsv_max_n = static_cast<int>(v);
     } else if (key == "maxn" && parse_int(val, 1, 64, &v)) {
@@ -229,6 +232,7 @@ std::string to_string(const RouteConfig& c) {
   };
   if (c.gemm_n1_gemv) add("gemv1");
   if (c.trsv_max_n > 0) add("trsv=" + std::to_string(c.trsv_max_n));
+  if (c.small_trsm_max_m > 0) add("strsm=" + std::to_string(c.small_trsm_max_m));
   if (c.narrow) add("narrow");
   if (c.parallel) add("par");
   if (s.empty()) add("off");
@@ -264,6 +268,8 @@ const char* route_name(Route r) noexcept {
       return "parallel";
     case Route::SplitK:
       return "splitk";
+    case Route::SmallTrsm:
+      return "strsm";
   }
   return "?";
 }
@@ -349,6 +355,11 @@ Route dtrsm(const RouteConfig& cfg, char side, char uplo, char ta, char diag, fi
                      (t == 'N' || t == 'T' || t == 'C') && (d == 'U' || d == 'N') && m >= 0 &&
                      n >= 0 && lda >= std::max<fint>(1, s == 'L' ? m : n) &&
                      ldb >= std::max<fint>(1, m);
+  if (valid && s == 'L' && n >= 1 && n <= cfg.narrow_max_n && m >= 1 &&
+      m <= cfg.small_trsm_max_m && alpha == 1.0) {
+    small_trsm_left(cfg.isa, u, t, d, m, n, a, lda, b, ldb);
+    return Route::SmallTrsm;
+  }
   if (valid && s == 'L' && n >= 1 && n <= cfg.trsv_max_n && m >= 1 && alpha == 1.0) {
     const fint one = 1;
     for (fint j = 0; j < n; ++j)
