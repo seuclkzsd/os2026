@@ -13,8 +13,11 @@
 //     to I. The projection leaves each column orthogonal to V up to O(eps / eta) of its norm
 //     (DGKS), and R1^{-1} amplifies that by at most the condition number (whatever the block
 //     width: the test uses the 2-norm, not a Frobenius estimate, which is >= p for every p x p
-//     factor); no second projection against V follows. Measured with bench/ghiep_fix_ortho.cpp
-//     (see there).
+//     factor); no second projection against V follows. Measured (bench/ghiep_fix_ortho.cpp,
+//     n = 1e5, basis k = 24..72, 2 threads, medians of 21 interleaved rounds, real): faster than
+//     the two-pass kernel below by 1.3-2.0x for p = 2..8 on Krylov-like blocks (80% of each
+//     column cancels, so DGKS takes its second pass) and 1.8-3.1x on random blocks (one pass);
+//     1.3-1.6x at p = 16, 1.0-1.3x at p = 64; same orthogonality (||[V Q]^H [V Q] - I|| <= 4e-15).
 //   * Otherwise the block is restored (W = W1 + V C1) and handed to BlockOrthonormalizer (two
 //     passes of block CGS, each followed by Cholesky-QR, column-wise fallback; block_ortho.hpp).
 //     A column of W that is dependent on [V U] and the block's earlier columns to working
@@ -202,7 +205,7 @@ void BlockKrylovSchurBasis<T>::add_block(LinearOperator<T>& op, GeneralPhaseTime
   }
   PhaseClock clock(phase(times, &GeneralPhaseTimes::orthogonalize_s));
   scale_output(j);
-  if (fast_orthonormalize(j)) {
+  if (block_cgs_cholqr2(n_, j, p_, v_.data(), kBreakdownRatio, coef_, rblk_)) {
     ++fast_steps_;
   } else {
     // Back to W = W1 + V C1 and the two-pass kernel with its column-wise fallback.
@@ -222,16 +225,16 @@ void BlockKrylovSchurBasis<T>::add_block(LinearOperator<T>& op, GeneralPhaseTime
 }
 
 template <class T>
-bool BlockKrylovSchurBasis<T>::fast_orthonormalize(index_t j) {
-  const index_t n = n_, p = p_;
-  T* w = v_.col(j);
-  coef_.resize(j, p);
-  rblk_.resize(p, p);
+bool block_cgs_cholqr2(index_t n, index_t j, index_t p, T* basis, double breakdown_ratio,
+                       DenseMatrix<T>& coef, DenseMatrix<T>& r) {
+  T* w = basis + j * n;
+  coef.resize(j, p);
+  r.resize(p, p);
   std::vector<double> before(static_cast<std::size_t>(p)), after(static_cast<std::size_t>(p));
-  linalg::orthogonalize_block_cgs2<T>(n, j, p, v_.data(), n, nullptr, 0, w, n, nullptr, 0,
-                                      coef_.data(), j, before.data(), after.data());
+  linalg::orthogonalize_block_cgs2<T>(n, j, p, basis, n, nullptr, 0, w, n, nullptr, 0,
+                                      coef.data(), j, before.data(), after.data());
   for (index_t c = 0; c < p; ++c)
-    if (!(after[c] > kBreakdownRatio * before[c])) return false;  // breakdown (or NaN)
+    if (!(after[c] > breakdown_ratio * before[c])) return false;  // breakdown (or NaN)
   const auto nn = static_cast<fint>(n), pp = static_cast<fint>(p);
   DenseMatrix<T> g1(p, p);
   linalg::gram(n, p, w, n, w, n, g1.data(), p);
@@ -244,7 +247,7 @@ bool BlockKrylovSchurBasis<T>::fast_orthonormalize(index_t j) {
   linalg::gram(n, p, w, n, w, n, r2.data(), p);
   double dev2 = 0.0;
   for (index_t c = 0; c < p; ++c)
-    for (index_t r = 0; r < p; ++r) dev2 += abs2(r2(r, c) - T(r == c ? 1.0 : 0.0));
+    for (index_t q = 0; q < p; ++q) dev2 += abs2(r2(q, c) - T(q == c ? 1.0 : 0.0));
   if (!(std::sqrt(dev2) <= kMaxFastDeviation) || !cholesky(r2)) {
     multiply_upper_right(w, n, r1);  // back to W1 = Q1 R1 for the caller's fallback
     return false;
@@ -253,10 +256,10 @@ bool BlockKrylovSchurBasis<T>::fast_orthonormalize(index_t j) {
   // R = R2 R1 (upper triangular: the strictly lower products are exact zeros), and the part of
   // each column orthogonal to V and the block's earlier columns, R(i, i), must stay above the
   // breakdown share as in the two-pass kernel.
-  lapack::gemm('N', 'N', pp, pp, pp, T(1), r2.data(), pp, r1.data(), pp, T(0), rblk_.data(), pp);
+  lapack::gemm('N', 'N', pp, pp, pp, T(1), r2.data(), pp, r1.data(), pp, T(0), r.data(), pp);
   for (index_t c = 0; c < p; ++c) {
-    if (!(std::abs(rblk_(c, c)) > kBreakdownRatio * before[c])) {
-      multiply_upper_right(w, n, rblk_);
+    if (!(std::abs(r(c, c)) > breakdown_ratio * before[c])) {
+      multiply_upper_right(w, n, r);
       return false;
     }
   }
@@ -313,7 +316,10 @@ void BlockKrylovSchurBasis<T>::release() {
   h_ = DenseMatrix<T>();
 }
 
-#define HS_INSTANTIATE_BLOCK_GENERAL(T) template class BlockKrylovSchurBasis<T>;
+#define HS_INSTANTIATE_BLOCK_GENERAL(T)                                                          \
+  template class BlockKrylovSchurBasis<T>;                                                         \
+  template bool block_cgs_cholqr2<T>(index_t, index_t, index_t, T*, double, DenseMatrix<T>&,       \
+                                     DenseMatrix<T>&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_BLOCK_GENERAL)
 #undef HS_INSTANTIATE_BLOCK_GENERAL
 

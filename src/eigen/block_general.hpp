@@ -107,6 +107,22 @@ constexpr index_t kAutoExtraBlocks = 4;
 BlockGeneralLayout block_general_layout(index_t n, index_t nev, index_t ncv1, bool auto_ncv,
                                         index_t p, bool complex_scalars);
 
+// ------------------------------------------------------------------------------ block step
+
+/// Fast path of a block step (block_general.cpp, "Block steps"): the block W = basis(:, j:j+p)
+/// against V = basis(:, 0:j) (orthonormal; ld n) by block classical Gram-Schmidt with the DGKS
+/// test (linalg::orthogonalize_block_cgs2) and Cholesky-QR twice inside the block.
+///   * true: W holds Q with [V Q] orthonormal, coef (j x p) = C, r (p x p) = R upper triangular,
+///     W_in = V C + Q R;
+///   * false (a column kept at most breakdown_ratio of its norm, the column-scaled block is worse
+///     conditioned than the fast path accepts, or the second Gram matrix is far from I): W holds
+///     W1 = W_in - V C1 (up to rounding) with C1 in coef, so the caller can restore W_in = W1 + V C1
+///     for the two-pass kernel (BlockOrthonormalizer).
+/// O(n j p + n p^2) flops in BLAS3, O(p^3) dense work; no n-sized buffers.
+template <class T>
+bool block_cgs_cholqr2(index_t n, index_t j, index_t p, T* basis, double breakdown_ratio,
+                       DenseMatrix<T>& coef, DenseMatrix<T>& r);
+
 // ------------------------------------------------------------------------------ block basis
 
 /// Storage and growth of the block Krylov-Schur decomposition (file comment). V is
@@ -146,7 +162,7 @@ class BlockKrylovSchurBasis {
   void start(const DenseMatrix<T>* initial);
 
   /// One block step: W = Op U (one apply of p columns), orthonormalized against V(:, 0:m+p)
-  /// (block CGS with DGKS + CholQR2, or the two-pass kernel; block_general.cpp), W = V C + U' R;
+  /// (block_cgs_cholqr2, or the two-pass kernel when it refuses), W = V C + U' R;
   /// H(0:m+p, m:m+p) <- C, H(m+p:m+2p, m:m+p) <- R, U' becomes the residual block and m grows by
   /// p. Requires m + p <= capacity. Throws InvalidInput when the operator output is not finite.
   void add_block(LinearOperator<T>& op, GeneralPhaseTimes* times);
@@ -172,9 +188,6 @@ class BlockKrylovSchurBasis {
   /// Divides the p operator outputs at V(:, j:j+p) by the operator scale, fixing the scale at the
   /// first nonzero output block, and throws InvalidInput for non-finite output.
   void scale_output(index_t j);
-  /// Fast path of a block step on V(:, j:j+p) against V(:, 0:j): coef_ and rblk_ receive C and R
-  /// and true is returned; on false the block holds W1 = W - V C1 with C1 in coef_.
-  bool fast_orthonormalize(index_t j);
 
   index_t n_;
   index_t capacity_;
