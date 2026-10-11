@@ -6,6 +6,8 @@
 //   * a plan beyond the resource budget ends Inconclusive before the Krylov run; the step
 //     planner is logarithmic and agrees with a linear scan; the cost model honours the budget;
 //     exclusion_run_size matches the run the check performs.
+// (Pencil-based regressions - the computed coupling, the rigour flag, the p = 1 exact path - are
+// in test_certfast.cpp next to its fixtures.)
 #include <gtest/gtest.h>
 
 #include <chrono>

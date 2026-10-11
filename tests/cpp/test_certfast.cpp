@@ -1,7 +1,10 @@
 // Tests of the randomized exclusion check (src/verify, include/hsolve/verify.hpp "(1)"): the
 // failure-probability bound, the check on pencils with known spectra (complete X passes; a removed
 // copy of a 4-fold eigenvalue and a removed edge eigenvalue are detected; standard, diagonal-B and
-// general-B pencils; dense and MUMPS shift-invert), determinism, and the start scaling.
+// general-B pencils; dense and MUMPS shift-invert), determinism, and the start scaling. P4 review
+// regressions at the end: the computed coupling of an inexact X against a dense reference,
+// column-scaled bases, the rigour flag of an estimated kappa, the p = 1 exact path and
+// unconverged candidates (diagonal-operator regressions: test_certfast_fix.cpp).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -9,6 +12,7 @@
 #include <functional>
 #include <limits>
 #include <numeric>
+#include <utility>
 #include <vector>
 
 #include "hsolve/eigen.hpp"
@@ -691,6 +695,90 @@ TYPED_TEST(VerifyExclusion, StartScalingKappaBoundsTheScaledCondition) {
 
 // ------------------------------------------------------------- P4 review regressions
 
+/// Dense reference of the coupling and of the spectrum of H11 for a basis x of a pencil:
+/// Q = B-orthonormal basis of span x (dense Cholesky-QR, twice), Op = (A - sigma B)^{-1} B dense
+/// (LU), R = Op Q - Q (Q^H B Op Q), e = sqrt(lambda_max(R^H B R)); mu by decreasing |mu|.
+template <class T>
+std::pair<double, std::vector<double>> dense_coupling(const DenseMatrix<T>& ad, const DenseMatrix<T>* bd,
+                                                      double sigma, const DenseMatrix<T>& x) {
+  using hs::lapack::fint;
+  const fint n = static_cast<fint>(x.rows()), m = static_cast<fint>(x.cols());
+  DenseMatrix<T> bmat(n, n);
+  for (fint i = 0; i < n; ++i) bmat(i, i) = T(1.0);
+  if (bd) bmat = *bd;
+  DenseMatrix<T> k = ad;
+  for (fint j = 0; j < n; ++j)
+    for (fint i = 0; i < n; ++i) k(i, j) -= T(sigma) * bmat(i, j);
+  std::vector<fint> ipiv(static_cast<std::size_t>(n));
+  EXPECT_EQ(hs::lapack::getrf(n, k.data(), n, ipiv.data()), 0);
+  DenseMatrix<T> op = bmat;
+  hs::lapack::getrs(n, n, k.data(), n, ipiv.data(), op.data(), n);
+  DenseMatrix<T> q = x;
+  for (int pass = 0; pass < 2; ++pass) {
+    DenseMatrix<T> bq(n, m), g(m, m);
+    hs::lapack::gemm('N', 'N', n, m, n, T(1), bmat.data(), n, q.data(), n, T(0), bq.data(), n);
+    hs::lapack::gemm('C', 'N', m, m, n, T(1), q.data(), n, bq.data(), n, T(0), g.data(), m);
+    EXPECT_EQ(hs::lapack::potrf('U', m, g.data(), m), 0);
+    hs::lapack::trsm('R', 'U', 'N', 'N', n, m, T(1), g.data(), m, q.data(), n);
+  }
+  DenseMatrix<T> y(n, m), bq(n, m), h(m, m), br(n, m), g(m, m);
+  hs::lapack::gemm('N', 'N', n, m, n, T(1), op.data(), n, q.data(), n, T(0), y.data(), n);
+  hs::lapack::gemm('N', 'N', n, m, n, T(1), bmat.data(), n, q.data(), n, T(0), bq.data(), n);
+  hs::lapack::gemm('C', 'N', m, m, n, T(1), bq.data(), n, y.data(), n, T(0), h.data(), m);
+  DenseMatrix<T> hh(m, m);
+  for (fint j = 0; j < m; ++j)
+    for (fint i = 0; i < m; ++i) hh(i, j) = T(0.5) * (h(i, j) + hs::conj_if(h(j, i)));
+  std::vector<double> mu(static_cast<std::size_t>(m));
+  DenseMatrix<T> hcopy = hh;
+  hs::lapack::heev('N', 'U', m, hcopy.data(), m, mu.data());
+  hs::lapack::gemm('N', 'N', n, m, m, T(-1), q.data(), n, hh.data(), m, T(1), y.data(), n);  // R
+  hs::lapack::gemm('N', 'N', n, m, n, T(1), bmat.data(), n, y.data(), n, T(0), br.data(), n);
+  hs::lapack::gemm('C', 'N', m, m, n, T(1), y.data(), n, br.data(), n, T(0), g.data(), m);
+  std::vector<double> w(static_cast<std::size_t>(m));
+  hs::lapack::heev('N', 'U', m, g.data(), m, w.data());
+  std::sort(mu.begin(), mu.end(), [](double a, double b) { return std::abs(a) > std::abs(b); });
+  return {std::sqrt(std::max(w.back(), 0.0)), mu};
+}
+
+// The computed coupling e = ||Op X - X H11||_B for an INEXACT X (residuals far above rounding, as
+// for the driver's Ritz vectors) matches a dense reference, and the Weyl counts follow from it.
+// A regression to the Euclidean inner product, a dropped guard or an underestimate of e fails.
+TYPED_TEST(VerifyExclusion, ComputedCouplingMatchesADenseReferenceForAnInexactBasis) {
+  using T = TypeParam;
+  for (BKind kind : {BKind::Identity, BKind::General}) {
+    Setup<T> st(kind);
+    DenseMatrix<T> x = columns(st.pc.v, within(st.pc.lambda, kSigma, kRadius));
+    std::vector<double> noise(static_cast<std::size_t>(x.rows() * x.cols()));
+    hs::linalg::fill_random(noise.data(), x.rows() * x.cols(), 77);
+    for (index_t i = 0; i < x.rows() * x.cols(); ++i) x.data()[i] += T(2e-3 * noise[i]);
+    const auto [e_ref, mu_ref] = dense_coupling<T>(st.ad, st.pc.has_b ? &st.bd : nullptr, kSigma, x);
+    ASSERT_GT(e_ref, 1e-2);  // far above rounding: the test discriminates
+    auto opt = default_options();
+    hs::StartScaling sc = hs::start_scaling_for<T>(st.pc.b_ptr());
+    hs::set_start_scaling(opt, sc);
+    const auto r = hs::exclusion_check<T>(*st.op, st.b_inner(), x, kSigma, kRadius, opt);
+    EXPECT_NEAR(r.coupling, e_ref, 1e-8 * e_ref);
+    // On top of the residual norm: the rounding guard 16 (m + 1) u max |mu| (measured: the
+    // difference matches it to ~3e-15, a thousandth of the guard).
+    const double guard = 16.0 * static_cast<double>(x.cols() + 1) * std::numeric_limits<double>::epsilon() *
+                         std::abs(mu_ref.front());
+    EXPECT_NEAR(r.coupling - e_ref, guard, 0.25 * guard);
+    ASSERT_EQ(r.deflated_theta.size(), mu_ref.size());
+    for (std::size_t i = 0; i < mu_ref.size(); ++i)
+      EXPECT_NEAR(r.deflated_theta[i], mu_ref[i], 1e-9 * std::abs(mu_ref[i]));
+    index_t found = 0, certified = 0;
+    for (double v : mu_ref) {
+      if (std::abs(v) >= 1.0 / kRadius - e_ref) ++found;
+      if (std::abs(v) >= 1.0 / kRadius + e_ref) ++certified;
+    }
+    EXPECT_EQ(r.found_inside, found);
+    EXPECT_EQ(r.certified_inside, certified);
+    EXPECT_GT(found, certified);  // the edge eigenvalue 0.36 sits within e of 1/r
+    EXPECT_NEAR(r.claim_threshold, (1.0 / kRadius - e_ref) * (1.0 - opt.rounding_margin), 1e-7 * e_ref);
+    EXPECT_EQ(r.status, ExclusionStatus::Passed) << r.statement;
+  }
+}
+
 // Rescaled columns of X (B-norms spread over 1e10) give the verdict of the plain basis: complete
 // passes, a removed copy of the 4-fold eigenvalue is detected (before the fix: "numerically rank
 // deficient").
@@ -780,6 +868,51 @@ TYPED_TEST(VerifyExclusion, EstimatedKappaIsFlaggedNotRigorous) {
   EXPECT_TRUE(exact.exact);
   EXPECT_TRUE(exact.rigorous);
   EXPECT_EQ(exact.status, ExclusionStatus::Passed) << exact.statement;
+}
+
+// The p = 1 path that searches the whole (small) complement exactly (delta = 1e-300 plans past
+// N = 32 steps), and a detection there.
+TYPED_TEST(VerifyExclusion, SingleVectorRunCoversASmallComplementExactly) {
+  using T = TypeParam;
+  Setup<T> st(BKind::Identity, 40);
+  auto idx = within(st.pc.lambda, kSigma, kRadius);
+  auto opt = default_options();
+  opt.block_size = 1;
+  opt.delta = 1e-300;
+  const auto r = hs::exclusion_check<T>(*st.op, nullptr, columns(st.pc.v, idx), kSigma, kRadius, opt);
+  EXPECT_EQ(r.status, ExclusionStatus::Passed) << r.statement;
+  EXPECT_TRUE(r.exact);
+  EXPECT_EQ(r.failure_probability, 0.0);
+  EXPECT_EQ(static_cast<index_t>(r.ritz_all.size()), 32);
+  EXPECT_EQ(r.block_steps, 32);
+  EXPECT_NEAR(r.max_ritz, 1.0 / 0.12, 1e-8);
+  const auto it = std::find_if(idx.begin(), idx.end(), [&](index_t i) { return std::abs(st.pc.lambda[i] - 0.33) < 1e-9; });
+  ASSERT_NE(it, idx.end());
+  idx.erase(it);
+  const auto det = hs::exclusion_check<T>(*st.op, nullptr, columns(st.pc.v, idx), kSigma, kRadius, opt);
+  ASSERT_EQ(det.status, ExclusionStatus::Detected) << det.statement;
+  EXPECT_TRUE(det.exact);
+  EXPECT_EQ(det.new_inside, 1);
+  ASSERT_GE(det.new_lambda.size(), 1u);
+  EXPECT_NEAR(det.new_lambda[0], 0.33, 1e-9);
+}
+
+// A returned candidate whose estimate misses tol is flagged unconverged.
+TYPED_TEST(VerifyExclusion, UnconvergedCandidateIsFlagged) {
+  using T = TypeParam;
+  Setup<T> st(BKind::Identity);
+  auto idx = within(st.pc.lambda, kSigma, kRadius);
+  const auto it = std::find_if(idx.begin(), idx.end(), [&](index_t i) { return std::abs(st.pc.lambda[i] - 0.33) < 1e-9; });
+  ASSERT_NE(it, idx.end());
+  idx.erase(it);
+  auto opt = default_options();
+  opt.tol = 1e-300;
+  const auto r = hs::exclusion_check<T>(*st.op, nullptr, columns(st.pc.v, idx), kSigma, kRadius, opt);
+  ASSERT_EQ(r.status, ExclusionStatus::Detected) << r.statement;
+  ASSERT_EQ(r.new_converged.size(), 1u);
+  EXPECT_GT(r.new_estimate[0], 0.0);
+  EXPECT_EQ(r.new_converged[0], 0);
+  EXPECT_NEAR(r.new_lambda[0], 0.33, 1e-6);
 }
 
 }  // namespace
