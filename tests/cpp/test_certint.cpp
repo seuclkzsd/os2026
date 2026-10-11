@@ -457,7 +457,7 @@ TYPED_TEST(DriverCertificateTyped, EstimatedKappaIsScreeningOnly) {
     hs::driver::NearestWindow w = s->window;
     w.lower = kSigma - 0.5;
     w.upper = kSigma + 0.5;
-    const auto out = rig.certifier.run(hs::CertificateMethod::Randomized, w, s->all, 0);
+    const auto out = rig.certifier.run(hs::CertificateMethod::Randomized, w, {s->all}, 0);
     EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Passed) << rig.rep.certificate.statement;
     const auto& c = rig.rep.certificate;
     EXPECT_EQ(c.method, "randomized");
@@ -497,7 +497,7 @@ TYPED_TEST(DriverCertificateTyped, SingleCountsCertifyTheWindowOrDeferToExactCou
   ASSERT_TRUE(s->sol.report.certificate.passed);
   {
     CertifierRig<T> rig(*s, {});
-    const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, s->all, 0);
+    const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {s->all}, 0);
     EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Passed);
     const auto& c = rig.rep.certificate;
     EXPECT_EQ(c.method, "exact_single");
@@ -518,7 +518,7 @@ TYPED_TEST(DriverCertificateTyped, SingleCountsCertifyTheWindowOrDeferToExactCou
   const auto removed = hs::driver::drop_found_pairs(dropped, hints, s->sol.eigenvalues, s->sigma, 1);
   ASSERT_EQ(removed.size(), 1u);
   CertifierRig<T> rig(*s, {});
-  const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, dropped, 0);
+  const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {dropped}, 0);
   EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Undecided);
   rig.rep.certificate.passed = false;
   rig.certifier.record_exact(true);
@@ -536,12 +536,12 @@ TYPED_TEST(DriverCertificateTyped, AutoChoiceFollowsTheMeasuredTimes) {
   {
     hs::driver::CertificateTimings slow_factor{10.0, 1e-4, 4.0};
     CertifierRig<T> rig(*s, slow_factor);
-    const auto ch = rig.certifier.choose(s->window, s->all);
+    const auto ch = rig.certifier.choose(s->window, {s->all});
     EXPECT_EQ(ch.method, hs::CertificateMethod::Randomized);
     EXPECT_TRUE(ch.kappa_rigorous);
     EXPECT_GT(ch.estimate.block_size, 0);
     EXPECT_GT(ch.epsilon, 0.0);
-    const auto out = rig.certifier.check(s->window, s->all, 0);
+    const auto out = rig.certifier.check(s->window, {s->all}, 0);
     EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Passed);
     EXPECT_EQ(rig.rep.certificate.method, "randomized");
     EXPECT_TRUE(rig.rep.certificate.rigorous);
@@ -553,9 +553,54 @@ TYPED_TEST(DriverCertificateTyped, AutoChoiceFollowsTheMeasuredTimes) {
   {
     hs::driver::CertificateTimings slow_solves{1e-4, 10.0, 4.0};
     CertifierRig<T> rig(*s, slow_solves);
-    EXPECT_EQ(rig.certifier.choose(s->window, s->all).method, hs::CertificateMethod::Exact);
-    EXPECT_EQ(rig.certifier.check(s->window, s->all, 0).verdict, hs::driver::CheckOutcome::Verdict::Undecided);
+    EXPECT_EQ(rig.certifier.choose(s->window, {s->all}).method, hs::CertificateMethod::Exact);
+    EXPECT_EQ(rig.certifier.check(s->window, {s->all}, 0).verdict, hs::driver::CheckOutcome::Verdict::Undecided);
     EXPECT_FALSE(rig.rep.certificate.performed);  // left to the exact counts
+  }
+}
+
+// The deflation block takes the selected pairs as residual correction left them: run.all's own
+// copy of a selected pair may miss the convergence test (near-singular shifts, P5 measurement on
+// syn-zero-cluster-complex-1e4: all 20 did), and deflating only run.all's converged pairs made the
+// check "detect" the found pairs themselves, rerun after rerun.
+TYPED_TEST(DriverCertificateTyped, DeflationUsesTheCorrectedSelectedPairs) {
+  using T = TypeParam;
+  auto s = solved_laplacian<T>(hs::CertificateMode::Randomized);
+  hs::driver::Block<T> raw = s->all;  // run.all: pair 0 uncorrected (backward error ~1e-3)
+  for (index_t i = 0; i < raw.x.rows(); ++i) raw.x(i, 0) += T(1e-4 * std::sin(0.37 * static_cast<double>(i)));
+  hs::driver::recompute_products(s->a, static_cast<const hs::CsrMatrix<T>*>(nullptr), raw);
+  std::vector<index_t> cols(static_cast<std::size_t>(raw.size()));
+  for (index_t j = 0; j < raw.size(); ++j) cols[static_cast<std::size_t>(j)] = j;
+  {
+    CertifierRig<T> rig(*s, {});
+    const auto out = rig.certifier.run(hs::CertificateMethod::Randomized, s->window, {raw, &s->all, cols}, 0);
+    EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Passed) << rig.rep.certificate.statement;
+    EXPECT_EQ(rig.rep.certificate.count_found, 8);
+  }
+  {
+    CertifierRig<T> rig(*s, {});
+    const auto out = rig.certifier.run(hs::CertificateMethod::Randomized, s->window, {raw}, 0);
+    EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Missing) << rig.rep.certificate.statement;
+    EXPECT_GE(out.missing, 1);
+  }
+}
+
+// A shift inside a cluster denser than the null-pivot threshold (factorized without detection):
+// whatever the randomized check makes of it, the solve never fails where the counts pass - an
+// undecided check, or one still detecting after the last rerun, leaves the verdict to the counts.
+TYPED_TEST(DriverCertificateTyped, DenseClusterAtTheShiftNeverFailsWhereCountsPass) {
+  using T = TypeParam;
+  std::vector<double> w;
+  for (int i = -100; i < 100; ++i) w.push_back((i + 0.5) * 1e-9);
+  for (int i = 0; i < 300; ++i) w.push_back(1.0 + 2.0 * i / 300.0);
+  for (int i = 0; i < 100; ++i) w.push_back(-1.0 - 2.0 * i / 100.0);
+  const auto a = hs::test::prescribed_spectrum<T>(w, 3, 17);
+  for (const auto mode : {hs::CertificateMode::Exact, hs::CertificateMode::Randomized, hs::CertificateMode::Auto}) {
+    const auto sol = hs::solve(a, nullptr, nearest_cfg(0.0, 20, mode));
+    EXPECT_TRUE(sol.report.success) << static_cast<int>(mode) << ": " << sol.report.certificate.statement;
+    EXPECT_TRUE(sol.report.certificate.passed) << static_cast<int>(mode);
+    EXPECT_TRUE(sol.report.certificate.rigorous) << static_cast<int>(mode);
+    expect_same_set(sol.eigenvalues, nearest(w, 0.0, 20), 1e-10);
   }
 }
 

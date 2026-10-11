@@ -4,13 +4,14 @@
 // (certificate_fault_drop: one copy of the largest found multiplet removed before the check).
 //
 //   bench_certint_e2e --case DIR --out DIR [--threads t] [--reps r] [--modes exact,auto,randomized]
-//                     [--drop d] [--delta 1e-12]
+//                     [--drop d] [--delta 1e-12] [--log DIR]
 //
 // Per run one JSON line ("exp": "run"): total and phase times, the certificate (method, rigorous,
 // failure_probability, solves, seconds, passed, counts), factorizations and solves, success, the
 // eigenvalues; per mode a "summary" line with the medians. The first repetition of each mode writes
 // its result directory OUT/<case>/hsolve-<mode>[-drop<d>]/ (eigenvalues.npy, eigenvectors.npy,
-// report.json; docs/FORMATS.md §3), the layout tools/eval/sweep.py evaluates:
+// report.json; docs/FORMATS.md §3), the layout tools/eval/sweep.py evaluates (--log DIR: the
+// driver's event log of every run as DIR/<case>-<mode>-rep<r>.jsonl):
 //   python -m tools.eval.sweep OUT --out OUT/eval.md      (under tools/run/guard.py)
 // Run through tools/run/guard.py (P5: gpu02, cores 24-27, 4 threads):
 //   python3 tools/run/guard.py --skip-busy-check --cores 24-27 --mem-gb 14 --timeout 3000 --
@@ -24,6 +25,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -33,6 +35,7 @@
 
 #include "hsolve/error.hpp"
 #include "hsolve/io.hpp"
+#include "hsolve/log.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/util.hpp"
 
@@ -49,6 +52,7 @@ struct Args {
   std::vector<std::string> modes{"exact", "auto", "randomized"};
   index_t drop = 0;
   double delta = 1e-12;
+  fs::path log_dir;
 };
 
 void emit(const json& j) { std::cout << j.dump() << std::endl; }
@@ -89,8 +93,14 @@ int run(const Args& args, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b) 
     for (std::size_t q = 0; q < nm; ++q) {
       const std::string mode = args.modes[(q + static_cast<std::size_t>(rep)) % nm];
       const hs::SolverConfig cfg = hs::parse_config(R"({"certificate": ")" + mode + R"("})", base);
+      std::unique_ptr<hs::Logger> log;
+      if (!args.log_dir.empty()) {
+        fs::create_directories(args.log_dir);
+        log = std::make_unique<hs::Logger>(
+            0, args.log_dir / (name + "-" + mode + "-rep" + std::to_string(rep) + ".jsonl"));
+      }
       hs::Timer wall;
-      const hs::Solution<T> sol = hs::solve(a, b, cfg);
+      const hs::Solution<T> sol = hs::solve(a, b, cfg, log.get());
       const double wall_s = wall.seconds();
       const hs::SolveReport& r = sol.report;
       const auto& c = r.certificate;
@@ -188,6 +198,7 @@ int main(int argc, char** argv) {
     else if (k == "--modes") args.modes = split(need(i));
     else if (k == "--drop") args.drop = std::stoll(need(i));
     else if (k == "--delta") args.delta = std::stod(need(i));
+    else if (k == "--log") args.log_dir = need(i);
     else {
       std::cerr << "unknown argument " << k << "\n";
       return 2;
@@ -195,7 +206,7 @@ int main(int argc, char** argv) {
   }
   if (args.case_dir.empty() || args.out.empty() || args.reps < 1 || args.modes.empty()) {
     std::cerr << "usage: bench_certint_e2e --case DIR --out DIR [--threads t] [--reps r] "
-                 "[--modes exact,auto,randomized] [--drop d] [--delta x]\n";
+                 "[--modes exact,auto,randomized] [--drop d] [--delta x] [--log DIR]\n";
     return 2;
   }
   omp_set_num_threads(args.threads);

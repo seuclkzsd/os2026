@@ -153,7 +153,15 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
                        {"nconv", static_cast<std::int64_t>(res.nconv)},
                        {"restarts", static_cast<std::int64_t>(res.restarts)},
                        {"op_applies", static_cast<std::int64_t>(res.op_applies)},
-                       {"deflated", static_cast<std::int64_t>(deflation ? deflation->cols() : 0)}});
+                       {"deflated", static_cast<std::int64_t>(deflation ? deflation->cols() : 0)},
+                       {"max_estimate", res.history.empty() ? 0.0 : res.history.back().max_estimate}});
+  if (!res.converged)  // where the restarts stalled: a sample of the restart history and its end
+    for (std::size_t i = 0; i < res.history.size(); i = (i + 1 == res.history.size() || i < 4) ? i + 1 : std::min(4 * i, res.history.size() - 1)) {
+      const RestartRecord& h = res.history[i];
+      event(c, "lanczos_history", {{"restart", static_cast<std::int64_t>(h.restart)},
+                                   {"nconv", static_cast<std::int64_t>(h.nconv)}, {"max_estimate", h.max_estimate},
+                                   {"op_applies", static_cast<std::int64_t>(h.op_applies)}});
+    }
   for (double th : res.ritz_all)
     if (th != 0.0) out.ritz_hints.push_back(sigma + 1.0 / th);
   // Append the new vectors (all nev, converged first) to the candidate block.
@@ -445,10 +453,12 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     double b_end = push_out(t.sigma + r, +1.0);
     if (zero_tol >= 0 && a_end <= zero_tol && b_end >= -zero_tol) return hand_over();  // window meets the band
     index_t missing = 0;
-    const CheckOutcome quick = fast.check({t.sigma, r, a_end, b_end}, run.all, round);
+    index_t zd = 0;
+    const RoundPairs<T> pairs{run.all, &sel, select_nearest(run.all.lambda, t.sigma, k, zero_tol, zd)};
+    const CheckOutcome quick = fast.check({t.sigma, r, a_end, b_end}, pairs, round);
     if (quick.verdict == CheckOutcome::Verdict::Passed) break;
-    if (quick.verdict == CheckOutcome::Verdict::Missing) {
-      if (round == 2) break;
+    // Still missing after the last rerun: the exact counts give the final verdict.
+    if (quick.verdict == CheckOutcome::Verdict::Missing && round < 2) {
       missing = quick.missing;
       warn(c, "certificate: the " + cert.method + " check finds " + std::to_string(missing) +
                   " eigenvalue(s) missing near sigma; deflated rerun");

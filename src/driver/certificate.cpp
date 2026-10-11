@@ -48,7 +48,6 @@ struct NearestCertifier<T>::Found {
   std::vector<index_t> window;     ///< columns of `all` with a finite lambda in [lower, upper]
   std::vector<double> lambda;      ///< their eigenvalues
   std::vector<double> error;       ///< their residual bounds ||A x - lambda B x||_{B^{-1}}
-  std::vector<index_t> converged;  ///< of `window`: backward error <= kConvergedFactor tol
 };
 
 template <class T>
@@ -90,14 +89,44 @@ typename NearestCertifier<T>::Found NearestCertifier<T>::found_in_window(const N
     f.window.push_back(j);
     f.lambda.push_back(l);
     f.error.push_back(pm.abs_residual * inv_sqrt_bmin);
-    if (pm.backward_error <= kConvergedFactor * c_.cfg.tol) f.converged.push_back(j);
   }
   return f;
 }
 
 template <class T>
+bool NearestCertifier<T>::converged(const Block<T>& blk, index_t j) const {
+  const PairMetrics pm =
+      pair_metrics(blk.ax.col(j), blk.bx.col(j), blk.x.col(j), blk.x.rows(), blk.lambda[j], n2a_, n2b_);
+  return std::isfinite(blk.lambda[j]) && pm.backward_error <= kConvergedFactor * c_.cfg.tol;
+}
+
+template <class T>
+DenseMatrix<T> NearestCertifier<T>::deflation_block(const NearestWindow& w, const RoundPairs<T>& pairs) const {
+  std::vector<const T*> cols;
+  const auto in_window = [&](double l) { return std::isfinite(l) && l >= w.lower && l <= w.upper; };
+  std::vector<char> taken(static_cast<std::size_t>(pairs.all.size()), 0);
+  if (pairs.selected) {
+    for (index_t j : pairs.selected_columns) taken[static_cast<std::size_t>(j)] = 1;
+    for (index_t j = 0; j < pairs.selected->size(); ++j)
+      if (in_window(pairs.selected->lambda[j]) && converged(*pairs.selected, j))
+        cols.push_back(pairs.selected->x.col(j));
+  }
+  for (index_t j = 0; j < pairs.all.size(); ++j)
+    if (!taken[static_cast<std::size_t>(j)] && in_window(pairs.all.lambda[j]) && converged(pairs.all, j))
+      cols.push_back(pairs.all.x.col(j));
+  const index_t n = pairs.all.x.rows(), m = static_cast<index_t>(cols.size());
+  DenseMatrix<T> x(n, m);
+  for (index_t j = 0; j < m; ++j) std::copy(cols[j], cols[j] + n, x.col(j));
+  return x;
+}
+
+// The randomized check needs kappa, and only a proven one counts for auto: the Lanczos estimate
+// of a general B's kappa (~0.1 s at n = 1e5) is computed only when the mode is randomized.
+template <class T>
 const StartScaling& NearestCertifier<T>::scaling() {
-  if (!scaling_) scaling_ = std::make_unique<StartScaling>(start_scaling_for<T>(pencil_.b()));
+  if (!scaling_)
+    scaling_ = std::make_unique<StartScaling>(
+        start_scaling_for<T>(pencil_.b(), 100.0, c_.cfg.certificate == CertificateMode::Randomized));
   return *scaling_;
 }
 
@@ -138,10 +167,10 @@ Radii randomized_radii(const NearestWindow& w, double sigma) {
 }  // namespace
 
 template <class T>
-CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Block<T>& all) {
+CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const RoundPairs<T>& pairs) {
   const SolverConfig& cfg = c_.cfg;
   CertificateChoice ch;
-  const Found f = found_in_window(w, all);
+  const Found f = found_in_window(w, pairs.all);
   const index_t n = pencil_.order();
   const MumpsInputSize in_size = mumps_input_size(pencil_);
   const FactorEstimate est = fac_.estimate();
@@ -149,7 +178,7 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Bloc
 
   CertificateCostInputs in;
   in.n = n;
-  in.deflated = std::min<index_t>(static_cast<index_t>(f.converged.size()), n - 1);
+  in.deflated = std::min<index_t>(deflation_block(w, pairs).cols(), n - 1);
   in.complex_scalars = is_complex_v<T>;
   in.factorize_s = timings_.factorize_s > 0.0 ? timings_.factorize_s : model_factor_s(est, in_size.order, threads);
   const double analysis = model_analysis_s(in_size.order, in_size.entries, static_cast<double>(est.factor_entries));
@@ -202,11 +231,12 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Bloc
 }
 
 template <class T>
-CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const Block<T>& all, int round) {
+CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs<T>& pairs, int round) {
   const SolverConfig& cfg = c_.cfg;
   if (cfg.certificate == CertificateMode::Exact || cfg.certificate == CertificateMode::Off) return {};
   PhaseScope phase(c_.clock, Phase::Certificate);
-  const CertificateChoice ch = choose(w, all);
+  fallback_note_.clear();
+  const CertificateChoice ch = choose(w, pairs);
   CertificateMethod method = ch.method;
   if (cfg.certificate == CertificateMode::Randomized)
     method = randomized_failed_ ? CertificateMethod::Exact : CertificateMethod::Randomized;
@@ -221,7 +251,7 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const Block<T>& 
     if (e.block_size > 0)
       os << " [p = " << e.block_size << ", s = " << e.block_steps << ", eps = " << ch.epsilon << "]";
     else if (!ch.kappa_rigorous)
-      os << " [kappa of B only estimated: not a certificate, not considered]";
+      os << " [no proven kappa of B (general B): not a certificate, not considered]";
     os << "; chose " << certificate_method_name(method);
     auto_note_ = os.str();
   }
@@ -234,22 +264,22 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const Block<T>& 
          {"kappa_rigorous", ch.kappa_rigorous}, {"factorize_s", timings_.factorize_s},
          {"solve_call_s", timings_.solve_call_s}, {"rhs_per_call", timings_.rhs_per_call}});
   if (method == CertificateMethod::Randomized) {
-    const CheckOutcome out = randomized(w, all, e.block_size, round);
+    const CheckOutcome out = randomized(w, pairs, e.block_size, round);
     if (out.verdict != CheckOutcome::Verdict::Undecided) return out;
     // auto: the next cheapest method that certifies
     if (cfg.certificate == CertificateMode::Auto && e.exact_single_s < e.exact_s) method = CertificateMethod::ExactSingle;
   }
-  if (method == CertificateMethod::ExactSingle) return single(w, all);
+  if (method == CertificateMethod::ExactSingle) return single(w, pairs.all);
   return {};
 }
 
 template <class T>
-CheckOutcome NearestCertifier<T>::run(CertificateMethod method, const NearestWindow& w, const Block<T>& all,
-                                      int round) {
+CheckOutcome NearestCertifier<T>::run(CertificateMethod method, const NearestWindow& w,
+                                      const RoundPairs<T>& pairs, int round) {
   PhaseScope phase(c_.clock, Phase::Certificate);
   switch (method) {
-    case CertificateMethod::Randomized: return randomized(w, all, choose(w, all).estimate.block_size, round);
-    case CertificateMethod::ExactSingle: return single(w, all);
+    case CertificateMethod::Randomized: return randomized(w, pairs, choose(w, pairs).estimate.block_size, round);
+    case CertificateMethod::ExactSingle: return single(w, pairs.all);
     case CertificateMethod::Exact: break;
   }
   return {};
@@ -259,8 +289,8 @@ CheckOutcome NearestCertifier<T>::run(CertificateMethod method, const NearestWin
 // window differs, but whatever stopped it - a narrow gap, a large coupling, a miscount - is
 // likely to persist; the exact counts decide instead).
 template <class T>
-CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Block<T>& all, index_t block_size,
-                                             int round) {
+CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const RoundPairs<T>& pairs,
+                                             index_t block_size, int round) {
   const SolverConfig& cfg = c_.cfg;
   InertiaCertificate& cert = c_.rep.certificate;
   const Radii rad = randomized_radii(w, sigma_);
@@ -277,10 +307,8 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Block
     fallback_note_ = os.str();
     return {};
   }
-  const Found f = found_in_window(w, all);
-  const index_t n = pencil_.order(), m = static_cast<index_t>(f.converged.size());
-  DenseMatrix<T> x(n, m);
-  for (index_t j = 0; j < m; ++j) std::copy(all.x.col(f.converged[j]), all.x.col(f.converged[j]) + n, x.col(j));
+  const DenseMatrix<T> x = deflation_block(w, pairs);
+  const index_t m = x.cols();
   refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
   SolveRefinement refine;
   if (fac_.options().precision == FactorPrecision::Single || fac_.options().blr) {
@@ -341,6 +369,7 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Block
     cert.rigorous = false;
     cert.failure_probability = 1.0;
     cert.statement = prefix() + "randomized check: " + res.statement;
+    fallback_note_ = "randomized check: " + res.statement;  // in case the counts decide after all
     CheckOutcome out;
     out.verdict = CheckOutcome::Verdict::Missing;
     out.missing = std::max<index_t>(1, res.new_count);

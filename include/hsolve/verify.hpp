@@ -273,10 +273,12 @@ void set_start_scaling(ExclusionOptions& opt, const StartScaling& sc);
 /// when that lower bound is positive (diagonally dominant: rigorous), else an ESTIMATE:
 /// safety * (Gershgorin upper bound) / (smallest Ritz value of a 40-step Lanczos run on S B S) -
 /// an assumption, not a bound (the Ritz value over-estimates lambda_min). kappa enters the step
-/// count only as log(kappa) / (2 acosh(.)), so a generous safety factor is cheap.
+/// count only as log(kappa) / (2 acosh(.)), so a generous safety factor is cheap. estimate =
+/// false skips that run: such a B then gets kappa = +inf, rigorous = false (for a caller that
+/// only wants a proven kappa, e.g. the driver's auto choice; ~0.1 s at n = 1e5).
 /// Throws InvalidInput for a non-positive diagonal. O(nnz(B)) (+ 40 B applications).
 template <class T>
-StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety = 100.0);
+StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety = 100.0, bool estimate = true);
 
 // ===================================================== (2) single-precision screening counts
 // A single-precision LDL^T count of K(s) = A - s B is the exact inertia of K(s) + E with

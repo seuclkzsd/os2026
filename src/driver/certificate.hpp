@@ -31,8 +31,10 @@
 // AND found_inside == certified_inside: then, with probability >= 1 - delta(s), the pencil has
 // exactly found_inside eigenvalues within r_c of sigma, all approximated by found pairs, so the
 // k selected pairs (all within r_edge < r_c) are k nearest ones. X = the converged found pairs
-// (backward error <= 10 tol) in the window [a, b]; an unconverged pair is left out and, if it is
-// an eigenvalue within r', detected.
+// (backward error <= 10 tol) in the window [a, b]: the selected ones as residual correction left
+// them, and the other computed ones; an unconverged pair is left out and, if it is an eigenvalue
+// within r', detected. A check still detecting after the last rerun leaves the final verdict to
+// the exact counts (the solve never fails where the counts pass).
 //
 // On a verdict "missing" (exact: count > found; randomized: Detected, new_count Ritz values
 // beyond the pass threshold) definite.cpp runs its deflated rerun and checks again. Detection of
@@ -72,6 +74,22 @@ struct NearestWindow {
   double lower = 0.0, upper = 0.0;  ///< window ends a < target - r, b > target + r (mid-gap)
 };
 
+/// The found pairs of a round. `all`: every computed pair as the Krylov runs left them
+/// (B-orthonormal X with A X, B X in sync; definite.cpp's run.all). `selected`: the selected pairs
+/// after residual correction and Rayleigh-Ritz (definite.cpp's sel), taken from the columns
+/// `selected_columns` of `all`; nullptr: those columns of `all` as they are. The randomized check
+/// deflates the corrected selected pairs and the other converged pairs of `all` in the window -
+/// the uncorrected copies in `all` may miss the convergence test (a near-singular shift).
+template <class T>
+struct RoundPairs {
+  RoundPairs(const Block<T>& all_pairs, const Block<T>* selected_pairs = nullptr,
+             std::vector<index_t> columns = {})
+      : all(all_pairs), selected(selected_pairs), selected_columns(std::move(columns)) {}
+  const Block<T>& all;
+  const Block<T>* selected = nullptr;
+  std::vector<index_t> selected_columns;
+};
+
 /// Verdict of a fast check. Undecided: the caller counts exactly (exact mode, auto choosing the
 /// exact counts, or a fast check that could not decide), then calls record_exact().
 struct CheckOutcome {
@@ -109,23 +127,27 @@ class NearestCertifier {
   /// pair (B-orthonormal X with A X, B X in sync). Exact mode returns Undecided without doing
   /// anything; otherwise choose() then run(), and in auto the single counts when a randomized
   /// check could not decide and they are predicted cheaper than the exact counts.
-  CheckOutcome check(const NearestWindow& w, const Block<T>& all, int round);
+  CheckOutcome check(const NearestWindow& w, const RoundPairs<T>& pairs, int round);
 
   /// Runs one method on this round's window: Randomized (block width from choose()) or
   /// ExactSingle; Exact returns Undecided. Fills the report on a verdict.
-  CheckOutcome run(CertificateMethod method, const NearestWindow& w, const Block<T>& all, int round);
+  CheckOutcome run(CertificateMethod method, const NearestWindow& w, const RoundPairs<T>& pairs, int round);
 
   /// Report fields after the exact counts of this round (cert.passed etc. already set by the
   /// caller); on_counter: the counts came from an InertiaCounter.
   void record_exact(bool on_counter);
 
-  /// The auto choice for window w (no side effect besides the start scaling, computed once).
-  CertificateChoice choose(const NearestWindow& w, const Block<T>& all);
+  /// The auto choice for window w (no side effect besides the start scaling, computed once:
+  /// without the Lanczos kappa estimate of a general B unless the mode is randomized).
+  CertificateChoice choose(const NearestWindow& w, const RoundPairs<T>& pairs);
 
  private:
   struct Found;
   Found found_in_window(const NearestWindow& w, const Block<T>& all) const;
-  CheckOutcome randomized(const NearestWindow& w, const Block<T>& all, index_t block_size, int round);
+  /// The randomized check's deflation block X (RoundPairs comment).
+  DenseMatrix<T> deflation_block(const NearestWindow& w, const RoundPairs<T>& pairs) const;
+  bool converged(const Block<T>& blk, index_t j) const;
+  CheckOutcome randomized(const NearestWindow& w, const RoundPairs<T>& pairs, index_t block_size, int round);
   CheckOutcome single(const NearestWindow& w, const Block<T>& all);
   const StartScaling& scaling();
   double check_budget_bytes() const;

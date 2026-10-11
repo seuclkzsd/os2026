@@ -427,7 +427,7 @@ void set_start_scaling(ExclusionOptions& opt, const StartScaling& sc) {
 }
 
 template <class T>
-StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety) {
+StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety, bool estimate) {
   StartScaling s;
   if (!b) {
     s.note = "B = I: kappa = 1";
@@ -479,6 +479,12 @@ StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety) {
     s.note = "Jacobi scaling, diagonally dominant: Gershgorin kappa bound";
     return s;
   }
+  if (!estimate) {
+    s.kappa = std::numeric_limits<double>::infinity();
+    s.rigorous = false;
+    s.note = "Jacobi scaling, not diagonally dominant: no proven kappa (not estimated)";
+    return s;
+  }
   // Estimate: smallest Ritz value of a short Lanczos run on S B S (an upper bound on lambda_min).
   class Scaled final : public LinearOperator<T> {
    public:
@@ -520,7 +526,7 @@ StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety) {
 #define HS_INSTANTIATE_EXCLUSION(T)                                                                          \
   template ExclusionResult<T> exclusion_check<T>(LinearOperator<T>&, LinearOperator<T>*, const DenseMatrix<T>&, \
                                                  double, double, const ExclusionOptions&);                    \
-  template StartScaling start_scaling_for<T>(const CsrMatrix<T>*, double);
+  template StartScaling start_scaling_for<T>(const CsrMatrix<T>*, double, bool);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_EXCLUSION)
 #undef HS_INSTANTIATE_EXCLUSION
 
