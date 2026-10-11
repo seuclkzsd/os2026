@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <vector>
 
@@ -686,6 +687,66 @@ TYPED_TEST(VerifyExclusion, StartScalingKappaBoundsTheScaledCondition) {
   CsrMatrix<T> bad = dd;
   bad.values[0] = T(-1.0);
   EXPECT_EQ(error_code_of([&] { hs::start_scaling_for<T>(&bad); }), hs::Error::Code::InvalidInput);
+}
+
+// ------------------------------------------------------------- P4 review regressions
+
+// A kappa that start_scaling_for only estimates (general, not diagonally dominant B) flags the
+// result as not rigorous and says so in the statement; proven kappas and exact runs do not.
+TYPED_TEST(VerifyExclusion, EstimatedKappaIsFlaggedNotRigorous) {
+  using T = TypeParam;
+  using hs::lapack::fint;
+  const index_t n = 400;
+  const fint nf = static_cast<fint>(n);
+  DenseMatrix<T> c(n, n);  // B = C^H C, C = I + N + 0.5 N^2: not diagonally dominant
+  for (index_t i = 0; i < n; ++i) {
+    c(i, i) = T(1.0);
+    if (i + 1 < n) c(i, i + 1) = T(1.0);
+    if (i + 2 < n) c(i, i + 2) = T(0.5);
+  }
+  DenseMatrix<T> ctc(n, n);
+  hs::lapack::gemm('C', 'N', nf, nf, nf, T(1), c.data(), nf, c.data(), nf, T(0), ctc.data(), nf);
+  const CsrMatrix<T> b = hs::test::from_dense(ctc, 1e-300);
+  const CsrMatrix<T> a = hs::test::random_hermitian<T>(n, 0.05, 21);
+  const DenseMatrix<T> ad = hs::test::to_dense(a), bd = hs::test::to_dense(b);
+  DenseMatrix<T> aa = ad, bb = bd;
+  std::vector<double> lam(static_cast<std::size_t>(n));
+  ASSERT_EQ(hs::lapack::hegv('N', 'U', nf, aa.data(), nf, bb.data(), nf, lam.data()), 0);
+  // sigma between two eigenvalues; nothing within r = d / 2, pass radius 3 d / 4.
+  const index_t j = n / 2;
+  const double sigma = 0.5 * (lam[j] + lam[j + 1]);
+  double d = std::numeric_limits<double>::infinity();
+  for (double l : lam) d = std::min(d, std::abs(l - sigma));
+  hs::test::DenseShiftInvertOperator<T> op(ad, &bd, sigma);
+  hs::CsrOperator<T> bop(b);
+  const DenseMatrix<T> none(n, 0);
+  const hs::StartScaling sc = hs::start_scaling_for<T>(&b);
+  ASSERT_FALSE(sc.rigorous) << sc.note;
+  auto opt = default_options(0.75 * d);
+  opt.block_size = 1;
+  hs::set_start_scaling(opt, sc);
+  EXPECT_FALSE(opt.b_condition_rigorous);
+  EXPECT_EQ(opt.b_condition, sc.kappa);
+  EXPECT_EQ(opt.start_scaling, &sc.scaling);
+  const auto r = hs::exclusion_check<T>(op, &bop, none, sigma, 0.5 * d, opt);
+  ASSERT_EQ(r.status, ExclusionStatus::Passed) << r.statement;
+  ASSERT_FALSE(r.exact);
+  EXPECT_FALSE(r.rigorous);
+  EXPECT_EQ(r.kappa, sc.kappa);
+  EXPECT_NE(r.statement.find("NOT RIGOROUS"), std::string::npos) << r.statement;
+  // The same kappa vouched for as a bound: rigorous, no marker.
+  opt.b_condition_rigorous = true;
+  const auto vouched = hs::exclusion_check<T>(op, &bop, none, sigma, 0.5 * d, opt);
+  EXPECT_TRUE(vouched.rigorous);
+  EXPECT_EQ(vouched.statement.find("NOT RIGOROUS"), std::string::npos) << vouched.statement;
+  // An exact run (the Krylov space covers the complement: a block size above N / 8 has no block
+  // layout, one single-vector cycle spans the complement) involves no kappa.
+  opt.b_condition_rigorous = false;
+  opt.block_size = 64;
+  const auto exact = hs::exclusion_check<T>(op, &bop, none, sigma, 0.5 * d, opt);
+  EXPECT_TRUE(exact.exact);
+  EXPECT_TRUE(exact.rigorous);
+  EXPECT_EQ(exact.status, ExclusionStatus::Passed) << exact.statement;
 }
 
 }  // namespace

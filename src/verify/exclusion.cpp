@@ -148,6 +148,9 @@ void validate(index_t n, const ExclusionOptions& opt, index_t x_rows, index_t m,
     HS_THROW(InvalidInput, "exclusion_check: with b_inner, b_condition must be a finite bound >= 1 on cond(S B S) "
                            "(see start_scaling_for), got "
                                << opt.b_condition);
+  if (!has_b && opt.b_condition != 0.0 && (!(opt.b_condition >= 1.0) || !std::isfinite(opt.b_condition)))
+    HS_THROW(InvalidInput, "exclusion_check: without b_inner, b_condition must be 0 (unset) or a finite bound >= 1, got "
+                               << opt.b_condition);
   if (!(opt.rounding_margin >= 0.0 && opt.rounding_margin < 0.5))
     HS_THROW(InvalidInput, "exclusion_check: rounding_margin must lie in [0, 0.5), got " << opt.rounding_margin);
   if (!std::isfinite(opt.coupling_bound))
@@ -202,7 +205,21 @@ ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_i
   r.sigma = sigma;
   r.radius = radius;
   r.pass_radius = opt.pass_radius;
-  r.kappa = b_inner ? opt.b_condition : 1.0;
+  // kappa >= cond(S B S) of the statement: the caller's bound with b_inner; for B = I computed
+  // exactly, cond(S^2) = (max s / min s)^2 (inf when it overflows: no statement).
+  if (b_inner) {
+    r.kappa = opt.b_condition;
+    r.rigorous = opt.b_condition_rigorous;
+  } else {
+    r.kappa = 1.0;
+    if (opt.start_scaling) {
+      const auto [lo, hi] = std::minmax_element(opt.start_scaling->begin(), opt.start_scaling->end());
+      const double ratio = *hi / *lo;
+      r.kappa = ratio * ratio;
+    }
+    r.kappa = std::max(r.kappa, opt.b_condition);
+    r.rigorous = true;
+  }
   r.deflated = m;
   r.dimension = n - m;
   r.block_size = p;
@@ -264,6 +281,12 @@ ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_i
                   " (coupling e = " + fmt(e) + "); choose a larger pass_radius or a more accurate x";
     return r;
   }
+  if (!std::isfinite(r.kappa)) {
+    r.status = ExclusionStatus::Inconclusive;
+    r.failure_probability = 1.0;
+    r.statement = "no statement: the start scaling's condition (max s / min s)^2 overflows (kappa = inf)";
+    return r;
+  }
 
   // ---- 3. Plan s from delta and run one Lanczos cycle on the deflated operator.
   const bool cplx_scalars = is_complex_v<T>;
@@ -303,6 +326,7 @@ ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_i
   r.block_steps = (p == 1 || r.exact) ? res.op_applies : res.op_applies / p;
   if (r.exact) {
     r.failure_probability = 0.0;
+    r.rigorous = true;  // no probability, so no kappa involved
   } else {
     // Block mode (no fallback): op_applies / p block steps, the Krylov space K_s of the start block.
     r.failure_probability =
@@ -344,6 +368,9 @@ ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_i
       st << " (Gaussian start block, p = " << p << ", s = " << r.block_steps << " block steps, N = " << n_free
          << ", kappa = " << r.kappa << ", eps = " << r.epsilon << ", coupling e = " << e << ", relative margin "
          << opt.rounding_margin << "; ideal Gaussian start, exact arithmetic on the computed operator)";
+    if (!r.exact && !r.rigorous)
+      st << "; NOT RIGOROUS: kappa is an estimate assumed to bound cond(S B S), not proven - a screening "
+            "result, not a certificate";
   } else {
     r.status = ExclusionStatus::Inconclusive;
     st << "no Ritz value reached 1/r', but the " << r.block_steps << " block steps only give failure probability "
@@ -351,6 +378,12 @@ ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_i
   }
   r.statement = st.str();
   return r;
+}
+
+void set_start_scaling(ExclusionOptions& opt, const StartScaling& sc) {
+  opt.start_scaling = sc.scaling.empty() ? nullptr : &sc.scaling;
+  opt.b_condition = sc.kappa;
+  opt.b_condition_rigorous = sc.rigorous;
 }
 
 template <class T>

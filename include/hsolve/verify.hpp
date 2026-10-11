@@ -56,8 +56,11 @@
 // Step 3 (probability). In B-orthonormal eigencoordinates of the complement the start column is
 // zeta = U^H B S g, Gaussian with covariance Sigma whose eigenvalues lie in the spectrum of S B S,
 // so beta^2 = |zeta_1|^2/||zeta||^2 >= |w^H eta|^2/||eta||^2 / kappa with eta standard Gaussian and
-// kappa >= cond(S B S) (b_condition; exactly 1 for B = I, and for a diagonal B with
-// S = B^{-1/2}). |w^H eta|^2/||eta||^2 is the first coordinate of a uniform unit vector:
+// kappa >= cond(S B S). For B = I (b_inner == nullptr) kappa = cond(S^2) = (max s_i / min s_i)^2
+// is computed here (1 without S); with b_inner the caller supplies it (b_condition; exactly 1 for
+// a diagonal B with S = B^{-1/2}). A small s_i on a missed eigenvector shrinks its start
+// component, which is exactly what kappa pays for. |w^H eta|^2/||eta||^2 is the first coordinate
+// of a uniform unit vector:
 //   real T:    P(z1^2 < x) <= sqrt(N x)       (Beta(1/2, (N-1)/2) density bound, Gautschi);
 //   complex T: P(|z1|^2 < x) <= (N - 1) x     (Beta(1, N - 1)).
 // The block Krylov space contains each column's Krylov space and the p columns are independent:
@@ -79,6 +82,12 @@
 // relative, versus ~1e-10 for r ~ 1e-6 scale); a radius below ~1e4 u scale is out of scope.
 // (c) The random numbers come from linalg::fill_random (SplitMix64, Box-Muller): the probability
 // is with respect to an ideal Gaussian start, the usual idealization of randomized algorithms.
+//
+// Rigour of kappa. For a general B that is not diagonally dominant, start_scaling_for's kappa is
+// an estimate (StartScaling::rigorous == false). With b_condition_rigorous = false (what
+// set_start_scaling copies) the result is flagged rigorous = false and the statement says that
+// kappa is assumed: a screening result, not a certificate. Runs covering the complement involve
+// no kappa and stay rigorous.
 //
 // Cost: one block application of Op to X (unless coupling_bound >= 0) plus s block applications of
 // p columns, block CGS2 against [X V] (2 passes), O((s p)^3) for the projected eigenproblem;
@@ -106,12 +115,20 @@ struct ExclusionOptions {
   index_t block_size = 4;     ///< p >= 1 start vectors (one op.apply of p columns per step)
   std::uint64_t seed = 2026;  ///< Gaussian start block (deterministic)
   /// Optional positive diagonal S (n entries): start columns S g. With B diagonal pass
-  /// S = B^{-1/2} (start_scaling_for) and kappa = 1. Call-scoped pointer.
+  /// S = B^{-1/2} (start_scaling_for) and kappa = 1. Without b_inner (B = I) the check charges
+  /// kappa = (max s_i / min s_i)^2 = cond(S^2) itself. Call-scoped pointer. set_start_scaling
+  /// sets this, b_condition and b_condition_rigorous from a StartScaling.
   const std::vector<double>* start_scaling = nullptr;
-  /// kappa >= cond(S B S), an upper bound the caller vouches for (start_scaling_for gives S and
-  /// kappa). Required (>= 1) with b_inner: the default 0 makes forgetting it an error rather than
-  /// a silently optimistic statement. Ignored (1) without b_inner.
+  /// With b_inner: kappa >= cond(S B S), an upper bound the caller vouches for (start_scaling_for
+  /// gives S and kappa). Required (>= 1): the default 0 makes forgetting it an error rather than
+  /// a silently optimistic statement. Without b_inner: optional (0 = unset, else >= 1); kappa =
+  /// max(cond(S^2), b_condition), cond(S^2) computed here.
   double b_condition = 0.0;
+  /// With b_inner: false when b_condition is an estimate, not a proven bound (StartScaling::
+  /// rigorous == false, e.g. a general non-diagonally-dominant B). The result is then flagged
+  /// rigorous = false and its statement says that kappa is assumed. Without b_inner kappa is
+  /// computed exactly and this is ignored.
+  bool b_condition_rigorous = true;
   /// >= 0: caller's bound on e = ||Op X - X H11||_B (2-norm), e.g. sqrt(sum of the Lanczos
   /// estimates^2) of the Ritz vectors spanning X; saves the block application of Op to X.
   /// < 0 (default): computed (rigorous path).
@@ -132,7 +149,8 @@ struct ExclusionOptions {
 enum class ExclusionStatus {
   Passed,       ///< no Ritz value with |theta| >= 1/r'; the probability statement holds
   Detected,     ///< some Ritz value has |theta| >= 1/r' (a missing pair, or one in (r, r'])
-  Inconclusive  ///< no statement: eps <= 0 (gap too small / coupling too large) or step cap hit
+  Inconclusive  ///< no statement: eps <= 0 (gap too small / coupling too large), step cap hit,
+                ///< or kappa not finite
 };
 
 const char* exclusion_status_name(ExclusionStatus s);
@@ -145,7 +163,11 @@ struct ExclusionResult {
   double pass_threshold = 0.0;   ///< tau = 1/r'
   double coupling = 0.0;         ///< e used (computed or supplied, plus a rounding guard)
   double epsilon = 0.0;          ///< 1 - tau / Theta_eff (<= 0: no statement possible)
-  double kappa = 1.0;
+  double kappa = 1.0;            ///< kappa of the statement (see ExclusionOptions::b_condition)
+  /// false when the probability statement rests on a kappa that is only an estimate
+  /// (b_condition_rigorous == false and the run did not cover the complement): a Passed result is
+  /// then a screening result, not a certificate (the statement says so).
+  bool rigorous = true;
   index_t deflated = 0;          ///< m = X.cols()
   index_t dimension = 0;         ///< N = n - m
   std::vector<double> deflated_theta;  ///< eigenvalues mu_i of H11, by decreasing |mu|
@@ -203,6 +225,10 @@ struct StartScaling {
   bool rigorous = true;
   std::string note;
 };
+
+/// Copies sc into opt: start_scaling = &sc.scaling (empty: none; sc must outlive the check),
+/// b_condition = sc.kappa, b_condition_rigorous = sc.rigorous.
+void set_start_scaling(ExclusionOptions& opt, const StartScaling& sc);
 
 /// B == nullptr: S = I, kappa = 1. B diagonal (positive): S = B^{-1/2}, kappa = 1 (exact).
 /// Otherwise Jacobi scaling S = diag(B)^{-1/2}; kappa = Gershgorin upper / lower bound of S B S
