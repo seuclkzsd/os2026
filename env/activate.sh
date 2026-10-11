@@ -12,3 +12,6 @@ export HS_CORES="${HS_CORES:-24-30,33-41}"     # 16 physical cores on NUMA node 
 export HS_MEM_GB="${HS_MEM_GB:-30}"            # RSS limit enforced by tools/run/guard.py
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" # interactive default; guard.py overrides per run
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
+# numpy's MADV_HUGEPAGE triggers failing THP compaction on this machine: first touch of fresh
+# arrays becomes ~100x slower (measured by the generator agents). Disable it for every tool.
+export NUMPY_MADVISE_HUGEPAGE=0
