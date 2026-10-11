@@ -386,6 +386,8 @@ def test_cli_and_report(tmp_path, monkeypatch):
                         "--note", "x / scipy: killed by the guard"]) == 0
     text = md.read_text()
     assert "| c | exact | HEP | 20 | 4 | 0.5 | 1 |" in text and "complete (4/4) | pass |" in text
+    row = next(line for line in text.splitlines() if line.startswith("| c | exact |"))
+    assert float(row.strip("|").split("|")[9]) < 1e-12        # the B-orth column
     assert "incomplete (3/4) | **fail** |" in text and "c / truncated: " in text
     assert text.endswith("## Notes\n\n- x / scipy: killed by the guard\n")
     # pairs outside the target set are counted in the completeness column

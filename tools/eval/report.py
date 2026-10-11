@@ -19,7 +19,8 @@ LEGEND = (
     "Metrics (tools/eval/evaluate.py): time = solver-reported `time_total_s`; peak memory = solver-reported "
     "`peak_rss_bytes`; backward error eta = ||Ax - lambda Bx||_2 / ((||A||_2 + |lambda| ||B||_2) ||x||_2) "
     "recomputed independently; eigenvalue error vs the reference as relative |lambda - mu|/|mu| and scaled "
-    "|lambda - mu|/(|mu| + ||A||_2/||B||_2); completeness found/expected, + computed pairs outside the "
+    "|lambda - mu|/(|mu| + ||A||_2/||B||_2); B-orth = ||X^H B X - I||_2 (HEP/GHEP, whose vectors must be "
+    "B-orthonormal; not part of the verdict); completeness found/expected, + computed pairs outside the "
     "target set (certified only against a complete reference; consistent/inconsistent = against an "
     "uncertified solver reference)."
 )
@@ -55,8 +56,8 @@ def render(docs: list[dict[str, Any]], title: str, notes: list[str] | None = Non
     docs = sorted(docs, key=lambda d: (d["case"], d["solver"]))
     lines = [f"# {title}", "", LEGEND, "",
              "| case | solver | problem | n | k | time [s] | peak mem [MiB] | max backward error "
-             "| max eig err (rel / scaled) | completeness | verdict |",
-             "|---|---|---|---:|---:|---:|---:|---:|---:|---|---|"]
+             "| max eig err (rel / scaled) | B-orth | completeness | verdict |",
+             "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|"]
     for d in docs:
         s = d["summary"]
         mem = d.get("peak_rss_bytes")
@@ -65,6 +66,7 @@ def render(docs: list[dict[str, Any]], title: str, notes: list[str] | None = Non
             f"| {_num(d.get('time_total_s'), '.3g')} | {_num(mem / 2**20 if mem else None, '.0f')} "
             f"| {_num(s['max_backward_error'], '.1e')} "
             f"| {_num(s['max_eig_rel_error'], '.1e')} / {_num(s['max_eig_scaled_error'], '.1e')} "
+            f"| {_num(s['b_orthogonality'], '.1e')} "
             f"| {_completeness(d['completeness'])} | {'pass' if d['verdict'] == 'pass' else '**fail**'} |")
     failing = [d for d in docs if d["verdict"] != "pass"]
     if failing:
