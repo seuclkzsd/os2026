@@ -100,7 +100,11 @@ inline constexpr std::int32_t kMaxMinimumDegree = 2048;
 /// flops of the order on 60^2, 300^2 and 20^3 grids, relative to 1.2): 1.3-1.5 0.67-1.0x;
 /// 1.7-1.8 0.75-1.7x; 1.9 1.6-5x; 1.999 170-250x (the halves peel a few vertices off a corner,
 /// thousands of separators deep); from 2 on a half may hold the whole graph: an empty separator,
-/// i.e. the natural order.
+/// i.e. the natural order. The grids flatter 1.5: on the real 3-D cases it costs fill
+/// (bench_analysis_orderings --nd-imbalance, MUMPS flops at 1.2 / 1.3 / 1.5: syn-mem27-46
+/// 65.9 / 65.5 / 98.9 GF, yee-pec-box-1e5 81.0 / 81.7 / 92.5, ss-qa8fk-qa8fm 18.5 / 21.9 / 31.4),
+/// on the 2-D ones it saves 0-14% (wg-square-1e5 0.59 / 0.59 / 0.51, wg-square-1e6 18.8 / 18.5 /
+/// 17.4) - hence the default 1.2.
 inline constexpr double kMaxImbalance = 1.5;
 
 struct SeparatorParams {
