@@ -64,6 +64,12 @@ constexpr real_t<T> abs2(const T& x) {
 
 enum class ScalarKind { Real64, Complex128 };
 
+/// Explicit-instantiation policy (docs/DESIGN.md §5): every template declared in a public header
+/// is instantiated exactly once, at the bottom of the .cpp of the owning module, via
+///   HS_FOR_EACH_SCALAR(MY_INSTANTIATION_MACRO)
+/// Headers state their scalar set in their top comment; the default set is {double, cplx}.
+#define HS_FOR_EACH_SCALAR(X) X(double) X(::hs::cplx)
+
 template <class T>
 constexpr ScalarKind scalar_kind() {
   static_assert(std::is_same_v<T, double> || std::is_same_v<T, cplx>,

@@ -229,6 +229,57 @@ CsrMatrix<T> triangle(const CsrMatrix<T>& a, bool upper) {
 }
 
 template <class T>
+CsrMatrix<T> symmetrize_from_triangle(const CsrMatrix<T>& tri) {
+  if (!tri.square()) HS_THROW(InvalidInput, "symmetrize_from_triangle: matrix is not square");
+  bool has_lower = false, has_upper = false;
+  for (index_t i = 0; i < tri.nrows; ++i)
+    for (index_t p = tri.rowptr[i]; p < tri.rowptr[i + 1]; ++p) {
+      has_lower |= tri.colind[p] < i;
+      has_upper |= tri.colind[p] > i;
+    }
+  if (has_lower && has_upper)
+    HS_THROW(InvalidInput, "symmetrize_from_triangle: input holds entries in both triangles");
+  // U + (U - diag U)^H: the transpose of the strict part fills the other triangle.
+  CsrMatrix<T> strict = triangle(tri, /*upper=*/has_lower ? false : true);
+  {
+    CsrMatrix<T> s;
+    s.nrows = s.ncols = strict.nrows;
+    s.rowptr.assign(static_cast<std::size_t>(s.nrows) + 1, 0);
+    for (index_t i = 0; i < strict.nrows; ++i) {
+      index_t cnt = 0;
+      for (index_t p = strict.rowptr[i]; p < strict.rowptr[i + 1]; ++p) cnt += strict.colind[p] != i;
+      s.rowptr[i + 1] = s.rowptr[i] + cnt;
+    }
+    s.colind.reserve(static_cast<std::size_t>(s.rowptr[s.nrows]));
+    s.values.reserve(static_cast<std::size_t>(s.rowptr[s.nrows]));
+    for (index_t i = 0; i < strict.nrows; ++i)
+      for (index_t p = strict.rowptr[i]; p < strict.rowptr[i + 1]; ++p)
+        if (strict.colind[p] != i) {
+          s.colind.push_back(strict.colind[p]);
+          s.values.push_back(strict.values[p]);
+        }
+    strict = std::move(s);
+  }
+  return add(T(1), tri, T(1), conj_transpose(strict));
+}
+
+template <class T>
+CsrMatrix<T> hermitian_part(const CsrMatrix<T>& a) {
+  if (!a.square()) HS_THROW(InvalidInput, "hermitian_part: matrix is not square");
+  return add(T(0.5), a, T(0.5), conj_transpose(a));
+}
+
+CsrMatrix<cplx> to_complex(const CsrMatrix<double>& a) {
+  CsrMatrix<cplx> c;
+  c.nrows = a.nrows;
+  c.ncols = a.ncols;
+  c.rowptr = a.rowptr;
+  c.colind = a.colind;
+  c.values.assign(a.values.begin(), a.values.end());
+  return c;
+}
+
+template <class T>
 double norm_fro(const CsrMatrix<T>& a) {
   double s = 0.0;
 #pragma omp parallel for reduction(+ : s) schedule(static)
@@ -331,12 +382,13 @@ CsrMatrix<double> real_embedding(const CsrMatrix<cplx>& k) {
   template CsrMatrix<T> add<T>(T, const CsrMatrix<T>&, T, const CsrMatrix<T>&);                    \
   template CsrMatrix<T> identity<T>(index_t);                                                      \
   template CsrMatrix<T> triangle<T>(const CsrMatrix<T>&, bool);                                    \
+  template CsrMatrix<T> symmetrize_from_triangle<T>(const CsrMatrix<T>&);                          \
+  template CsrMatrix<T> hermitian_part<T>(const CsrMatrix<T>&);                                    \
   template double norm_fro<T>(const CsrMatrix<T>&);                                                \
   template double norm_one<T>(const CsrMatrix<T>&);                                                \
   template double hermitian_defect<T>(const CsrMatrix<T>&);
 
-HS_INSTANTIATE_CSR(double)
-HS_INSTANTIATE_CSR(cplx)
+HS_FOR_EACH_SCALAR(HS_INSTANTIATE_CSR)
 #undef HS_INSTANTIATE_CSR
 
 }  // namespace hs

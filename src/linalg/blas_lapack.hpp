@@ -53,6 +53,14 @@ void zhegv_(const fint* itype, const char* jobz, const char* uplo, const fint* n
             const fint* lda, zcplx* b, const fint* ldb, double* w, zcplx* work,
             const fint* lwork, double* rwork, fint* info, fstrlen, fstrlen);
 
+// ---- LAPACK: LU (dense reference solves in tests / small projected problems) ----
+void dgetrf_(const fint* m, const fint* n, double* a, const fint* lda, fint* ipiv, fint* info);
+void zgetrf_(const fint* m, const fint* n, zcplx* a, const fint* lda, fint* ipiv, fint* info);
+void dgetrs_(const char* trans, const fint* n, const fint* nrhs, const double* a, const fint* lda,
+             const fint* ipiv, double* b, const fint* ldb, fint* info, fstrlen);
+void zgetrs_(const char* trans, const fint* n, const fint* nrhs, const zcplx* a, const fint* lda,
+             const fint* ipiv, zcplx* b, const fint* ldb, fint* info, fstrlen);
+
 // ---- LAPACK: Cholesky ----
 void dpotrf_(const char* uplo, const fint* n, double* a, const fint* lda, fint* info, fstrlen);
 void zpotrf_(const char* uplo, const fint* n, zcplx* a, const fint* lda, fint* info, fstrlen);
@@ -174,6 +182,37 @@ inline fint hegv(char jobz, char uplo, fint n, zcplx* a, fint lda, zcplx* b, fin
          1, 1);
   if (info < 0 || (info > 0 && info <= n)) HS_THROW(Internal, "zhegv failed, info=" << info);
   return info;
+}
+
+/// LU factorization with partial pivoting. Returns info (> 0: exactly singular U(info,info)).
+inline fint getrf(fint n, double* a, fint lda, fint* ipiv) {
+  fint info = 0;
+  if (n == 0) return 0;
+  dgetrf_(&n, &n, a, &lda, ipiv, &info);
+  if (info < 0) HS_THROW(Internal, "dgetrf illegal argument " << -info);
+  return info;
+}
+inline fint getrf(fint n, zcplx* a, fint lda, fint* ipiv) {
+  fint info = 0;
+  if (n == 0) return 0;
+  zgetrf_(&n, &n, a, &lda, ipiv, &info);
+  if (info < 0) HS_THROW(Internal, "zgetrf illegal argument " << -info);
+  return info;
+}
+/// Solve A X = B with the getrf factors (trans 'N').
+inline void getrs(fint n, fint nrhs, const double* a, fint lda, const fint* ipiv, double* b, fint ldb) {
+  if (n == 0 || nrhs == 0) return;
+  const char t = 'N';
+  fint info = 0;
+  dgetrs_(&t, &n, &nrhs, a, &lda, ipiv, b, &ldb, &info, 1);
+  if (info != 0) HS_THROW(Internal, "dgetrs failed, info=" << info);
+}
+inline void getrs(fint n, fint nrhs, const zcplx* a, fint lda, const fint* ipiv, zcplx* b, fint ldb) {
+  if (n == 0 || nrhs == 0) return;
+  const char t = 'N';
+  fint info = 0;
+  zgetrs_(&t, &n, &nrhs, a, &lda, ipiv, b, &ldb, &info, 1);
+  if (info != 0) HS_THROW(Internal, "zgetrs failed, info=" << info);
 }
 
 /// Cholesky factorization. Returns info (> 0: leading minor not positive definite).

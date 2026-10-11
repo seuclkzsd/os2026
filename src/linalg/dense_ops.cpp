@@ -82,8 +82,12 @@ void scal(index_t n, T alpha, T* x) {
 
 template <class T>
 double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T* bv, index_t ldbv,
-                          T* w, T* bw, T* h) {
-  HS_ASSERT((bv == nullptr) == (bw == nullptr), "bv and bw must be given together");
+                          T* w, T* bw, T* h, const ApplyFn<T>* apply_m) {
+  const bool stored = bv != nullptr;
+  const bool recompute = !stored && apply_m != nullptr;
+  HS_ASSERT(!stored || bw != nullptr, "stored mode needs bw = M*w");
+  HS_ASSERT(!recompute || bw != nullptr, "recompute mode needs a bw workspace");
+  HS_ASSERT(stored || recompute || bw == nullptr, "bw given without bv or apply_m");
   const auto nn = static_cast<lapack::fint>(n);
   const auto kk = static_cast<lapack::fint>(k);
   std::vector<T> c(static_cast<std::size_t>(k));
@@ -91,17 +95,20 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
     for (index_t j = 0; j < k; ++j) h[j] = T(0);
   }
   for (int pass = 0; pass < 2 && k > 0; ++pass) {
-    // c = (M V)^H w  ==  V^H M w   (M Hermitian)
-    const T* proj = bv ? bv : v;
-    const index_t ldp = bv ? ldbv : ldv;
-    lapack::gemv('C', nn, kk, T(1), proj, static_cast<lapack::fint>(ldp), w, T(0), c.data());
-    // w -= V c ; bw -= (M V) c
+    if (recompute) (*apply_m)(w, bw);
+    // c = V^H M w: (M V)^H w in stored mode, V^H (M w) in recompute mode, V^H w otherwise.
+    if (stored) {
+      lapack::gemv('C', nn, kk, T(1), bv, static_cast<lapack::fint>(ldbv), w, T(0), c.data());
+    } else {
+      lapack::gemv('C', nn, kk, T(1), v, static_cast<lapack::fint>(ldv), recompute ? bw : w, T(0), c.data());
+    }
     lapack::gemv('N', nn, kk, T(-1), v, static_cast<lapack::fint>(ldv), c.data(), T(1), w);
-    if (bv) lapack::gemv('N', nn, kk, T(-1), bv, static_cast<lapack::fint>(ldbv), c.data(), T(1), bw);
+    if (stored) lapack::gemv('N', nn, kk, T(-1), bv, static_cast<lapack::fint>(ldbv), c.data(), T(1), bw);
     if (h) {
       for (index_t j = 0; j < k; ++j) h[j] += c[j];
     }
   }
+  if (recompute) (*apply_m)(w, bw);
   if (bw) {
     const double m2 = std::real(dot(n, w, bw));
     return m2 > 0.0 ? std::sqrt(m2) : 0.0;
@@ -131,13 +138,12 @@ void multiply(index_t n, index_t k, index_t m, const T* v, index_t ldv, const T*
   template void axpy<T>(index_t, T, const T*, T*);                                                  \
   template void scal<T>(index_t, T, T*);                                                            \
   template double orthogonalize_cgs2<T>(index_t, index_t, const T*, index_t, const T*, index_t, T*, \
-                                        T*, T*);                                                    \
+                                        T*, T*, const ApplyFn<T>*);                                 \
   template void gram<T>(index_t, index_t, const T*, index_t, const T*, index_t, T*, index_t);       \
   template void multiply<T>(index_t, index_t, index_t, const T*, index_t, const T*, index_t, T*,    \
                             index_t);
 
-HS_INSTANTIATE_DENSE_OPS(double)
-HS_INSTANTIATE_DENSE_OPS(cplx)
+HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DENSE_OPS)
 #undef HS_INSTANTIATE_DENSE_OPS
 
 }  // namespace hs::linalg

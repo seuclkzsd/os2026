@@ -37,7 +37,7 @@
     { "name": "portable", "configurePreset": "portable", "jobs": 4 }
   ],
   "testPresets": [
-    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true }, "execution": { "jobs": 4 } },
-    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true }, "execution": { "jobs": 4 } }
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true }, "execution": { "jobs": 4, "noTestsAction": "error" } },
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true }, "execution": { "jobs": 4, "noTestsAction": "error" } }
   ]
 }

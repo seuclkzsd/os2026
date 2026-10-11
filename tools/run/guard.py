@@ -9,8 +9,12 @@ script.  It enforces the project's resource policy:
             threading environment variables are set to the same count.
   * Memory: the summed RSS of the whole process tree is sampled every
             ``--interval`` seconds; the tree is killed when it exceeds
-            ``--mem-gb`` or when system-wide MemAvailable drops below
-            ``--min-avail-gb`` (protects other users of the machine).
+            ``--mem-gb``, or when system-wide MemAvailable drops below
+            ``--min-avail-gb`` AND the tree itself is large (>= max(2 GiB,
+            mem_gb/4)), so small builds/tests of parallel sessions are never
+            collateral damage.  The reported peak is the max of the sampled sum,
+            the summed kernel high-water marks (VmHWM) and ru_maxrss, so short
+            spikes between samples are not missed.
   * Time:   optional wall-clock timeout.
   * Mutual exclusion: ``--exclusive`` takes a machine-wide flock so that
             heavy experiments run one at a time.
@@ -36,6 +40,9 @@ from pathlib import Path
 DEFAULT_CORES = os.environ.get("HS_CORES", "24-30,33-41")
 DEFAULT_MEM_GB = float(os.environ.get("HS_MEM_GB", "30"))
 DEFAULT_MIN_AVAIL_GB = float(os.environ.get("HS_MIN_AVAIL_GB", "12"))
+# During parallel multi-agent phases set HS_MAX_SHARED_MEM_GB (e.g. 8): larger --mem-gb then
+# requires --exclusive, so heavy runs never overlap.
+MAX_SHARED_MEM_GB = float(os.environ.get("HS_MAX_SHARED_MEM_GB", "inf"))
 LOCK_PATH = os.environ.get("HS_LOCK", "/tmp/hsolve-guard-exclusive.lock")
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                "BLIS_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
@@ -103,16 +110,20 @@ def tree_pids(root: int) -> list[int]:
     return pids
 
 
-def tree_rss_bytes(root: int) -> int:
-    page = os.sysconf("SC_PAGE_SIZE")
-    total = 0
+def tree_rss_bytes(root: int) -> tuple[int, int]:
+    """(sum of current RSS, sum of VmHWM) over the process tree, in bytes."""
+    rss = hwm = 0
     for pid in tree_pids(root):
         try:
-            with open(f"/proc/{pid}/statm") as f:
-                total += int(f.read().split()[1]) * page
-        except (FileNotFoundError, ProcessLookupError):
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss += int(line.split()[1]) * 1024
+                    elif line.startswith("VmHWM:"):
+                        hwm += int(line.split()[1]) * 1024
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
             pass
-    return total
+    return rss, hwm
 
 
 def kill_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
@@ -150,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
     cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
     if not cmd:
         ap.error("missing command")
+
+    if args.mem_gb > MAX_SHARED_MEM_GB and not args.exclusive:
+        ap.error(f"--mem-gb {args.mem_gb} > HS_MAX_SHARED_MEM_GB={MAX_SHARED_MEM_GB}: add --exclusive")
 
     cpus = parse_cpulist(args.cores)
     allowed = os.sched_getaffinity(0)
@@ -189,15 +203,18 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
     proc = subprocess.Popen(cmd, env=env, preexec_fn=preexec)
     peak = 0
+    peak_hwm = 0
     reason = None
+    big_tree = max(2.0, args.mem_gb / 4) * 2**30
     try:
         while proc.poll() is None:
-            rss = tree_rss_bytes(proc.pid)
+            rss, hwm = tree_rss_bytes(proc.pid)
             peak = max(peak, rss)
+            peak_hwm = max(peak_hwm, hwm)
             if rss > args.mem_gb * 2**30:
                 reason = f"rss {rss / 2**30:.2f} GiB > limit {args.mem_gb} GiB"
-            elif mem_available_gb() < args.min_avail_gb:
-                reason = f"system MemAvailable < {args.min_avail_gb} GiB"
+            elif rss >= big_tree and mem_available_gb() < args.min_avail_gb:
+                reason = f"system MemAvailable < {args.min_avail_gb} GiB while tree uses {rss / 2**30:.1f} GiB"
             elif args.timeout and time.time() - t0 > args.timeout:
                 reason = f"timeout {args.timeout}s"
             if reason:
@@ -212,12 +229,15 @@ def main(argv: list[str] | None = None) -> int:
     wall = time.time() - t0
     ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu_s = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
+    # ru_maxrss of children is a max over all reaped children of this guard (KiB on Linux).
+    peak_reported = max(peak, peak_hwm, ru1.ru_maxrss * 1024)
     summary = {
         "cmd": cmd,
         "returncode": rc,
         "killed": reason,
         "wall_s": round(wall, 3),
-        "peak_rss_gib": round(peak / 2**30, 3),
+        "peak_rss_gib": round(peak_reported / 2**30, 3),
+        "peak_sampled_gib": round(peak / 2**30, 3),
         "cpu_s": round(cpu_s, 3),
         "cores": args.cores,
         "threads": nthreads,

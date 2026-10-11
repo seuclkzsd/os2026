@@ -69,14 +69,22 @@ if(HSOLVE_BUILD_TESTS)
   enable_testing()
   find_package(GTest REQUIRED)
   include(GoogleTest)
+  # Shared test fixtures (dense reference operators, known-spectrum generators).
+  file(GLOB HSOLVE_TEST_SUPPORT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/support/*.cpp")
+  add_library(hsolve_test_support STATIC ${HSOLVE_TEST_SUPPORT_SOURCES})
+  target_include_directories(hsolve_test_support PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp"
+                                                        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(hsolve_test_support PUBLIC hsolve GTest::gtest LAPACK::LAPACK BLAS::BLAS)
   file(GLOB HSOLVE_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/test_*.cpp")
   foreach(src IN LISTS HSOLVE_TEST_SOURCES)
     get_filename_component(name "${src}" NAME_WE)
     add_executable(${name} "${src}")
     target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_link_libraries(${name} PRIVATE hsolve GTest::gtest_main LAPACK::LAPACK BLAS::BLAS
-                                          MUMPS::MUMPS nlohmann_json::nlohmann_json)
-    gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST
+    target_compile_definitions(${name} PRIVATE HSOLVE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    target_link_libraries(${name} PRIVATE hsolve hsolve_test_support GTest::gtest_main LAPACK::LAPACK
+                                          BLAS::BLAS MUMPS::MUMPS nlohmann_json::nlohmann_json)
+    # Test names are "<executable>.<Suite>.<Name>", so `ctest -R test_factor` selects one file.
+    gtest_discover_tests(${name} TEST_PREFIX "${name}." DISCOVERY_MODE PRE_TEST
       PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1")
   endforeach()
 endif()
