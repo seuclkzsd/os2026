@@ -1,6 +1,16 @@
 // Dense vector/block helpers shared by the eigensolvers and the driver (module-internal API).
 // Single owner of: deterministic random vectors, inner products/norms, CGS2 orthogonalization.
 // T in {double, cplx}. Vectors are contiguous; blocks are column-major with explicit ld.
+//
+// Reproducibility. dot and norm2 are summed over fixed row blocks whose boundaries depend only on
+// n: one thread sums a block in a fixed order (explicit lane accumulators, no reassociation),
+// block sums are added in block order into at most 256 slots, and the slots are added serially.
+// The results are therefore bitwise identical for every OpenMP thread count and from run to run.
+// The summation order differs from a plain left-to-right sum; the accuracy is the usual
+// O(eps * sum |x_i y_i|) of a blocked sum.
+//
+// Thread safety: all functions are reentrant (no shared state); arrays passed as outputs must not
+// be accessed concurrently. Called from inside an active OpenMP region they run on one thread.
 #pragma once
 
 #include <cstdint>
@@ -17,12 +27,13 @@ namespace hs::linalg {
 template <class T>
 void fill_random(T* x, index_t n, std::uint64_t seed, std::uint64_t stream = 0);
 
-/// x^H y (conjugate-linear in x). OpenMP-parallel reduction; deterministic for a fixed
-/// thread count.
+/// x^H y (conjugate-linear in x). OpenMP-parallel, bitwise independent of the thread count (see
+/// the file comment). O(n), reads 2n scalars.
 template <class T>
 T dot(index_t n, const T* x, const T* y);
 
-/// ||x||_2 (overflow-safe two-pass scaling is not needed for our magnitudes; plain sum).
+/// ||x||_2 (overflow-safe two-pass scaling is not needed for our magnitudes; plain sum of
+/// squares, which over/underflows only beyond ~1e154 / below ~1e-154). Deterministic like dot.
 template <class T>
 double norm2(index_t n, const T* x);
 
