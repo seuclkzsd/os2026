@@ -152,9 +152,10 @@ TYPED_TEST(OpsKernelPaths, ShiftInvertResultsUnchangedAcrossPaths) {
 }
 
 // An unattainable rel_tol with a double factor near an eigenvalue: the P1 policy computes
-// corrections until one is rejected; stopping at the rounding level (componentwise backward error
-// <= 8 eps) computes no more of them than that, and returns a residual as small (both are at the
-// attainable accuracy).
+// corrections until one is rejected (at least two: the first one is accepted); stopping at the
+// rounding level (componentwise backward error <= 8 eps) stops after the first correction, i.e.
+// strictly fewer corrections and solved right-hand sides, and returns a residual as small (both
+// are at the attainable accuracy).
 TYPED_TEST(OpsKernelPaths, RefinementStopsAtTheRoundingLevel) {
   using T = TypeParam;
   const index_t nx = 40, ny = 41, n = nx * ny, p = 3;
@@ -173,19 +174,25 @@ TYPED_TEST(OpsKernelPaths, RefinementStopsAtTheRoundingLevel) {
   hs::SolveRefinement p1 = p4;
   p1.stop_at_rounding_level = false;
   hs::ShiftInvertOperator<T> old_policy(*f, pencil, sigma, p1), new_policy(*f, pencil, sigma, p4);
+  const index_t rhs0 = f->stats().rhs_solved;
   old_policy.apply(x.data(), n, y1.data(), n, p);
+  const index_t rhs_old = f->stats().rhs_solved - rhs0;
   new_policy.apply(x.data(), n, y2.data(), n, p);
-  EXPECT_GE(old_policy.refinement_steps(), 1);
-  EXPECT_LE(new_policy.refinement_steps(), old_policy.refinement_steps());
-  EXPECT_LT(new_policy.refinement_steps(), p4.max_steps);
+  const index_t rhs_new = f->stats().rhs_solved - rhs0 - rhs_old;
+  EXPECT_GE(old_policy.refinement_steps(), 2);
+  EXPECT_LE(new_policy.refinement_steps(), 1);  // one correction reaches the rounding level
+  EXPECT_LT(new_policy.refinement_steps(), old_policy.refinement_steps());
+  EXPECT_LT(rhs_new, rhs_old);
+  EXPECT_GT(new_policy.last_relative_residual(), p4.rel_tol);  // stopped by the rounding level
   EXPECT_LE(new_policy.last_backward_error(), 8 * std::numeric_limits<double>::epsilon());
   EXPECT_LE(new_policy.last_relative_residual(), 4 * old_policy.last_relative_residual() + 1e-300);
   EXPECT_LE(max_rel_diff(n, p, y2.data(), n, y1.data(), n), 1e-6);
 }
 
 // Columns that are already done (here: zero right-hand sides, residual exactly 0) are left out of
-// the correction solves; the active ones still reach double accuracy with a single factor, and
-// the finished ones are returned unchanged.
+// the correction solves (each correction solves at most the 2 active columns, not all p: counted
+// with FactorStats::rhs_solved); the active ones still reach double accuracy with a single
+// factor, and the finished ones are returned unchanged.
 TYPED_TEST(OpsKernelPaths, RefinementSolvesOnlyTheActiveColumns) {
   using T = TypeParam;
   Pencil<T> c(300, true);
@@ -207,8 +214,13 @@ TYPED_TEST(OpsKernelPaths, RefinementSolvesOnlyTheActiveColumns) {
   refine.max_steps = 10;
   refine.rel_tol = 1e-13;
   hs::ShiftInvertOperator<T> op(*f, pencil, c.sigma, refine);
+  const index_t rhs0 = f->stats().rhs_solved;
   op.apply(x.data(), ld, y.data(), ld, p);
-  EXPECT_GE(op.refinement_steps(), 1);
+  const index_t rhs = f->stats().rhs_solved - rhs0, steps = op.refinement_steps();
+  EXPECT_GE(steps, 1);
+  // One p-column solve, then 1 or 2 columns per correction (the P1 scheme solved p each time).
+  EXPECT_LE(rhs, p + 2 * steps);
+  EXPECT_GE(rhs, p + steps);
   for (index_t k : {0, 2, 3})
     for (index_t i = 0; i < n; ++i) ASSERT_EQ(y[i + k * ld], T(0)) << "k=" << k;
   for (index_t k : {1, 4})
@@ -218,6 +230,7 @@ TYPED_TEST(OpsKernelPaths, RefinementSolvesOnlyTheActiveColumns) {
 
 TYPED_TEST(OpsKernelPaths, UnavailablePathIsRefusedAtConstruction) {
   using T = TypeParam;
+  // Hosts with AVX-512: covered by test_solvephase_fix_dispatch (HS_KERNELS_NO_AVX512=1).
   if (hs::kernel_path_available(KernelPath::Avx512)) GTEST_SKIP() << "AVX-512 available here";
   const auto a = hs::test::laplacian_1d<T>(10);
   EXPECT_EQ(error_code_of([&] { hs::CsrOperator<T> op(a, KernelPath::Avx512); }),

@@ -1,9 +1,12 @@
 // Concrete linear operators (module src/ops). Scalar set: T in {double, cplx}.
 // Non-owning: every referenced object must outlive the operator (rvalue constructors deleted).
 // Sparse products go through the kernels of sparse.hpp; `kernels` selects their KernelPath
-// (Auto: AVX-512 when available; Reference reproduces the P1 operators for comparisons). Each
-// operator keeps the kernels' scratch between applies (no allocation per apply after the first
-// block of a given width).
+// (Auto: AVX-512 when available; Reference: the P1 sparse loops, for comparisons). Only the sparse
+// products depend on the path: the P4 refinement policy (corrections solve only the still-active
+// columns; SolveRefinement::stop_at_rounding_level) applies on every path, so with refinement on
+// no path reproduces the P1 ShiftInvertOperator (bench/solvephase_fix_refine.cpp has a replica of
+// it). Each operator keeps the kernels' scratch between applies (no allocation per apply after
+// the first block of a given width).
 #pragma once
 
 #include <vector>
@@ -46,7 +49,9 @@ class CsrOperator final : public LinearOperator<T> {
 struct SolveRefinement {
   int max_steps = 0;     ///< 0 = off. Needed with single-precision or BLR factorizations.
   double rel_tol = 0.0;  ///< column j is done when ||r_j|| <= rel_tol * ||(B x)_j||
-  bool stop_at_rounding_level = true;  ///< false: ignore the backward-error test (P1 behaviour)
+  /// false: ignore the backward-error test (the P1 stopping rule; corrections still solve only
+  /// the active columns, unlike P1)
+  bool stop_at_rounding_level = true;
 };
 
 /// Op = K^{-1} * B with K = A - sigma*B (B = I when the pencil has no B), where `factor` holds
