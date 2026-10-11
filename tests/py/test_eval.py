@@ -382,7 +382,14 @@ def test_cli_and_report(tmp_path, monkeypatch):
     doc = json.loads((good / evaluate.EVAL_FILE).read_text())
     assert doc["verdict"] == "pass" and doc["schema_version"] == cio.SCHEMA_VERSION
     md = tmp_path / "results" / "summary.md"
-    assert report.main([str(tmp_path / "good"), str(bad / evaluate.EVAL_FILE), "--out", str(md)]) == 0
+    assert report.main([str(tmp_path / "good"), str(bad / evaluate.EVAL_FILE), "--out", str(md),
+                        "--note", "x / scipy: killed by the guard"]) == 0
     text = md.read_text()
     assert "| c | exact | HEP | 20 | 4 | 0.5 | 1 |" in text and "complete (4/4) | pass |" in text
     assert "incomplete (3/4) | **fail** |" in text and "c / truncated: " in text
+    assert text.endswith("## Notes\n\n- x / scipy: killed by the guard\n")
+    # pairs outside the target set are counted in the completeness column
+    extra = _save(tmp_path / "extra", *_nearest(ref, SIGMA, 5))
+    assert evaluate.main(["c", str(extra), "--root", str(tmp_path), "--solver", "five"]) == 0
+    assert report.main([str(extra), "--out", str(md)]) == 0
+    assert "complete (4/4, +1 extra) | pass |" in md.read_text()

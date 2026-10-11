@@ -49,7 +49,9 @@ def _completeness(c: dict[str, Any]) -> str:
     return f"{c['status']} ({c['found']}/{exp_s}{extra})"
 
 
-def render(docs: list[dict[str, Any]], title: str) -> str:
+def render(docs: list[dict[str, Any]], title: str, notes: list[str] | None = None) -> str:
+    """Markdown summary; `notes` (e.g. runs killed by the guard, which leave no evaluation) are listed
+    verbatim after the failures."""
     docs = sorted(docs, key=lambda d: (d["case"], d["solver"]))
     lines = [f"# {title}", "", LEGEND, "",
              "| case | solver | problem | n | k | time [s] | peak mem [MiB] | max backward error "
@@ -68,6 +70,8 @@ def render(docs: list[dict[str, Any]], title: str) -> str:
     if failing:
         lines += ["", "## Failures", ""]
         lines += [f"- {d['case']} / {d['solver']}: " + "; ".join(d["reasons"]) for d in failing]
+    if notes:
+        lines += ["", "## Notes", ""] + [f"- {note}" for note in notes]
     return "\n".join(lines) + "\n"
 
 
@@ -76,12 +80,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("inputs", nargs="+", type=Path, help=f"evaluation JSON files or directories ({EVAL_FILE})")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT, help="markdown file (default: %(default)s)")
     ap.add_argument("--title", default="Evaluation summary")
+    ap.add_argument("--note", action="append", default=[],
+                    help="line for a Notes section, e.g. a run that left no evaluation (repeatable)")
     args = ap.parse_args(argv)
     docs = collect(args.inputs)
     if not docs:
         ap.error("no evaluation files found")
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(render(docs, args.title))
+    args.out.write_text(render(docs, args.title, args.note))
     print(f"{len(docs)} evaluation(s) -> {args.out}")
     return 0
 
