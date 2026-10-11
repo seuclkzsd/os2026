@@ -207,6 +207,15 @@ class SparseFactorization {
   /// Toggle out-of-core storage of the factors; takes effect at the next factorize().
   virtual void set_out_of_core(bool on) = 0;
 
+  /// Toggle null-pivot detection (ICNTL(24)/CNTL(3), default on); takes effect at the next
+  /// factorize(). Off is for shifts inside an eigenvalue cluster denser than
+  /// null_pivot_tol*||K||, where every nearby shift looks "singular": MUMPS then keeps the tiny
+  /// (nonzero) pivots, and shift-invert stays correct - the near-null directions are the wanted
+  /// eigenvectors and get amplified (inverse iteration). factorize() still returns false for an
+  /// exactly zero pivot (INFO -10). The inertia of such a factorization is NOT certified near the
+  /// shift: inertia counts for certificates must come from factorizations with detection on.
+  virtual void set_null_pivot_detection(bool on) = 0;
+
   virtual const FactorStats& stats() const = 0;
   virtual const FactorOptions& options() const = 0;
   /// Order n of K (not of the embedding).

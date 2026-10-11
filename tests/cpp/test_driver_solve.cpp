@@ -112,6 +112,24 @@ TEST(DriverSolve, ShiftExactlyOnAnEigenvalue) {
   expect_same_set(sol.eigenvalues, nearest(w, sigma, 5), 1e-10);
 }
 
+// sigma inside a cluster whose spacing (2e-8) is below the null-pivot threshold (1e-8 * ||K|| ~ 1e-7):
+// every nearby shift is flagged "singular". The driver must factorize AT sigma without detection
+// and still certify the k nearest (endpoint counts at gap midpoints without detection).
+TEST(DriverSolve, ShiftInsideDenseCluster) {
+  std::vector<double> w;
+  for (int i = -150; i < 150; ++i) w.push_back(2e-8 * i);
+  for (int i = 0; i < 150; ++i) w.push_back(1.0 + 0.06 * i);
+  for (int i = 0; i < 150; ++i) w.push_back(-1.0 - 0.06 * i);
+  auto a = hs::test::prescribed_spectrum<double>(w, 4, 31);
+  auto sol = hs::solve(a, nullptr, nearest_cfg(0.0, 5));  // {0, +-2e-8, +-4e-8}: unique at tol
+  expect_report_ok(sol, true);
+  ASSERT_EQ(sol.eigenvalues.size(), 5u);
+  auto got = sol.eigenvalues;
+  std::sort(got.begin(), got.end());
+  const std::vector<double> want{-4e-8, -2e-8, 0.0, 2e-8, 4e-8};
+  for (int i = 0; i < 5; ++i) EXPECT_NEAR(got[i], want[i], 1e-12);
+}
+
 TEST(DriverSolve, IntervalCountsWithInertia) {
   auto a = hs::test::laplacian_2d<double>(25, 24);
   auto w = hs::test::laplacian_2d_eigenvalues(25, 24);

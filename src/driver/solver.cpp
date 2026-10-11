@@ -123,49 +123,85 @@ FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
 
 // ------------------------------------------------------------------------- factorization steps
 
-// Factorize K(sigma0), perturbing the shift when K is numerically singular (DESIGN §3.6-4):
-// delta_r = (+/-) 1e-8 * max(scale, |sigma0|) * 10^(r/2). Returns the shift actually used.
+// Factorize K(sigma0) (DESIGN §3.6-4). A null pivot means sigma0 is (numerically) ON an eigenvalue:
+// perturb the shift, delta_r = (+/-) 1e-8 * max(scale, |sigma0|) * 10^r, at most twice. If every
+// nearby shift still looks singular, sigma0 lies inside a cluster denser than the null-pivot
+// threshold: moving away would change which eigenvalues are nearest, so factorize AT sigma0 with
+// null-pivot detection off (tiny pivots are kept; shift-invert then amplifies exactly the wanted
+// near-null directions). `detection_off` tells later refactorizations at this shift to do the same.
 template <class T>
-double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale) {
+double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off) {
+  detection_off = false;
+  fac.set_null_pivot_detection(true);
   double s = sigma0;
+  const index_t perturbations = std::min<index_t>(2, c.cfg.max_shift_retries);
   for (index_t r = 0;; ++r) {
     if (fac.factorize(1.0, -s)) {
       c.rep.shift_retries = r;
       if (r > 0) warn(c, "shift perturbed to " + fmt(s) + " (A - sigma B singular at the requested shift)");
       return s;
     }
-    if (r >= c.cfg.max_shift_retries)
-      HS_THROW(Singular, "A - sigma B is numerically singular near sigma = " << sigma0 << " after " << r
-                                                                             << " perturbations");
-    const double mag = 1e-8 * std::max(scale, std::abs(sigma0)) * std::pow(10.0, static_cast<double>(r / 2));
+    if (r >= perturbations) break;
+    const double mag = 1e-8 * std::max(scale, std::abs(sigma0)) * std::pow(10.0, static_cast<double>(r));
     s = sigma0 + ((r % 2 == 0) ? mag : -mag);
   }
+  fac.set_null_pivot_detection(false);
+  if (fac.factorize(1.0, -sigma0)) {
+    detection_off = true;
+    c.rep.shift_retries = perturbations + 1;
+    warn(c, "shift lies inside an eigenvalue cluster denser than the null-pivot threshold; factorized at the "
+            "requested shift without null-pivot detection");
+    return sigma0;
+  }
+  fac.set_null_pivot_detection(true);
+  HS_THROW(Singular, "A - sigma B is exactly singular at and near sigma = " << sigma0);
 }
 
-// nu_-(A - s B): number of eigenvalues below s. If K(s) is singular the endpoint is moved in
-// direction `outward` (+1 / -1) by a growing step; moves are counted. Returns the final s.
-// Inertia must come from an exact (double, full-rank) factorization: the inertia of a single-
-// precision or BLR factor is that of the rounded/compressed matrix. The main factorization object
-// is reused when it is exact (same pattern, analysis reused); otherwise compute_inertia builds a
-// separate double factorization.
+// Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
+template <class T>
+void refactorize_at(SparseFactorization<T>& fac, double sigma, bool detection_off) {
+  fac.set_null_pivot_detection(!detection_off);
+  if (!fac.factorize(1.0, -sigma)) HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
+}
+
+// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2). Endpoints are placed at spectral-gap
+// midpoints. The count must come from an exact (double, full-rank) factorization: the inertia of a
+// single-precision or BLR factor is that of the rounded/compressed matrix, so then compute_inertia
+// builds a separate double factorization. The first two attempts use null-pivot detection (a null
+// pivot means s sits on an eigenvalue: move it outward). Inside a cluster denser than the detection
+// threshold every s is flagged, so later attempts count WITHOUT detection: a backward-stable LDL^T
+// gives the exact inertia of K + E with ||E|| ~ eps*growth*||K||, i.e. it counts correctly every
+// eigenvalue farther than that from s - and s is a gap midpoint. Returns the final s via `s`.
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
                     double step) {
   const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
   for (int tries = 0; tries < 8; ++tries) {
-    Inertia in;
-    if (exact) {
-      if (fac.factorize(1.0, -s)) in = fac.inertia();
-    } else {
-      FactorOptions o = fac.options();
-      o.precision = FactorPrecision::Double;
-      o.blr = false;
-      in = compute_inertia(pencil, 1.0, -s, o);
+    // At each position: detection on (certified), then - exact factor only - detection off at
+    // the SAME position; move outward only if both fail (exactly singular / no exact factor).
+    for (const bool detection : {true, false}) {
+      if (!detection && !exact) break;
+      Inertia in;
+      if (exact) {
+        fac.set_null_pivot_detection(detection);
+        if (fac.factorize(1.0, -s)) in = fac.inertia();
+      } else {
+        FactorOptions o = fac.options();
+        o.precision = FactorPrecision::Double;
+        o.blr = false;
+        in = compute_inertia(pencil, 1.0, -s, o);
+      }
+      if (in.valid) {
+        if (!detection && c.rep.certificate.note.empty())
+          c.rep.certificate.note = "endpoint inertia counted without null-pivot detection (dense cluster)";
+        fac.set_null_pivot_detection(true);
+        return in.neg;
+      }
     }
-    if (in.valid) return in.neg;
     s += outward * step * std::pow(4.0, tries);
     ++c.rep.certificate.endpoint_moves;
   }
+  fac.set_null_pivot_detection(true);
   HS_THROW(Singular, "cannot find a nonsingular certificate endpoint near " << s);
 }
 
@@ -379,8 +415,9 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   }
   if (k > n) HS_THROW(InvalidInput, "target.k = " << k << " exceeds the matrix order " << n);
 
-  // Factorization at the shift (with near-singular perturbation).
-  const double sigma = factorize_near(c, fac, sigma0, scale);
+  // Factorization at the shift (near-singular handling in factorize_near).
+  bool detection_off = false;
+  const double sigma = factorize_near(c, fac, sigma0, scale, detection_off);
   rep.sigma_used = sigma;
   const FactorStats& fs = fac.stats();
   event(c, "factorization", {{"sigma", sigma}, {"factor_s", fs.factorize_s}, {"entries", static_cast<std::int64_t>(fs.factor_entries)},
@@ -499,7 +536,7 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
     run.all = take_columns(run.all, conv);
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
     if (nev_rerun < 1) break;
-    if (!fac.factorize(1.0, -sigma)) HS_THROW(Internal, "refactorization at the working shift failed");
+    refactorize_at(fac, sigma, detection_off);
     DenseMatrix<T> defl = run.all.x;
     it_timer.reset();
     lanczos_run(c, fac, pencil, sigma, nev_rerun, &defl, run);
@@ -557,7 +594,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
   rep.sigma_requested = t.sigma;
   rep.certificate.note = "not available for indefinite B (Sylvester inertia does not count eigenvalues)";
 
-  const double sigma = factorize_near(c, fac, t.sigma, scale);
+  bool detection_off = false;
+  const double sigma = factorize_near(c, fac, t.sigma, scale, detection_off);
   rep.sigma_used = sigma;
 
   SolveRefinement refine;

@@ -94,6 +94,7 @@ class MumpsFactorization final : public SparseFactorization<T> {
   void solve(T* b, index_t nrhs, index_t ldb) override;
   Inertia inertia() const override { return inertia_; }
   void set_out_of_core(bool on) override { options_.out_of_core = on; }
+  void set_null_pivot_detection(bool on) override { null_pivot_detection_ = on; }
   const FactorStats& stats() const override { return stats_; }
   const FactorOptions& options() const override { return options_; }
   index_t order() const override { return pencil_ ? pencil_->order() : 0; }
@@ -114,6 +115,7 @@ class MumpsFactorization final : public SparseFactorization<T> {
   bool blr_at_analysis_ = false;
   bool factorized_ = false;
   int relax_pct_;  ///< current ICNTL(14): grows with workspace retries and is kept afterwards
+  bool null_pivot_detection_ = true;  ///< ICNTL(24) for the next factorization
 };
 
 // Controls that never change during the object's life. ICNTL indices follow the MUMPS guide.
@@ -222,6 +224,7 @@ bool MumpsFactorization<T, U>::factorize(double alpha, double beta) {
 
   mumps_.icntl(22) = options_.out_of_core ? 1 : 0;
   mumps_.icntl(35) = options_.blr ? 2 : 0;
+  mumps_.icntl(24) = null_pivot_detection_ ? 1 : 0;
   int info1 = 0, retries = 0;
   for (;;) {
     mumps_.icntl(14) = relax_pct_;
