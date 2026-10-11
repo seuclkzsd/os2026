@@ -212,8 +212,11 @@ TEST(DriverZeroCluster, SideShiftsBeyondAPlainRunsEdge) {
     for (const auto& pr : sol.report.pairs) EXPECT_LE(pr.backward_error, 1e-13) << k;
     ASSERT_FALSE(sol.report.slices.empty());
     for (const auto& sl : sol.report.slices)
-      for (double x : lam)
-        if (x != 0.0) EXPECT_GT(std::abs(sl.sigma - x), 1e-3 * std::abs(x)) << "shift " << sl.sigma << " on " << x;
+      for (double x : lam) {
+        if (x != 0.0) {
+          EXPECT_GT(std::abs(sl.sigma - x), 1e-3 * std::abs(x)) << "shift " << sl.sigma << " on " << x;
+        }
+      }
   }
 }
 
