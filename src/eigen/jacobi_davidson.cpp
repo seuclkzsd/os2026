@@ -13,16 +13,45 @@
 // the first column of V, and moves the Q/V boundary by one: no copies, V stays B-orthonormal and
 // B-orthogonal to Q.
 //
-// Extraction. Ritz: eigenpairs of HK, ranked by |nu| (theta = tau + nu). Harmonic (B = I only, see
-// eigen_iterative.hpp): HK c = mu G c, i.e. Ritz values of (A - tau I)^{-1} on the test space
-// K V, ranked by |mu| (largest first = nearest tau). G is whitened through its eigen-decomposition
-// with eigenvalues floored at 1e-14 max (an exact eigenvector at tau makes G singular; flooring
-// keeps it ranked first instead of failing). Solving through the normal matrix G limits the
-// accuracy of a harmonic vector to about eps ||K||^2 / (nu_2^2 - nu_1^2) (nu_2: next nearest
-// harmonic value), which can exceed tol when other eigenvalues lie very close to tau. Hence
-// "Ritz polishing": once the best harmonic vector is within ~8 degrees (overlap >= 0.99) of a
-// Ritz vector - near convergence, where spurious Ritz values no longer occur - that Ritz vector
-// (accurate to eps ||K|| / gap) is used as the approximation.
+// Start space (start_block_iteration). p random vectors; with a preconditioner M ~ (A - tau B)^-1
+// they first get start_iterations steps of subspace iteration S <- orth(M B S) (B-orthogonal to
+// a deflation block). Every later expansion is derived from the residual of the one current
+// approximation u, so it amplifies only the copy of a multiple eigenvalue contained in u; the
+// other copies of a plain random block stay diluted by the far spectrum, and the extraction
+// prefers a farther eigenvalue whose approximation was built along the way (measured: 4-5 of 6
+// copies + 1.0 returned as converged). The block iteration amplifies all p directions at once.
+// start_iterations 1 / 2 / 3 (bench/lobpcg_jd_fix_options.cpp, single factor, Ritz, 5 runs,
+// solves min/median/max): syn-mem27-46 125/133/142, 129/135/136, 135/143/153; yee-pec-cube-32
+// 184/196/199, 196/200/206, 200/204/230 (0: 168/187/211 and 202/207/216). One step still left 2
+// harmonic failures in bench/lobpcg_jd_fix_synthetic.cpp, two none: default 2.
+//
+// Extraction. Ritz (the default): eigenpairs of HK, ranked by |nu| (theta = tau + nu). Measured
+// against harmonic (bench/lobpcg_jd_fix_options.cpp, single factor, 5 runs, solves
+// min/median/max, with / without the start block iteration): syn-mem27-46 Ritz 129/135/136 and
+// 168/187/211, harmonic 147/165/288 and 432/916/1882; yee-pec-cube-32 Ritz 196/200/206 and
+// 202/207/216, harmonic 194/201/218 and 203/208/262 (one run without the block iteration missed
+// a copy). The harmonic variance is explained below: tau = 0 lies within 1e-6 ||A|| of
+// eigenvalues of syn-mem27-46.
+// Harmonic (B = I only, see eigen_iterative.hpp): HK c = mu G c, i.e. Ritz values of
+// (A - tau I)^{-1} on the test space K V, ranked by |mu| (largest first = nearest tau). G is
+// whitened through its eigen-decomposition with eigenvalues floored at 1e-14 max (G is singular
+// when V holds an exact eigenvector at tau).
+// Harmonic extraction cannot rank an eigenvalue at (or within the approximation error of) tau: for
+// K x = 0 and u = x cos(phi) + e sin(phi) the harmonic value ||K u||^2 / (u^H K u) =
+// ||K e||^2 / (e^H K e) depends only on the error direction e (for lambda = tau + delta it
+// approaches delta only once the error angle is below ~delta / ||K||), and for x itself the pencil
+// (HK, G) is singular (0/0; the floored whitening gives it a rounding-level |mu|, i.e. ranks it
+// LAST). Measured before the fix: tau on an eigenvalue was skipped and a farther set was returned
+// as converged. Hence the "certified Ritz override": with the Rayleigh quotient nu and residual
+// norm rho of every Ritz vector (rho^2 = y^H G y - nu^2, from the small matrices), a Ritz pair
+// whose inclusion interval (it contains an eigenvalue) satisfies |nu| + rho < |nu_sel| - rho_sel
+// proves an eigenvalue nearer tau than anything the harmonic selection can approximate, and is
+// selected instead. Spurious Ritz values (large rho) never pass this test. Solving through the
+// normal matrix G limits the accuracy of a harmonic vector to about
+// eps ||K||^2 / (nu_2^2 - nu_1^2) (nu_2: next nearest harmonic value), which can exceed tol when
+// other eigenvalues lie very close to tau. Hence also "Ritz polishing": once the best harmonic
+// vector is within ~8 degrees (overlap >= 0.99) of a Ritz vector - near convergence, where
+// spurious Ritz values no longer occur - that Ritz vector (accurate to eps ||K|| / gap) is used.
 //
 // Correction equation. With U = [Q u] (u^H B u = 1, U B-orthonormal) and the shift s,
 //     (I - B U U^H)(A - s B)(I - U U^H B) t = -r,   U^H B t = 0,
@@ -156,6 +185,7 @@ class JacobiDavidson {
   void load_deflation();
   bool append(const T* t);
   bool append_random();
+  void start_block_iteration(index_t p);
   void extract();
   DenseMatrix<T> orthonormal_candidates(index_t q);
   void restart();
@@ -244,6 +274,7 @@ JacobiDavidson<T>::JacobiDavidson(LinearOperator<T>& a, LinearOperator<T>* b, Li
     HS_THROW(InvalidInput, "jacobi_davidson: tol must be positive and finite, got " << options.tol);
   if (options.max_iterations < 0) HS_THROW(InvalidInput, "jacobi_davidson: max_iterations must be >= 0");
   if (options.inner_iterations < 0) HS_THROW(InvalidInput, "jacobi_davidson: inner_iterations must be >= 0");
+  if (options.start_iterations < 0) HS_THROW(InvalidInput, "jacobi_davidson: start_iterations must be >= 0");
   if (!(options.norm_a >= 0.0) || !(options.norm_b >= 0.0) || !std::isfinite(options.norm_a) ||
       !std::isfinite(options.norm_b))
     HS_THROW(InvalidInput, "jacobi_davidson: norm_a / norm_b must be finite and >= 0");
@@ -264,8 +295,8 @@ JacobiDavidson<T>::JacobiDavidson(LinearOperator<T>& a, LinearOperator<T>* b, Li
                                                                   << n_ << " x [1, " << kmax_ << "]");
   }
   switch (options.extraction) {
-    case JdExtraction::Auto:
-      harmonic_ = b == nullptr;
+    case JdExtraction::Auto:  // Ritz: measured faster and more robust, see eigen_iterative.hpp
+      harmonic_ = false;
       break;
     case JdExtraction::Harmonic:
       if (b)
@@ -375,6 +406,26 @@ bool JacobiDavidson<T>::append_random() {
   return false;
 }
 
+/// Start space by subspace iteration: p random vectors, then start_iterations steps
+/// S <- M B S, each B-orthonormalized against Q (deflation block) and within S; appended to V.
+template <class T>
+void JacobiDavidson<T>::start_block_iteration(index_t p) {
+  DenseMatrix<T> s(n_, p), bs, ms(n_, p);
+  if (b_) bs.resize(n_, p);
+  T* bsd = b_ ? bs.data() : nullptr;
+  std::vector<OrthoBlock<T>> against;
+  if (nconv_ > 0) against.push_back({basis_.data(), bqcol(0), nconv_});
+  for (index_t j = 0; j < p; ++j) linalg::fill_random(s.col(j), n_, opt_.seed, next_stream_++);
+  index_t q = eigen_detail::b_orthonormalize<T>(n_, against, s.data(), bsd, p, b_, kExpandDrop);
+  for (index_t step = 0; step < opt_.start_iterations && q > 0; ++step) {
+    m_->apply(b_ ? bsd : s.data(), n_, ms.data(), n_, q);
+    eigen_detail::require_finite(n_, ms.data(), q, "jacobi_davidson: preconditioner output");
+    std::swap(s, ms);
+    q = eigen_detail::b_orthonormalize<T>(n_, against, s.data(), bsd, q, b_, kExpandDrop);
+  }
+  for (index_t j = 0; j < q && k_ < kmax_; ++j) append(s.col(j));
+}
+
 template <class T>
 void JacobiDavidson<T>::extract() {
   const index_t k = k_;
@@ -418,6 +469,16 @@ void JacobiDavidson<T>::extract() {
     const double nrm = std::sqrt(std::real(sdot(k, src, src)));
     for (index_t i = 0; i < k; ++i) coef_(i, l) = src[i] / nrm;
   }
+  // Rayleigh quotient nu(y) = y^H HK y and residual norm rho(y) = ||K V y - nu V y|| of a unit
+  // coefficient vector y (V orthonormal, B = I): rho^2 = y^H G y - nu^2.
+  const DenseMatrix<T> gk = leading(g_, k);
+  std::vector<T> tmp(static_cast<std::size_t>(k));
+  auto quotient = [&](const T* y, double& nu_y, double& rho_y) {
+    lapack::gemv('N', fi(k), fi(k), T(1), hk.data(), fi(k), y, T(0), tmp.data());
+    nu_y = std::real(sdot(k, y, tmp.data()));
+    lapack::gemv('N', fi(k), fi(k), T(1), gk.data(), fi(k), y, T(0), tmp.data());
+    rho_y = std::sqrt(std::max(std::real(sdot(k, y, tmp.data())) - nu_y * nu_y, 0.0));
+  };
   // Ritz polishing (see the file comment).
   index_t best = 0;
   double overlap = -1.0;
@@ -428,16 +489,32 @@ void JacobiDavidson<T>::extract() {
       best = l;
     }
   }
-
+  double sel_nu = 0.0, sel_rho = 0.0;
   if (overlap >= kPolishOverlap) {
     std::copy(ritz.col(best), ritz.col(best) + k, sel_.begin());
-    sel_theta_ = tau_ + nu[best];
   } else {
     std::copy(coef_.col(0), coef_.col(0) + k, sel_.begin());
-    std::vector<T> hc(static_cast<std::size_t>(k));
-    lapack::gemv('N', fi(k), fi(k), T(1), hk.data(), fi(k), sel_.data(), T(0), hc.data());
-    sel_theta_ = tau_ + std::real(sdot(k, sel_.data(), hc.data()));
   }
+  quotient(sel_.data(), sel_nu, sel_rho);
+  // Certified Ritz override (see the file comment): a Ritz pair whose inclusion interval
+  // [nu - rho, nu + rho] lies strictly nearer tau than every value the selected pair can
+  // approximate proves a nearer eigenvalue; it replaces the harmonic selection.
+  index_t cert = -1;
+  double cert_bound = std::numeric_limits<double>::infinity();
+  for (index_t l = 0; l < k; ++l) {
+    double nu_l = 0.0, rho_l = 0.0;
+    quotient(ritz.col(l), nu_l, rho_l);
+    const double bound = std::abs(nu_l) + rho_l;
+    if (bound < cert_bound) {
+      cert_bound = bound;
+      cert = l;
+    }
+  }
+  if (cert >= 0 && cert_bound < std::abs(sel_nu) - sel_rho) {
+    std::copy(ritz.col(cert), ritz.col(cert) + k, sel_.begin());
+    quotient(sel_.data(), sel_nu, sel_rho);
+  }
+  sel_theta_ = tau_ + sel_nu;
 }
 
 /// The current approximation followed by the ranked extraction vectors, orthonormalized (CGS2)
@@ -903,12 +980,14 @@ IterativeEigResult<T> JacobiDavidson<T>::run() {
     for (index_t j = 0; j < opt_.initial->cols() && k_ < kmax_; ++j) append(opt_.initial->col(j));
   }
   if (k_ == 0) {
-    // A block of random start vectors (not one): every copy of a multiple eigenvalue near tau is
-    // then present in V with an O(1) relative component, which the tau-tracking expansions
-    // amplify; from a single vector further copies appear only at rounding level and were missed
-    // (measured: a triple eigenvalue at distance 0.05 lost to a simple one at 0.35).
-    const index_t p = std::min<index_t>(std::min(nev_, kmax_ - 1), n_ - d_);
-    for (index_t j = 0; j < std::max<index_t>(p, 1); ++j)
+    // A block of random start vectors (not one): from a single vector further copies of a
+    // multiple eigenvalue appear only at rounding level (measured: a triple eigenvalue at
+    // distance 0.05 lost to a simple one at 0.35). With a preconditioner the block is improved
+    // by subspace iteration (file comment); a plain random block still loses copies once the
+    // multiplicity reaches about nev - 1.
+    const index_t p = std::max<index_t>(std::min<index_t>(std::min(nev_, kmax_ - 1), n_ - d_), 1);
+    if (m_ && opt_.start_iterations > 0) start_block_iteration(p);
+    for (index_t j = k_; j < p; ++j)
       if (!append_random() && k_ == 0)
         HS_THROW(InvalidInput, "jacobi_davidson: cannot draw a start vector with positive B-norm (B not HPD?)");
   }

@@ -118,8 +118,10 @@ IterativeEigResult<T> lobpcg(LinearOperator<T>& a, LinearOperator<T>* b, LinearO
 
 /// How Ritz approximations are extracted from the search space V (B-orthonormal).
 enum class JdExtraction {
-  Auto,      ///< Harmonic when B == nullptr, Ritz otherwise
-  Harmonic,  ///< harmonic Ritz vectors w.r.t. tau (Petrov space (A - tau I) V); B == nullptr only
+  Auto,      ///< Ritz (measured: fewer solves and no failures where Harmonic failed, see
+             ///< jacobi_davidson)
+  Harmonic,  ///< harmonic Ritz vectors w.r.t. tau (Petrov space (A - tau I) V), with Ritz
+             ///< polishing and a certified Ritz override for eigenvalues at tau; B == nullptr only
   Ritz,      ///< standard Rayleigh-Ritz, Ritz values nearest tau
 };
 
@@ -149,6 +151,10 @@ struct JdOptions {
   /// theta-shifted ones at 2^-(j+1), j = theta-shifted outer iterations on the current pair.
   index_t inner_iterations = 20;
   std::uint64_t seed = 2026;  ///< deterministic random start block
+  /// Subspace-iteration steps S <- orth(M B S) applied to the random start block before the first
+  /// extraction (only with a preconditioner M and without `initial`; costs start_iterations * p
+  /// preconditioner applications, p = start block size); 0 = none. See jacobi_davidson.
+  index_t start_iterations = 2;
   /// Optional start block (n x p, p >= 1), B-orthonormalized and used as the initial search
   /// space instead of the random start block.
   const DenseMatrix<T>* initial = nullptr;
@@ -166,8 +172,8 @@ struct JdOptions {
 /// Hermitian Jacobi-Davidson (Sleijpen & van der Vorst 1996; JDQR-style locking and thick restart,
 /// Fokkema, Sleijpen & van der Vorst 1998) for the nev eigenpairs of A x = lambda B x nearest
 /// `target`.
-/// Each outer iteration extracts the approximation u nearest tau from V (harmonic or standard
-/// Ritz, see JdExtraction), takes theta = u^H A u (u^H B u = 1) and r = A u - theta B u (from the
+/// Each outer iteration extracts the approximation u nearest tau from V (standard Ritz by default,
+/// or harmonic, see JdExtraction), takes theta = u^H A u (u^H B u = 1) and r = A u - theta B u (from the
 /// stored products, refreshed at locking), locks u when its backward error is <= tol (it leaves V
 /// and joins the deflation block Q, which keeps every later correction B-orthogonal to it), and
 /// otherwise expands V by the approximate solution t of the deflated correction equation.
@@ -175,17 +181,47 @@ struct JdOptions {
 /// (A - tau B)^{-1} the expansion then acts like shift-and-invert at tau, so V collects the
 /// eigenvectors nearest tau in order) and by theta once ||r|| / ||B u|| <= 0.1 * (distance to the
 /// nearest Ritz value of another eigenvalue) (fast local convergence, like inexact Rayleigh
-/// quotient iteration). The start space is a block of min(nev, max_basis - 1) random vectors, so
-/// that every copy of a multiple eigenvalue is represented. M only affects the speed, never the
-/// accuracy (r is exact), so a single-precision factor of A - tau B yields double-precision
-/// eigenpairs. When that factor is inaccurate on the eigenvectors nearest tau (eps_s *
-/// cond(A - tau B) ~ 1, i.e. its backward error is as large as the wanted |lambda - tau|) the inner
-/// solves need many more steps (measured, 2 threads, nev = 12: syn-mem27-46 285-560
-/// preconditioner applications over 5 runs versus 36 solves of double shift-invert Lanczos;
-/// yee-pec-cube-32 217 versus 68).
-/// The pairs found are the nearest ones in practice, not provably: a missing eigenvalue (e.g. a
-/// further copy of a multiple eigenvalue never represented in V) is not detected here - the
-/// driver's inertia certificate does that.
+/// quotient iteration).
+/// Start space: p = min(nev, max_basis - 1, n - d) random vectors. With a preconditioner they first
+/// get start_iterations (default 2) steps of subspace iteration S <- orth(M B S): with M ~
+/// (A - tau B)^{-1} this brings the eigenvectors nearest tau - in particular several copies of a
+/// multiple eigenvalue - into V together. Every later expansion amplifies only the copy inside the
+/// current approximation u, so from a plain random block the other copies stay diluted and a
+/// farther eigenvalue is locked instead (measured, bench/lobpcg_jd_fix_synthetic.cpp: with a
+/// 6-, 8- or 10-fold eigenvalue and nev = 6, 24 of 24 preconditioned runs returned 4-5 copies with
+/// converged = true without the block iteration, 0 of 24 with it, at 36% fewer solves in total).
+/// M only affects the speed, never the accuracy (r is exact), so a single-precision factor of
+/// A - tau B yields double-precision eigenpairs. Measured (bench/lobpcg_jd_memory.cpp, 2 threads,
+/// nev = 12, tol = 1e-10, 5 runs each with a fresh, non-deterministic MUMPS factor; min / median /
+/// max of preconditioner solves and of the total time incl. analysis and factorization):
+///   syn-mem27-46 (tau = 0 lies 3e-6 and 5e-6 from two 6-fold eigenvalues, ||A|| = 3.6):
+///     JD + single factor  123 / 133 / 141 solves,  7.5 / 8.0 / 9.6 s, factor 337 MB, peak 0.55 GiB
+///     shift-invert Lanczos, double factor  36 solves,  5.2 / 5.4 / 6.5 s,  651 MB, 0.70 GiB
+///     single factor + refinement (the driver's fallback)  303 / 396 / 396 solves,
+///       13.7 / 19.0 / 25.0 s, 337 MB, 0.46 GiB; 2 of 5 runs not accepted (eta 2e-8, 2e-5)
+///     former JD defaults (harmonic extraction, no block iteration)  312 / 665 / 2170 solves,
+///       18 / 31 / 117 s
+///   yee-pec-cube-32 (tau = 53.16 between two 6-fold eigenvalues):
+///     JD + single factor  196 / 200 / 206 solves,  8.8 / 9.0 / 11.1 s, 282 MB, 0.45 GiB
+///     shift-invert Lanczos, double factor  68 solves,  5.8 / 6.1 / 7.7 s,  548 MB, 0.57 GiB
+///     single factor + refinement  300 / 381 / 613 solves,  12.1 / 15.1 / 24.6 s, 0.36 GiB;
+///       1 of 5 runs missed a copy of a 6-fold eigenvalue (bare Lanczos, no certificate)
+///     former JD defaults  207 / 214 / 230 solves,  9.9 / 10.2 / 12.2 s
+///   yee-pec-cube-32 with tau 9.5e-9 and 2.5e-11 from the 6-fold eigenvalue 49.21342550952...
+///   (eps_s cond(A - tau B) > 1; at 2.5e-11 the double factor is singular, at 9.5e-9 double
+///   shift-invert Lanczos ends at eta 2e-8 with a wrong set; the single factor was reported
+///   singular in 2 of 12 runs): JD 219 - 259 and 231 - 333 solves (5 runs each), 10 - 19 s, all
+///   correct; single factor + refinement fails (eta 7e-2); former JD defaults at 9.5e-9: 608
+///   solves with a wrong set (a copy missing, converged = true) or 6339 solves / 241 s; at
+///   2.5e-11: no convergence in 1000 iterations (7230 solves, 323 s, eta 0.2).
+/// So JD with a single factor costs about 1.5x the time of double shift-invert Lanczos at half the
+/// factor memory, and is faster and more reliable than single factor + refinement.
+/// The pairs found are the nearest ones in practice, NOT provably: in particular without a
+/// preconditioner (or with start_iterations = 0) copies of an eigenvalue of multiplicity >= about
+/// nev - 1 can be lost to farther eigenvalues while converged = true (measured: 28 of 32
+/// unpreconditioned runs of the synthetic study). A missing eigenvalue is not detected here; the
+/// driver's inertia certificate detects it, and a rerun with the copies found as `deflation`
+/// recovers the missing ones.
 /// Returns m == nev pairs when converged; otherwise the locked pairs plus the best current
 /// approximations (m = nconv + min(nev - nconv, current basis size)).
 /// Cost per outer iteration: 1 + (inner iterations) applications each of A and B (with B), as many
@@ -194,7 +230,8 @@ struct JdOptions {
 /// Memory (scalars): n * (d + nev + max_basis) for [Y Q V], the same again for B [Y Q V] (B only)
 /// and for (A - tau B) V, n * (d + nev + 1) for M B [Y Q u] (GMRES with a
 /// preconditioner), inner workspace n * (2 inner_iterations + 1) (GMRES) or 7 n (MINRES), plus 7 n
-/// work vectors; the result adds n * nev.
+/// work vectors, plus 2 n p (3 n p with B) during the start block iteration; the result adds
+/// n * nev. The start block iteration costs start_iterations * p preconditioner applications.
 template <class T>
 IterativeEigResult<T> jacobi_davidson(LinearOperator<T>& a, LinearOperator<T>* b,
                                       LinearOperator<T>* precond, double target,

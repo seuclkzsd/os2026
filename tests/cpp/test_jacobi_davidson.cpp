@@ -186,6 +186,12 @@ class FactorSolveOperator final : public LinearOperator<T> {
   hs::SparseFactorization<T>& f_;
 };
 
+/// Number of values within tol of x.
+index_t copies(const std::vector<double>& values, double x, double tol) {
+  return static_cast<index_t>(
+      std::count_if(values.begin(), values.end(), [&](double v) { return std::abs(v - x) <= tol; }));
+}
+
 template <class T>
 class JacobiDavidsonTyped : public ::testing::Test {};
 using Scalars = ::testing::Types<double, cplx>;
@@ -480,6 +486,153 @@ TYPED_TEST(JacobiDavidsonTyped, TinyProblemSpansTheWholeSpace) {
   expect_same_values(r.theta, lambda, 1e-12);
 }
 
+TYPED_TEST(JacobiDavidsonTyped, TargetExactlyOnASimpleEigenvalue) {
+  // Regression: harmonic extraction (the default with B == nullptr) cannot rank an eigenvalue at
+  // tau - the pencil (V^H K V, (K V)^H K V) is singular in that direction - and skipped it,
+  // returning a farther set as converged. The certified Ritz override selects it.
+  using T = TypeParam;
+  std::vector<double> spectrum;
+  for (index_t i = 0; i < 300; ++i) spectrum.push_back(-3.0 + 0.02 * static_cast<double>(i));
+  const auto a = hs::test::prescribed_spectrum<T>(spectrum, 6, 31);
+  hs::CsrOperator<T> op(a);
+  const double tau = spectrum[150];  // an eigenvalue of A (to rounding)
+  DenseOperator<T> prec(dense_inverse(round_to_float(shifted<T>(a, nullptr, tau + 1e-3))));
+  for (JdExtraction ex : {JdExtraction::Auto, JdExtraction::Harmonic, JdExtraction::Ritz}) {
+    for (const bool with_prec : {true, false}) {
+      SCOPED_TRACE(::testing::Message() << "extraction " << static_cast<int>(ex) << ", preconditioner " << with_prec);
+      JdOptions<T> opt;
+      opt.nev = 5;
+      opt.tol = 1e-11;
+      opt.extraction = ex;
+      opt.max_iterations = 3000;
+      const auto r = hs::jacobi_davidson<T>(op, nullptr, with_prec ? &prec : nullptr, tau, opt);
+      EXPECT_TRUE(r.converged);
+      check_contract<T>(op, nullptr, r, tau, opt.nev, opt.tol);
+      expect_same_values(r.theta, nearest(spectrum, tau, opt.nev), 1e-9);
+      EXPECT_EQ(copies(r.theta, tau, 1e-9), 1);
+    }
+  }
+}
+
+TYPED_TEST(JacobiDavidsonTyped, TargetExactlyOnAMultipleEigenvalue) {
+  // tau = 4 is an eigenvalue of multiplicity 25 of the 25 x 25 grid Laplacian; the
+  // preconditioner is a float-rounded inverse at a slightly moved shift (the double factor at
+  // tau itself is singular).
+  using T = TypeParam;
+  const auto a = hs::test::laplacian_2d<T>(25, 25);
+  hs::CsrOperator<T> op(a);
+  const double tau = 4.0;
+  DenseOperator<T> prec(dense_inverse(round_to_float(shifted<T>(a, nullptr, tau + 1e-3))));
+  for (JdExtraction ex : {JdExtraction::Harmonic, JdExtraction::Ritz}) {
+    SCOPED_TRACE(ex == JdExtraction::Harmonic ? "harmonic" : "ritz");
+    JdOptions<T> opt;
+    opt.nev = 6;
+    opt.tol = 1e-11;
+    opt.extraction = ex;
+    const auto r = hs::jacobi_davidson<T>(op, nullptr, &prec, tau, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, tau, opt.nev, opt.tol);
+    EXPECT_EQ(copies(r.theta, tau, 1e-9), opt.nev);
+  }
+}
+
+TYPED_TEST(JacobiDavidsonTyped, NullSpaceAtTargetZero) {
+  // Ten exact zero eigenvalues (an EM-like null space) and tau = 0: all of them first, then the
+  // nearest nonzero ones.
+  using T = TypeParam;
+  std::vector<double> spectrum(10, 0.0);
+  for (index_t i = 0; i < 290; ++i) spectrum.push_back(0.5 + 0.02 * static_cast<double>(i));
+  const auto a = hs::test::prescribed_spectrum<T>(spectrum, 6, 32);
+  hs::CsrOperator<T> op(a);
+  DenseOperator<T> prec(dense_inverse(round_to_float(shifted<T>(a, nullptr, -1e-3))));
+  for (JdExtraction ex : {JdExtraction::Harmonic, JdExtraction::Ritz}) {
+    for (const index_t nev : {6, 12}) {
+      SCOPED_TRACE(::testing::Message() << (ex == JdExtraction::Harmonic ? "harmonic" : "ritz") << " nev " << nev);
+      JdOptions<T> opt;
+      opt.nev = nev;
+      opt.tol = 1e-11;
+      opt.extraction = ex;
+      const auto r = hs::jacobi_davidson<T>(op, nullptr, &prec, 0.0, opt);
+      EXPECT_TRUE(r.converged);
+      check_contract<T>(op, nullptr, r, 0.0, opt.nev, opt.tol);
+      expect_same_values(r.theta, nearest(spectrum, 0.0, nev), 1e-9);
+    }
+  }
+}
+
+/// {0.5 (mult times), 1.0, 1.01, ...}: n = 300.
+std::vector<double> multiple_spectrum(index_t mult) {
+  std::vector<double> w(static_cast<std::size_t>(mult), 0.5);
+  for (index_t i = 0; i < 300 - mult; ++i) w.push_back(1.0 + 0.01 * static_cast<double>(i));
+  return w;
+}
+
+TYPED_TEST(JacobiDavidsonTyped, MultiplicityAtLeastNevWithPreconditioner) {
+  // nev = 6 copies of a 6- or 8-fold eigenvalue (EM: 6-fold eigenvalues and k = 12).
+  // Regression: each expansion amplifies only the copy inside the current approximation, so the
+  // other copies of the random start block stayed diluted and an approximation of 1.0 built
+  // along the way was preferred: 4 or 5 copies + 1.0 were returned as converged. The start block
+  // iteration with the preconditioner (start_iterations) represents every copy.
+  using T = TypeParam;
+  for (const index_t mult : {6, 8}) {
+    const auto spectrum = multiple_spectrum(mult);
+    const auto a = hs::test::prescribed_spectrum<T>(spectrum, 8, 3);
+    hs::CsrOperator<T> op(a);
+    const double tau = 0.45;
+    DenseOperator<T> prec(dense_inverse(round_to_float(shifted<T>(a, nullptr, tau))));
+    for (JdExtraction ex : {JdExtraction::Harmonic, JdExtraction::Ritz}) {
+      for (const std::uint64_t seed : {2026ULL, 7ULL}) {
+        SCOPED_TRACE(::testing::Message() << "mult " << mult << (ex == JdExtraction::Harmonic ? " harmonic" : " ritz")
+                                          << " seed " << seed);
+        JdOptions<T> opt;
+        opt.nev = 6;
+        opt.tol = 1e-11;
+        opt.extraction = ex;
+        opt.seed = seed;
+        const auto r = hs::jacobi_davidson<T>(op, nullptr, &prec, tau, opt);
+        EXPECT_TRUE(r.converged);
+        check_contract<T>(op, nullptr, r, tau, opt.nev, opt.tol);
+        EXPECT_EQ(copies(r.theta, 0.5, 1e-9), opt.nev);
+      }
+    }
+  }
+}
+
+TYPED_TEST(JacobiDavidsonTyped, MultiplicityWithoutPreconditionerIsCompletedByDeflatedReruns) {
+  // Documented limitation: without a preconditioner (no start block iteration) a copy of an
+  // eigenvalue of multiplicity >= about nev - 1 can be missed, and that is not detected here.
+  // The driver's remedy - rerun with the copies found as deflation block, as long as the inertia
+  // count says copies are missing - completes the set.
+  using T = TypeParam;
+  const auto spectrum = multiple_spectrum(6);
+  const auto a = hs::test::prescribed_spectrum<T>(spectrum, 8, 3);
+  hs::CsrOperator<T> op(a);
+  const index_t n = a.nrows;
+  const double tau = 0.45;
+  JdOptions<T> opt;
+  opt.nev = 6;
+  opt.tol = 1e-11;
+  DenseMatrix<T> found(n, 0);
+  for (int run = 0; run < 4 && found.cols() < opt.nev; ++run) {
+    JdOptions<T> o = opt;
+    o.nev = opt.nev - found.cols();
+    if (found.cols() > 0) o.deflation = &found;
+    const auto r = hs::jacobi_davidson<T>(op, nullptr, nullptr, tau, o);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, tau, o.nev, o.tol);
+    if (found.cols() > 0) {
+      EXPECT_LT(gram_deviation<T>(found, nullptr, r.vectors, false), 1e-10);
+    }
+    DenseMatrix<T> next(n, found.cols() + copies(r.theta, 0.5, 1e-9));
+    std::copy(found.data(), found.data() + n * found.cols(), next.data());
+    index_t c = found.cols();
+    for (index_t j = 0; j < static_cast<index_t>(r.theta.size()); ++j)
+      if (std::abs(r.theta[j] - 0.5) <= 1e-9) std::copy(r.vectors.col(j), r.vectors.col(j) + n, next.col(c++));
+    found = next;
+  }
+  EXPECT_EQ(found.cols(), opt.nev);
+}
+
 TYPED_TEST(JacobiDavidsonTyped, InvalidOptionsThrowInvalidInput) {
   using T = TypeParam;
   const auto a = hs::test::laplacian_1d<T>(20);
@@ -511,6 +664,9 @@ TYPED_TEST(JacobiDavidsonTyped, InvalidOptionsThrowInvalidInput) {
   o = {};
   o.min_basis = 8;
   o.max_basis = 8;
+  expect_invalid(o);
+  o = {};
+  o.start_iterations = -1;
   expect_invalid(o);
   o = {};
   expect_invalid(o, &small);
