@@ -197,8 +197,11 @@ struct GeneralEigResult {
 /// For a fixed seed the result is bitwise reproducible whenever linalg::dot/norm2 are.
 /// Cost per restart: about ncv/2 operator applications, O(n ncv^2) flops for CGS2 and the basis
 /// update, O(ncv^3) dense work (Schur form, a few reorderings and eigenvector sets).
-/// Memory: the basis, n (ncv + 1) scalars of T, plus the outputs (vectors: n x m complex,
-/// schur_basis: n x m of T) and O(ncv^2 + 2048 ncv) workspace; no other n-sized buffers.
+/// Memory: the basis, n (ncv + 1) scalars of T, and O(ncv^2 + 2048 ncv) workspace; no other
+/// n-sized buffers. The outputs (schur_basis: n x m of T, vectors: n x m complex) are formed in
+/// that order with the basis freed in between, so the peak is the larger of basis + schur_basis
+/// and schur_basis + vectors (the vectors are x = Q1 z with Q1 the Schur basis and z from the
+/// projected eigenvectors, equal to V y up to rounding).
 /// Not thread-safe for a shared `op`; otherwise reentrant.
 ///
 /// Block mode (options.block_size = p > 1; block Arnoldi Krylov-Schur). The Krylov space grows by

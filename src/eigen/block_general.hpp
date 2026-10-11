@@ -24,7 +24,6 @@
 #include "hsolve/dense.hpp"
 #include "hsolve/linear_operator.hpp"
 #include "hsolve/types.hpp"
-#include "linalg/dense_ops.hpp"
 
 namespace hs::eigen_detail {
 
@@ -165,19 +164,6 @@ class BlockKrylovSchurBasis {
 
   /// Y (n x cols, ld ldy) = V(:, 0:m) C with C m x cols (ld ldc).
   void combine(const T* c, index_t ldc, index_t cols, T* y, index_t ldy) const;
-
-  /// The same product handed over by row blocks: consume(r0, rb, block) receives rows
-  /// [r0, r0 + rb) of V C as an rb x cols block (ld rb).
-  template <class Consume>
-  void combine_by_rows(const T* c, index_t ldc, index_t cols, Consume&& consume) const {
-    constexpr index_t kRows = 2048;
-    aligned_vector<T> block(static_cast<std::size_t>(std::min(kRows, n_) * cols));
-    for (index_t r0 = 0; r0 < n_; r0 += kRows) {
-      const index_t rb = std::min(kRows, n_ - r0);
-      linalg::multiply(rb, m_, cols, v_.data() + r0, n_, c, ldc, block.data(), rb);
-      consume(r0, rb, static_cast<const T*>(block.data()));
-    }
-  }
 
   /// Frees the basis storage (after the result has been formed); the object is unusable after.
   void release();

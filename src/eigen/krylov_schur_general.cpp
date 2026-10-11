@@ -64,6 +64,7 @@
 #include "eigen/general_schur.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/error.hpp"
+#include "linalg/blas_lapack.hpp"
 #include "linalg/dense_ops.hpp"
 
 namespace hs {
@@ -261,17 +262,10 @@ class KrylovSchurBasis {
     linalg::multiply(n_, ncv_, cols, v_.data(), n_, c, ldc, y, ldy);
   }
 
-  /// The same product handed over by row blocks: consume(r0, rb, block) receives rows
-  /// [r0, r0 + rb) of V C as an rb x cols block (ld rb), so callers can convert it without an
-  /// n x cols buffer.
-  template <class Consume>
-  void combine_by_rows(const T* c, index_t ldc, index_t cols, Consume&& consume) const {
-    aligned_vector<T> block(static_cast<std::size_t>(std::min(kRowBlock, n_) * cols));
-    for (index_t r0 = 0; r0 < n_; r0 += kRowBlock) {
-      const index_t rb = std::min(kRowBlock, n_ - r0);
-      linalg::multiply(rb, ncv_, cols, v_.data() + r0, n_, c, ldc, block.data(), rb);
-      consume(r0, rb, static_cast<const T*>(block.data()));
-    }
+  /// Frees the basis storage (after the result has been formed); the object is unusable after.
+  void release() {
+    v_ = DenseMatrix<T>();
+    h_ = DenseMatrix<T>();
   }
 
  private:
@@ -537,10 +531,12 @@ index_t select_retained(Cycle<T>& cyc, index_t keep, index_t max_keep, Which whi
   return k;
 }
 
-/// The result from the cycle that ends the run: Ritz vectors x = V y (unit 2-norm), the Schur
-/// basis, and the values scaled back to Op.
+/// The result from the cycle that ends the run: the Schur basis Q1 = V Q(:, 0:m_out), Ritz
+/// vectors x = V y = Q1 z (unit 2-norm) and the values scaled back to Op. Releases the basis.
+/// Memory: Q1 is formed while V is alive, the n x m_out complex vectors only after V is freed, so
+/// the peak is max(V + Q1, Q1 + vectors) rather than V + Q1 + vectors (DESIGN §3.6-3).
 template <class Basis, class T>
-GeneralEigResult<T> materialize(const Basis& basis, const Cycle<T>& cyc, Which which) {
+GeneralEigResult<T> materialize(Basis& basis, const Cycle<T>& cyc, Which which) {
   const ProjectedSchur<T>& ps = cyc.ps;
   const std::vector<SchurBlock>& blocks = ps.blocks();
   const index_t m = ps.order();
@@ -584,12 +580,28 @@ GeneralEigResult<T> materialize(const Basis& basis, const Cycle<T>& cyc, Which w
     }
     c += blk.size;
   }
-  // x = V y, converted to complex columns block by block: no n x m buffer of T besides the
-  // outputs (memory budget, DESIGN §3.6-3).
+  // Q1 = V Q(:, 0:m_out), then V is no longer needed.
+  res.schur_basis.resize(n, m_out);
+  basis.combine(ps.vectors().data(), m, m_out, res.schur_basis.data(), n);
+  basis.release();
+  // The output values lead S, so each eigenvector of H is y = Q z with z supported on
+  // [0, m_out) (back substitution in the quasi-triangular S): x = V y = Q1 z, z = Q(:, 0:m_out)^H y.
+  DenseMatrix<T> z(m_out, m_out);
+  {
+    const auto mo = static_cast<lapack::fint>(m_out), mm = static_cast<lapack::fint>(m);
+    lapack::gemm('C', 'N', mo, mo, mm, T(1), ps.vectors().data(), mm, coef.data(), mm, T(0),
+                 z.data(), mo);
+  }
+  // x = Q1 z, converted to complex columns block by block: no n x m_out buffer of T besides the
+  // outputs.
   res.vectors.resize(n, m_out);
-  basis.combine_by_rows(coef.data(), m, m_out, [&](index_t r0, index_t rb, const T* xb) {
+  aligned_vector<T> block(static_cast<std::size_t>(std::min(kRowBlock, n) * m_out));
+  for (index_t r0 = 0; r0 < n; r0 += kRowBlock) {
+    const index_t rb = std::min(kRowBlock, n - r0);
+    linalg::multiply(rb, m_out, m_out, res.schur_basis.data() + r0, n, z.data(), m_out,
+                     block.data(), rb);
     for (index_t col = 0; col < m_out; ++col) {
-      const T* x0 = xb + col * rb;
+      const T* x0 = block.data() + col * rb;
       cplx* out0 = res.vectors.col(col) + r0;
       if constexpr (!is_complex_v<T>) {
         if (pair_at[col]) {
@@ -605,16 +617,13 @@ GeneralEigResult<T> materialize(const Basis& basis, const Cycle<T>& cyc, Which w
       }
       for (index_t i = 0; i < rb; ++i) out0[i] = cplx(x0[i]);
     }
-  });
+  }
   for (index_t col = 0; col < m_out; ++col) {
     // One factor for both members of a pair keeps them exact conjugates.
     const cplx inv(1.0 / linalg::norm2(n, res.vectors.col(col)));
     linalg::scal(n, inv, res.vectors.col(col));
     if (pair_at[col]) linalg::scal(n, inv, res.vectors.col(++col));
   }
-
-  res.schur_basis.resize(n, m_out);
-  basis.combine(ps.vectors().data(), m, m_out, res.schur_basis.data(), n);
   res.schur_form.resize(m_out, m_out);
   for (index_t j = 0; j < m_out; ++j) {
     for (index_t i = 0; i < m_out; ++i) res.schur_form(i, j) = T(s) * ps.form()(i, j);
