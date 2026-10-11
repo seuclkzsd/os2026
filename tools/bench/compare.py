@@ -195,8 +195,9 @@ def run_once(solver: str, c: case.Case, tgt: dict[str, Any], out: Path, args, ov
     res = case.load_result(out)
     rep = res.report
     etas = [p.get("backward_error", np.nan) for p in rep.get("pairs", [])]
+    solver_eta = float(np.nanmax(etas)) if etas and not np.all(np.isnan(etas)) else None
     entry.update(claimed_success=bool(rep.get("success")), success=bool(rep.get("success")) and run_ok,
-                 solver_max_eta=float(np.nanmax(etas)) if etas else None,
+                 solver_max_eta=solver_eta, max_eta=solver_eta,   # replaced by the evaluation's
                  pairs=len(res.eigenvalues), eigenvalues=[float(x) for x in np.asarray(res.eigenvalues).real],
                  solver_peak_bytes=rep.get("peak_rss_bytes"))
     if not rep.get("success"):

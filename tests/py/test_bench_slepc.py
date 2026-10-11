@@ -784,6 +784,7 @@ def test_compare_run_once_never_reads_a_stale_result(tmp_path, monkeypatch):
     _fake_guard(monkeypatch, writes=lambda cmd: _write_result(out, WIDE[:4]), killed="timeout 10s")
     e = compare.run_once("hsolve", c, c.config["target"], out, args, None)
     assert e["claimed_success"] and not e["success"] and not e["valid"] and "run failed" in e["why"][0]
+    assert e["max_eta"] == e["solver_max_eta"] == 1e-16                # no evaluation: the solver's own
 
 
 def test_compare_run_once_validity_comes_from_the_evaluation(tmp_path, monkeypatch):
