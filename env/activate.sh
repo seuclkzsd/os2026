@@ -1,9 +1,14 @@
 # Source this file to enter the project environment:  source env/activate.sh
 # Activates the conda env and sets the resource policy defaults (docs/DESIGN.md §6).
-_conda_bin="$(command -v conda || echo "$HOME/miniconda3/bin/conda")"
+# Per-host settings (conda location, environment prefix, cores, memory limits) live in
+# env/hosts/<short hostname>.sh; without such a file the defaults below apply (development server).
+_hs_host_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hosts/$(hostname -s).sh"
+# shellcheck disable=SC1090
+[ -f "$_hs_host_file" ] && source "$_hs_host_file"
+_conda_bin="${HS_CONDA_BIN:-$(command -v conda || echo "$HOME/miniconda3/bin/conda")}"
 eval "$("$_conda_bin" shell.bash hook)"
-conda activate os2026
-unset _conda_bin
+conda activate "${HS_CONDA_ENV:-os2026}"
+unset _conda_bin _hs_host_file
 # Some user profiles prepend other toolchains (e.g. an old cmake); make the env win.
 export PATH="$CONDA_PREFIX/bin:$PATH"
 # conda compiler activation injects -march=nocona -O2 ...; CMake owns optimisation flags.
