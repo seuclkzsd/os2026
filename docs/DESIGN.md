@@ -301,47 +301,146 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     最小/最大 k 个）。
 
 ### 3.6 driver（`include/hsolve/solver.hpp`）
-1. **诊断**：规模、nnz、实/复（A 复 B 实时 `to_complex`）、厄密缺陷（超 `hermitian_tol` 抛错，
-   否则 `hermitian_part`）、‖A‖₂/‖B‖₂ 估计（~30 步 Lanczos 的最大 |Ritz 值|：它是 ‖·‖₂ 的**下界**，从而 η 是真实后向误差的**上界**，验收偏保守）、
-   scale = ‖A‖₂/‖B‖₂、B 正定性（`compute_inertia(pencil, 0, 1)`）。
-2. **策略**：HEP/GHEP → 位移反演 + `lanczos_krylov_schur`（B 内积）；GHIEP → 位移反演 +
-   `krylov_schur_general`；谱两端且 k 小 → 不分解，直接 Lanczos。
-3. **内存预算**（显式公式）：factor_cap_MB = (budget − current_rss − n·sizeof(T)·(ncv·(1+store_bv)
-   + 3k) − margin)/1e6。`analyze` 后估计值 ≤ cap 才分解，并把 cap 作为 ICNTL(23) 传给 MUMPS（超限
-   变成 INFO=−19 而不是被系统杀掉）。超预算依次：BLR（需重新分析一次以获得估计）→ 单精度 +
-   迭代修正 → out-of-core；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。
-   Interval 模式先用惯性求出区间内个数 m，再定 nev/ncv，n·m·sizeof(T)·3 超限则切片或拒绝。
+实现：`solver.cpp`（编排）、`steps.cpp`（共用步骤：位移、计数、分析与预算、自适应排序、代价模型）、
+`definite.cpp`（HEP/GHEP：最近 k 个与窗口/谱切片）、`indefinite.cpp`（GHIEP）、`internal.hpp`。
+
+0. **计时契约**：`PhaseClock` 把 `hs::solve` 的每一时刻记入且只记入一个阶段（嵌套作用域取最内层）：
+   setup（输入检查、范数估计、问题类型判定、规划）、factor（所有符号分析——含自适应排序的 AMD
+   探测——与所有数值分解——含惯性计数、B 正定性检测、A 的零主元计数）、iterate（Krylov 求解：
+   回代、正交化、重启）、verify（Rayleigh–Ritz、残差、补救、选择、证书簿记）。因此
+   `time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s`，各项非负（P2 的
+   time_verify_s 可能为负，已废）。证书的耗时分在 factor（端点计数）与 verify 中，报告不单列。
+1. **诊断**：规模、nnz、实/复（A 复 B 实时 `to_complex`）、厄密缺陷（`hs::hermitian_defect`，超
+   `hermitian_tol` 抛错，> 0 时取 `hermitian_part`）、‖A‖₂/‖B‖₂ 估计（~30 步 Lanczos 的最大
+   |Ritz 值|：它是 ‖·‖₂ 的**下界**，从而 η 是真实后向误差的**上界**，验收偏保守）、
+   scale = ‖A‖₂/‖B‖₂。文件输入已由 io 用缩放算法精确厄密化；内存输入（Python）只经过这里未缩放的
+   缺陷，元素 ≲ 1e-154 或 ≳ 1e154 时会下溢/溢出（已知差距，`docs/PYTHON.md` §4、§7）。
+   `threads > 0` 时 `omp_set_num_threads(threads)`（不恢复；Python 前端自己恢复）。
+   B 正定性在分析之后判定（第 4 步）：对角 B 直接看符号（免分解）；否则在主分析上分解 0·A + 1·B
+   读惯性（主对象为双精度非 BLR；否则 `compute_inertia`）。
+2. **策略**：
+   - HEP/GHEP → 位移反演 + `lanczos_krylov_schur`（B 内积，block_size = 1）：nearest 用单位移
+     （§3.6-8）；interval / smallest / largest 用窗口与谱切片（§3.6-8b）。
+   - GHIEP → 位移反演 + `krylov_schur_general`，**只支持 nearest**（其余目标需要惯性计数，抛
+     Unsupported）；零簇见 §3.6-9。
+   - `method = lanczos`（免分解）抛 Unsupported；LOBPCG / JD 已在 eigen 层实现（§3.5），driver 尚未
+     调用（P4）。
+   - smallest / largest 的惯性搜索以谱两端的 Ritz 估计为种子：30 步 Lanczos（A；有 B 时为 B 内积下
+     的 B⁻¹A，B 的分解复用主分析，对角 B 直接求逆）。
+3. **内存预算**（显式公式）：分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·(ncv_g +
+   6k_g))/1e6，k_g = k（interval：min(n, 64)），ncv_g = ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)）；
+   cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap 作为 ICNTL(23)
+   传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
+   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。BLR 与单精度只由配置开启
+   （`blr = on`、`factor_precision = single`），driver **不**自动降级（P0 设计的「BLR → 单精度」降级链
+   未实现）。
+   窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前 RSS)，
+   否则 OutOfMemoryBudget；一片的工作集约 7·c·n·sizeof(T)（基 ~2c，Rayleigh–Ritz 的 X/AX/BX 与乘积
+   临时量 4c，选中块 c）限制片大小 c；**无固定特征值个数上限**（P2 的 max(2000, n/2) 已废）。
+   已知未计入：GHIEP 后处理（结果向量、实子空间 W 及 AW、BW、投影解）约 88 B·n·m，wg-square-1e6
+   （m = 19）上约 1.67 GB，对应预算项只有 ~0.86 GB；它决定该例的全程峰值（memio 实测，P4）。
 3b. **自适应排序**（`ordering=-1`，默认）：先做 AMD 分析探测（极快），按代价模型预估嵌套剖分
    （SCOTCH）在本次运行的分解与回代上能省的时间，超过其额外分析代价（≈7×AMD 分析）才改用
    SCOTCH。模型：t_分解 ≈ 6e-7·n + flops/(12 GF/s·线程)，t_回代 ≈ 16 B·条目/12 GB/s；AMD 填充比
-   >20 视为三维型（ND 保留 0.35 flops、0.6 条目），否则（0.6、0.85）。实测（8 线程）：二维波导 1e5
-   1.65→1.20 s，二维腔 1.17→0.47 s；三维问题选 SCOTCH（比 METIS 分析快 35–50%）。
-4. **近奇异位移**：`factorize` 返回 false 时 σ ← σ + δ（δ 从 1e-8·scale 起每次 ×10，最多
-   `max_shift_retries` 次），记入报告；「最近 k 个」的选择始终相对原始 σ。
-5. **迭代求解**：内层容差 = tol × inner_tol_factor；θ → λ = σ + 1/θ。
-6. **精修**：HEP/GHEP 在原问题上做 Rayleigh–Ritz（小规模稠密 hegv），保证 B 正交；GHIEP 对每个
-   向量分别计算 θ 映射值与 Rayleigh 商 xᴴAx/xᴴBx 的残差，取残差小者。
+   >20 视为三维型（ND 保留 0.35 flops、0.6 条目），否则（0.6、0.85）；预计分解次数 = 1 + 2（证书）
+   + 1（有 B），回代次数 max(40, 3k)。实测（8 线程）：二维波导 1e5 1.65→1.20 s，二维腔
+   1.17→0.47 s；三维问题选 SCOTCH（比 METIS 分析快 35–50%）。
+   注意：比较的是**实测**的 AMD 分析耗时，受机器负载影响——两次相同的 wg-square-1e6 运行分别选了
+   SCOTCH（因子 7.24e7 条目、INFOG(21) 828 MB、峰值 2.92 GB）与 AMD（9.70e7、1140 MB、3.10 GB）
+   （memio 实测）。需要逐位复现时固定 `ordering`。
+4. **近奇异位移**（`factorize_near`）：`factorize` 返回 false（σ 在数值上落在特征值上）时**只扰动
+   一次**：σ ← σ + 1e-8·max(scale, |σ|)（孤立特征值此时已在检测阈值之外约 1e3 倍；
+   `max_shift_retries = 0` 时不扰动），记入报告。仍判奇异说明 σ 在比检测阈值更密的簇内，再往外移
+   会改变「最近」的集合（P2 的第二次 10× 扰动在 syn-zero-cluster-real-1e5 上落到所需半径的 5 倍处，
+   证书数出 166 个、找到 21 个）→ **在 σ 处关闭零主元检测分解**（以后在此位移的重分解照做）；再失败
+   抛 Singular。「最近 k 个」的选择始终相对原始 σ。有意放在或紧挨重特征值的位移（§3.6-8b 的部分簇
+   与重根重跑）被扰动时不告警、不计 shift_retries。
+5. **迭代求解**：内层容差 = tol × inner_tol_factor；θ → λ = σ + 1/θ。nearest 恰好收敛 k 对
+   （nev = k；完备性由证书负责，不靠多算余量）。主分解为单精度 / BLR 时算子带双精度迭代修正
+   （≤ 10 步，rel_tol = 0.1·tol·inner_tol_factor）。
+6. **精修**：HEP/GHEP 在原问题上做**秩揭示** Rayleigh–Ritz：B-Gram 矩阵 XᴴBX 做特征分解，丢弃小于
+   最大特征值 1e-8 倍的方向（跨片去重时 1e-4），在剩余的 B-正交基上解投影铅笔。同一向量算两次、或
+   补救把两列推到同一特征向量上，只留一份——「找到的对数」恒为不同 B-正交向量数，重复向量不可能
+   凑满证书。GHIEP：所有运行的 Ritz 向量并集取实部与虚部张成实子空间（欧氏正交化，丢弃相关列），
+   在其上解投影的不定铅笔（LU + Schur），一次精修全部候选。
 7. **残差验证**：每对计算 ‖Ax − λBx‖₂、相对残差、后向误差 η（§4.5）。未达标者做残差修正迭代
-   x ← x − K̃⁻¹(A − ρB)x（ρ 为 Rayleigh 商；对任意近似分解 K̃，其不动点都是 (A,B) 的精确特征对）；
-   仍不达标则 accepted=false。
-8. **惯性证书**（HEP/GHEP；复数经实嵌入同样可用）——窗口按目标类型定义：
-   - Nearest：r = max|λᵢ − σ|，a ≤ σ − r、b ≥ σ + r，并各自向外推进到谱隙（借助 ritz_all，
-     无信息时用 r(1+δ)）；惯性 valid=false 时移动端点。
-   - Smallest：单个计数 ν₋(A − bB) == k，b 取 λ_k 之上的谱隙。Largest：n − ν₋(A − aB) == k。
-   - Interval：用户给定的 [lower, upper]。
-   - 通过条件 count_inertia == count_found，count_found 为去重后 B-正交的不同向量数；**任何不等
-     都重跑**（少 → 以已得向量作 deflation 补齐；多 → 去除重复/幽灵收敛）。
-   - 复用主分解对象：factorize(K(a))、factorize(K(b)) 读惯性，仅当需要重跑才重分解 K(σ)。
-   - GHIEP 无惯性证书（报告中注明）；改用延迟重启检查：换种子、更大 nev 重跑，确认没有
-     |θ| ≥ |θ_k| 的新 Ritz 值收敛。
-9. **零模（零空间）处理**：EM 零空间可达 n 的 20% 以上，**不得显式 deflation 或剔除重算**。
-   HEP/GHEP：用惯性数出零簇 d = ν₋(A−εB) − ν₋(A+εB)，在两侧各放一个单边位移 σ₊ > ε
-   （Which::LargestAlgebraic，θ>0 ⇔ λ>σ₊）与 σ₋ < −ε（SmallestAlgebraic），用惯性二分把 σ± 放在
-   使零簇成为单个无关 θ 值的位置，结果按离原 σ 的距离合并。GHIEP 同样用单边代数选择。
-   `zero_filter_tol` 定义为相对 scale。
+   x ← x − K̃⁻¹(A − ρB)x（ρ 为 Rayleigh 商；对任意近似分解 K̃，其不动点都是 (A,B) 的精确特征对；
+   每对至多 3 步，K(σ) 的分解按需重建），之后再做一次秩揭示 Rayleigh–Ritz；仍不达标则
+   accepted=false。η > max(1e-6, tol) 的对视为幽灵，不计入找到数。
+8. **惯性证书（nearest，HEP/GHEP；复数经实嵌入同样可用）**：
+   - 窗口：r = max|λᵢ − σ|，a ≤ σ − r、b ≥ σ + r，各自推到与更外侧最近的 Ritz 提示值（ritz_all 的
+     映射值）的中点；无提示时外推 max(1e-3·|端点 − σ|, 1e-8·scale)。
+   - 通过条件 count_inertia == count_found（count_found 为窗口内不同 B-正交向量数）。少 → 以已收敛对
+     （η ≤ 10·tol）作 deflation、在 σ 处重分解后重跑（nev = 缺数 + 2），至多 2 轮；多 → 告警
+     （重复/幽灵收敛）。
+   - `count_below(s)` = ν₋(A − sB)：先带零主元检测计数；被判奇异时，s 若是谱隙点（证书端点）就在
+     s 处关闭检测计数（稠密簇内任何移动都会越过特征值；向后稳定的 LDLᵀ 对离 s ≫ eps·‖K‖ 的特征值
+     计数精确）；s 若是任意点（用户区间端点、插值切点、零带边界——可能恰在一个（重）特征值上）就在
+     s ± step/10 处关闭检测计数（窗口用 step = 1e-10·max(scale, |s|)，即偏移 1e-11 相对）。仍奇异则
+     向外移 step·4ⁱ（至多 8 次，计入 endpoint_moves）。主分解为单精度或 BLR 时改用 `compute_inertia`
+     （双精度、无 BLR）。
+   - **目前复用主分解对象**：在端点 factorize(K(a))、factorize(K(b)) 读惯性，重跑或补救前再在 σ 处
+     重分解（每轮证书 2–3 次分解；三个 3-D 测例 2 线程实测占总时间 23–37%）。InertiaCounter
+     （§3.4）的接入在 P4 进行中，计划规则（certpar 实测）：仅当主分解为单精度/BLR、排序为嵌套剖分、或 AMD 分析耗时
+     < 0.3 × 主分解耗时时用计数器（低填充输入上计数器的分析反而更贵）；主因子 INFOG(21) + 计数器
+     估计超出上限时先 `release_factors()`；主因子完好时重跑不再在 σ 重分解；B 正定性检测也可改成
+     计数器的 count(0, 1)；可选的单精度筛查计数只用于 B = I 或对角 B，且位移须离所有特征值
+     > 1e-4·κ(B)·(scale + |s|)。
+   - GHIEP 无惯性证书（报告中注明）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。
+8b. **窗口与谱切片**（interval / smallest / largest，B 正定或 B = I；以及零带干扰的 nearest，见 9）：
+   - 窗口端点与所有切点都是同一分析上的精确 Sylvester 计数，每片都知道自己含几个特征值；各片单独
+     求解、单独认证，最后合并。
+   - 片大小：c_target = `slice_size`（> 0）或代价模型最优值（钳到 [16, 1000]），c_max = `slice_size`
+     或 1.25·c_target。代价模型（`steps.cpp`，在 yee-pec-box 1e4/1e5 的切片扫描上标定）：每对回代
+     2.1 + 33/c 次、基向量遍历 200 + 7c 次（每线程 6 GB/s、上限 60 GB/s）、每片 2.2 次分解，分解/回代
+     时间沿用 §3.6-3b 的模型；最优 c* = √((2.2·t_分解 + 33·t_回代)/(7·向量字节/带宽))。只需落在实测
+     平坦最优区内（同一 1e5 因子上回代时间在共享机器上波动 69–98 ms）。
+   - 切点从窗口下端向上推进，每片约 c_target 个、至多 c_max 个（剩余 ≤ 2c_target 时对半分）。计数
+     搜索 `find_count`：以上一片的局部密度（否则窗口剩余部分的平均密度）给首猜，再做带 Illinois
+     修正的计数插值（regula falsi，步子保持在括号内 5%；某次计数等于括号端点的计数时改二分）；开放
+     端从越界的那一点几何扩张。计数分不开的簇（同一对端点计数的括号缩到首次出现时的 1/32，或宽度
+     1e-8·max(scale, |x|, |y|)）终止搜索，返回簇旁已认证谱隙的中点（最大 k 取簇下方，其余取上方），
+     绝不返回贴着簇的点。
+   - 位移：内部片取中心（LargestMagnitude）；片外一侧没有特征值（谱端）或另一端紧邻零带时，在片端
+     用单边位移（SmallestAlgebraic：取位移以下；LargestAlgebraic：取以上），直接复用该计数点的分解；
+     被判奇异的端点（其上有特征值，如用户端点）不作锚点——有限片改取中心，开放片取该端旁谱隙中点。
+   - 每片收敛恰好其计数个对；离切点 δ = 1e-9·max(scale, |cut|) 以内的片外对也保留（这么近的特征值
+     可能算到另一侧），交给去重。缺对时以已得对作 deflation 重跑，只要还有新对（至多 缺数 + 4 轮、
+     上限 32 轮、连续 2 轮无新对即停）；已得对中有重特征值时，重跑位移放在离它 1% 谱隙处（重根主导
+     算子约 100 倍，舍入补出其余副本；正放在重根上会把数值重簇拆成逐个收敛的 θ）。
+   - 合并：来自不同片、特征值相差 ≤ 2e-9 相对的对成组，以 B-Gram 秩（1e-4）+ Rayleigh–Ritz 去重；
+     全局证书逐窗口要求「不同对数 == 计数」。
+   - smallest / largest：窗口 (−∞, U] 与 [L, +∞)，U（L）由上述惯性搜索确定：要求 ν(U) ∈ [k, k + slack]，
+     slack = t_分解 / 边际每对代价（钳到 [1, max(16, k)]：多算几对比再做一次计数便宜时停止细化），
+     再在 U（L）处单边运行。第 k 个特征值落在数值相等的大簇（超出 k 的副本多于 max(16, k)，如零空间）
+     中时为「部分簇」窗口：只求仍需的副本数，由在其均值 ± Δ（Δ = max(16 × 副本散布, 1e-9 相对)，
+     ≤ 1e-8 相对）的两次计数证实整簇数值相等后接受任意这些副本；否则整簇求解（先查内存预算）。
+   - 报告：每次运行一条 `slices[]`（窗口、位移、which、计数、找到数、nev、重跑、重启、算子作用
+     次数、是否通过）；`sigma_used` 为首片位移。
+9. **零模（零空间）处理**：EM 零空间可达 n 的 20% 以上，**不得显式 deflation 或剔除重算**；零簇
+   靠位移放置排除，不靠事后过滤。`zero_filter_tol` 定义为相对 scale（< 0 关闭）。
+   - HEP/GHEP（仅当 `zero_filter_tol` ≥ 0；带宽 band = zero_filter_tol·scale）：在 −band、+band 两点
+     计数（零带边界），窗口在这两个计数点之间切掉零带——过滤与计数完全一致，`zero_modes_filtered`
+     即带内特征值数（由惯性得出）；紧邻零带的片把单边位移放在远离零带的一端；一直延伸到零带的开放
+     窗口改在谱端之外的点封口。nearest：先做普通单位移运行；若零带进入选择或证书窗口，转交窗口求解
+     [σ − r, σ + r] 减去零带——r 取第 k 个与下一个不同 Ritz 提示的距离中点（无下一个时 1.25 × 第 k 个），
+     再按计数扩大到窗口在带外含 k 个特征值（单位移在零带附近会收敛零空间副本）。未设
+     `zero_filter_tol` 时零空间特征值就是普通特征值（smallest / largest 可走部分簇规则）。
+   - GHIEP（零簇从不被需要；带宽 max(zero_filter_tol, 1e-8)·scale）：(1) σ 处普通运行，其 k 个最近
+     对不触及零带则保留；(2) 否则（或 σ 在零带内）在主分析上分解 A 数零主元得零簇维数
+     （`zero_cluster_dim`），有簇（或用户设了零带）时改用两侧单边运行 σ₊ > band（LargestAlgebraic，
+     θ>0 ⇔ λ>σ₊）与 σ₋ < −band（SmallestAlgebraic），零簇落在不需要的一端。每侧位移放在该侧已持有
+     的最外特征值（零簇，或普通运行的最外对）与下一个不同特征值的**中点**；后者由内缘处一次探测运行
+     （2 对、容差 1e-6、≤ 4 次重启）找到——位移贴着零带边缘时零簇的 |θ| = 1/band 压过所需值，残差
+     停在 1e-10..1e-9，中点处两侧邻居平衡。探测无该侧 Ritz 值 → 该侧为空；所需值符号不对 → 该侧耗尽。
+     实部位于两侧位移之间的复特征值对两侧都不需要：由各 Krylov 空间里出现两次的复 Ritz 估计找出，
+     在其实部的 1/4 处做一次单边恢复运行（`recover_strip`），未决时告警且 success=false。全部 Ritz
+     向量一次性在投影铅笔上精修，选离 σ 最近的 k 个带外特征值；某侧收敛范围未覆盖最终半径时加大
+     nev 重跑该侧。
 10. **GHIEP 实/复分类**：|Im λ| > complex_tol·max(|λ|, scale) **且** 实投影对未通过后向误差测试而
     复对通过，才算复特征值；复特征对单独输出（`complex_eigenvalues`），实特征对不受影响。
-11. **输出**：见 `docs/FORMATS.md §3`。
+11. **输出**：见 `docs/FORMATS.md §3`（含 `slices`、`zero_cluster_dim`、`zero_modes_filtered` 与
+    分阶段计时）。
 
 ### 3.7 util（`include/hsolve/log.hpp`、`include/hsolve/util.hpp`）
 - `Logger`：JSON lines 写文件 + 人类可读 stderr；事件名小写下划线，字段扁平。
