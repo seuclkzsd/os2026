@@ -331,6 +331,24 @@ def test_tune_layouts_and_groups():
         [("2", "1e-12"), ("2", "1e-10")]
 
 
+def test_tune_prune_drops_one_setting_at_a_time():
+    inc = SlepcConfig.make(2, 1, "none", {"eps_nev": "k+4", "eps_purify": "0", "st_mat_mumps_icntl_28": "2",
+                                          "st_mat_mumps_icntl_29": "1", "st_mat_mumps_icntl_35": "2",
+                                          "st_mat_mumps_cntl_7": "1e-12"})
+    labels = [c.label() for c in tune_slepc.g_prune(inc, _ctx())]
+    assert labels == [
+        "2x1 eps_purify=0 st_mat_mumps_cntl_7=1e-12 st_mat_mumps_icntl_28=2 st_mat_mumps_icntl_29=1 st_mat_mumps_icntl_35=2",
+        "2x1 eps_nev=k+4 st_mat_mumps_cntl_7=1e-12 st_mat_mumps_icntl_28=2 st_mat_mumps_icntl_29=1 st_mat_mumps_icntl_35=2",
+        "2x1 eps_nev=k+4 eps_purify=0 st_mat_mumps_cntl_7=1e-12 st_mat_mumps_icntl_35=2",   # pair 28/29
+        "2x1 eps_nev=k+4 eps_purify=0 st_mat_mumps_icntl_28=2 st_mat_mumps_icntl_29=1"]
+    assert "prune" in tune_slepc.SIMPLIFYING and [n for n, _ in tune_slepc.plan("nearest")][-1] == "prune"
+    # simplifying selection: the incumbent competes, a valid removal within the margin wins
+    inc_r = {"config": inc, "valid": True, "time": 1.00}
+    drop = {"config": inc.with_options(eps_nev=None), "valid": True, "time": 1.02}
+    assert tune_slepc.pick([drop, inc_r], 0.03) is drop
+    assert tune_slepc.pick([{**drop, "time": 1.10}, inc_r], 0.03) is inc_r
+
+
 def test_tune_plan_group_selection():
     assert [n for n, _ in tune_slepc.plan("nearest", ["ncv", "blr"])] == ["blr", "ncv"]   # plan order kept
     assert [n for n, _ in tune_slepc.plan("interval", ["slice_nev"])] == ["slice_nev"]

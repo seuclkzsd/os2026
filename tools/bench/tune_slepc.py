@@ -19,6 +19,9 @@ against the incumbent, which moves to the fastest VALID one if it is faster by m
   blr        nearest: block low-rank factorization ICNTL(35)=2 with CNTL(7) 1e-12 / 1e-10
   krylov     nearest: -eps_ncv k+8/2k/3k/4k (default max(2k, k+15)), -eps_krylovschur_restart
              0.3/0.7, generalized: -eps_purify 0, GHIEP: -eps_gen_non_hermitian (GNHEP Krylov-Schur)
+  prune      last: the incumbent without each one of its options; a removal wins when it stays
+             valid and is not slower by more than --margin (greedy order can leave a setting
+             behind that a later group made unnecessary)
   slicing    interval targets (spectrum slicing with MUMPS inertia): -eps_krylovschur_partitions
              (divisors of the rank count) and the per-shift -eps_krylovschur_nev 10/20/60
              (the per-shift ncv/mpd follow SLEPc's defaults for that nev)
@@ -200,6 +203,28 @@ def g_blr(inc: SlepcConfig, ctx: Context) -> list[SlepcConfig]:
     return [inc.with_options(**{MUMPS + "icntl_35": "2", MUMPS + "cntl_7": eps}) for eps in ("1e-12", "1e-10")]
 
 
+def g_prune(inc: SlepcConfig, ctx: Context) -> list[SlepcConfig]:
+    """The incumbent without one of its options each: a setting an earlier group needed (e.g. the
+    accuracy padding) may be unnecessary after a later one (e.g. no purification)."""
+    out = []
+    for name, _ in inc.options:
+        c = inc.with_options(**{name: None})
+        if name == MUMPS + "icntl_28":      # parallel analysis comes as a pair
+            c = c.with_options(**{MUMPS + "icntl_29": None})
+        elif name == MUMPS + "icntl_29":
+            continue
+        elif name == MUMPS + "icntl_35":    # so does BLR
+            c = c.with_options(**{MUMPS + "cntl_7": None})
+        elif name == MUMPS + "cntl_7" and inc.option(MUMPS + "icntl_35"):
+            continue
+        out.append(c)
+    return out
+
+
+# Groups whose candidates only remove settings: they win when valid and not slower (pick()).
+SIMPLIFYING = ("prune",)
+
+
 def plan(mode: str, groups: list[str] | None = None) -> list[tuple[str, Group]]:
     """Ordered (name, generator) groups of the coordinate descent (module docstring), restricted
     to `groups` when given (names as listed here; unknown names are an error)."""
@@ -210,11 +235,11 @@ def plan(mode: str, groups: list[str] | None = None) -> list[tuple[str, Group]]:
     if mode == "interval":
         full = [("accuracy", g_accuracy), ("layout", g_layout), ("partitions", g_partitions),
                 ("slice_nev", g_slice_nev), ("ordering", g_ordering), ("layout2", g_layout),
-                ("partitions2", g_partitions)] + mumps[:2]
+                ("partitions2", g_partitions)] + mumps[:2] + [("prune", g_prune)]
     else:
         full = ([("accuracy", g_accuracy), ("layout", g_layout), ("ordering", g_ordering), ("layout2", g_layout)]
                 + mumps + [("blr", g_blr), ("ncv", g_ncv), ("restart", g_restart), ("purify", g_purify),
-                           ("problem_type", g_problem_type)])
+                           ("problem_type", g_problem_type), ("prune", g_prune)])
     if groups is None:
         return full
     unknown = sorted(set(groups) - {n for n, _ in full})
@@ -367,8 +392,13 @@ class Tuner:
                 r = self.screen(c, name, timeout)
                 screened[c.label()] = r
                 results.append(r)
-            best = pick(results, args.margin)
-            moved = best is not None and (not inc["valid"] or best["time"] < inc["time"] * (1.0 - args.margin))
+            if name in SIMPLIFYING and inc["valid"]:
+                # dropping an option needs no gain: the simpler one wins unless it is slower
+                best = pick(results + [inc], args.margin)
+                moved = best is not inc
+            else:
+                best = pick(results, args.margin)
+                moved = best is not None and (not inc["valid"] or best["time"] < inc["time"] * (1.0 - args.margin))
             if moved:
                 inc = best
             decisions.append({"group": name, "candidates": [r["config"].label() for r in results],
