@@ -109,6 +109,22 @@ def test_hollow_guide_spectrum_real_with_18_propagating_modes(nx, perturb, patte
     assert wg.count_signs(lam.real, 1e-8 * scale) == [18, disc.num_node_dofs, disc.num_edge_dofs - 18]
 
 
+def test_hollow_pencil_decouples_into_discrete_te_and_tm_cutoffs():
+    """Nonzero pencil eigenvalues = (nonzero Nedelec curl-curl eigenvalues) U (P1 Dirichlet
+    eigenvalues) - k0^2 exactly, on any mesh (module docstring)."""
+    disc, _, _ = _disc(9, perturb=0.2, seed=6)
+    A, B = wg.waveguide_pencil(disc, K0)
+    lam = wg.dense_pencil_eigenvalues(A, B)
+    scale = np.abs(lam).max()
+    lam = np.sort(_real(lam, scale))
+    te = sla.eigh(wg.curl_tt(disc).toarray(), wg.mass_tt(disc).toarray(), eigvals_only=True)
+    tm = sla.eigh(wg.stiff_zz(disc).toarray(), wg.mass_zz(disc).toarray(), eigvals_only=True)
+    expected = np.sort(np.concatenate([te[te > 1e-9 * te.max()], tm]) - K0 * K0)
+    nonzero = lam[np.abs(lam) > 1e-8 * scale]
+    assert nonzero.size == expected.size == disc.num_edge_dofs
+    assert np.allclose(nonzero, expected, rtol=1e-9, atol=1e-9 * scale)
+
+
 def test_slab_guide_complex_pairs_only_among_evanescent_modes():
     """Indefinite B: LSE/LSM branches of opposite sign characteristic collide into complex pairs,
     but only above the zero cluster; the propagating modes stay real with positive B-type."""
