@@ -38,6 +38,8 @@ struct KrylovSchurOptions {
   double tol = 1e-12;        ///< relative residual-estimate tolerance (see contract above)
   std::uint64_t seed = 2026; ///< deterministic random start vector (linalg::fill_random)
   /// Optional start vector (column 0 is used; must be nonzero). Overrides the random start.
+  /// Hermitian solver with block_size = p > 1: the first min(p, cols) columns form the start
+  /// block (see lanczos_krylov_schur).
   const DenseMatrix<T>* initial = nullptr;
   /// Hermitian solver only: block D (n x d), orthonormal in the solver inner product. The Krylov
   /// basis is kept orthogonal to span(D) ("deflated restart": find further eigenpairs after the
