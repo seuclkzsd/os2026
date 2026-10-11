@@ -76,6 +76,19 @@ if(HSOLVE_BUILD_BENCH)
   endforeach()
 endif()
 
+# ---- Python package (python/, docs/PYTHON.md): ON by default when pybind11 is found ----
+find_package(Python 3.8 COMPONENTS Interpreter Development.Module QUIET)
+if(Python_FOUND)
+  find_package(pybind11 2.10 CONFIG QUIET)
+endif()
+option(HSOLVE_BUILD_PYTHON "Build the Python module hsolve._hsolve (needs pybind11)" ${pybind11_FOUND})
+if(HSOLVE_BUILD_PYTHON)
+  if(NOT pybind11_FOUND)
+    find_package(pybind11 2.10 CONFIG REQUIRED)
+  endif()
+  add_subdirectory(python)
+endif()
+
 # ---- tests: one executable per tests/cpp/test_*.cpp ----
 if(HSOLVE_BUILD_TESTS)
   enable_testing()
