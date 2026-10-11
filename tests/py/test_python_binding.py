@@ -525,6 +525,44 @@ def test_gil_is_released_during_solve():
     assert len(during) >= max(5, 0.2 * solve_s / 0.002), (len(during), solve_s, t1 - t0)
 
 
+def test_concurrent_solves_from_threads():
+    """Solves from several Python threads are serialised inside the module and all correct."""
+    n, exact = 2000, lap1d_eigs(2000)
+    out: dict[int, hsolve.SolveResult] = {}
+    errors: list[BaseException] = []
+
+    def run(i: int):
+        try:
+            out[i] = solve_quiet(lap1d(n), sigma=0.5 + 0.3 * i, k=4)
+        except BaseException as e:  # noqa: BLE001 - re-raised in the main thread
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    for i in range(3):
+        assert_same_set(out[i].eigenvalues, nearest(exact, 0.5 + 0.3 * i, 4), 1e-11)
+
+
+def test_verbose_logs_to_stderr(capfd):
+    solve_quiet(lap1d(40), sigma=1.0, k=2, verbose=1)
+    err = capfd.readouterr().err
+    assert "problem n=40" in err and "done success=true" in err
+    solve_quiet(lap1d(40), sigma=1.0, k=2)
+    assert capfd.readouterr().err == ""
+
+
+def test_empty_results_and_empty_matrix():
+    res = solve_quiet(lap1d(50), lower=10.0, upper=11.0)  # no eigenvalue in the interval
+    assert res.eigenvalues.shape == (0,) and res.eigenvectors.shape == (50, 0)
+    assert res.complex_eigenvalues.shape == (0,) and res.complex_eigenvectors.shape == (50, 0)
+    with pytest.raises(hsolve.InvalidInputError, match="empty"):
+        hsolve.solve(sp.csr_matrix((0, 0)), k=1)
+
+
 def test_threads_argument_does_not_leak():
     before = _hsolve.max_threads()
     solve_quiet(lap1d(100), sigma=1.0, k=2, threads=1)

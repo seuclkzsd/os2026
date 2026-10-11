@@ -261,9 +261,10 @@ AnySolution run_solve(MatrixArg& a, MatrixArg* b, const SolverConfig& cfg, int v
 }
 
 /// n x m column-major DenseMatrix -> numpy (n, m) Fortran-ordered array owning the buffer.
+/// No columns -> an (n, 0) array (the driver leaves unused blocks default-constructed, 0 x 0).
 template <class T>
-py::array take_matrix(DenseMatrix<T>&& m) {
-  const py::ssize_t rows = m.rows(), cols = m.cols();
+py::array take_matrix(DenseMatrix<T>&& m, index_t n) {
+  const py::ssize_t rows = m.cols() == 0 ? static_cast<py::ssize_t>(n) : m.rows(), cols = m.cols();
   if (rows == 0 || cols == 0) return py::array_t<T, py::array::f_style>(std::vector<py::ssize_t>{rows, cols});
   auto owner = std::make_unique<DenseMatrix<T>>(std::move(m));
   T* data = owner->data();
@@ -286,9 +287,10 @@ template <class T>
 py::tuple to_python(Solution<T>&& sol, const SolverConfig& cfg) {
   const std::string report = sol.report.to_json(-1);
   py::array w = copy_vector(sol.eigenvalues);
-  py::array v = take_matrix(std::move(sol.eigenvectors));
+  const index_t n = sol.report.n;
+  py::array v = take_matrix(std::move(sol.eigenvectors), n);
   py::array cw = copy_vector(sol.complex_eigenvalues);
-  py::array cv = take_matrix(std::move(sol.complex_eigenvectors));
+  py::array cv = take_matrix(std::move(sol.complex_eigenvectors), n);
   return py::make_tuple(w, v, cw, cv, report, config_to_json(cfg, -1));
 }
 
