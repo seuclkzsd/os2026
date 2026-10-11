@@ -452,14 +452,15 @@ double WindowSolver<T>::expansion_step() const {
 }
 
 // A point p in (a, b) with g_lo <= nu(p) <= g_hi, aiming at g (a.nu < g_lo <= g <= g_hi < b.nu).
-// Brackets from the known counts are narrowed by count interpolation (safeguarded regula falsi,
-// bisection after two steps on the same side); open ends are found by geometric expansion from
-// the spectrum estimates. If a cluster narrower than width_min() straddles the target count, the
+// Brackets from the known counts are narrowed by count interpolation (regula falsi with the
+// Illinois modification: the end retained twice in a row gets half the weight; steps kept 5% inside
+// the bracket); open ends are found by geometric expansion from the spectrum estimates. If a cluster narrower than width_min() straddles the target count, the
 // smallest known point above the cluster is returned (its count exceeds g_hi).
 template <class T>
 CountPoint WindowSolver<T>::find_count(const CountPoint& a, const CountPoint& b, index_t g_lo, index_t g,
                                        index_t g_hi, double start, double guess) {
   int same_side = 0, last_side = 0;
+  double lft_weight = 1.0, rgt_weight = 1.0;  // Illinois weights of the retained ends
   index_t expansions = 0;
   for (int it = 0; it < 40; ++it) {
     CountPoint lft = a, rgt = b;
@@ -491,15 +492,20 @@ CountPoint WindowSolver<T>::find_count(const CountPoint& a, const CountPoint& b,
       ++expansions;
     } else {
       if (rgt.s - lft.s <= width_min(lft.s, rgt.s)) return rgt;  // unsplittable cluster
-      double frac = (static_cast<double>(g) - static_cast<double>(lft.nu)) / static_cast<double>(rgt.nu - lft.nu);
-      if (same_side >= 2) frac = 0.5;
-      frac = std::clamp(frac, 0.05, 0.95);
+      const double fl = lft_weight * (static_cast<double>(lft.nu) - static_cast<double>(g));  // < 0
+      const double fr = rgt_weight * (static_cast<double>(rgt.nu) - static_cast<double>(g));  // > 0
+      const double frac = std::clamp(-fl / (fr - fl), 0.05, 0.95);
       s = lft.s + frac * (rgt.s - lft.s);
     }
     const CountPoint p = count(s, +1.0);
     const int side = p.nu < g_lo ? -1 : (p.nu > g_hi ? +1 : 0);
     same_side = (side != 0 && side == last_side) ? same_side + 1 : 1;
     last_side = side;
+    // Illinois: a new left end twice in a row halves the weight of the retained right end, and
+    // vice versa; a switch of sides resets both.
+    if (same_side >= 2 && side < 0) rgt_weight *= 0.5;
+    if (same_side >= 2 && side > 0) lft_weight *= 0.5;
+    if (same_side == 1) lft_weight = rgt_weight = 1.0;
   }
   // Give up refining: the closest known point above the target.
   CountPoint rgt = b;
@@ -831,7 +837,7 @@ Solution<T> WindowSolver<T>::solve() {
 
   // Slice size: the cost model's optimum (or the user's), capped below by the memory budget.
   c_target_ = cfg.slice_size > 0 ? cfg.slice_size : cost_.best_slice();
-  c_max_ = cfg.slice_size > 0 ? cfg.slice_size : c_target_ + c_target_ / 2;
+  c_max_ = cfg.slice_size > 0 ? cfg.slice_size : c_target_ + c_target_ / 4;
   event(c_, "slicing_model", {{"t_factor_s", cost_.t_factor}, {"t_solve_s", cost_.t_solve},
                               {"slice_target", static_cast<std::int64_t>(c_target_)},
                               {"slice_max", static_cast<std::int64_t>(c_max_)}});

@@ -242,15 +242,19 @@ double model_solve_s(const FactorEstimate& e) { return 16.0 * static_cast<double
 // bench/slicing_sweep (yee-pec-box 1e4 and 1e5, slices of 12..1075 pairs, 2 threads):
 //   solves per pair      ~ kSolvesPerPair + kSolvesPerRun / c  (2.0 + 33/c fits 2.0 .. 5.0)
 //   basis work per pair  ~ (kVecPassesPerPair + kVecPassesPerPairPerC * c) n-vector passes
-//                          (CGS2 against a basis growing with c, B products, restarts; 4.5..5.1 and
-//                          176..225 passes measured at n = 1e4 / 1e5)
+//                          (CGS2 against a basis growing with c, B products, restarts): about 200
+//                          passes plus a slope that grows with c, 4.5..9 per unit c over c =
+//                          25..170 (n = 1e4 and 1e5) - 7 is used, which put the 1e5 optimum (~100
+//                          pairs per slice, flat within ~10% for 64..128) closer than 5 did (155)
 //   factorizations       ~ kFactorizationsPerSlice per slice (its shift + ~1.2 inertia counts to
 //                          place the next cut)
 // at kStreamBwPerThread bytes/s per thread for the basis passes (saturating at kStreamBwMax).
+// Timings on the shared machine varied by 10..30% between identical runs (solves 69..98 ms on
+// the same 1e5 factor), so the model only needs to land in the flat part of the optimum.
 constexpr double kSolvesPerPair = 2.1;
 constexpr double kSolvesPerRun = 33.0;
 constexpr double kVecPassesPerPair = 200.0;
-constexpr double kVecPassesPerPairPerC = 5.0;
+constexpr double kVecPassesPerPairPerC = 7.0;
 constexpr double kFactorizationsPerSlice = 2.2;
 constexpr double kStreamBwPerThread = 6e9;
 constexpr double kStreamBwMax = 60e9;
