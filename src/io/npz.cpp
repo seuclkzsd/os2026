@@ -53,6 +53,13 @@ std::vector<T> NpzFile::read_as(const std::string& key, NpyHeader* header) const
   return read_npy_payload_as<T>(*src, h);
 }
 
+template <class T>
+void NpzFile::read_chunks(const std::string& key, const ChunkSink<T>& sink) const {
+  const auto src = zip_.open(entry(key));
+  const NpyHeader h = read_npy_header(*src);
+  read_npy_payload_chunks<T>(*src, h, sink);
+}
+
 }  // namespace io
 
 std::map<std::string, NpyArray> read_npz(const std::filesystem::path& path) {
@@ -63,8 +70,9 @@ std::map<std::string, NpyArray> read_npz(const std::filesystem::path& path) {
 }
 
 // read_as covers the element types of npy_to_vector: the public scalars plus three more.
-#define HS_IO_INSTANTIATE_NPZ(T) \
-  template std::vector<T> io::NpzFile::read_as<T>(const std::string&, io::NpyHeader*) const;
+#define HS_IO_INSTANTIATE_NPZ(T)                                                              \
+  template std::vector<T> io::NpzFile::read_as<T>(const std::string&, io::NpyHeader*) const; \
+  template void io::NpzFile::read_chunks<T>(const std::string&, const io::ChunkSink<T>&) const;
 
 HS_FOR_EACH_SCALAR(HS_IO_INSTANTIATE_NPZ)
 HS_IO_INSTANTIATE_NPZ(float)

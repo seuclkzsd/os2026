@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -63,6 +64,16 @@ class LineReader {
       eof_ = got < buf_.size() - end_;
       end_ += got;
     }
+  }
+
+  /// Back to the first line (the buffer is reused).
+  void rewind() {
+    in_.clear();
+    in_.seekg(0);
+    if (!in_) HS_THROW(Io, name_ << ": cannot rewind");
+    pos_ = end_ = 0;
+    eof_ = false;
+    line_no_ = 0;
   }
 
   std::uint64_t line_number() const { return line_no_; }
@@ -219,27 +230,13 @@ Banner parse_banner(std::string_view line, const LineReader& lr) {
   return b;
 }
 
-// Reads the value lines. Coordinate lines are "i j [value]" (1-based); array lines hold one
-// value each, column-major, lower triangle only for symmetric/hermitian matrices.
-template <class T>
-CsrMatrix<T> read_entries(LineReader& lr, const Banner& b, index_t n, std::uint64_t declared_nnz,
-                          bool drop_zeros, std::uint64_t file_size, AssemblyStats& stats) {
+// Reads the value lines, checking each in file order, and hands every stored entry to
+// put(i, j, v) (0-based). Coordinate lines are "i j [value]" (1-based); array lines hold one
+// value each, column-major, lower triangle only for symmetric/hermitian matrices, and their zeros
+// are not handed over (structural absence in a dense format).
+template <class T, class Put>
+void read_entries(LineReader& lr, const Banner& b, index_t n, std::uint64_t expected, Put&& put) {
   const bool one_triangle = b.symmetry != MtxSymmetry::General;
-  const auto un = static_cast<std::uint64_t>(n);  // n <= 2^31: n*n fits
-  const std::uint64_t expected =
-      b.coordinate ? declared_nnz : (one_triangle ? un * (un + 1) / 2 : un * un);
-  // Every value line takes at least two bytes ("0\n"); a larger count means a corrupt header,
-  // caught before reserving memory for it.
-  if (expected > file_size / 2)
-    fail_at(lr, "declares " + std::to_string(expected) + " entries, more than the file can hold");
-
-  std::vector<std::int32_t> rows, cols;
-  std::vector<T> vals;
-  if (b.coordinate) {
-    rows.reserve(expected);
-    cols.reserve(expected);
-    vals.reserve(expected);
-  }
   std::uint64_t count = 0;
   index_t next_i = 0, next_j = 0;  // array format: position of the next value
   std::string_view line;
@@ -275,14 +272,83 @@ CsrMatrix<T> read_entries(LineReader& lr, const Banner& b, index_t n, std::uint6
     if (!t.next().empty()) fail_at(lr, "unexpected extra token");
     ++count;
     if (!b.coordinate && v == T(0)) continue;  // dense format: zeros are structural absence
-    rows.push_back(static_cast<std::int32_t>(i));
-    cols.push_back(static_cast<std::int32_t>(j));
-    vals.push_back(v);
+    put(i, j, v);
   }
   if (count != expected)
     HS_THROW(Io, lr.name() << ": file ends after " << count << " of " << expected << " entries");
-  return csr_from_triplets<T>(n, n, rows.data(), cols.data(), vals.data(), vals.size(),
-                              drop_zeros, stats);
+}
+
+// Pass 1 over a coordinate file: row pointers from the row tokens of the first `expected` entry
+// lines alone. A line whose row token cannot be read is not counted; pass 2 meets it in file order
+// and reports it exactly as a single pass would.
+std::vector<index_t> count_rows(LineReader& lr, index_t n, std::uint64_t expected) {
+  std::vector<index_t> rowptr(static_cast<std::size_t>(n) + 1, 0);
+  std::uint64_t count = 0;
+  std::string_view line;
+  while (count < expected && lr.next(line)) {
+    if (blank_or_comment(line)) continue;
+    ++count;
+    std::string_view tok = Tokens(line).next();
+    if (!tok.empty() && tok.front() == '+') tok.remove_prefix(1);
+    std::int64_t i = 0;
+    const char* last = tok.data() + tok.size();
+    const auto [end, ec] = std::from_chars(tok.data(), last, i);
+    if (ec == std::errc() && end == last && i >= 1 && i <= n) ++rowptr[i];  // row i - 1
+  }
+  std::partial_sum(rowptr.begin(), rowptr.end(), rowptr.begin());
+  return rowptr;
+}
+
+template <class T>
+CsrMatrix<T> read_values(LineReader& lr, const Banner& b, index_t n, std::uint64_t declared_nnz,
+                         bool drop_zeros, std::uint64_t file_size, AssemblyStats& stats) {
+  const bool one_triangle = b.symmetry != MtxSymmetry::General;
+  const auto un = static_cast<std::uint64_t>(n);  // n <= 2^31: n*n fits
+  const std::uint64_t expected =
+      b.coordinate ? declared_nnz : (one_triangle ? un * (un + 1) / 2 : un * un);
+  // Every value line takes at least two bytes ("0\n"); a larger count means a corrupt header,
+  // caught before reserving memory for it.
+  if (expected > file_size / 2)
+    fail_at(lr, "declares " + std::to_string(expected) + " entries, more than the file can hold");
+
+  if (!b.coordinate) {  // dense array format (small matrices): triplets, then CSR
+    std::vector<std::int32_t> rows, cols;
+    std::vector<T> vals;
+    read_entries<T>(lr, b, n, expected, [&](index_t i, index_t j, const T& v) {
+      rows.push_back(static_cast<std::int32_t>(i));
+      cols.push_back(static_cast<std::int32_t>(j));
+      vals.push_back(v);
+    });
+    return csr_from_triplets<T>(n, n, rows.data(), cols.data(), vals.data(), vals.size(),
+                                drop_zeros, stats);
+  }
+
+  // Coordinate format: two passes over the file instead of a triplet copy of the entries (which
+  // cost 16-24 bytes per entry on top of the result). Pass 1 counts the entries of every row,
+  // pass 2 parses and checks every line in file order and places each entry into the next slot
+  // of its row; rows keep the file order, so canonicalize_csr sums duplicates exactly as
+  // csr_from_triplets would. Peak: the result plus the line buffer.
+  const std::uint64_t header_lines = lr.line_number();
+  CsrMatrix<T> m;
+  m.nrows = m.ncols = n;
+  m.rowptr = count_rows(lr, n, expected);
+  m.colind.resize(static_cast<std::size_t>(m.rowptr[n]));
+  m.values.resize(static_cast<std::size_t>(m.rowptr[n]));
+  lr.rewind();
+  std::string_view skipped;
+  for (std::uint64_t k = 0; k < header_lines; ++k) lr.next(skipped);
+  std::vector<index_t> filled(static_cast<std::size_t>(n), 0);
+  const auto changed = [&lr] { HS_THROW(Io, lr.name() << ": the file changed while it was read"); };
+  read_entries<T>(lr, b, n, expected, [&](index_t i, index_t j, const T& v) {
+    const index_t dst = m.rowptr[i] + filled[i]++;
+    if (dst >= m.rowptr[i + 1]) changed();
+    m.colind[dst] = static_cast<std::int32_t>(j);
+    m.values[dst] = v;
+  });
+  for (index_t i = 0; i < n; ++i)
+    if (filled[i] != m.rowptr[i + 1] - m.rowptr[i]) changed();
+  stats = canonicalize_csr(m, drop_zeros);
+  return m;
 }
 
 }  // namespace
@@ -311,11 +377,11 @@ MtxMatrix read_matrix_market(const std::filesystem::path& path, bool drop_zeros)
   MtxMatrix out;
   out.symmetry = b.symmetry;
   if (b.field == Field::Complex) {
-    out.matrix = read_entries<cplx>(lr, b, n, static_cast<std::uint64_t>(nnz), drop_zeros,
-                                    file_size, out.stats);
+    out.matrix = read_values<cplx>(lr, b, n, static_cast<std::uint64_t>(nnz), drop_zeros,
+                                   file_size, out.stats);
   } else {
-    out.matrix = read_entries<double>(lr, b, n, static_cast<std::uint64_t>(nnz), drop_zeros,
-                                      file_size, out.stats);
+    out.matrix = read_values<double>(lr, b, n, static_cast<std::uint64_t>(nnz), drop_zeros,
+                                     file_size, out.stats);
   }
   return out;
 }

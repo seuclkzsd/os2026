@@ -8,6 +8,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -485,44 +486,97 @@ NpyArray read_npy_payload(ByteSource& src, NpyHeader header) {
   return a;
 }
 
+namespace {
+
+constexpr std::size_t kChunkBytes = std::size_t{1} << 20;  // payload bytes per streamed chunk
+
+std::size_t chunk_elements(const NpyHeader& h) {
+  return std::max<std::size_t>(1, kChunkBytes / h.info.item_size);
+}
+
+// Reads the payload in chunks of chunk_elements(h) elements converted to T: dst(first, count)
+// returns where elements [first, first + count) go, done(first, count) runs once they are there.
+// An hs::Error thrown by the conversion or by `done` is deferred until the rest of the payload has
+// been read and src.finish() has checked its integrity, so a corrupt member still reports Io, as
+// when the payload was read in one piece; after such an error the remaining chunks are only read.
+template <class T, class Dst, class Done>
+void stream_payload(ByteSource& src, const NpyHeader& h, Dst&& dst, Done&& done) {
+  check_payload_length(src, h);
+  const bool native = stores_native<T>(h.info);
+  const std::size_t per_chunk = chunk_elements(h);
+  std::vector<std::byte> raw(native ? 0 : std::min(per_chunk, h.count) * h.info.item_size);
+  std::exception_ptr deferred;
+  const auto convert = [&](std::size_t first, std::size_t count, T* out) {
+    try {
+      convert_into<T>(raw.data(), count, h.info, h.dtype, out, first);
+    } catch (const Error& e) {
+      deferred = std::make_exception_ptr(Error(e.code(), src.name() + ": " + e.what()));
+    }
+  };
+  if (!native && h.count == 0) convert(0, 0, nullptr);  // a rejected cast fails for empty arrays too
+  for (std::size_t first = 0; first < h.count; first += per_chunk) {
+    const std::size_t count = std::min(per_chunk, h.count - first);
+    T* out = dst(first, count);
+    if (native) {
+      src.read(reinterpret_cast<std::byte*>(out), count * sizeof(T));
+    } else {
+      src.read(raw.data(), count * h.info.item_size);
+      if (!deferred) convert(first, count, out);
+    }
+    if (deferred) continue;
+    try {
+      done(first, count);
+    } catch (const Error&) {
+      deferred = std::current_exception();
+    }
+  }
+  src.finish();
+  if (deferred) std::rethrow_exception(deferred);
+}
+
+}  // namespace
+
 template <class T>
 std::vector<T> read_npy_payload_as(ByteSource& src, const NpyHeader& header) {
-  check_payload_length(src, header);
+  std::vector<T> v(header.count);
   if (stores_native<T>(header.info)) {
-    std::vector<T> v(header.count);
+    check_payload_length(src, header);
     src.read(reinterpret_cast<std::byte*>(v.data()), header.data_bytes);
     src.finish();
     return v;
   }
-  std::vector<std::byte> raw(header.data_bytes);
-  src.read(raw.data(), raw.size());
-  src.finish();
-  try {
-    return convert_elements<T>(raw.data(), header.count, header.info, header.dtype);
-  } catch (const Error& e) {
-    throw Error(e.code(), src.name() + ": " + e.what());  // name the file/member
-  }
+  // Converted chunk by chunk straight into the result: no raw copy of the whole payload.
+  stream_payload<T>(
+      src, header, [&](std::size_t first, std::size_t) { return v.data() + first; },
+      [](std::size_t, std::size_t) {});
+  return v;
 }
 
 template <class T>
-std::vector<T> convert_elements(const std::byte* data, std::size_t count, const DtypeInfo& info,
-                                const std::string& dtype) {
-  std::vector<T> out;
+void read_npy_payload_chunks(ByteSource& src, const NpyHeader& header, const ChunkSink<T>& sink) {
+  std::vector<T> buf(std::min(chunk_elements(header), header.count));
+  stream_payload<T>(
+      src, header, [&](std::size_t, std::size_t) { return buf.data(); },
+      [&](std::size_t first, std::size_t count) { sink(buf.data(), first, count); });
+}
+
+template <class T>
+void convert_into(const std::byte* data, std::size_t count, const DtypeInfo& info,
+                  const std::string& dtype, T* out, std::size_t first_index) {
   const bool handled = visit_numeric(info, [&](auto tag) {
     using S = typename decltype(tag)::type;
     constexpr Cast rule = cast_rule<S, T>();
     if constexpr (rule == Cast::Rejected) {
       return false;
     } else {
-      out.resize(count);
       const bool big_endian = info.big_endian();
       for (std::size_t k = 0; k < count; ++k) {
         const S s = load_element<S>(data + k * sizeof(S), big_endian);
         if constexpr (rule == Cast::Checked) {
           if (!fits_exactly<T>(s))
-            HS_THROW(InvalidInput, "cannot convert numpy dtype '" << dtype << "' to "
-                                                                   << type_name<T>() << ": element "
-                                                                   << k << " does not fit exactly");
+            HS_THROW(InvalidInput, "cannot convert numpy dtype '"
+                                       << dtype << "' to " << type_name<T>() << ": element "
+                                       << first_index + k << " does not fit exactly");
         }
         out[k] = convert_value<T>(s);
       }
@@ -532,6 +586,13 @@ std::vector<T> convert_elements(const std::byte* data, std::size_t count, const 
   if (!handled)
     HS_THROW(InvalidInput, "cannot convert numpy dtype '" << dtype << "' to " << type_name<T>()
                                                            << " (not a safe numpy cast)");
+}
+
+template <class T>
+std::vector<T> convert_elements(const std::byte* data, std::size_t count, const DtypeInfo& info,
+                                const std::string& dtype) {
+  std::vector<T> out(count);
+  convert_into<T>(data, count, info, dtype, out.data(), 0);
   return out;
 }
 
@@ -605,8 +666,12 @@ std::vector<T> npy_to_vector(const NpyArray& a) {
   template void write_npy_vector<T>(const std::filesystem::path&, const std::vector<T>&);       \
   template std::vector<T> npy_to_vector<T>(const NpyArray&);                                     \
   template std::vector<T> io::read_npy_payload_as<T>(io::ByteSource&, const io::NpyHeader&);    \
+  template void io::read_npy_payload_chunks<T>(io::ByteSource&, const io::NpyHeader&,            \
+                                               const io::ChunkSink<T>&);                         \
   template std::vector<T> io::convert_elements<T>(const std::byte*, std::size_t,                 \
-                                                  const io::DtypeInfo&, const std::string&);
+                                                  const io::DtypeInfo&, const std::string&);     \
+  template void io::convert_into<T>(const std::byte*, std::size_t, const io::DtypeInfo&,         \
+                                    const std::string&, T*, std::size_t);
 #define HS_IO_INSTANTIATE_MATRIX(T) \
   template void write_npy_matrix<T>(const std::filesystem::path&, const DenseMatrix<T>&);
 
