@@ -122,9 +122,11 @@ double model_solve_s(const FactorEstimate& e);                               ///
 double model_analysis_s(double order, double entries, double factor_entries);
 /// An InertiaCounter count (inertia-only factorization) saves this fraction of a factorization.
 constexpr double kCounterSaving = 0.13;
-/// A SCOTCH analysis costs this many AMD analyses of the same input (adaptive ordering; measured
-/// 2.2..17, median ~9 on the 1e5 data cases, bench/drvint_profile --exp analysis; 7 keeps the
-/// P3 calibration, which picks the same ordering as before on every data case).
+/// A nested-dissection analysis (SCOTCH, or METIS for deterministic runs: nd_ordering) costs this
+/// many AMD analyses of the same input (adaptive ordering; measured 2.2..17, median ~9 on the 1e5
+/// data cases, bench/drvint_profile --exp analysis; METIS median 9.8 vs SCOTCH 9.3 on the cases
+/// that pick it, bench/drvint_fix_ordering; 7 keeps the P3 calibration, which picks the same
+/// ordering as before on every data case).
 constexpr double kNdAnalysisOverAmd = 7.0;
 
 struct MumpsInputSize {
@@ -226,7 +228,13 @@ struct OrderingDecision {
 OrderingDecision decide_ordering(const FactorEstimate& amd, const MumpsInputSize& in, double pencil_nnz,
                                  int threads, index_t expected_factorizations, index_t expected_solves);
 
-/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe + cost model, SCOTCH if it pays.
+/// MUMPS ICNTL(7) of the nested-dissection branch of the adaptive ordering: SCOTCH (3), or METIS
+/// (5, fixed seed) when cfg.deterministic asks for bitwise-reproducible runs - SCOTCH's orderings
+/// vary from run to run (measurements in steps.cpp).
+int nd_ordering(const SolverConfig& cfg);
+
+/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe + cost model, nested dissection
+/// (nd_ordering) if it pays.
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,

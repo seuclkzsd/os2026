@@ -401,6 +401,24 @@ OrderingDecision decide_ordering(const FactorEstimate& amd, const MumpsInputSize
   return d;
 }
 
+// Nested-dissection ordering of the adaptive analysis. SCOTCH 7 (ICNTL(7)=3) orders differently
+// from analysis to analysis, in one process as across processes (its default context draws a
+// random seed and orders with threads): syn-lap3d-22, three identical CLI runs with
+// deterministic = true, 4 threads: 1.73 / 1.77 / 1.83e6 factor entries and different
+// eigenvectors (SCOTCH_DETERMINISTIC=1 in the environment fixes that, but a library must not
+// impose it on its host process). METIS (5) has a fixed seed: identical estimates in every
+// analysis and bitwise equal results. Measured on the 42 data cases (bench/drvint_fix_ordering.cpp,
+// 4 threads, 3 interleaved analyses each): the SCOTCH estimates varied between the analyses of one
+// process on every case, the METIS ones on none. On the 20 cases where the AMD probe picks nested
+// dissection, METIS analyses take 0.52x .. 1.98x SCOTCH's time (median 0.84x): faster on the 1e4
+// and the largest 3-D cases (ss-ge87h76 4.87 -> 2.53 s), slower on the 1e5 3-D ones this solver
+// targets (syn-mem27-46 0.82 -> 1.06 s, yee-pec-cube-32 0.64 -> 0.98 s, yee-pec-box-1e5 0.81 ->
+// 1.19 s, ss-tem152078 1.07 -> 1.77 s); factorizations take 0.84x .. 1.06x. So the default keeps
+// SCOTCH (its runs are reproducible to tolerance, like the L0-OpenMP factorizations) and only runs
+// that promise bitwise reproducibility take METIS. One cost constant serves both: the median
+// nested-dissection / AMD analysis ratio is 9.3 (SCOTCH) and 9.8 (METIS) on those cases.
+int nd_ordering(const SolverConfig& cfg) { return cfg.deterministic ? 5 : 3; }
+
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
@@ -418,11 +436,12 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   event(c, "ordering", {{"amd_analyze_s", t_amd}, {"amd_analyze_model_s", d.amd_analysis_s},
                         {"amd_flops", e.flops}, {"amd_entries", static_cast<std::int64_t>(e.factor_entries)},
                         {"fill_ratio", d.fill_ratio}, {"predicted_saving_s", d.saving_s},
-                        {"predicted_nd_cost_s", d.nd_cost_s}, {"choice", std::string(d.use_nd ? "scotch" : "amd")}});
+                        {"predicted_nd_cost_s", d.nd_cost_s},
+                        {"choice", std::string(!d.use_nd ? "amd" : nd_ordering(c.cfg) == 5 ? "metis" : "scotch")}});
   if (!d.use_nd) return fac;
-  fac.reset();  // free the AMD analysis before the SCOTCH one: lower peak of the phase
+  fac.reset();  // free the AMD analysis before the nested-dissection one: lower peak of the phase
   FactorOptions nd = fopts;
-  nd.ordering = 3;  // SCOTCH: measured faster analysis than METIS at equal or better total time
+  nd.ordering = nd_ordering(c.cfg);
   auto fac_nd = make_mumps_factorization<T>(nd);
   fac_nd->analyze(pencil, 1.0, -sigma0);
   return fac_nd;

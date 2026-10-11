@@ -80,10 +80,13 @@ struct SolverConfig {
   int threads = 0;                  ///< 0 = OMP_NUM_THREADS / all available
   double memory_budget_gb = 14.0;   ///< refuse factorizations predicted to exceed this
   FactorPrecision factor_precision = FactorPrecision::Double;
-  int ordering = -1;                ///< -1: adaptive AMD/SCOTCH by cost model (DESIGN §3.6-3b);
+  int ordering = -1;                ///< -1: adaptive AMD / nested dissection by cost model (DESIGN
+                                    ///< §3.6-3b; nested dissection = SCOTCH, METIS if deterministic);
                                     ///< >= 0: MUMPS ICNTL(7) (7 auto, 5 METIS, 3 SCOTCH, 0 AMD, ...)
   bool deterministic = false;       ///< true: bitwise-reproducible factorizations/solves for a fixed
-                                    ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves);
+                                    ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves; the
+                                    ///< adaptive ordering then takes METIS, not SCOTCH, whose orderings
+                                    ///< vary from run to run - so does an explicit ordering = 3);
                                     ///< false: L0-OpenMP (results reproducible to tolerance)
   Toggle blr = Toggle::Auto;
   Toggle out_of_core = Toggle::Auto;
