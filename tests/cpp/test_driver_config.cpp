@@ -8,6 +8,7 @@
 
 #include "hsolve/error.hpp"
 #include "hsolve/solver.hpp"
+#include "hsolve/util.hpp"
 
 namespace {
 
@@ -18,7 +19,7 @@ TEST(DriverConfig, ParsesDocumentedExample) {
     "ncv": 40, "seed": 7, "threads": 8, "memory_budget_gb": 28.5, "factor_precision": "single",
     "blr": "on", "out_of_core": "off", "inertia_check": "auto", "zero_filter_tol": 1e-6,
     "complex_tol": 1e-9, "hermitian_tol": 1e-12, "max_shift_retries": 3, "inner_tol_factor": 0.5,
-    "ordering": 5, "max_restarts": 77})";
+    "ordering": 5, "max_restarts": 77, "block_size": 4, "inertia_counter": "off"})";
   const hs::SolverConfig c = hs::parse_config(doc);
   EXPECT_EQ(c.target.mode, hs::TargetMode::Nearest);
   EXPECT_EQ(c.target.sigma, -2.5e5);
@@ -37,6 +38,36 @@ TEST(DriverConfig, ParsesDocumentedExample) {
   EXPECT_EQ(c.max_shift_retries, 3);
   EXPECT_EQ(c.ordering, 5);
   EXPECT_EQ(c.max_restarts, 77);
+  EXPECT_EQ(c.block_size, 4);
+  EXPECT_EQ(c.inertia_counter, hs::Toggle::Off);
+}
+
+TEST(DriverConfig, BlockSizeAndInertiaCounterRoundTrip) {
+  const hs::SolverConfig def;
+  EXPECT_EQ(def.block_size, 0);  // auto
+  EXPECT_EQ(def.inertia_counter, hs::Toggle::Auto);
+  const auto j = nlohmann::json::parse(hs::config_to_json(def));
+  EXPECT_EQ(j["block_size"], 0);
+  EXPECT_EQ(j["inertia_counter"], "auto");
+  hs::SolverConfig c;
+  c.block_size = 8;
+  c.inertia_counter = hs::Toggle::On;
+  const auto again = hs::parse_config(hs::config_to_json(c));
+  EXPECT_EQ(again.block_size, 8);
+  EXPECT_EQ(again.inertia_counter, hs::Toggle::On);
+  EXPECT_EQ(hs::parse_config(R"({"block_size": 1})").block_size, 1);
+  auto bad = [](const char* doc) {
+    try {
+      (void)hs::parse_config(doc);
+      return false;
+    } catch (const hs::Error& e) {
+      return e.code() == hs::Error::Code::InvalidInput;
+    }
+  };
+  EXPECT_TRUE(bad(R"({"block_size": -1})"));
+  EXPECT_TRUE(bad(R"({"block_size": 2.5})"));
+  EXPECT_TRUE(bad(R"({"block_size": "4"})"));
+  EXPECT_TRUE(bad(R"({"inertia_counter": "yes"})"));
 }
 
 TEST(DriverConfig, MissingKeysKeepBaseAndRoundTrip) {
@@ -97,10 +128,14 @@ TEST(DriverReport, JsonHasDocumentedKeysAndNullForInfiniteBounds) {
   for (const char* key : {"schema_version", "n", "nnz_a", "nnz_b", "complex_scalars", "problem", "norm2_a", "norm2_b",
                           "scale", "method", "sigma_requested", "sigma_used", "shift_retries", "factor_options",
                           "factor_stats", "restarts", "op_applies", "time_total_s", "time_setup_s", "time_factor_s",
-                          "time_iterate_s", "time_verify_s", "peak_rss_bytes", "pairs", "certificate", "slices",
-                          "zero_cluster_dim", "zero_modes_filtered", "success", "warnings"})
+                          "time_iterate_s", "time_verify_s", "time_certificate_s", "peak_rss_bytes", "pairs",
+                          "certificate", "slices", "zero_cluster_dim", "zero_modes_filtered", "success", "warnings",
+                          "block_size", "solver", "version"})
     EXPECT_TRUE(j.contains(key)) << key;
   EXPECT_EQ(j["problem"], "generalized_definite");
+  EXPECT_EQ(j["solver"], "hsolve");
+  EXPECT_EQ(j["version"], std::string(hs::version()));
+  EXPECT_EQ(j["block_size"], 1);
   EXPECT_EQ(j["method"], "shift_invert_lanczos");
   EXPECT_TRUE(j["certificate"]["lower"].is_null());
   EXPECT_EQ(j["certificate"]["upper"], 2.0);

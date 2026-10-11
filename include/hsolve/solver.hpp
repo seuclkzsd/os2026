@@ -63,6 +63,16 @@ struct SolverConfig {
                                     ///< below it the driver replaces A by (A+A^H)/2
   double inner_tol_factor = 0.1;    ///< Krylov tolerance = tol * inner_tol_factor
   index_t ncv = 0;                  ///< 0 = auto
+  index_t block_size = 0;           ///< Krylov block width p of the shift-invert Lanczos runs (HEP /
+                                    ///< GHEP, incl. slices; KrylovSchurOptions::block_size): 0 = auto
+                                    ///< (src/driver/internal.hpp block_size_for: p = 4 for runs of
+                                    ///< >= 8 wanted pairs, else 1; depends on nev only), 1 = single
+                                    ///< vector. A deflated certificate rerun missing m pairs uses
+                                    ///< max(p, min(4, m rounded up to even)) (rerun_block_size), so
+                                    ///< it gets all missing copies of a multiple eigenvalue by
+                                    ///< construction only up to that width. p is halved (warning)
+                                    ///< while the block basis does not fit the memory budget.
+                                    ///< GHIEP runs are single-vector.
   index_t slice_size = 0;           ///< spectrum slicing (interval / smallest / largest, B HPD): at
                                     ///< most this many eigenvalues per shift; 0 = auto (cost model)
   index_t max_restarts = 1000;
@@ -70,14 +80,22 @@ struct SolverConfig {
   int threads = 0;                  ///< 0 = OMP_NUM_THREADS / all available
   double memory_budget_gb = 14.0;   ///< refuse factorizations predicted to exceed this
   FactorPrecision factor_precision = FactorPrecision::Double;
-  int ordering = -1;                ///< -1: adaptive AMD/SCOTCH by cost model (DESIGN §3.6-3b);
+  int ordering = -1;                ///< -1: adaptive AMD / nested dissection by cost model (DESIGN
+                                    ///< §3.6-3b; nested dissection = SCOTCH, METIS if deterministic);
                                     ///< >= 0: MUMPS ICNTL(7) (7 auto, 5 METIS, 3 SCOTCH, 0 AMD, ...)
   bool deterministic = false;       ///< true: bitwise-reproducible factorizations/solves for a fixed
-                                    ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves);
+                                    ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves; the
+                                    ///< adaptive ordering then takes METIS, not SCOTCH, whose orderings
+                                    ///< vary from run to run - so does an explicit ordering = 3);
                                     ///< false: L0-OpenMP (results reproducible to tolerance)
   Toggle blr = Toggle::Auto;
   Toggle out_of_core = Toggle::Auto;
   Toggle inertia_check = Toggle::Auto;  ///< Auto = On for HEP/GHEP when affordable
+  Toggle inertia_counter = Toggle::Auto;  ///< Sylvester counts of the certificate on an
+                                          ///< InertiaCounter (inertia-only factorizations on the
+                                          ///< main analysis' pivot order) instead of the main
+                                          ///< object; Auto: nearest certificates when the model
+                                          ///< says it pays, and always for single / BLR factors
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
   double complex_tol = 1e-8;      ///< GHIEP: a pair is complex only if |Im lambda| >
@@ -154,17 +172,24 @@ struct SolveReport {
   double sigma_used = 0.0;       ///< after near-singular perturbation
   index_t shift_retries = 0;
   FactorOptions factor_options;
+  index_t block_size = 1;        ///< Krylov block width p of the first shift-invert run (resolved
+                                 ///< SolverConfig::block_size; 1 for GHIEP)
   // statistics
   FactorStats factor_stats;
   index_t restarts = 0;
   index_t op_applies = 0;
   // Wall time of hs::solve split into exclusive phases (each instant counted once), so
-  // time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s:
+  // time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s
+  //                 + time_certificate_s:
   double time_total_s = 0.0;
   double time_setup_s = 0.0;    ///< input checks, norm estimates, problem type, planning
-  double time_factor_s = 0.0;   ///< symbolic analyses + numeric factorizations (incl. inertia counts)
+  double time_factor_s = 0.0;   ///< symbolic analyses + numeric factorizations of shifts (Krylov
+                                ///< runs, rescue), of B (definiteness test) and of A (GHIEP)
   double time_iterate_s = 0.0;  ///< Krylov solvers (operator applications = solves, orthogonalization)
-  double time_verify_s = 0.0;   ///< Rayleigh-Ritz refinement, residuals, rescue, selection, certificate
+  double time_verify_s = 0.0;   ///< Rayleigh-Ritz refinement, residuals, rescue, selection
+  double time_certificate_s = 0.0;  ///< HEP/GHEP Sylvester inertia counts: certificate endpoints,
+                                    ///< window ends, slice cuts (main-object factorizations or
+                                    ///< InertiaCounter counts incl. its analysis)
   std::int64_t peak_rss_bytes = 0;
   // results
   std::vector<PairReport> pairs;

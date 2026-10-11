@@ -71,6 +71,29 @@ bool is_diagonal(const CsrMatrix<T>& b) {
   return true;
 }
 
+enum class Definiteness { Positive, NotPositive, Unknown };
+
+// O(nnz) screen of a Hermitian B before its factorization: every row strictly diagonally
+// dominant with a positive diagonal proves B HPD (Gershgorin); a diagonal entry <= 0 (e_i^H B e_i)
+// proves it is not. Everything else needs the inertia of B.
+template <class T>
+Definiteness screen_definiteness(const CsrMatrix<T>& b) {
+  bool dominant = true;
+  for (index_t i = 0; i < b.nrows; ++i) {
+    double diag = 0.0, off = 0.0;
+    for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p) {
+      if (b.colind[p] == i) {
+        diag = std::real(b.values[p]);
+      } else {
+        off += std::abs(b.values[p]);
+      }
+    }
+    if (!(diag > 0.0)) return Definiteness::NotPositive;
+    dominant = dominant && diag > off;
+  }
+  return dominant ? Definiteness::Positive : Definiteness::Unknown;
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------------------- solve
@@ -117,7 +140,15 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   // 2. Memory budget for the factorization (DESIGN §3.6-3).
   const double budget = cfg.memory_budget_gb * 1073741824.0;
   const index_t k_guess = cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
-  const index_t ncv_guess = cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32);
+  // Krylov basis: the general solver's (GHIEP) or the block Lanczos basis of the auto block width
+  // (DESIGN §3.6-3; block layout of eigen.hpp). A wider explicit block_size is not reserved here:
+  // the factorization has priority, and fit_block_size() halves the width (with a warning) when
+  // its basis does not fit what the factors leave; GHIEP runs ignore block_size altogether.
+  const index_t p_guess = std::min(cfg.block_size > 0 ? cfg.block_size : driver::kMaxAutoBlockSize,
+                                   driver::kMaxAutoBlockSize);
+  const index_t ncv_guess =
+      std::max(cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32),
+               driver::lanczos_basis_columns(n, 0, std::min(n, k_guess), cfg.ncv, p_guess));
   const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(ncv_guess + 6 * k_guess);
   const double cap_mb = (budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)) - krylov_bytes) * 0.95 / 1e6;
   if (cap_mb <= 0)
@@ -149,7 +180,10 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     Timer tb;
     Inertia ib;
     // A diagonal B (e.g. lumped/Yee mass matrices) is HPD iff its diagonal is positive: no
-    // factorization needed. Otherwise count the inertia of B on the main analysis.
+    // factorization needed. A diagonally dominant one with positive diagonal is HPD, one with a
+    // diagonal entry <= 0 is not (screen_definiteness). Otherwise count the inertia of B on the
+    // main analysis.
+    const Definiteness screen = b_diagonal ? Definiteness::Unknown : screen_definiteness(*b);
     if (b_diagonal) {
       ib.neg = ib.zero = ib.pos = 0;
       for (index_t i = 0; i < n; ++i) {
@@ -157,6 +191,12 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
         (d > 0.0 ? ib.pos : d < 0.0 ? ib.neg : ib.zero)++;
       }
       ib.valid = true;
+    } else if (screen == Definiteness::Positive) {
+      ib.neg = ib.zero = 0;
+      ib.pos = n;
+      ib.valid = true;
+    } else if (screen == Definiteness::NotPositive) {
+      // not HPD; its inertia is not needed (counts stay -1, valid == false)
     } else if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
       driver::PhaseScope phase(clock, driver::Phase::Factor);
       if (fac->factorize(0.0, 1.0)) ib = fac->inertia();  // false: B singular -> not HPD
@@ -168,7 +208,8 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     type = (ib.valid && ib.neg == 0 && ib.zero == 0) ? ProblemType::GeneralizedDefinite
                                                      : ProblemType::GeneralizedIndefinite;
     event(c, "b_inertia", {{"neg", static_cast<std::int64_t>(ib.neg)}, {"zero", static_cast<std::int64_t>(ib.zero)},
-                           {"pos", static_cast<std::int64_t>(ib.pos)}, {"valid", ib.valid}, {"seconds", tb.seconds()}});
+                           {"pos", static_cast<std::int64_t>(ib.pos)}, {"valid", ib.valid},
+                           {"screened", screen != Definiteness::Unknown}, {"seconds", tb.seconds()}});
   }
   rep.problem = type;
   Method method = cfg.method;
@@ -217,7 +258,9 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   rep.time_factor_s = clock.seconds(driver::Phase::Factor);
   rep.time_iterate_s = clock.seconds(driver::Phase::Iterate);
   rep.time_verify_s = clock.seconds(driver::Phase::Verify);
-  rep.time_total_s = rep.time_setup_s + rep.time_factor_s + rep.time_iterate_s + rep.time_verify_s;
+  rep.time_certificate_s = clock.seconds(driver::Phase::Certificate);
+  rep.time_total_s =
+      rep.time_setup_s + rep.time_factor_s + rep.time_iterate_s + rep.time_verify_s + rep.time_certificate_s;
   rep.peak_rss_bytes = peak_rss_bytes();
   event(c, "done", {{"success", rep.success}, {"pairs", static_cast<std::int64_t>(rep.pairs.size())},
                     {"seconds", rep.time_total_s}});

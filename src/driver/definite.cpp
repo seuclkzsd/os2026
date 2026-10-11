@@ -113,12 +113,13 @@ const char* which_name(Which w) {
   return "unknown";
 }
 
-// One shift-invert Lanczos run at the shift the factorization currently holds, optionally deflated.
+// One shift-invert Lanczos run at the shift the factorization currently holds, optionally deflated,
+// with Krylov blocks of p vectors (KrylovSchurOptions::block_size; p = 1: single vector).
 // theta = 1/(lambda - sigma): LargestMagnitude = nearest sigma, SmallestAlgebraic = the eigenvalues
 // just below sigma, LargestAlgebraic = just above.
 template <class T>
 void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma, Which which,
-                 index_t nev, const DenseMatrix<T>* deflation, DefiniteRun<T>& out) {
+                 index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out) {
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
   SolveRefinement refine;
@@ -136,6 +137,7 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   ko.tol = c.cfg.tol * c.cfg.inner_tol_factor;
   ko.seed = c.cfg.seed + static_cast<std::uint64_t>(out.restarts);  // fresh start for reruns
   ko.deflation = deflation;
+  ko.block_size = std::max<index_t>(p, 1);
   HermitianEigResult<T> res;
   {
     PhaseScope phase(c.clock, Phase::Iterate);
@@ -145,7 +147,9 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   out.applies += res.op_applies;
   out.converged = res.converged;
   event(c, "lanczos", {{"sigma", sigma}, {"which", std::string(which_name(which))},
-                       {"nev", static_cast<std::int64_t>(nev)}, {"nconv", static_cast<std::int64_t>(res.nconv)},
+                       {"nev", static_cast<std::int64_t>(nev)},
+                       {"block_size", static_cast<std::int64_t>(ko.block_size)},
+                       {"nconv", static_cast<std::int64_t>(res.nconv)},
                        {"restarts", static_cast<std::int64_t>(res.restarts)},
                        {"op_applies", static_cast<std::int64_t>(res.op_applies)},
                        {"deflated", static_cast<std::int64_t>(deflation ? deflation->cols() : 0)}});
@@ -184,13 +188,44 @@ void keep_converged(DefiniteRun<T>& run, double n2a, double n2b, double tol) {
   run.all = take_columns(run.all, conv);
 }
 
+// Residual metrics of every column (DESIGN §4.5). Columns in parallel; each column's sums run in
+// one thread in index order, so the result does not depend on the thread count.
 template <class T>
 std::vector<PairMetrics> block_metrics(const Block<T>& blk, double n2a, double n2b) {
-  std::vector<PairMetrics> m;
-  const index_t n = blk.x.rows();
-  for (index_t j = 0; j < blk.size(); ++j)
-    m.push_back(driver::pair_metrics(blk.ax.col(j), blk.bx.col(j), blk.x.col(j), n, blk.lambda[j], n2a, n2b));
-  return m;
+  const index_t n = blk.x.rows(), m = blk.size();
+  std::vector<PairMetrics> out(static_cast<std::size_t>(m));
+#pragma omp parallel for schedule(static)
+  for (index_t j = 0; j < m; ++j)
+    out[static_cast<std::size_t>(j)] =
+        driver::pair_metrics(blk.ax.col(j), blk.bx.col(j), blk.x.col(j), n, blk.lambda[j], n2a, n2b);
+  return out;
+}
+
+/// Columns of x reordered in place so that new column j = old column perm[j] (perm a permutation
+/// of 0..m-1), using one n-vector of workspace (cycle following).
+template <class T>
+void permute_columns(DenseMatrix<T>& x, const std::vector<index_t>& perm) {
+  const index_t n = x.rows(), m = static_cast<index_t>(perm.size());
+  std::vector<char> done(static_cast<std::size_t>(m), 0);
+  std::vector<T> tmp(static_cast<std::size_t>(n));
+  for (index_t start = 0; start < m; ++start) {
+    if (done[start] || perm[start] == start) {
+      done[start] = 1;
+      continue;
+    }
+    std::copy(x.col(start), x.col(start) + n, tmp.data());
+    index_t j = start;
+    while (true) {
+      done[j] = 1;
+      const index_t src = perm[j];
+      if (src == start) {
+        std::copy(tmp.begin(), tmp.end(), x.col(j));
+        break;
+      }
+      std::copy(x.col(src), x.col(src) + n, x.col(j));
+      j = src;
+    }
+  }
 }
 
 /// Metrics of sel; pairs above tol get residual correction with the factorization that
@@ -309,8 +344,12 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   // Converge exactly the k wanted pairs (most wanted by |theta| = nearest to sigma). Asking for
   // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
   const index_t nev = std::min<index_t>(n, k);
+  // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis.
+  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c.cfg, nev));
+  rep.block_size = p;
   DefiniteRun<T> run;
-  lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
+  lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev, p, static_cast<const DenseMatrix<T>*>(nullptr),
+              run);
   if (!run.converged) warn(c, "Krylov-Schur did not converge all requested pairs within max_restarts");
 
   const double zero_tol = cfg.zero_filter_tol >= 0 ? cfg.zero_filter_tol * scale : -1.0;
@@ -325,8 +364,19 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     index_t zd = 0;  // restore the target order (Rayleigh-Ritz sorts ascending)
     const auto order = select_nearest(sel.lambda, t.sigma, sel.size(), -1.0, zd);
     std::vector<PairMetrics> m2;
-    for (index_t j : order) m2.push_back(metrics[j]);
-    sel = take_columns(sel, order);
+    std::vector<double> l2;
+    for (index_t j : order) {
+      m2.push_back(metrics[j]);
+      l2.push_back(sel.lambda[j]);
+    }
+    if (static_cast<index_t>(order.size()) == sel.size()) {  // a permutation: reorder in place
+      permute_columns(sel.x, order);
+      permute_columns(sel.ax, order);
+      permute_columns(sel.bx, order);
+      sel.lambda = std::move(l2);
+    } else {
+      sel = take_columns(sel, order);
+    }
     metrics = std::move(m2);
   };
   select_and_verify();
@@ -344,9 +394,16 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     if (rep.zero_modes_filtered > 0 || sel.size() < k || std::abs(t.sigma) - r <= zero_tol) return hand_over();
   }
 
-  // Inertia certificate (DESIGN §3.6-8), with up to two deflated reruns on a count mismatch.
+  // Inertia certificate (DESIGN §3.6-8), with up to two deflated reruns on a count mismatch. Its
+  // two counts per round come from an InertiaCounter when that pays (counter_pays). The main
+  // factors at sigma are released before the counter counts (MainFactors::Release): after the
+  // rescue above they are needed only for a rerun, which refactorizes once - as main-object counts
+  // would - and the counts never hold both in memory.
   const bool want_cert = cfg.inertia_check != Toggle::Off;
   InertiaCertificate& cert = rep.certificate;
+  const bool on_counter = want_cert && counter_pays(cfg, fac.estimate(), mumps_input_size(pencil),
+                                                    fac.options().threads, 2);
+  CountSource<T> counts(fac, pencil, on_counter, MainFactors::Release);
   for (int round = 0; want_cert && round < 3; ++round) {
     if (sel.size() == 0) break;
     const double tiny = 1e-12 * std::max(scale, std::abs(t.sigma));
@@ -363,8 +420,8 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     double b_end = push_out(t.sigma + r, +1.0);
     if (zero_tol >= 0 && a_end <= zero_tol && b_end >= -zero_tol) return hand_over();  // window meets the band
     const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-    const index_t nu_a = count_below(c, fac, pencil, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
-    const index_t nu_b = count_below(c, fac, pencil, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+    const index_t nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+    const index_t nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
     cert.performed = true;
     cert.lower = a_end;
     cert.upper = b_end;
@@ -385,7 +442,9 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     if (nev_rerun < 1) break;
     refactorize_at(c, fac, sigma, detection_off);
     DenseMatrix<T> defl = run.all.x;
-    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, &defl, run);
+    const index_t d = defl.cols();
+    const index_t p_rerun = fit_block_size<T>(c, n, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, missing));
+    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run);
     select_and_verify();
   }
   if (cert.performed && !cert.passed) {
@@ -490,7 +549,15 @@ class WindowSolver {
  public:
   WindowSolver(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double n2a, double n2b,
                double scale, const SpectrumEstimate& est)
-      : c_(c), pencil_(pencil), fac_(fac), n2a_(n2a), n2b_(n2b), scale_(scale), est_(est), n_(pencil.order()) {
+      : c_(c),
+        pencil_(pencil),
+        fac_(fac),
+        counts_(fac, pencil, c.cfg.inertia_counter == Toggle::On),
+        n2a_(n2a),
+        n2b_(n2b),
+        scale_(scale),
+        est_(est),
+        n_(pencil.order()) {
     cost_ = make_cost_model(fac.estimate(), n_, fac.options().threads, is_complex_v<T>);
   }
 
@@ -530,6 +597,9 @@ class WindowSolver {
   Ctx& c_;
   const ShiftedPencil<T>& pencil_;
   SparseFactorization<T>& fac_;
+  /// Counts on the main object by default: a count point can then serve as a one-sided shift
+  /// without refactorization (anchors), which an InertiaCounter count cannot.
+  CountSource<T> counts_;
   double n2a_, n2b_, scale_;
   SpectrumEstimate est_;
   index_t n_;
@@ -561,7 +631,7 @@ CountPoint WindowSolver<T>::count(double s, double outward) {
     if (p.s == s) return p;
   const double step = 1e-10 * std::max(scale_, std::abs(s));
   bool off = false, near = false;
-  const index_t nu = count_below(c_, fac_, pencil_, s, outward, step, &off, false, &near);
+  const index_t nu = count_below(c_, counts_, s, outward, step, &off, false, &near);
   const CountPoint p{s, nu, off, near};
   remember(p);
   event(c_, "count", {{"s", s}, {"nu", static_cast<std::int64_t>(nu)}, {"near_eigenvalue", near}});
@@ -967,7 +1037,9 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     return partial ? std::max<index_t>(0, s.want - inside) : count - inside - near_out;
   };
   sr.nev = std::min(n_, s.required());
-  lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
+  const index_t p = fit_block_size<T>(c_, n_, sr.nev, 0, 4 * sr.nev, block_size_for(c_.cfg, sr.nev));
+  if (id == 0) c_.rep.block_size = p;
+  lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, p, static_cast<const DenseMatrix<T>*>(nullptr), run);
   select();
   // Certificate of the slice: deflated reruns while pairs are missing and the reruns find new
   // ones. A multiple eigenvalue among the found pairs gets its own shift (multiplet_shift).
@@ -983,15 +1055,17 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     event(c_, "slice_rerun", {{"slice", static_cast<std::int64_t>(id)}, {"missing", static_cast<std::int64_t>(miss)},
                               {"multiplet", m_sigma}});
     DenseMatrix<T> defl = run.all.x;
+    const index_t d = defl.cols();
+    const index_t p_rerun = fit_block_size<T>(c_, n_, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, miss));
     if (std::isfinite(m_sigma)) {
       tried.push_back(m_sigma);
       bool off = false;
       const double ms = factorize_near(c_, fac_, multiplet_rerun_shift(m_sigma, sel, s), scale_, off,
                                        /*on_eigenvalue=*/true);
-      lanczos_run(c_, fac_, pencil_, ms, Which::LargestMagnitude, nev_rerun, &defl, run);
+      lanczos_run(c_, fac_, pencil_, ms, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run);
     } else {
       refactorize_at(c_, fac_, sigma, detection_off);
-      lanczos_run(c_, fac_, pencil_, sigma, which, nev_rerun, &defl, run);
+      lanczos_run(c_, fac_, pencil_, sigma, which, nev_rerun, p_rerun, &defl, run);
     }
     ++sr.reruns;
     select();
@@ -1104,33 +1178,6 @@ index_t WindowSolver<T>::deduplicate() {
   }
   if (removed > 0) compact_pool(drop);
   return removed;
-}
-
-/// Columns of x reordered in place so that new column j = old column perm[j] (perm a permutation
-/// of 0..m-1), using one n-vector of workspace (cycle following).
-template <class T>
-void permute_columns(DenseMatrix<T>& x, const std::vector<index_t>& perm) {
-  const index_t n = x.rows(), m = static_cast<index_t>(perm.size());
-  std::vector<char> done(static_cast<std::size_t>(m), 0);
-  std::vector<T> tmp(static_cast<std::size_t>(n));
-  for (index_t start = 0; start < m; ++start) {
-    if (done[start] || perm[start] == start) {
-      done[start] = 1;
-      continue;
-    }
-    std::copy(x.col(start), x.col(start) + n, tmp.data());
-    index_t j = start;
-    while (true) {
-      done[j] = 1;
-      const index_t src = perm[j];
-      if (src == start) {
-        std::copy(tmp.begin(), tmp.end(), x.col(j));
-        break;
-      }
-      std::copy(x.col(src), x.col(src) + n, x.col(j));
-      j = src;
-    }
-  }
 }
 
 template <class T>

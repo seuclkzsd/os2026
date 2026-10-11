@@ -25,13 +25,18 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 // ------------------------------------------------------------------------------ time accounting
 
 /// Phases of a solve. Every instant of hs::solve is charged to exactly one phase (exclusive
-/// time), so the report's time_setup_s + time_factor_s + time_iterate_s + time_verify_s equals
-/// time_total_s:
-///   Setup   input checks, norm estimates, problem-type decision, planning (the default);
-///   Factor  symbolic analyses and numeric factorizations (shifts, inertia counts, B, A);
-///   Iterate the Krylov solvers (operator applications = solves, orthogonalization, restarts);
-///   Verify  Rayleigh-Ritz refinement, residuals, rescue, selection, certificate bookkeeping.
-enum class Phase { Setup = 0, Factor = 1, Iterate = 2, Verify = 3 };
+/// time), so the report's time_setup_s + time_factor_s + time_iterate_s + time_verify_s +
+/// time_certificate_s equals time_total_s:
+///   Setup       input checks, norm estimates, problem-type decision, planning (the default);
+///   Factor      symbolic analyses and numeric factorizations of shifts, of B (definiteness
+///               test) and of A (GHIEP zero cluster);
+///   Iterate     the Krylov solvers (operator applications = solves, orthogonalization, restarts);
+///   Verify      Rayleigh-Ritz refinement, residuals, rescue, selection, certificate bookkeeping;
+///   Certificate Sylvester inertia counts of the HEP/GHEP path (count_below: certificate
+///               endpoints, window ends, slice cuts, cluster checks), including the
+///               InertiaCounter's analysis.
+enum class Phase { Setup = 0, Factor = 1, Iterate = 2, Verify = 3, Certificate = 4 };
+constexpr int kPhases = 5;
 
 class PhaseClock {
  public:
@@ -46,7 +51,7 @@ class PhaseClock {
   Timer timer_;
   double last_ = 0.0;
   Phase current_ = Phase::Setup;
-  double acc_[4] = {0.0, 0.0, 0.0, 0.0};
+  double acc_[kPhases] = {0.0, 0.0, 0.0, 0.0, 0.0};
 };
 
 /// Charges its lifetime to phase p (nested scopes: the innermost wins; the enclosing phase
@@ -103,6 +108,34 @@ Block<T> take_columns(const Block<T>& src, const std::vector<index_t>& cols);
 template <class T>
 void append_columns(DenseMatrix<T>& dst, const DenseMatrix<T>& src);
 
+// ------------------------------------------------------------------------------ run-time models
+
+/// Run-time models of the MUMPS building blocks on this machine (DESIGN §3.6-3b). Deterministic
+/// functions of the input and the analysis estimate, so that every decision built on them
+/// (ordering, InertiaCounter, slice size) is the same in every run of the same problem. `order`
+/// and `entries` describe the matrix MUMPS factorizes (mumps_input_size).
+double model_factor_s(const FactorEstimate& e, double order, int threads);  ///< one factorization
+double model_solve_s(const FactorEstimate& e);                               ///< one 1-RHS solve
+/// One MUMPS analysis with AMD ordering (input conversion, ordering, symbolic factorization) of an
+/// input with `entries` upper-triangle entries whose factors hold `factor_entries` (the analysis
+/// estimate), fitted on the data cases (steps.cpp). MUMPS' analysis is sequential: no threads.
+double model_analysis_s(double order, double entries, double factor_entries);
+/// An InertiaCounter count (inertia-only factorization) saves this fraction of a factorization.
+constexpr double kCounterSaving = 0.13;
+/// A nested-dissection analysis (SCOTCH, or METIS for deterministic runs: nd_ordering) costs this
+/// many AMD analyses of the same input (adaptive ordering; measured 2.2..17, median ~9 on the 1e5
+/// data cases, bench/drvint_profile --exp analysis; METIS median 9.8 vs SCOTCH 9.3 on the cases
+/// that pick it, bench/drvint_fix_ordering; 7 keeps the P3 calibration, which picks the same
+/// ordering as before on every data case).
+constexpr double kNdAnalysisOverAmd = 7.0;
+
+struct MumpsInputSize {
+  double order = 0.0;    ///< n, or 2n for complex T (real symmetric embedding)
+  double entries = 0.0;  ///< upper-triangle entries passed to MUMPS
+};
+template <class T>
+MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil);
+
 // ------------------------------------------------------------------------------ factorization
 
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb);
@@ -124,25 +157,102 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 template <class T>
 bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off);
 
+/// What a CountSource counting on its InertiaCounter does with the main factors, decided anew
+/// before every count (the main object may hold factors again since the previous count: a rerun,
+/// a rescue or the next slice refactorized it).
+enum class MainFactors {
+  /// Keep them, unless their working memory (INFOG(21)) plus the counter's estimate exceed the
+  /// factorization cap (FactorOptions::max_memory_mb, DESIGN §3.6-3): then release them. For
+  /// paths that run Krylov solves at a shift between counts (windows: slice shifts, rescue).
+  KeepWithinCap,
+  /// Always release them (MUMPS JOB=-4) before a count: for counts after which the factors are
+  /// needed only on a failed certificate (nearest target: one refactorization for the rerun, as
+  /// with main-object counts). The counts then never add the counter's working memory to the main
+  /// factors'. Nearest, six 3-D 1e5 cases, 4 threads, medians of 6 interleaved runs: peak RSS
+  /// 0.48..0.85 GiB, 21..26% below keeping them resident and 2..7% below main-object counts, at
+  /// the certificate time of the resident variant (0.05..0.14 s below main-object counts).
+  Release,
+};
+
+/// Where the Sylvester counts of a solve path come from (DESIGN §3.6-8):
+///   * the main factorization object, refactorized at each count point: it then holds K(s)
+///     (Ctx::held), which a Krylov run at s reuses (one-sided slice anchors);
+///   * an InertiaCounter, built at the first count from the main analysis' pivot order
+///     (factor.hpp): inertia-only factorizations (measured 10-23% cheaper) that do not touch the
+///     main factors; MainFactors says whether those are released before a count (then they are
+///     refactorized when needed again, as with main-object counts).
+/// Inexact main factors (single precision, BLR) always count on the counter: their own inertia is
+/// that of the rounded / compressed matrix. Not thread-safe; the pencil and the main object must
+/// outlive it.
+template <class T>
+class CountSource {
+ public:
+  /// prefer_counter: count on the counter even with an exact main factor (see counter_pays()).
+  /// main: what counter counts do with the main factors (no effect on main-object counts).
+  CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter,
+              MainFactors main = MainFactors::KeepWithinCap);
+  ~CountSource();
+  CountSource(const CountSource&) = delete;
+  CountSource& operator=(const CountSource&) = delete;
+
+  SparseFactorization<T>& fac() { return fac_; }
+  const ShiftedPencil<T>& pencil() const { return pencil_; }
+  bool uses_counter() const { return use_counter_; }
+  /// Inertia of K(s) = A - s B (valid == false: K(s) numerically singular). Main object: Ctx::held
+  /// describes the factorization it now holds. Charged to Phase::Certificate.
+  Inertia count(Ctx& c, double s, bool detection);
+
+ private:
+  SparseFactorization<T>& fac_;
+  const ShiftedPencil<T>& pencil_;
+  bool use_counter_ = false;
+  MainFactors main_ = MainFactors::KeepWithinCap;
+  std::unique_ptr<InertiaCounter<T>> counter_;
+};
+
+/// Rule for the nearest target's certificate (`counts` counts, exact main factor): an
+/// InertiaCounter pays when the counts' saving, kCounterSaving of a factorization each (model of
+/// DESIGN §3.6-3b), exceeds its analysis (model_analysis_s: about what an AMD analysis of the
+/// input costs). e: the main analysis' estimate, in: mumps_input_size of the pencil, threads: of
+/// the factorizations. cfg.inertia_counter On / Off override it. Deterministic.
+bool counter_pays(const SolverConfig& cfg, const FactorEstimate& e, const MumpsInputSize& in, int threads,
+                  index_t counts);
+
 /// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2), moving s outward (direction
-/// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`. With an
-/// exact (double, non-BLR) factor the object then holds K(s) (Ctx::held), counted with null-pivot
-/// detection unless *detection_off (optional) reports otherwise. s_is_gap: s lies mid-way between
+/// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`. Counting on
+/// the main object, that object then holds K(s) (Ctx::held), counted with null-pivot detection
+/// unless *detection_off (optional) reports otherwise. s_is_gap: s lies mid-way between
 /// computed eigenvalues (count there without detection if flagged); otherwise a flagged s is first
 /// moved by step / 10 (it may sit on an eigenvalue) - see steps.cpp. *near_eigenvalue (optional)
 /// is set when the requested s was flagged singular: an eigenvalue (or a cluster) lies within the
 /// null-pivot threshold of the returned s, which then is no place for a shift.
 template <class T>
-index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step, bool* detection_off = nullptr, bool s_is_gap = false,
-                    bool* near_eigenvalue = nullptr);
+index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, double step,
+                    bool* detection_off = nullptr, bool s_is_gap = false, bool* near_eigenvalue = nullptr);
 
 /// Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3).
 template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed = false);
 
-/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe + cost model, SCOTCH if it pays.
+/// The adaptive ordering's decision from the AMD probe's estimate (deterministic, see steps.cpp).
+struct OrderingDecision {
+  double fill_ratio = 0.0;      ///< AMD factor entries / nnz(K)
+  double saving_s = 0.0;        ///< predicted saving of nested dissection on the run
+  double amd_analysis_s = 0.0;  ///< model_analysis_s of the input and the AMD estimate
+  double nd_cost_s = 0.0;       ///< kNdAnalysisOverAmd * amd_analysis_s
+  bool use_nd = false;          ///< saving_s > nd_cost_s
+};
+OrderingDecision decide_ordering(const FactorEstimate& amd, const MumpsInputSize& in, double pencil_nnz,
+                                 int threads, index_t expected_factorizations, index_t expected_solves);
+
+/// MUMPS ICNTL(7) of the nested-dissection branch of the adaptive ordering: SCOTCH (3), or METIS
+/// (5, fixed seed) when cfg.deterministic asks for bitwise-reproducible runs - SCOTCH's orderings
+/// vary from run to run (measurements in steps.cpp).
+int nd_ordering(const SolverConfig& cfg);
+
+/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe + cost model, nested dissection
+/// (nd_ordering) if it pays.
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
@@ -169,6 +279,37 @@ struct CostModel {
 };
 
 CostModel make_cost_model(const FactorEstimate& est, index_t n, int threads, bool complex_scalars);
+
+// ------------------------------------------------------------------------------ block Krylov
+
+/// Columns of n-vectors a shift-invert lanczos_krylov_schur run holds (driver use: no store_bv):
+/// p = 1: the basis [D V v] plus the M*w workspace, d + ncv + 2; p > 1: [D V V_m] plus the n x p
+/// M*W workspace, d + ncv_b + 2p with ncv_b from eigen_detail::block_dimensions (the larger
+/// block basis), or d + n_free + 2 when the block layout does not fit the free space (the solver
+/// then runs one single-vector cycle over it). ncv: SolverConfig::ncv (0 = auto).
+index_t lanczos_basis_columns(index_t n, index_t d, index_t nev, index_t ncv, index_t p);
+
+/// Block width of the auto rule, used for runs of at least kAutoBlockMinNev wanted pairs.
+constexpr index_t kMaxAutoBlockSize = 4;
+constexpr index_t kAutoBlockMinNev = 8;
+
+/// Block width of a shift-invert Lanczos run of the definite path for nev wanted pairs:
+/// cfg.block_size if > 0, else the auto rule kMaxAutoBlockSize for nev >= kAutoBlockMinNev and 1
+/// below (measurements in steps.cpp). Deterministic (no timing enters).
+index_t block_size_for(const SolverConfig& cfg, index_t nev);
+
+/// p, halved while the basis of a run of width p (lanczos_basis_columns, plus `extra_columns`
+/// n-vectors the caller keeps, e.g. the candidate block X, AX, BX) would not fit the memory left
+/// in the budget (warning when reduced).
+template <class T>
+index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p);
+
+/// Block width of a deflated rerun that misses `missing` pairs after a run with width p:
+/// max(p, min(kMaxAutoBlockSize, missing rounded up to even)), so that a random start block has
+/// components in every missing copy of a multiple eigenvalue of multiplicity up to that width and
+/// one run finds them all (eigen.hpp, block mode). More missing copies than the width are left to
+/// rounding and further reruns; see steps.cpp for why it is capped.
+index_t rerun_block_size(index_t p, index_t missing);
 
 /// Ritz estimates of the ends of the spectrum of the pencil (from inside): lowest two and
 /// highest two Ritz values of a short Lanczos run (A alone for B = I, B^{-1}A otherwise).

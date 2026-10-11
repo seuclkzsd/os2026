@@ -9,6 +9,7 @@
 
 #include "hsolve/error.hpp"
 #include "hsolve/solver.hpp"
+#include "hsolve/util.hpp"
 
 namespace hs {
 
@@ -149,6 +150,7 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "inner_tol_factor") c.inner_tol_factor = get_number(v, k);
     else if (key == "hermitian_tol") c.hermitian_tol = get_number(v, k);
     else if (key == "ncv") c.ncv = get_integer<index_t>(v, k);
+    else if (key == "block_size") c.block_size = get_integer<index_t>(v, k);
     else if (key == "slice_size") c.slice_size = get_integer<index_t>(v, k);
     else if (key == "max_restarts") c.max_restarts = get_integer<index_t>(v, k);
     else if (key == "seed") c.seed = get_integer<std::uint64_t>(v, k);
@@ -163,6 +165,7 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "blr") c.blr = enum_parse<Toggle>(v, k);
     else if (key == "out_of_core") c.out_of_core = enum_parse<Toggle>(v, k);
     else if (key == "inertia_check") c.inertia_check = enum_parse<Toggle>(v, k);
+    else if (key == "inertia_counter") c.inertia_counter = enum_parse<Toggle>(v, k);
     else if (key == "zero_filter_tol") c.zero_filter_tol = get_number(v, k);
     else if (key == "complex_tol") c.complex_tol = get_number(v, k);
     else if (key == "max_shift_retries") c.max_shift_retries = get_integer<index_t>(v, k);
@@ -175,8 +178,10 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
   if (!(c.tol > 0.0) || !(c.tol < 1.0)) HS_THROW(InvalidInput, "config: tol must be in (0, 1)");
   if (!(c.inner_tol_factor > 0.0) || c.inner_tol_factor > 1.0)
     HS_THROW(InvalidInput, "config: inner_tol_factor must be in (0, 1]");
-  if (c.ncv < 0 || c.slice_size < 0 || c.max_restarts < 1 || c.threads < 0 || c.max_shift_retries < 0)
-    HS_THROW(InvalidInput, "config: ncv, slice_size, threads, max_shift_retries must be >= 0 and max_restarts >= 1");
+  if (c.ncv < 0 || c.block_size < 0 || c.slice_size < 0 || c.max_restarts < 1 || c.threads < 0 ||
+      c.max_shift_retries < 0)
+    HS_THROW(InvalidInput,
+             "config: ncv, block_size, slice_size, threads, max_shift_retries must be >= 0 and max_restarts >= 1");
   if (!(c.memory_budget_gb > 0.0)) HS_THROW(InvalidInput, "config: memory_budget_gb must be > 0");
   if (c.ordering < -1 || c.ordering > 7) HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive) or a MUMPS ICNTL(7) value 0..7");
   return c;
@@ -195,6 +200,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"inner_tol_factor", c.inner_tol_factor},
             {"hermitian_tol", c.hermitian_tol},
             {"ncv", c.ncv},
+            {"block_size", c.block_size},
             {"slice_size", c.slice_size},
             {"max_restarts", c.max_restarts},
             {"seed", c.seed},
@@ -206,6 +212,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"blr", enum_name(c.blr)},
             {"out_of_core", enum_name(c.out_of_core)},
             {"inertia_check", enum_name(c.inertia_check)},
+            {"inertia_counter", enum_name(c.inertia_counter)},
             {"zero_filter_tol", c.zero_filter_tol},
             {"complex_tol", c.complex_tol},
             {"max_shift_retries", c.max_shift_retries}};
@@ -237,6 +244,8 @@ std::string SolveReport::to_json(int indent) const {
                         {"passed", sl.passed}});
   }
   json j = {{"schema_version", 1},
+            {"solver", "hsolve"},
+            {"version", hs::version()},
             {"n", n},
             {"nnz_a", nnz_a},
             {"nnz_b", nnz_b},
@@ -251,6 +260,7 @@ std::string SolveReport::to_json(int indent) const {
             {"sigma_requested", sigma_requested},
             {"sigma_used", sigma_used},
             {"shift_retries", shift_retries},
+            {"block_size", block_size},
             {"factor_options", factor_options_json(factor_options)},
             {"factor_stats", factor_stats_json(factor_stats)},
             {"restarts", restarts},
@@ -260,6 +270,7 @@ std::string SolveReport::to_json(int indent) const {
             {"time_factor_s", time_factor_s},
             {"time_iterate_s", time_iterate_s},
             {"time_verify_s", time_verify_s},
+            {"time_certificate_s", time_certificate_s},
             {"peak_rss_bytes", peak_rss_bytes},
             {"pairs", pairs_j},
             {"certificate",
