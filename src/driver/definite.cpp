@@ -24,8 +24,7 @@
 //   * Every computed block passes a rank-revealing Rayleigh-Ritz, so counts of found pairs are
 //     counts of distinct B-orthonormal vectors. A slice missing pairs reruns deflated while the
 //     reruns find new ones, with its own shift on a multiple eigenvalue among the found pairs
-//     (single-vector Krylov sees further copies only where the multiplet dominates); a slice still
-//     short after de-duplication is repaired with its pairs as deflation.
+//     (single-vector Krylov sees further copies only where the multiplet dominates).
 // A nearest target whose selection or certificate window reaches the zero band is handed to the
 // windows as [sigma - r, sigma + r] minus the band, r grown from the plain run's Ritz hints until
 // the counts hold k eigenvalues outside the band (a single shift there converges null-space copies).
@@ -501,12 +500,6 @@ class WindowSolver {
   void set_nearest_radius(double r0) { nearest_r0_ = r0; }
 
  private:
-  /// Shift of a slice's runs (kept for its repair).
-  struct SliceShift {
-    double sigma = std::numeric_limits<double>::quiet_NaN();
-    Which which = Which::LargestMagnitude;
-    bool detection_off = false;
-  };
 
   // ---- counts and cuts
   CountPoint count(double s, double outward);
@@ -523,15 +516,13 @@ class WindowSolver {
   std::vector<Slice> plan(const Window& w);
   Anchor anchor_of(const Slice& s) const;
   // ---- runs
-  bool run_slice(const Slice& s, index_t id, const Block<T>* seed = nullptr);
+  bool run_slice(const Slice& s, index_t id);
   double multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const;
   double multiplet_rerun_shift(double mean, const Block<T>& sel, const Slice& s) const;
   bool cluster_verified(const Slice& s, const std::vector<double>& lambda, double& mean, double& delta);
   void reserve_pool(index_t pairs);
   void append_to_pool(const Block<T>& blk, const std::vector<PairMetrics>& m, index_t id);
   void compact_pool(const std::vector<char>& drop);
-  Block<T> take_from_pool(const std::vector<index_t>& cols);
-  index_t repair();
   index_t deduplicate();
   bool in_band(double l) const { return band_ >= 0.0 && l > band_lo_ && l < band_hi_; }
   double factorize_anchor(const CountPoint& p, bool& detection_off);
@@ -548,7 +539,6 @@ class WindowSolver {
   double band_lo_ = 0.0, band_hi_ = 0.0;  ///< the band as counted: (band_lo_, band_hi_) is excluded
   std::vector<CountPoint> known_;     ///< every count evaluated (or certified), ascending in s
   std::vector<Slice> slices_;
-  std::vector<SliceShift> shifts_;    ///< per slice
   std::vector<SliceReport> reports_;  ///< per slice
   Pool<T> pool_;
   index_t restarts_ = 0, applies_ = 0;
@@ -822,22 +812,6 @@ void WindowSolver<T>::compact_pool(const std::vector<char>& drop) {
   pool_.slice.resize(static_cast<std::size_t>(w));
 }
 
-// Moves the given pool columns into a block (products recomputed) and removes them from the pool.
-template <class T>
-Block<T> WindowSolver<T>::take_from_pool(const std::vector<index_t>& cols) {
-  Block<T> blk;
-  blk.x.resize(n_, static_cast<index_t>(cols.size()));
-  std::vector<char> drop(static_cast<std::size_t>(pool_.used), 0);
-  for (std::size_t q = 0; q < cols.size(); ++q) {
-    std::copy(pool_.x.col(cols[q]), pool_.x.col(cols[q]) + n_, blk.x.col(static_cast<index_t>(q)));
-    blk.lambda.push_back(pool_.lambda[cols[q]]);
-    drop[cols[q]] = 1;
-  }
-  recompute_products(pencil_.a(), pencil_.b(), blk);
-  compact_pool(drop);
-  return blk;
-}
-
 // A multiple eigenvalue among the pairs found inside the slice (two or more within kEqualWidth,
 // not tried before): its copies sit at one theta, and a single-vector Krylov run at a shift next to
 // it - where it dominates the operator - recovers the missing copies through rounding, while a run
@@ -912,57 +886,45 @@ bool WindowSolver<T>::cluster_verified(const Slice& s, const std::vector<double>
 // One slice: shift, Krylov run for exactly its count (or the copies wanted of a partial cluster),
 // verification, certificate with deflated reruns. Pairs within an ambiguity margin delta outside
 // the slice are kept too (an eigenvalue that close to a cut may be computed on the other side of
-// it); deduplicate() resolves them. seed (repair): pairs of this slice found before, kept as the
-// deflation of a first rerun for the missing ones. Returns false only for a partial cluster that
-// turned out not to be numerically equal (the caller then solves it in full).
+// it); deduplicate() resolves them. Returns false only for a partial cluster that turned out not
+// to be numerically equal (the caller then solves it in full).
 template <class T>
-bool WindowSolver<T>::run_slice(const Slice& s, index_t id, const Block<T>* seed) {
+bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
   const SolverConfig& cfg = c_.cfg;
   const index_t count = s.count();
   const bool partial = s.want >= 0;
-  if (static_cast<index_t>(shifts_.size()) <= id) {
-    shifts_.resize(static_cast<std::size_t>(id + 1));
-    reports_.resize(static_cast<std::size_t>(id + 1));
-  }
-  SliceShift& sh = shifts_[static_cast<std::size_t>(id)];
-  if (seed && std::isfinite(sh.sigma)) {
-    if (!try_refactorize_at(c_, fac_, sh.sigma, sh.detection_off))
-      sh.sigma = factorize_near(c_, fac_, sh.sigma, scale_, sh.detection_off);
-  } else if (partial) {  // shift on the cluster: it dominates, rounding brings out its copies
-    sh.sigma = factorize_near(c_, fac_, s.focus, scale_, sh.detection_off, /*on_eigenvalue=*/true);
-    sh.which = Which::LargestMagnitude;
+  double sigma = 0.0;
+  bool detection_off = false;
+  Which which = Which::LargestMagnitude;
+  if (partial) {  // a shift at the cluster's bracket: the cluster dominates, rounding brings out copies
+    sigma = factorize_near(c_, fac_, s.focus, scale_, detection_off, /*on_eigenvalue=*/true);
   } else {
     switch (anchor_of(s)) {
       case Anchor::Centre:
-        sh.sigma = factorize_near(c_, fac_, 0.5 * (s.lo.s + s.hi.s), scale_, sh.detection_off);
-        sh.which = Which::LargestMagnitude;
+        sigma = factorize_near(c_, fac_, 0.5 * (s.lo.s + s.hi.s), scale_, detection_off);
         break;
       case Anchor::Upper: {  // eigenvalues below the shift: theta < 0, most negative = nearest below
         const CountPoint p = s.hi.near ? gap_point(s.hi, +1.0, plus_inf()) : s.hi;
-        sh.sigma = factorize_anchor(p, sh.detection_off);
-        sh.which = Which::SmallestAlgebraic;
+        sigma = factorize_anchor(p, detection_off);
+        which = Which::SmallestAlgebraic;
         break;
       }
       case Anchor::Lower: {  // eigenvalues above the shift: theta > 0, largest = nearest above
         const CountPoint p = s.lo.near ? gap_point(s.lo, -1.0, minus_inf()) : s.lo;
-        sh.sigma = factorize_anchor(p, sh.detection_off);
-        sh.which = Which::LargestAlgebraic;
+        sigma = factorize_anchor(p, detection_off);
+        which = Which::LargestAlgebraic;
         break;
       }
     }
   }
-  const double sigma = sh.sigma;
-  const Which which = sh.which;
-  const bool detection_off = sh.detection_off;
+  if (static_cast<index_t>(reports_.size()) <= id) reports_.resize(static_cast<std::size_t>(id + 1));
   SliceReport& sr = reports_[static_cast<std::size_t>(id)];
-  if (!seed) {
-    sr = SliceReport{};
-    sr.lower = s.lo.s;
-    sr.upper = s.hi.s;
-    sr.sigma = sigma;
-    sr.which = which_name(which);
-    sr.count_inertia = count;
-  }
+  sr = SliceReport{};
+  sr.lower = s.lo.s;
+  sr.upper = s.hi.s;
+  sr.sigma = sigma;
+  sr.which = which_name(which);
+  sr.count_inertia = count;
 
   const double d_lo = std::isfinite(s.lo.s) ? 1e-9 * std::max(scale_, std::abs(s.lo.s)) : 0.0;
   const double d_hi = std::isfinite(s.hi.s) ? 1e-9 * std::max(scale_, std::abs(s.hi.s)) : 0.0;
@@ -1004,15 +966,9 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id, const Block<T>* seed
   auto missing = [&]() {
     return partial ? std::max<index_t>(0, s.want - inside) : count - inside - near_out;
   };
-  if (seed) {  // B-orthonormal (merged across slices) before it serves as deflation
-    run.all = *seed;
-    driver::rayleigh_ritz_definite(run.all.x, run.all.ax, run.all.bx, run.all.lambda, kDependentGram);
-    select();
-  } else {
-    sr.nev = std::min(n_, s.required());
-    lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
-    select();
-  }
+  sr.nev = std::min(n_, s.required());
+  lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
+  select();
   // Certificate of the slice: deflated reruns while pairs are missing and the reruns find new
   // ones. A multiple eigenvalue among the found pairs gets its own shift (multiplet_shift).
   std::vector<double> tried;
@@ -1069,8 +1025,8 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id, const Block<T>* seed
   }
   sr.count_found = inside;
   sr.passed = partial ? inside == s.want : (inside - near_in <= count && count <= inside + near_out);
-  sr.restarts += run.restarts;
-  sr.op_applies += run.applies;
+  sr.restarts = run.restarts;
+  sr.op_applies = run.applies;
   restarts_ += run.restarts;
   applies_ += run.applies;
   event(c_, "slice", {{"slice", static_cast<std::int64_t>(id)}, {"lower", s.lo.s}, {"upper", s.hi.s}, {"sigma", sigma},
@@ -1148,35 +1104,6 @@ index_t WindowSolver<T>::deduplicate() {
   }
   if (removed > 0) compact_pool(drop);
   return removed;
-}
-
-// Global repair: a full slice holding fewer pool pairs than its count (after de-duplication at the
-// cuts) is rerun at its shift with its pairs as deflation (run_slice with a seed). Returns the
-// number of slices repaired.
-template <class T>
-index_t WindowSolver<T>::repair() {
-  index_t repaired = 0;
-  for (std::size_t i = 0; i < slices_.size(); ++i) {
-    const Slice& s = slices_[i];
-    if (s.want >= 0) continue;
-    const double d_lo = std::isfinite(s.lo.s) ? 1e-9 * std::max(scale_, std::abs(s.lo.s)) : 0.0;
-    const double d_hi = std::isfinite(s.hi.s) ? 1e-9 * std::max(scale_, std::abs(s.hi.s)) : 0.0;
-    index_t inside = 0;
-    std::vector<index_t> cols;
-    for (index_t j = 0; j < pool_.used; ++j) {
-      const double l = pool_.lambda[j];
-      if (in_band(l)) continue;
-      if (l >= s.lo.s && l <= s.hi.s) ++inside;
-      if (l >= s.lo.s - d_lo && l <= s.hi.s + d_hi) cols.push_back(j);
-    }
-    if (inside >= s.count()) continue;
-    event(c_, "slice_repair",
-          {{"slice", static_cast<std::int64_t>(i)}, {"missing", static_cast<std::int64_t>(s.count() - inside)}});
-    Block<T> seed = take_from_pool(cols);
-    run_slice(s, static_cast<index_t>(i), &seed);
-    ++repaired;
-  }
-  return repaired;
 }
 
 /// Columns of x reordered in place so that new column j = old column perm[j] (perm a permutation
@@ -1460,8 +1387,7 @@ Solution<T> WindowSolver<T>::solve() {
     s.want = -1;
     run_slice(s, static_cast<index_t>(i));
   }
-  index_t removed = deduplicate();
-  if (repair() > 0) removed += deduplicate();
+  const index_t removed = deduplicate();
   if (removed > 0) event(c_, "deduplicate", {{"removed", static_cast<std::int64_t>(removed)}});
   rep.slices = reports_;
 

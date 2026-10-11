@@ -21,7 +21,8 @@
 //   ghiep_complex         GHIEP zero cluster, a complex pair between the side shifts    (F7)
 //   ghiep_cplx_cluster    GHIEP zero cluster, complex Hermitian pencil (no complex pair)
 //   ghiep_plain_edge      GHIEP zero cluster, side shifts beyond a plain run's disk edge (F5)
-//   all                   every probe above
+//   restarts              30x30 Laplacian [3.8, 4.2] with max_restarts 2..8 (not in all)
+//   all                   every probe above but restarts
 //
 // PROBE_LOG=<dir> writes each run's JSON-lines event log to <dir>/<probe>.jsonl. Run it through
 // tools/run/guard.py (docs/DESIGN.md §6).
@@ -287,6 +288,15 @@ void probe(const std::string& p) {
     for (double h : {0.1, 0.15, 0.2})
       run("lap4_pm" + std::to_string(h).substr(0, 4), a, kNoB, interval_cfg(4.0 - h, 4.0 + h),
           in_interval(w, 4.0 - h - 1e-12, 4.0 + h + 1e-12));
+  }
+  if (p == "restarts") {  // not in `all`: slices starved of restarts (reruns must still certify)
+    const auto a = hs::test::laplacian_2d<double>(30, 30);
+    const auto w = hs::test::laplacian_2d_eigenvalues(30, 30);
+    for (index_t mr : {2, 3, 5, 8}) {
+      auto cfg = interval_cfg(3.8, 4.2, 20);
+      cfg.max_restarts = mr;
+      run("restarts" + std::to_string(mr), a, kNoB, cfg, in_interval(w, 3.8 - 1e-12, 4.2 + 1e-12));
+    }
   }
   if (all || p == "cluster_mid") {
     std::vector<double> lam(40, 0.5);
