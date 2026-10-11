@@ -9,7 +9,7 @@ import pytest
 import scipy.sparse as sp
 
 from tools import case as cio
-from tools.eval import baseline_scipy, common, evaluate, reference, report
+from tools.eval import baseline_scipy, common, evaluate, reference, report, sweep
 
 TRIPLE = 1.0                  # eigenvalue of multiplicity 3 in the prescribed spectra
 SIGMA = -0.3                  # 4 nearest: -0.6, 0.2, -1.0, 0.7 (no tie); the 5th is the triple
@@ -488,3 +488,50 @@ def test_cli_and_report(tmp_path, monkeypatch):
     assert report.main([str(extra), "--out", str(md)]) == 0
     assert "complete (4/4, +1 extra) | ok | pass |" in md.read_text()
 
+
+def _guard(path, returncode=0, killed=None, wall_s=1.5):
+    path.write_text(json.dumps({"returncode": returncode, "killed": killed, "wall_s": wall_s, "peak_rss_gib": 0.5,
+                                "cores": "28,29", "threads": 2}))
+
+
+def test_sweep_over_a_raw_run(tmp_path, monkeypatch):
+    # run2 layout (guard.json + one solver directory) and compare.py layout (guard-<solver>.json)
+    ref = _hermitian_case(tmp_path, "c")
+    run = tmp_path / "raw" / "run"
+    _save(run / "c" / "hsolve", *_nearest(ref, SIGMA, 4))
+    _guard(run / "c" / "guard.json")
+    w, V = _unreferenced_case(tmp_path)
+    near = np.argsort(np.abs(w - 1.05))
+    _save(run / "p" / "full", w[near[:4]], V[:, near[:4]])
+    _save(run / "p" / "short", w[near[[0, 1, 3, 4]]], V[:, near[[0, 1, 3, 4]]])   # one copy of 1.0 short
+    for s in ("full", "short"):
+        _guard(run / "p" / f"guard-{s}.json")
+    _guard(run / "p" / "guard-crashed.json", returncode=-9, killed="rss 8.1 GiB > 8 GiB", wall_s=3.0)
+    _guard(run / "p" / "guard-late.json", returncode=1)
+    _save(run / "p" / "late", w[near[:4]], V[:, near[:4]])
+
+    md, ev = tmp_path / "eval_run.md", tmp_path / "ev"
+    monkeypatch.setenv("HS_GUARDED", "1")
+    assert sweep.main([str(run), "--root", str(tmp_path), "--eval-dir", str(ev), "--out", str(md)]) == 0
+    text = md.read_text()
+    assert ("**full**: 1 pass / 0 fail; **hsolve**: 1 pass / 0 fail; **late**: 1 pass / 0 fail; "
+            "**short**: 0 pass / 1 fail, 1 overclaim(s)") in text
+    doc = json.loads((ev / "p" / "short" / evaluate.EVAL_FILE).read_text())
+    assert doc["reference"]["kind"] == "pooled" and doc["completeness"]["status"] == "inconsistent"
+    assert doc["measured"]["wall_s"] == 1.5
+    hs = json.loads((ev / "c" / "hsolve" / evaluate.EVAL_FILE).read_text())
+    assert hs["reference"]["kind"] == "dense" and hs["measured"]["peak_rss_bytes"] == 2**29
+    assert "| c | hsolve | HEP | 20 | 4 | dense | 0.5 | 1.5 | 512 |" in text
+    assert "- p / crashed: no result directory (exit status -9, killed: rss 8.1 GiB > 8 GiB, wall 3.0 s)" in text
+    assert "- p / late: result written but the run ended with exit status 1, wall 1.5 s" in text
+    # without pooling the unreferenced case cannot catch the missed copy
+    docs, notes = sweep.sweep(run, root=tmp_path, eval_dir=ev, pool=False, solvers=["short"])
+    assert [d["verdict"] for d in docs] == ["pass"] and docs[0]["completeness"]["status"] == "unknown"
+    assert notes == []
+    # by default the evaluation goes into the result directory; a broken result becomes a note
+    assert not (run / "p" / "full" / evaluate.EVAL_FILE).exists()
+    docs, _ = sweep.sweep(run, root=tmp_path, cases=["p"], solvers=["full"])
+    assert (run / "p" / "full" / evaluate.EVAL_FILE).exists() and docs[0]["completeness"]["status"] == "unknown"
+    (run / "p" / "short" / "eigenvectors.npy").write_bytes(b"garbage")
+    docs, notes = sweep.sweep(run, root=tmp_path, cases=["p"], solvers=["short"])
+    assert docs == [] and notes[0].startswith("p / short: evaluation failed: ")
