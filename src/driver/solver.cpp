@@ -114,6 +114,7 @@ FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
   FactorOptions o;
   o.precision = cfg.factor_precision;
   o.ordering = cfg.ordering;
+  o.deterministic = cfg.deterministic;
   o.threads = cfg.threads > 0 ? cfg.threads : max_threads();
   o.blr = cfg.blr == Toggle::On;
   o.out_of_core = cfg.out_of_core == Toggle::On;
@@ -424,8 +425,9 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
                              {"mb", fs.factor_mb_used}, {"delayed_pivots", static_cast<std::int64_t>(fs.delayed_pivots)}});
 
   // Krylov run (+ a margin of extra pairs so that the k-th nearest is reliably among them).
-  const index_t extra = std::min<index_t>(16, std::max<index_t>(2, k / 4));
-  const index_t nev = std::min<index_t>(n, k + extra);
+  // Converge exactly the k wanted pairs (most wanted by |theta| = nearest to sigma). Asking for
+  // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
+  const index_t nev = std::min<index_t>(n, k);
   DefiniteRun<T> run;
   Timer it_timer;
   lanczos_run(c, fac, pencil, sigma, nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
@@ -604,9 +606,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     refine.rel_tol = cfg.tol * cfg.inner_tol_factor * 0.1;
   }
   ShiftInvertOperator<T> op(fac, pencil, sigma, refine);
-  const index_t extra = std::min<index_t>(16, std::max<index_t>(2, t.k / 4));
   KrylovSchurOptions<T> ko;
-  ko.nev = std::min<index_t>(n, t.k + extra);
+  ko.nev = std::min<index_t>(n, t.k);
   ko.ncv = cfg.ncv;
   ko.max_restarts = cfg.max_restarts;
   ko.tol = cfg.tol * cfg.inner_tol_factor;

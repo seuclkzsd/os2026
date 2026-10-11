@@ -92,7 +92,8 @@ json factor_options_json(const FactorOptions& o) {
           {"threads", o.threads},                {"mem_relax_pct", o.mem_relax_pct},
           {"max_memory_mb", o.max_memory_mb},    {"blr", o.blr},                 {"blr_tol", o.blr_tol},
           {"blr_estimates", o.blr_estimates},    {"out_of_core", o.out_of_core}, {"ooc_dir", o.ooc_dir},
-          {"null_pivot_tol", o.null_pivot_tol},  {"verbosity", o.verbosity}};
+          {"null_pivot_tol", o.null_pivot_tol},  {"verbosity", o.verbosity},
+          {"deterministic", o.deterministic}};
 }
 
 json factor_stats_json(const FactorStats& s) {
@@ -154,6 +155,10 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "memory_budget_gb") c.memory_budget_gb = get_number(v, k);
     else if (key == "factor_precision") c.factor_precision = enum_parse<FactorPrecision>(v, k);
     else if (key == "ordering") c.ordering = get_integer<int>(v, k);
+    else if (key == "deterministic") {
+      if (!v.is_boolean()) HS_THROW(InvalidInput, "config: 'deterministic' must be true/false");
+      c.deterministic = v.get<bool>();
+    }
     else if (key == "blr") c.blr = enum_parse<Toggle>(v, k);
     else if (key == "out_of_core") c.out_of_core = enum_parse<Toggle>(v, k);
     else if (key == "inertia_check") c.inertia_check = enum_parse<Toggle>(v, k);
@@ -194,6 +199,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"memory_budget_gb", c.memory_budget_gb},
             {"factor_precision", enum_name(c.factor_precision)},
             {"ordering", c.ordering},
+            {"deterministic", c.deterministic},
             {"blr", enum_name(c.blr)},
             {"out_of_core", enum_name(c.out_of_core)},
             {"inertia_check", enum_name(c.inertia_check)},

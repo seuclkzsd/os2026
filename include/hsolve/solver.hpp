@@ -69,6 +69,9 @@ struct SolverConfig {
   double memory_budget_gb = 14.0;   ///< refuse factorizations predicted to exceed this
   FactorPrecision factor_precision = FactorPrecision::Double;
   int ordering = 7;                 ///< MUMPS ICNTL(7)
+  bool deterministic = false;       ///< true: bitwise-reproducible factorizations/solves for a fixed
+                                    ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves);
+                                    ///< false: L0-OpenMP (results reproducible to tolerance)
   Toggle blr = Toggle::Auto;
   Toggle out_of_core = Toggle::Auto;
   Toggle inertia_check = Toggle::Auto;  ///< Auto = On for HEP/GHEP when affordable
