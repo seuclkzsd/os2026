@@ -156,8 +156,8 @@ void validate(index_t n, const ExclusionOptions& opt, index_t x_rows, index_t m,
   if (opt.deflated_theta && opt.coupling_bound >= 0.0)
     for (double t : *opt.deflated_theta)
       if (!std::isfinite(t)) HS_THROW(InvalidInput, "exclusion_check: deflated_theta must be finite");
-  if (opt.max_block_steps < 0 || opt.max_new_pairs < 0)
-    HS_THROW(InvalidInput, "exclusion_check: max_block_steps and max_new_pairs must be >= 0");
+  if (opt.max_block_steps < 0 || opt.max_new_pairs < 1)
+    HS_THROW(InvalidInput, "exclusion_check: need max_block_steps >= 0 and max_new_pairs >= 1");
   if (!(opt.tol > 0.0) || !std::isfinite(opt.tol))
     HS_THROW(InvalidInput, "exclusion_check: tol must be positive and finite");
   if (opt.start_scaling) {
@@ -271,7 +271,7 @@ ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_i
   const index_t n_free = r.dimension;
   // Basis size: s blocks; the single-vector solver needs ncv > nev (or the whole free space).
   index_t ncv = std::max<index_t>(s * p, p == 1 ? 2 : 1);
-  const index_t nev_req = opt.max_new_pairs > 0 ? opt.max_new_pairs : std::max<index_t>(p, 2);
+  const index_t nev_req = opt.max_new_pairs;
   index_t nev = std::min(nev_req, n_free);
   if (ncv < n_free) nev = std::min(nev, std::max<index_t>(1, ncv - 1));
 

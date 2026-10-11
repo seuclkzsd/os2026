@@ -150,6 +150,46 @@ TEST(VerifyBound, ChebyshevLemmaHoldsForAdversarialStart) {
   }
 }
 
+// Soundness of the probability statement, empirically: an operator with one eigenvalue at
+// |theta| = 1 that X misses (X empty, claim radius 1) and the rest just below the pass threshold
+// 0.7 (eps = 0.3). For every Krylov size the rate of missed detections (Passed or Inconclusive)
+// over many seeds stays below the bound the result reports; the smallest sizes really do miss.
+// (The bound is a worst case over spectra, ~sqrt(N) pessimistic for this benign one.)
+TEST(VerifyBound, EmpiricalMissRateStaysBelowTheBound) {
+  const index_t n = 120;
+  std::vector<double> d(static_cast<std::size_t>(n));
+  d[0] = -1.0;  // the hidden eigenvalue, on the negative side
+  for (index_t i = 1; i < n; ++i)  // half of the rest near each end of [-0.69, 0.69]
+    d[i] = (i % 2 ? 0.69 : -0.69) * (1.0 - 0.05 * static_cast<double>(i) / static_cast<double>(n));
+  hs::test::DiagonalOperator<double> op(d);
+  const DenseMatrix<double> none(n, 0);
+  int total_misses = 0;
+  for (index_t p : {1, 2})
+    for (index_t steps : {2, 4, 6, 8, 10}) {
+      ExclusionOptions o;
+      o.pass_radius = 1.0 / 0.7;
+      o.delta = 1e-30;  // never reached: the cap decides the size, the result reports the bound
+      o.block_size = p;
+      o.max_block_steps = steps;
+      const int trials = 200;
+      int misses = 0;
+      double bound = 0.0;
+      for (int t = 0; t < trials; ++t) {
+        o.seed = 100 + static_cast<std::uint64_t>(t);
+        const auto r = hs::exclusion_check<double>(op, nullptr, none, 0.0, 1.0, o);
+        ASSERT_FALSE(r.exact);
+        bound = r.failure_probability;
+        if (r.status != ExclusionStatus::Detected) ++misses;
+      }
+      total_misses += misses;
+      const double rate = static_cast<double>(misses) / trials;
+      // Binomial slack of 4 standard deviations around the bound.
+      EXPECT_LE(rate, bound + 4.0 * std::sqrt(bound * (1.0 - bound) / trials) + 1e-12)
+          << "p=" << p << " steps=" << steps << " bound=" << bound;
+    }
+  EXPECT_GT(total_misses, 0) << "the smallest Krylov spaces should miss for some seeds";
+}
+
 // ------------------------------------------------------------------------------- pencils
 
 enum class BKind { Identity, Diagonal, General };

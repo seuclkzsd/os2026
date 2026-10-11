@@ -121,7 +121,9 @@ struct ExclusionOptions {
   const std::vector<double>* deflated_theta = nullptr;
   double rounding_margin = 1e-6;  ///< relative safety margin on 1/r (see Rounding), in [0, 0.5)
   index_t max_block_steps = 0;    ///< cap on s (0: none); a capped run may end Inconclusive
-  index_t max_new_pairs = 0;      ///< Ritz vectors returned on detection (0: max(p, 2))
+  /// Ritz vectors returned on detection (the best by |theta|; new_count still counts all). 1 keeps
+  /// the block layout smallest (3 block steps at least, against 4 for p of them).
+  index_t max_new_pairs = 1;
   double tol = 1e-10;             ///< a returned pair is flagged converged when est <= tol |theta|
 };
 
