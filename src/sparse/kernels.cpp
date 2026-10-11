@@ -19,7 +19,9 @@
 // with function target attributes (no -mavx512f needed) and selected only when
 // __builtin_cpu_supports("avx512f") (CPUID and OS register state) says it can run.
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <type_traits>
 #include <vector>
@@ -41,6 +43,7 @@ namespace {
 
 constexpr index_t kChunk = 16;     // vectors per pass of the interleaved kernels
 constexpr index_t kRowBlock = 256;  // rows per scheduling unit of the fast kernels
+constexpr index_t kMinReuse = 2;    // spmm interleaves X only when nnz(A) >= kMinReuse * ncols
 
 bool cpu_has_avx512f() noexcept {
 #if HS_KERNELS_AVX512
@@ -67,6 +70,40 @@ template <class T>
 inline T combine(T alpha, T s, T beta, const T& y) {
   return beta == T(0) ? mul(alpha, s) : mul(alpha, s) + mul(beta, y);
 }
+
+/// |z| in the 1-norm of the components (|Re z| + |Im z| for complex: within sqrt(2) of |z|), the
+/// magnitude used by the componentwise backward error of shifted_residual.
+inline double mag(double v) { return std::abs(v); }
+inline double mag(cplx v) { return std::abs(v.real()) + std::abs(v.imag()); }
+
+/// |r| / s, the componentwise backward error of one entry (0 / 0 = 0, r / 0 = inf).
+inline double ratio(double r, double s) {
+  if (r == 0.0) return 0.0;
+  return s > 0.0 ? r / s : std::numeric_limits<double>::infinity();
+}
+
+/// Per-column maxima of the row blocks of a residual (blocks x q), reduced in any order: max is
+/// exact, so the result is deterministic.
+class BlockMax {
+ public:
+  BlockMax(double* out, index_t n, index_t q)
+      : out_(out), q_(q), v_(out ? static_cast<std::size_t>(((n + kRowBlock - 1) / kRowBlock) * q) : 0, 0.0) {}
+  bool on() const noexcept { return out_ != nullptr; }
+  double* row(index_t i0) noexcept { return v_.data() + (i0 / kRowBlock) * q_; }
+  void finish() {
+    if (!out_) return;
+    for (index_t k = 0; k < q_; ++k) out_[k] = 0.0;
+    for (std::size_t t = 0; t < v_.size(); ++t) {
+      const index_t k = static_cast<index_t>(t) % q_;
+      out_[k] = std::max(out_[k], v_[t]);
+    }
+  }
+
+ private:
+  double* out_;
+  index_t q_;
+  std::vector<double> v_;
+};
 
 /// Scalars per vector entry in the double-precision scratch.
 template <class T>
@@ -175,7 +212,7 @@ void spmm_reference(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_
 template <class T>
 void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
                                 const T* x, index_t ldx, const T* y, index_t ldy, T* r,
-                                index_t ldr, index_t p) {
+                                index_t ldr, index_t p, double* omega) {
   const index_t n = a.nrows;
   if (b) {
     spmm_reference(*b, x, ldx, r, ldr, p, T(1), T(0));
@@ -189,14 +226,36 @@ void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, do
     for (index_t k = 0; k < p; ++k)
       for (index_t i = 0; i < n; ++i) r[i + k * ldr] += T(sigma) * y[i + k * ldy];
   }
+  if (!omega) return;
+  // Componentwise backward error with the scale s = |B| |w| + |A| |y|, w = x + sigma y (B = I: |w|).
+  for (index_t k = 0; k < p; ++k) {
+    const T* xk = x + k * ldx;
+    const T* yk = y + k * ldy;
+    double w = 0.0;
+    for (index_t i = 0; i < n; ++i) {
+      double sc = 0.0;
+      if (b) {
+        for (index_t t = b->rowptr[i]; t < b->rowptr[i + 1]; ++t) {
+          const index_t j = b->colind[t];
+          sc += mag(b->values[t]) * mag(xk[j] + sigma * yk[j]);
+        }
+      } else {
+        sc = mag(xk[i] + sigma * yk[i]);
+      }
+      for (index_t t = a.rowptr[i]; t < a.rowptr[i + 1]; ++t) sc += mag(a.values[t]) * mag(yk[a.colind[t]]);
+      w = std::max(w, ratio(mag(r[i + k * ldr]), sc));
+    }
+    omega[k] = w;
+  }
 }
 
 // ------------------------------------------------------------------------------ Portable
 
-/// out[k] (k < q) += sign * sum_t v[t] * Xp[ci[t], k] over row i of m (Xp interleaved, q wide).
+/// out[k] (k < q) += sign * sum_t v[t] * Xp[ci[t], k] over row i of m (Xp interleaved, q wide);
+/// with sacc != nullptr also sacc[k] += sum_t mag(v[t]) * mag(Xp[ci[t], k]) (magnitudes, see mag()).
 template <class T>
 inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const double* xp, index_t q,
-                                    double sign, double* acc) {
+                                    double sign, double* acc, double* sacc = nullptr) {
   const index_t* rp = m.rowptr.data();
   const std::int32_t* ci = m.colind.data();
   const T* v = m.values.data();
@@ -209,9 +268,17 @@ inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const doub
         acc[2 * k] += vr * xre - vi * xim;
         acc[2 * k + 1] += vr * xim + vi * xre;
       }
+      if (sacc) {
+        const double mv = mag(v[t]);
+        for (index_t k = 0; k < q; ++k) sacc[k] += mv * (std::abs(xr[2 * k]) + std::abs(xr[2 * k + 1]));
+      }
     } else {
       const double vv = sign * v[t];
       for (index_t k = 0; k < q; ++k) acc[k] += vv * xr[k];
+      if (sacc) {
+        const double mv = std::abs(v[t]);
+        for (index_t k = 0; k < q; ++k) sacc[k] += mv * std::abs(xr[k]);
+      }
     }
   }
 }
@@ -242,21 +309,30 @@ void spmm_chunk_portable(const CsrMatrix<T>& a, const double* xp, index_t q, T* 
   });
 }
 
-/// R[:, 0..q) = B Wp - A Yp (Wp = X + sigma Y interleaved), or (B = I) X + sigma Y - A Yp.
+/// R[:, 0..q) = B Wp - A Yp (Wp = X + sigma Y interleaved), or (B = I) X + sigma Y - A Yp. With
+/// bm.on(), also the row-block maxima of |r| / s (s = |B| |Wp| + |A| |Yp|, B = I: |w| + |A| |Yp|).
 template <class T>
 void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
                              const T* x, index_t ldx, const T* y, index_t ldy, const double* wp,
-                             const double* yp, index_t q, T* r, index_t ldr) {
+                             const double* yp, index_t q, T* r, index_t ldr, BlockMax& bm) {
   for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
-    double acc[2 * kChunk];
+    double acc[2 * kChunk], sacc[kChunk];
+    double* wmax = bm.on() ? bm.row(i0) : nullptr;
     for (index_t i = i0; i < i1; ++i) {
       std::fill(acc, acc + q * kWords<T>, 0.0);
-      if (b) row_accumulate_portable(*b, i, wp, q, 1.0, acc);
-      row_accumulate_portable(a, i, yp, q, -1.0, acc);
+      std::fill(sacc, sacc + q, 0.0);
+      double* sp = wmax ? sacc : nullptr;
+      if (b) row_accumulate_portable(*b, i, wp, q, 1.0, acc, sp);
+      row_accumulate_portable(a, i, yp, q, -1.0, acc, sp);
       for (index_t k = 0; k < q; ++k) {
         T v = acc_value<T>(acc, k);
-        if (!b) v = (x[i + k * ldx] + sigma * y[i + k * ldy]) + v;
+        if (!b) {
+          const T wi = x[i + k * ldx] + sigma * y[i + k * ldy];
+          v = wi + v;
+          if (wmax) sacc[k] += mag(wi);
+        }
         r[i + k * ldr] = v;
+        if (wmax) wmax[k] = std::max(wmax[k], ratio(mag(v), sacc[k]));
       }
     }
   });
@@ -267,24 +343,33 @@ void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, doubl
 /// y_j, or (B = I) x_i + sigma y_i - sum_A a_ij y_j.
 template <class T>
 void residual_column(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, const T* y,
-                     T* r) {
+                     T* r, BlockMax& bm) {
   const index_t* ra = a.rowptr.data();
   const std::int32_t* ca = a.colind.data();
   const T* va = a.values.data();
   for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
+    double* wmax = bm.on() ? bm.row(i0) : nullptr;
     for (index_t i = i0; i < i1; ++i) {
       T s = T(0);
+      double sc = 0.0;
       if (b) {
         for (index_t t = b->rowptr[i]; t < b->rowptr[i + 1]; ++t) {
           const index_t j = b->colind[t];
-          s += mul(b->values[t], x[j] + sigma * y[j]);
+          const T w = x[j] + sigma * y[j];
+          s += mul(b->values[t], w);
+          if (wmax) sc += mag(b->values[t]) * mag(w);
         }
       } else {
         s = x[i] + sigma * y[i];
+        if (wmax) sc = mag(s);
       }
       T acc = T(0);
-      for (index_t t = ra[i]; t < ra[i + 1]; ++t) acc += mul(va[t], y[ca[t]]);
+      for (index_t t = ra[i]; t < ra[i + 1]; ++t) {
+        acc += mul(va[t], y[ca[t]]);
+        if (wmax) sc += mag(va[t]) * mag(y[ca[t]]);
+      }
       r[i] = s - acc;
+      if (wmax) wmax[0] = std::max(wmax[0], ratio(mag(r[i]), sc));
     }
   });
 }
@@ -299,11 +384,12 @@ inline __mmask8 lane_mask(index_t words, int c) {
   return left >= 8 ? static_cast<__mmask8>(0xFF) : static_cast<__mmask8>((1u << left) - 1u);
 }
 
-/// Real: acc[c] += sign * a_it * Xp[j, 8c .. 8c+8) over row i of m, two nonzeros in flight.
-template <int NC>
+/// Real: acc[c] += sign * a_it * Xp[j, 8c .. 8c+8) over row i of m, two nonzeros in flight;
+/// with S also sacc[c] += |a_it| |Xp[j, chunk c]|.
+template <int NC, bool S>
 HS_TARGET_AVX512 inline void row_real_avx512(const CsrMatrix<double>& m, index_t i, const double* xp,
                                              index_t q, const __mmask8* mask, double sign,
-                                             __m512d* acc) {
+                                             __m512d* acc, __m512d* sacc) {
   const index_t* rp = m.rowptr.data();
   const std::int32_t* ci = m.colind.data();
   const double* v = m.values.data();
@@ -317,25 +403,35 @@ HS_TARGET_AVX512 inline void row_real_avx512(const CsrMatrix<double>& m, index_t
     const __m512d a0 = _mm512_set1_pd(sign * v[t]);
     const __m512d a1 = _mm512_set1_pd(sign * v[t + 1]);
     for (int c = 0; c < NC; ++c) {
-      acc[c] = _mm512_fmadd_pd(a0, _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c), acc[c]);
-      acc2[c] = _mm512_fmadd_pd(a1, _mm512_maskz_loadu_pd(mask[c], x1 + 8 * c), acc2[c]);
+      const __m512d x0v = _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c);
+      const __m512d x1v = _mm512_maskz_loadu_pd(mask[c], x1 + 8 * c);
+      acc[c] = _mm512_fmadd_pd(a0, x0v, acc[c]);
+      acc2[c] = _mm512_fmadd_pd(a1, x1v, acc2[c]);
+      if constexpr (S) {
+        sacc[c] = _mm512_fmadd_pd(_mm512_abs_pd(a0), _mm512_abs_pd(x0v), sacc[c]);
+        sacc[c] = _mm512_fmadd_pd(_mm512_abs_pd(a1), _mm512_abs_pd(x1v), sacc[c]);
+      }
     }
   }
   if (t < e) {
     const double* x0 = xp + static_cast<index_t>(ci[t]) * q;
     const __m512d a0 = _mm512_set1_pd(sign * v[t]);
-    for (int c = 0; c < NC; ++c)
-      acc[c] = _mm512_fmadd_pd(a0, _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c), acc[c]);
+    for (int c = 0; c < NC; ++c) {
+      const __m512d x0v = _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c);
+      acc[c] = _mm512_fmadd_pd(a0, x0v, acc[c]);
+      if constexpr (S) sacc[c] = _mm512_fmadd_pd(_mm512_abs_pd(a0), _mm512_abs_pd(x0v), sacc[c]);
+    }
   }
   for (int c = 0; c < NC; ++c) acc[c] = _mm512_add_pd(acc[c], acc2[c]);
 }
 
 /// Complex: (accr[c], acci[c]) += sign * (Re a, Im a) * Xp[j, chunk c] over row i of m; the
-/// product is assembled by finish_complex().
-template <int NC>
+/// product is assembled by finish_complex(). With S also sacc[c] += mag(a) [|xr|, |xi|] (the two
+/// lanes of a vector entry are added by the caller).
+template <int NC, bool S>
 HS_TARGET_AVX512 inline void row_complex_avx512(const CsrMatrix<cplx>& m, index_t i, const double* xp,
                                                 index_t q, const __mmask8* mask, double sign,
-                                                __m512d* accr, __m512d* acci) {
+                                                __m512d* accr, __m512d* acci, __m512d* sacc) {
   const index_t* rp = m.rowptr.data();
   const std::int32_t* ci = m.colind.data();
   const double* v = reinterpret_cast<const double*>(m.values.data());
@@ -344,10 +440,13 @@ HS_TARGET_AVX512 inline void row_complex_avx512(const CsrMatrix<cplx>& m, index_
     const double* x0 = xp + static_cast<index_t>(ci[t]) * w;
     const __m512d ar = _mm512_set1_pd(sign * v[2 * t]);
     const __m512d ai = _mm512_set1_pd(sign * v[2 * t + 1]);
+    __m512d am = _mm512_setzero_pd();
+    if constexpr (S) am = _mm512_set1_pd(std::abs(v[2 * t]) + std::abs(v[2 * t + 1]));
     for (int c = 0; c < NC; ++c) {
       const __m512d xv = _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c);
       accr[c] = _mm512_fmadd_pd(ar, xv, accr[c]);
       acci[c] = _mm512_fmadd_pd(ai, xv, acci[c]);
+      if constexpr (S) sacc[c] = _mm512_fmadd_pd(am, _mm512_abs_pd(xv), sacc[c]);
     }
   }
 }
@@ -369,12 +468,12 @@ HS_TARGET_AVX512 void spmm_rows_avx512(const CsrMatrix<T>& a, const double* xp, 
     if constexpr (is_complex_v<T>) {
       __m512d accr[NC], acci[NC];
       for (int c = 0; c < NC; ++c) accr[c] = acci[c] = _mm512_setzero_pd();
-      row_complex_avx512<NC>(a, i, xp, q, mask, 1.0, accr, acci);
+      row_complex_avx512<NC, false>(a, i, xp, q, mask, 1.0, accr, acci, nullptr);
       for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, finish_complex(accr[c], acci[c]));
     } else {
       __m512d acc[NC];
       for (int c = 0; c < NC; ++c) acc[c] = _mm512_setzero_pd();
-      row_real_avx512<NC>(a, i, xp, q, mask, 1.0, acc);
+      row_real_avx512<NC, false>(a, i, xp, q, mask, 1.0, acc, nullptr);
       for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, acc[c]);
     }
     for (index_t k = 0; k < q; ++k) {
@@ -384,33 +483,44 @@ HS_TARGET_AVX512 void spmm_rows_avx512(const CsrMatrix<T>& a, const double* xp, 
   }
 }
 
-template <class T, int NC>
+template <class T, int NC, bool S>
 HS_TARGET_AVX512 void residual_rows_avx512(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
                                            const T* x, index_t ldx, const T* y, index_t ldy,
                                            const double* wp, const double* yp, index_t q, T* r,
-                                           index_t ldr, index_t i0, index_t i1) {
+                                           index_t ldr, index_t i0, index_t i1, double* wmax) {
   const index_t words = q * kWords<T>;
   __mmask8 mask[NC];
   for (int c = 0; c < NC; ++c) mask[c] = lane_mask(words, c);
-  alignas(64) double out[2 * kChunk];
+  alignas(64) double out[2 * kChunk], sout[2 * kChunk];
   for (index_t i = i0; i < i1; ++i) {
+    __m512d sacc[NC];
+    for (int c = 0; c < NC; ++c) sacc[c] = _mm512_setzero_pd();
     if constexpr (is_complex_v<T>) {
       __m512d accr[NC], acci[NC];
       for (int c = 0; c < NC; ++c) accr[c] = acci[c] = _mm512_setzero_pd();
-      if (b) row_complex_avx512<NC>(*b, i, wp, q, mask, 1.0, accr, acci);
-      row_complex_avx512<NC>(a, i, yp, q, mask, -1.0, accr, acci);
+      if (b) row_complex_avx512<NC, S>(*b, i, wp, q, mask, 1.0, accr, acci, sacc);
+      row_complex_avx512<NC, S>(a, i, yp, q, mask, -1.0, accr, acci, sacc);
       for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, finish_complex(accr[c], acci[c]));
     } else {
       __m512d acc[NC];
       for (int c = 0; c < NC; ++c) acc[c] = _mm512_setzero_pd();
-      if (b) row_real_avx512<NC>(*b, i, wp, q, mask, 1.0, acc);
-      row_real_avx512<NC>(a, i, yp, q, mask, -1.0, acc);
+      if (b) row_real_avx512<NC, S>(*b, i, wp, q, mask, 1.0, acc, sacc);
+      row_real_avx512<NC, S>(a, i, yp, q, mask, -1.0, acc, sacc);
       for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, acc[c]);
     }
+    if constexpr (S)
+      for (int c = 0; c < NC; ++c) _mm512_store_pd(sout + 8 * c, sacc[c]);
     for (index_t k = 0; k < q; ++k) {
       T v = acc_value<T>(out, k);
-      if (!b) v = (x[i + k * ldx] + sigma * y[i + k * ldy]) + v;
+      double sc = 0.0;
+      if constexpr (S) sc = is_complex_v<T> ? sout[2 * k] + sout[2 * k + 1] : sout[k];
+      if (!b) {
+        const T wi = x[i + k * ldx] + sigma * y[i + k * ldy];
+        v = wi + v;
+        if constexpr (S) sc += mag(wi);
+      }
       r[i + k * ldr] = v;
+      if constexpr (S) wmax[k] = std::max(wmax[k], ratio(mag(v), sc));
     }
   }
 }
@@ -454,19 +564,25 @@ void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_
 template <class T>
 void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, index_t ldx,
                     const T* y, index_t ldy, const double* wp, const double* yp, index_t q, T* r, index_t ldr,
-                    KernelPath path) {
+                    KernelPath path, BlockMax& bm) {
 #if HS_KERNELS_AVX512
   if (path == KernelPath::Avx512) {
     with_chunk_width<T>(q, [&](auto nc) {
       for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
-        residual_rows_avx512<T, decltype(nc)::value>(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, i0, i1);
+        if (bm.on()) {
+          residual_rows_avx512<T, decltype(nc)::value, true>(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, i0,
+                                                             i1, bm.row(i0));
+        } else {
+          residual_rows_avx512<T, decltype(nc)::value, false>(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, i0,
+                                                              i1, nullptr);
+        }
       });
     });
     return;
   }
 #endif
   static_cast<void>(path);
-  residual_chunk_portable(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr);
+  residual_chunk_portable(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, bm);
 }
 
 }  // namespace
@@ -514,6 +630,13 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
     return;
   }
   const index_t m = a.ncols;
+  if (a.nnz() < kMinReuse * m) {
+    // Each row of X is used fewer than kMinReuse times (e.g. a diagonal mass matrix): the
+    // interleaved copy (one read and one write of X) costs more than the strided reads it saves
+    // (yee-pec-box-1e5, diagonal B: p = 8, 16 were 1.5x slower with it).
+    spmm_reference(a, x, ldx, y, ldy, p, alpha, beta);
+    return;
+  }
   Scratch xp(options.workspace, m * std::min(p, kChunk) * kWords<T>);
   for (index_t k0 = 0; k0 < p; k0 += kChunk) {
     const index_t q = std::min(kChunk, p - k0);
@@ -524,14 +647,15 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
 
 template <class T>
 void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, index_t ldx,
-                      const T* y, index_t ldy, T* r, index_t ldr, index_t p, const KernelOptions& options) {
+                      const T* y, index_t ldy, T* r, index_t ldr, index_t p, const KernelOptions& options,
+                      double* backward_error) {
   if (!a.square() || (b && (b->nrows != a.nrows || !b->square())))
     HS_THROW(InvalidInput, "shifted_residual: A (" << a.nrows << "x" << a.ncols << ") and B must be square "
                                                    << "of equal order");
   const KernelPath path = resolve_kernel_path(options.path);
   if (p <= 0) return;
   if (path == KernelPath::Reference) {
-    shifted_residual_reference(a, b, sigma, x, ldx, y, ldy, r, ldr, p);
+    shifted_residual_reference(a, b, sigma, x, ldx, y, ldy, r, ldr, p, backward_error);
     return;
   }
   const index_t n = a.nrows;
@@ -545,13 +669,15 @@ void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma
     const index_t q = std::min(kChunk, p - k0);
     const T* xk = x + k0 * ldx;
     const T* yk = y + k0 * ldy;
+    BlockMax bm(backward_error ? backward_error + k0 : nullptr, n, q);
     if (q == 1) {
-      residual_column(a, b, sigma, xk, yk, r + k0 * ldr);
-      continue;
+      residual_column(a, b, sigma, xk, yk, r + k0 * ldr, bm);
+    } else {
+      interleave<T>(n, q, yk, ldy, 0.0, nullptr, 0, yp);
+      if (b) interleave<T>(n, q, xk, ldx, sigma, yk, ldy, wp);
+      residual_chunk(a, b, sigma, xk, ldx, yk, ldy, wp, yp, q, r + k0 * ldr, ldr, path, bm);
     }
-    interleave<T>(n, q, yk, ldy, 0.0, nullptr, 0, yp);
-    if (b) interleave<T>(n, q, xk, ldx, sigma, yk, ldy, wp);
-    residual_chunk(a, b, sigma, xk, ldx, yk, ldy, wp, yp, q, r + k0 * ldr, ldr, path);
+    bm.finish();
   }
 }
 
@@ -561,7 +687,7 @@ void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma
                         const KernelOptions&);                                                     \
   template void shifted_residual<T>(const CsrMatrix<T>&, const CsrMatrix<T>*, double, const T*,    \
                                     index_t, const T*, index_t, T*, index_t, index_t,              \
-                                    const KernelOptions&);
+                                    const KernelOptions&, double*);
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_KERNELS)
 #undef HS_INSTANTIATE_KERNELS

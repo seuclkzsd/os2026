@@ -189,6 +189,27 @@ TYPED_TEST(SparseKernelPaths, ThreadCountAndWorkspaceDoNotChangeBits) {
   }
 }
 
+// A diagonal matrix (fewer than 2 entries per column) keeps the strided loop on every path:
+// bitwise the Reference result.
+TYPED_TEST(SparseKernelPaths, DiagonalMatrixKeepsTheStridedLoop) {
+  using T = TypeParam;
+  const index_t n = 123, p = 9;
+  std::vector<index_t> idx(static_cast<std::size_t>(n));
+  std::vector<T> vals(idx.size());
+  for (index_t i = 0; i < n; ++i) {
+    idx[i] = i;
+    vals[i] = scalar<T>(1.0 + 0.01 * static_cast<double>(i), 0.5);
+  }
+  const auto d = hs::csr_from_coo(n, n, idx, idx, vals);
+  const auto x = random_block<T>(n, p, n, 77);
+  std::vector<T> ref(static_cast<std::size_t>(n * p)), y(ref.size());
+  hs::spmm(d, x.data(), n, ref.data(), n, p, T(1), T(0), {KernelPath::Reference});
+  for (KernelPath path : fast_paths()) {
+    hs::spmm(d, x.data(), n, y.data(), n, p, T(1), T(0), {path});
+    EXPECT_TRUE(y == ref) << name(path);
+  }
+}
+
 TYPED_TEST(SparseKernelPaths, EmptyMatricesAndBlocks) {
   using T = TypeParam;
   CsrMatrix<T> empty;  // 0 x 0
@@ -224,7 +245,9 @@ TYPED_TEST(SparseKernelPaths, ShiftedResidualMatchesReference) {
         const auto x = random_block<T>(n, p, ldx, 50 + static_cast<std::uint64_t>(p));
         const auto y = random_block<T>(n, p, ldy, 60 + static_cast<std::uint64_t>(p));
         std::vector<T> ref(static_cast<std::size_t>(ldr * p), T(7));
-        hs::shifted_residual(a, bp, sigma, x.data(), ldx, y.data(), ldy, ref.data(), ldr, p, {KernelPath::Reference});
+        std::vector<double> omega_ref(static_cast<std::size_t>(p), -1.0);
+        hs::shifted_residual(a, bp, sigma, x.data(), ldx, y.data(), ldy, ref.data(), ldr, p, {KernelPath::Reference},
+                             omega_ref.data());
         // Scale of the rounding errors.
         std::vector<double> scale = abs_product(a, y.data(), ldy, p);
         if (with_b) {
@@ -237,10 +260,17 @@ TYPED_TEST(SparseKernelPaths, ShiftedResidualMatchesReference) {
               scale[i + k * n] += std::abs(x[i + k * ldx]) + std::abs(sigma) * std::abs(y[i + k * ldy]);
         }
         for (KernelPath path : fast_paths()) {
-          std::vector<T> r(static_cast<std::size_t>(ldr * p), T(7));
-          std::vector<double> ws;
-          hs::shifted_residual(a, bp, sigma, x.data(), ldx, y.data(), ldy, r.data(), ldr, p, {path, &ws});
+          std::vector<T> r(static_cast<std::size_t>(ldr * p), T(7)), r2(r);
+          std::vector<double> ws, omega(static_cast<std::size_t>(p), -1.0);
+          hs::shifted_residual(a, bp, sigma, x.data(), ldx, y.data(), ldy, r.data(), ldr, p, {path, &ws},
+                               omega.data());
+          // The backward-error output changes nothing in R.
+          hs::shifted_residual(a, bp, sigma, x.data(), ldx, y.data(), ldy, r2.data(), ldr, p, {path, &ws});
+          EXPECT_TRUE(r == r2) << name(path);
           for (index_t k = 0; k < p; ++k) {
+            // Random X, Y: R is far from rounding level, so omega agrees closely across paths.
+            EXPECT_GT(omega_ref[k], 1e-3);
+            EXPECT_NEAR(omega[k], omega_ref[k], 1e-12 * omega_ref[k]) << name(path) << " k=" << k;
             for (index_t i = 0; i < n; ++i)
               ASSERT_LE(std::abs(r[i + k * ldr] - ref[i + k * ldr]), 1e-14 * scale[i + k * n])
                   << name(path) << " n=" << n << " p=" << p << " with_b=" << with_b << " i=" << i;
@@ -250,6 +280,47 @@ TYPED_TEST(SparseKernelPaths, ShiftedResidualMatchesReference) {
       }
     }
   }
+}
+
+// For Y = K^{-1} B X computed accurately (dense LU of a small pencil) the residual is rounding
+// noise: the componentwise backward error is a few eps on every path, for both B and B = I, while
+// a perturbed Y gives a large one; an exactly zero residual row counts as 0.
+TYPED_TEST(SparseKernelPaths, BackwardErrorIsAtRoundingLevelForAnAccurateSolve) {
+  using T = TypeParam;
+  const index_t n = 120, p = 6;
+  const double sigma = 0.37;
+  const auto a = hs::test::random_hermitian<T>(n, 0.08, 15);
+  const auto b = hs::test::random_hpd<T>(n, 0.05, 16);
+  const auto db = hs::test::to_dense(b);
+  for (bool with_b : {true, false}) {
+    const CsrMatrix<T>* bp = with_b ? &b : nullptr;
+    hs::test::DenseShiftInvertOperator<T> exact(hs::test::to_dense(a), with_b ? &db : nullptr, sigma);
+    const auto x = random_block<T>(n, p, n, 17);
+    std::vector<T> y(static_cast<std::size_t>(n * p)), r(y.size());
+    exact.apply(x.data(), n, y.data(), n, p);
+    std::vector<KernelPath> all = fast_paths();
+    all.push_back(KernelPath::Reference);
+    for (KernelPath path : all) {
+      for (index_t q : {index_t(1), p}) {
+        std::vector<double> omega(static_cast<std::size_t>(q));
+        hs::shifted_residual(a, bp, sigma, x.data(), n, y.data(), n, r.data(), n, q, {path}, omega.data());
+        for (index_t k = 0; k < q; ++k)
+          EXPECT_LT(omega[k], 16 * std::numeric_limits<double>::epsilon())
+              << name(path) << " with_b=" << with_b << " q=" << q << " k=" << k;
+      }
+      auto y2 = y;
+      y2[3] += T(1e-6);
+      std::vector<double> omega(1);
+      hs::shifted_residual(a, bp, sigma, x.data(), n, y2.data(), n, r.data(), n, 1, {path}, omega.data());
+      EXPECT_GT(omega[0], 1e-9) << name(path);
+    }
+  }
+  // A zero right-hand side and solution: every row is 0 / 0.
+  std::vector<T> zero(static_cast<std::size_t>(n * 2), T(0)), r(zero.size());
+  std::vector<double> omega(2, -1.0);
+  hs::shifted_residual(a, &b, sigma, zero.data(), n, zero.data(), n, r.data(), n, 2, {}, omega.data());
+  EXPECT_EQ(omega[0], 0.0);
+  EXPECT_EQ(omega[1], 0.0);
 }
 
 TYPED_TEST(SparseKernelPaths, ShiftedResidualRejectsMismatchedOrders) {

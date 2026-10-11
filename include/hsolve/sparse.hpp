@@ -102,7 +102,9 @@ double hermitian_defect(const CsrMatrix<T>& a);
 // Multi-vector kernels (p >= 2) first copy X into an interleaved (row-major) block, so that one
 // pass over A serves 16 real or 16 complex vectors with contiguous loads instead of p strided
 // gathers per nonzero; A is streamed once per 16 vectors. That copy is n*min(p, 16) scalars of
-// scratch (KernelOptions::workspace, else allocated per call).
+// scratch (KernelOptions::workspace, else allocated per call). spmm keeps the Reference loop when
+// A has fewer than 2 entries per column on average (e.g. a diagonal B: the copy would cost more
+// than it saves), and every path computes a single vector with the Reference row loop.
 
 /// Instruction-set path of the sparse kernels.
 enum class KernelPath {
@@ -146,10 +148,15 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
 /// in one sweep over the rows of A and B (Reference: three spmm passes, as before P4): A and B
 /// are read once per 16 vectors and R written once, with 2*n*min(p, 16) scalars of scratch for
 /// p >= 2 (a single column is computed straight from x and y).
+/// backward_error (optional, p entries): the componentwise backward error of every column,
+///   omega_k = max_i |r_ik| / s_ik,  s = |B| |w| + |A| |y|,  w = x + sigma y  (B = I: |w| + |A| |y|),
+/// with |z| = |Re z| + |Im z| for complex entries, 0/0 = 0 and r/0 = inf. omega_k at the level of
+/// a few eps means r_k is rounding noise of its own evaluation: no refinement step can reduce it.
+/// Computed in the same sweep (max is exact: deterministic for any thread count).
 template <class T>
 void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
                       index_t ldx, const T* y, index_t ldy, T* r, index_t ldr, index_t p,
-                      const KernelOptions& options = {});
+                      const KernelOptions& options = {}, double* backward_error = nullptr);
 
 /// The pencil K(alpha, beta) = alpha*A + beta*B (B = I when b == nullptr) for REAL alpha, beta,
 /// stored as the index-only UPPER-triangle pattern of the union of A and B (the only part a
