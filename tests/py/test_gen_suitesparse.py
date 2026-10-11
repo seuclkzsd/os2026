@@ -201,11 +201,13 @@ def test_ritz_interval_is_inside_the_spectrum(complex_):
     a = _sym(120, 8, complex_)
     lo, hi = ss.ritz_interval(a, steps=15)
     w = np.linalg.eigvalsh(a.toarray())
-    assert w[0] <= lo < hi <= w[-1] and lo < 0 < hi
+    tol = 1e-12 * np.abs(w).max()                      # extreme Ritz values may converge
+    assert w[0] - tol <= lo < hi <= w[-1] + tol and lo < 0 < hi
     b = _spd(120, 9)
     lo, hi = ss.ritz_interval(a, b, steps=15)
     w = sl.eigh(a.toarray(), b.toarray(), eigvals_only=True)
-    assert w[0] <= lo < hi <= w[-1]
+    tol = 1e-12 * np.abs(w).max()
+    assert w[0] - tol <= lo < hi <= w[-1] + tol
     lo, hi = ss.ritz_interval(sp.identity(50, format="csr") * 3.0)  # invariant subspace at once
     assert lo == pytest.approx(3.0) and hi == pytest.approx(3.0)
 

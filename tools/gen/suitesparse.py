@@ -127,8 +127,9 @@ REGISTRY: dict[str, Matrix] = {m.key: m for m in (
     Matrix("PARSEC", "Ga10As10H30", 113081, 6115633, "real", False, 24.7,
            "real-space DFT Hamiltonian (PARSEC), symmetric indefinite"),
     Matrix("Sinclair", "3Dspectralwave2", 292008, 12935272, "complex", False, 61.7,
-           "3-D spectral wave model, complex with symmetric pattern: valid only if Hermitian "
-           "(complex-symmetric matrices are rejected after download)"),
+           "3-D spectral-element elastic wave modelling in the frequency domain (C. Sinclair); "
+           "stored as complex Hermitian (checked 2026-10: the collection moved the original "
+           "imaginary diagonal to aux 'shift'); 1.39M explicit zeros are dropped"),
 )}
 
 _TEM_CASE = "electromagnetic curl-curl/mass pencil C x = lambda M x"
@@ -321,7 +322,8 @@ def ritz_interval(a: sp.spmatrix, b: sp.spmatrix | None = None, steps: int = 40,
     Basis: K_m(D^{-1} A, v0) with D = diag(B) (Jacobi-preconditioned, so no solve with B is needed),
     orthonormalized by CGS2; Rayleigh-Ritz on (V^H A V, V^H B V). By Courant-Fischer every Ritz
     value lies in [lambda_min, lambda_max] for ANY subspace, so the returned (lo, hi) satisfy
-    lambda_min <= lo <= hi <= lambda_max: points between them are inside the spectrum. Cost:
+    lambda_min <= lo <= hi <= lambda_max up to rounding (an extreme Ritz value may converge to its
+    eigenvalue): points strictly between them are inside the spectrum. Cost:
     `steps` products with A and O(n steps^2) orthogonalization.
     """
     n = a.shape[0]
@@ -330,25 +332,33 @@ def ritz_interval(a: sp.spmatrix, b: sp.spmatrix | None = None, steps: int = 40,
     diag = None if b is None else b.diagonal().real
     rng = np.random.default_rng(seed)
     v = rng.standard_normal(n) + (1j * rng.standard_normal(n) if cplx else 0.0)
-    basis = np.empty((n, min(steps, n)), dtype=dtype)
+    # Only vector-matrix products touch the n x m blocks: with n >> m, numpy's complex
+    # (m x n) @ (n x m) product was measured ~1000x slower than m vector products here.
+    basis = np.empty((n, min(steps, n)), dtype=dtype, order="F")
+    a_basis = np.empty_like(basis)  # A q_j, reused by the Rayleigh-Ritz projection
     m = 0
     while m < basis.shape[1]:
         scale = np.linalg.norm(v)
+        q = basis[:, :m]
         for _ in range(2):  # CGS2: two passes keep the basis orthonormal to working precision
-            v = v - basis[:, :m] @ (basis[:, :m].conj().T @ v)
+            v = v - q @ _project(q, v)
         nv = np.linalg.norm(v)
         if nv <= 1e-10 * scale:  # invariant subspace reached
             break
         basis[:, m] = v / nv
-        v = a @ basis[:, m]
-        if diag is not None:
-            v = v / diag
+        a_basis[:, m] = a @ basis[:, m]
+        v = a_basis[:, m] / diag if diag is not None else a_basis[:, m].copy()
         m += 1
     q = basis[:, :m]
-    ah = q.conj().T @ (a @ q)
-    bh = np.eye(m) if b is None else q.conj().T @ (b @ q)
+    ah = np.stack([_project(q, a_basis[:, j]) for j in range(m)], axis=1)
+    bh = np.eye(m) if b is None else np.stack([_project(q, b @ q[:, j]) for j in range(m)], axis=1)
     theta = scipy.linalg.eigh((ah + ah.conj().T) / 2, (bh + bh.conj().T) / 2, eigvals_only=True)
     return float(theta[0]), float(theta[-1])
+
+
+def _project(q: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Q^H y as conj(conj(y)^T Q): a vector-matrix product without conjugating the n x m block."""
+    return (y.conj() @ q).conj()
 
 
 def gershgorin_interval(a: sp.spmatrix) -> tuple[float, float]:
