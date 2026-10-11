@@ -113,10 +113,17 @@ index_t configured_block_size(const C&, long) {
 /// Largest configured block size used: wider blocks only add basis work, and a block too wide for
 /// the space makes krylov_schur_general fall back to one exact cycle over all of it.
 constexpr index_t kMaxConfiguredBlock = 64;
+/// Runs with at most this many wanted pairs (the side probes, nev = 2) stay single-vector whatever
+/// is configured: they only locate a shift, and a block would multiply their basis for nothing.
+constexpr index_t kMaxProbeNev = 2;
+/// Share of the memory left in the budget (memory_budget_gb - current RSS) a run's block basis may
+/// take (fit_block_size); the rest is headroom for the solves' own workspace.
+constexpr double kBlockMemoryShare = 0.9;
 
-/// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil: the
-/// configured value if positive (at most kMaxConfiguredBlock and n / 16), else the measured rule
-/// above. One multi-RHS solve of p columns costs much less than p single solves (2 threads,
+/// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil, before
+/// the memory fit (fit_block_size): the configured value if positive - capped at nev (a block
+/// wider than the wanted set only adds basis work), kMaxConfiguredBlock and n / 16, and 1 for the
+/// probes (nev <= kMaxProbeNev) - else the measured rule above. One multi-RHS solve of p columns costs much less than p single solves (2 threads,
 /// wg-square-1e5: 21 / 12.9 / 8.8 / 6.2 ms per vector for p = 1 / 2 / 4 / 8; wg-square-1e6:
 /// 248 / 155 / 114 / 72 ms), while a block Krylov space needs more vectors for distinct
 /// eigenvalues (wg-square-1e5, k = 18: 57 / 62 / 84 / 128 applications) - and many more in the
@@ -131,8 +138,38 @@ constexpr index_t kMaxConfiguredBlock = 64;
 /// over all nine cases); p = 4 lost up to 1.5x. n ~ 1e4: p = 2 gained <= 7%, p >= 4 lost.
 index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev) {
   const index_t configured = configured_block_size(cfg, 0);
-  if (configured > 0) return std::max<index_t>(1, std::min({configured, kMaxConfiguredBlock, n / 16}));
+  if (configured > 0) {
+    if (nev <= kMaxProbeNev) return 1;
+    return std::max<index_t>(1, std::min({configured, nev, kMaxConfiguredBlock, n / 16}));
+  }
   return n >= kBlockMinOrder && nev >= kBlockMinNev ? kAutoBlock : 1;
+}
+
+/// ko.block_size, halved while the run's peak - krylov_schur_general_peak_columns n-vectors, plus
+/// the operator's refinement workspace (2 n p, with refinement only) - exceeds kBlockMemoryShare of
+/// the memory the budget leaves beside everything the solve holds now (current RSS: the live
+/// factorization, earlier runs' Schur bases), DESIGN §3.6-3. A configured p = 64 at n = 1e6 would
+/// otherwise hold a 512-column basis (4.1 GB, real) that the solver's memory plan never reserved.
+/// Warns (once per distinct reduction) when p is reduced.
+template <class T>
+index_t fit_block_size(Ctx& c, index_t n, KrylovSchurOptions<T> ko, bool refinement) {
+  const index_t wanted = ko.block_size;
+  if (wanted <= 1) return wanted;
+  const double vec = static_cast<double>(n) * static_cast<double>(sizeof(T));
+  const double avail = c.cfg.memory_budget_gb * 1073741824.0 -
+                       static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  auto bytes = [&](index_t q) {
+    ko.block_size = q;
+    return vec * static_cast<double>(krylov_schur_general_peak_columns<T>(n, ko) + (refinement ? 2 * q : 0));
+  };
+  index_t p = wanted;
+  while (p > 1 && bytes(p) > kBlockMemoryShare * avail) p /= 2;
+  if (p < wanted) {
+    const std::string msg = "GHIEP Krylov block size reduced from " + std::to_string(wanted) + " to " +
+                            std::to_string(p) + " by the memory budget";
+    if (std::find(c.rep.warnings.begin(), c.rep.warnings.end(), msg) == c.rep.warnings.end()) warn(c, msg);
+  }
+  return p;
 }
 
 template <class T>
@@ -169,6 +206,7 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   ko.tol = tol > 0 ? tol : cfg.tol * cfg.inner_tol_factor;
   ko.seed = cfg.seed;
   ko.block_size = ghiep_block_size(cfg, pencil.order(), ko.nev);
+  ko.block_size = fit_block_size(c, pencil.order(), ko, refine.max_steps > 0);
   {
     PhaseScope phase(c.clock, Phase::Iterate);
     run.res = krylov_schur_general<T>(op, which, ko);
