@@ -140,9 +140,12 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   // 2. Memory budget for the factorization (DESIGN §3.6-3).
   const double budget = cfg.memory_budget_gb * 1073741824.0;
   const index_t k_guess = cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
-  // Krylov basis: the general solver's (GHIEP) or the block Lanczos basis of the widest block the
-  // definite path may use (DESIGN §3.6-3; block layout of eigen.hpp).
-  const index_t p_guess = cfg.block_size > 0 ? cfg.block_size : driver::kMaxAutoBlockSize;
+  // Krylov basis: the general solver's (GHIEP) or the block Lanczos basis of the auto block width
+  // (DESIGN §3.6-3; block layout of eigen.hpp). A wider explicit block_size is not reserved here:
+  // the factorization has priority, and fit_block_size() halves the width (with a warning) when
+  // its basis does not fit what the factors leave; GHIEP runs ignore block_size altogether.
+  const index_t p_guess = std::min(cfg.block_size > 0 ? cfg.block_size : driver::kMaxAutoBlockSize,
+                                   driver::kMaxAutoBlockSize);
   const index_t ncv_guess =
       std::max(cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32),
                driver::lanczos_basis_columns(n, 0, std::min(n, k_guess), cfg.ncv, p_guess));

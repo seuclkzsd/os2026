@@ -1,6 +1,6 @@
 // Regression tests of the drvint review fixes (src/driver): the deterministic nested-dissection
-// ordering, when certificate counts on an InertiaCounter release the main factors, and the
-// counter_pays rule.
+// ordering, when certificate counts on an InertiaCounter release the main factors, the
+// counter_pays rule, and the up-front Krylov reservation of explicit block widths.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -17,6 +17,7 @@
 #include "hsolve/factor.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
+#include "hsolve/util.hpp"
 #include "support/fixtures.hpp"
 
 namespace {
@@ -281,6 +282,47 @@ TEST(DriverCounter, CounterPaysRule) {
   EXPECT_TRUE(counter_pays(cfg, cav, cav_in, 4, 2));
   cfg.inertia_counter = hs::Toggle::Off;
   EXPECT_FALSE(counter_pays(cfg, mem27, mem27_in, 4, 2));
+}
+
+// ------------------------------------------------------------------------------ block widths
+
+// An explicit block width far beyond what the budget holds is reduced by fit_block_size (warning)
+// instead of failing up front: the reservation before the analysis only covers the auto width.
+// GHIEP ignores block_size (single-vector general Krylov-Schur).
+TEST(DriverBlocks, ExplicitBlockWidthBeyondTheBudgetIsReduced) {
+  const index_t nx = 50, ny = 41, n = nx * ny;
+  auto a = hs::test::laplacian_2d<double>(nx, ny);
+  for (index_t i = 0; i < n; ++i)
+    for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p)
+      if (a.colind[p] == i) a.values[p] -= 4.0;
+  auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
+  for (auto& x : w) x -= 4.0;
+  auto cfg = nearest_cfg(0.3, 10);
+  cfg.block_size = 2048;  // > n: one cycle over the whole space, n + 2 vectors = 33 MB
+  // 20 MB beyond the current RSS: room for the p = 4 reservation and the factors, not for 33 MB.
+  auto budget_gb = []() {
+    return (static_cast<double>(std::max<std::int64_t>(hs::current_rss_bytes(), 0)) + 20e6) / 1073741824.0;
+  };
+  cfg.memory_budget_gb = budget_gb();
+  const auto sol = hs::solve(a, nullptr, cfg);
+  EXPECT_TRUE(sol.report.success);
+  EXPECT_LT(sol.report.block_size, 2048);
+  EXPECT_GE(sol.report.block_size, 1);
+  bool warned = false;
+  for (const auto& m : sol.report.warnings) warned = warned || m.find("block size reduced") != std::string::npos;
+  EXPECT_TRUE(warned);
+  expect_same_set(sol.eigenvalues, nearest(w, 0.3, 10), 1e-9);
+  // GHIEP: B = I with one negative diagonal entry.
+  std::vector<index_t> idx(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) idx[static_cast<std::size_t>(i)] = i;
+  std::vector<double> diag(static_cast<std::size_t>(n), 1.0);
+  diag[77] = -1.0;
+  const auto b = hs::csr_from_coo<double>(n, n, idx, idx, diag);
+  cfg.memory_budget_gb = budget_gb();
+  const auto g = hs::solve(a, &b, cfg);
+  EXPECT_EQ(g.report.problem, hs::ProblemType::GeneralizedIndefinite);
+  EXPECT_EQ(g.report.block_size, 1);
+  EXPECT_EQ(g.eigenvalues.size() + g.complex_eigenvalues.size(), 10u);
 }
 
 }  // namespace
