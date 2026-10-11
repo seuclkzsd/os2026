@@ -6,7 +6,10 @@
 //   * complex T : MUMPS has no Hermitian LDL^H (complex SYM=2 means complex-SYMMETRIC), so K is
 //                 factorized through its real symmetric embedding E = [[Re K, -Im K],[Im K, Re K]]
 //                 (order 2n, SYM=2). Solves: E [Re x; Im x] = [Re b; Im b]. inertia(K) = inertia(E)/2.
-//                 Flops and memory match a complex LU of K; inertia comes for free.
+//                 Flops and memory match a complex LU of K; inertia comes for free. Real or
+//                 imaginary parts that are exactly zero in both A and B (hence for every real
+//                 alpha, beta) are left out of E's pattern, so a mostly-real K costs little more
+//                 than two real factorizations.
 //
 // MUMPS facts this contract relies on (verified on 5.8.2 by the P0 design review):
 //   * Null-pivot detection needs ICNTL(24)=1 AND CNTL(3) > 0; with CNTL(3)=0 an exactly singular
@@ -16,6 +19,26 @@
 //     singular shift it is unreliable.
 //   * INFOG values above 2^31 are reported negative in units of 1e6 ("-x means x*10^6").
 //   * MB in MUMPS means 1e6 bytes.
+//   * Workspace errors are cured by a larger ICNTL(14) without re-analysis (measured: a
+//     saddle-point matrix with ICNTL(14)=0 fails with -9 once, then succeeds); BLR enabled at
+//     analysis can be switched off for the factorization; ICNTL(22) (out-of-core) can change
+//     between factorizations, and JOB=-2 deletes the factor files.
+//
+// Null-pivot threshold (null_pivot_tol = CNTL(3)), measured on 5.8.2 with ICNTL(8)=7 scaling.
+// At an exactly singular shift the last pivot is roughly c*eps*||K|| / |v_last|^2, v_last being
+// the null vector's component at the last eliminated variable, so for delocalized null vectors
+// it GROWS with n; at |sigma - lambda| = delta*||K|| it is about delta*||K|| / |v_last|^2.
+//   * sigma exactly on an eigenvalue of 2-D Laplacians (24 shifts across the spectrum):
+//       CNTL(3) = 1e-12 flags 22/24 (n=2500), 18/24 (n=10^4), 7/24 (n=4*10^4);
+//       CNTL(3) = 1e-10 flags 24/24 for n = 2500 .. 4*10^4 and 12/12 for n = 9*10^4.
+//   * |sigma - lambda| >= 1e-10 * ||K|| (delocalized Laplacian modes, n <= 9*10^4, and localized
+//     modes of prescribed-spectrum matrices, real and complex): never flagged for any CNTL(3)
+//     up to 1e-9; larger thresholds only flag shifts within ~1e-14*||K|| of an eigenvalue.
+// Hence the default 1e-10. Trade-off: for much larger n with delocalized null vectors an exact
+// singularity can escape detection; the factorization then has a huge but finite pivot (solves
+// stay backward stable, the zero eigenvalue is counted on an arbitrary side), which is why
+// inertia endpoints must lie in spectral gaps. The "near-singular but regular" guarantee is
+// relative to ||K|| (the driver's scale), not to |lambda|.
 #pragma once
 
 #include <cstdint>
@@ -34,16 +57,19 @@ struct FactorOptions {
   int ordering = 7;           ///< ICNTL(7): 7 auto, 5 METIS, 3 SCOTCH, 4 PORD, 0 AMD
   int scaling = 7;            ///< ICNTL(8): 7 = recomputed at every factorization (shift-independent)
   int threads = 0;            ///< ICNTL(16) OpenMP threads; 0 = omp_get_max_threads()
-  int mem_relax_pct = 35;     ///< ICNTL(14) initial value (doubled on workspace-error retries)
+  int mem_relax_pct = 35;     ///< ICNTL(14) initial value; on a workspace error it is doubled (at
+                              ///< least +10 points, so 0 still grows) and kept for later calls
   double max_memory_mb = 0;   ///< ICNTL(23) working-memory cap (MB = 1e6 B); 0 = no cap
   bool blr = false;           ///< block low-rank factorization (ICNTL(35)); pair with SolveRefinement
   double blr_tol = 1e-10;     ///< CNTL(7)
   bool blr_estimates = false; ///< enable BLR at analysis only to obtain INFOG(36..39) estimates
   bool out_of_core = false;   ///< ICNTL(22); can be changed later with set_out_of_core()
   std::string ooc_dir;        ///< out-of-core directory (empty: MUMPS default / TMPDIR)
-  double null_pivot_tol = 1e-12;  ///< CNTL(3) > 0 (with ICNTL(24)=1): pivots below this, relative
-                                  ///< to the preprocessed matrix norm, are null => factorize() fails
-  int verbosity = 0;          ///< 0 silent; > 0 forwards MUMPS diagnostics to stderr
+  double null_pivot_tol = 1e-10;  ///< CNTL(3) in (0, 1) (with ICNTL(24)=1): pivot rows below this,
+                                  ///< relative to the preprocessed matrix norm, are null =>
+                                  ///< factorize() returns false (default: see header comment)
+  int verbosity = 0;          ///< 0 silent; > 0 MUMPS diagnostics (ICNTL(4) = min(verbosity, 4)) on
+                              ///< stdout: MUMPS treats Fortran unit 0 (stderr) as "off"
 };
 
 /// Matrix inertia (counts of negative / zero / positive eigenvalues). Only meaningful if valid.
@@ -65,7 +91,8 @@ struct FactorEstimate {
 };
 
 struct FactorStats {
-  double analyze_s = 0.0;
+  index_t analyses = 0;      ///< successful + failed analyze() calls
+  double analyze_s = 0.0;    ///< accumulated over all analyze() calls
   double factorize_s = 0.0;  ///< accumulated over all factorize() calls
   double solve_s = 0.0;      ///< accumulated over all solve() calls
   index_t factorizations = 0;    ///< successful + failed factorize() calls
@@ -74,8 +101,8 @@ struct FactorStats {
   FactorEstimate estimate;
   std::int64_t factor_entries = 0;  ///< INFOG(9) after the last factorization
   double factor_mb_used = 0.0;      ///< INFOG(18) after the last factorization
-  index_t null_pivots = 0;          ///< INFOG(28) after the last factorization
-  index_t delayed_pivots = 0;       ///< INFOG(13) after the last factorization
+  index_t null_pivots = 0;          ///< INFOG(28) after the last factorization (of E for complex T)
+  index_t delayed_pivots = 0;       ///< INFOG(13) after the last factorization (of E for complex T)
   index_t workspace_retries = 0;    ///< automatic ICNTL(14) increases (all calls)
   int last_info1 = 0;               ///< INFOG(1) of the last MUMPS call
   int last_info2 = 0;               ///< INFOG(2)
@@ -90,15 +117,21 @@ class SparseFactorization {
 
   /// Symbolic analysis on pencil's upper pattern. The values of alpha*A + beta*B are passed to
   /// MUMPS as representative values (analysis-time matching for 2x2 pivots uses them); pass
-  /// the first shift you will factorize. The pencil must outlive this object.
+  /// the first shift you will factorize. The pencil must outlive this object. Calling it again
+  /// re-analyses (and discards the factorization). Throws InvalidInput (empty pencil, non-finite
+  /// alpha/beta), Unsupported (MUMPS order above 2^31-1), OutOfMemoryBudget (INFO -5/-7/-13)
+  /// or FactorizationFailed (other negative INFO).
   virtual void analyze(const ShiftedPencil<T>& pencil, double alpha, double beta) = 0;
-  /// Valid after analyze().
+  /// Valid after analyze() (Internal before).
   virtual FactorEstimate estimate() const = 0;
 
-  /// Numeric factorization of K = alpha*A + beta*B (real alpha, beta).
+  /// Numeric factorization of K = alpha*A + beta*B (real alpha, beta). Requires analyze()
+  /// (Internal otherwise).
   /// Returns false when K is (numerically) singular: INFO(1) == -10 or INFOG(28) > 0 null
-  /// pivots. Then stats().null_pivots is set, inertia().valid is false, solve() throws, and the
-  /// object stays analysed so the caller can refactorize at a perturbed shift.
+  /// pivots, or (complex T) an odd INFOG(12): the two copies in E of an eigenvalue at the
+  /// shift got opposite signs, i.e. K is singular to working precision although no pivot fell
+  /// below CNTL(3). Then stats().null_pivots is set, inertia().valid is false, solve() throws,
+  /// and the object stays analysed so the caller can refactorize at a perturbed shift.
   /// Other failures throw hs::Error:
   ///   workspace errors (INFO -8,-9,-14,-15,-17,-20) are retried internally up to 3 times with
   ///   ICNTL(14) doubled (stats().workspace_retries), then FactorizationFailed;
@@ -108,11 +141,15 @@ class SparseFactorization {
 
   /// Solve K X = B in place; b is n x nrhs column-major with ldb >= n. Multiple right-hand sides
   /// are solved in one MUMPS call (block triangular solves). Throws Internal without a valid
-  /// factorization.
+  /// factorization, InvalidInput for nrhs < 0 or ldb < n, OutOfMemoryBudget / FactorizationFailed
+  /// for MUMPS errors (as in factorize()). A Single factorization rounds b to float and back.
   virtual void solve(T* b, index_t nrhs, index_t ldb) = 0;
 
-  /// Inertia of the last factorized K: neg = INFOG(12) (halved for complex T), zero = null
-  /// pivots, pos = n - neg - zero, valid = (last factorize() succeeded and no null pivots).
+  /// Inertia of the last factorized K: neg = INFOG(12), zero = null pivots (both halved, zero
+  /// rounded up, for complex T), pos = n - neg - zero, valid = (last factorize() succeeded, i.e.
+  /// no null pivots). With Single or BLR it is the inertia of the rounded / compressed matrix,
+  /// exact only when no eigenvalue lies within that perturbation of the shift (compute_inertia
+  /// always factorizes in double precision without BLR).
   virtual Inertia inertia() const = 0;
 
   /// Toggle out-of-core storage of the factors; takes effect at the next factorize().
