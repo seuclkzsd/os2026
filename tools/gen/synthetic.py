@@ -16,7 +16,8 @@ window=None (the whole spectrum is listed). "Exact" means: the eigenvalues of th
 stored, up to the rounding committed while assembling it (documented per family in ref.json).
 
 The module also hosts small exact-spectrum utilities reused by tools/gen/yee.py: distinct levels,
-unambiguous "nearest k" targets, inertia counts, case writing and the preset command line.
+"nearest k" targets decidable at the default tolerance, inertia counts, case writing and the
+preset command line.
 
 Usage (from the repository root):
     python -m tools.gen.synthetic --list
@@ -39,6 +40,15 @@ from tools import case
 
 FAMILY = "synthetic"
 
+DEFAULT_TOL = 1e-10
+"""Tolerance (backward error, DESIGN 4.5) of every generated default configuration; targets are
+made decidable at this accuracy."""
+
+SEPARATION = 10.0
+"""Required gap between the k-th and (k+1)-th distance to sigma, in units of the eigenvalue error
+bound: 2 because both eigenvalues may move towards each other, times 5 for the slack of the
+driver's norm estimates (upper bounds, which make its acceptance test looser)."""
+
 # ============================================================================ spectrum utilities
 
 
@@ -58,41 +68,60 @@ def distinct_levels(eigenvalues, rtol: float = 1e-9) -> tuple[np.ndarray, np.nda
     return w[starts], counts
 
 
-def nearest_k_closed(eigenvalues, sigma: float, k_min: int, rel_gap: float = 1e-6) -> int:
-    """Smallest k >= k_min for which "the k eigenvalues nearest to sigma" is unambiguous.
+def eigenvalue_error_bound(lam, spectral_radius: float, cond_b: float = 1.0, tol: float = DEFAULT_TOL):
+    """Largest eigenvalue error the acceptance test admits near eigenvalue lam (DESIGN 4.5).
 
-    Distances to sigma tie for multiplets and for eigenvalues mirrored around sigma; a target
-    whose answer depends on tie-breaking cannot be evaluated. We require the k-th and (k+1)-th
-    distances to differ by more than rel_gap * (|sigma| + d_(k+1)), i.e. well above the eigenvalue
-    accuracy a backward-stable solver reaches at the default tolerance.
+    A pair accepted at backward error eta <= tol has a residual r = A x - lam B x with
+    ||r|| <= tol (||A|| + |lam| ||B||) ||x||. For a Hermitian pencil with HPD B some eigenvalue
+    lies within ||B^-1|| ||r|| / ||x|| of lam (residual bound in the B^-1 norm), and
+    ||A|| <= ||B|| rho with rho = max |eigenvalue| (A = B^1/2 S B^1/2, ||S|| = rho), so the error is
+    at most tol cond(B) (rho + |lam|). cond_b may be an upper bound; it is 1 for a standard problem.
     """
-    d = np.sort(np.abs(np.asarray(eigenvalues, dtype=float) - sigma))
+    return tol * cond_b * (spectral_radius + np.abs(lam))
+
+
+def nearest_k_closed(eigenvalues, sigma: float, k_min: int, *, cond_b: float = 1.0,
+                     tol: float = DEFAULT_TOL) -> int:
+    """Smallest k >= k_min for which "the k eigenvalues nearest to sigma" is decidable at tol.
+
+    A solver whose pairs pass the acceptance test may misplace each eigenvalue by up to
+    eigenvalue_error_bound, so the k-th and (k+1)-th nearest eigenvalues can trade places unless
+    their distances to sigma differ by more than SEPARATION times that bound (taken at the larger
+    of the two). This settles exact ties (multiplets, eigenvalues mirrored around sigma) as well as
+    spacings below the solver's resolution inside clusters, which no relative criterion can see.
+    cond_b: (an upper bound on) cond(B) of the pencil, 1 for a standard problem.
+    """
+    w = np.asarray(eigenvalues, dtype=float)
+    d = np.sort(np.abs(w - sigma))
     if not 1 <= k_min <= d.size:
         raise ValueError(f"k_min={k_min} outside [1, {d.size}]")
-    separated = (d[1:] - d[:-1]) > rel_gap * (abs(sigma) + d[1:])
+    bound = eigenvalue_error_bound(abs(sigma) + d[1:], float(np.abs(w).max()), cond_b, tol)
+    separated = (d[1:] - d[:-1]) > SEPARATION * bound
     hits = np.nonzero(separated[k_min - 1:])[0]
     return k_min + int(hits[0]) if hits.size else int(d.size)
 
 
 def target_between_levels(eigenvalues, level: int, k_min: int, why: str, *, frac: float = 0.4,
-                          k_max: int = 500) -> dict[str, Any]:
+                          k_max: int = 500, cond_b: float = 1.0) -> dict[str, Any]:
     """A 'nearest k' target with sigma = lev[level] + frac * (lev[level+1] - lev[level]).
 
     frac != 0.5 keeps sigma off the midpoint (equidistant neighbours); k is enlarged to the next
-    unambiguous count. k_max guards against a preset whose k would swallow a huge cluster.
+    decidable count. k_max guards against a preset whose k would swallow a huge cluster.
     """
     lev, _ = distinct_levels(eigenvalues)
     if not 0 <= level < lev.size - 1:
         raise ValueError(f"level {level} outside [0, {lev.size - 2}]")
     sigma = float(lev[level] + frac * (lev[level + 1] - lev[level]))
-    return target_at(eigenvalues, sigma, k_min, why, k_max=k_max)
+    return target_at(eigenvalues, sigma, k_min, why, k_max=k_max, cond_b=cond_b)
 
 
-def target_at(eigenvalues, sigma: float, k_min: int, why: str, *, k_max: int = 500) -> dict[str, Any]:
-    """A 'nearest k' target at a given sigma with the smallest unambiguous k >= k_min."""
-    k = nearest_k_closed(eigenvalues, sigma, k_min)
+def target_at(eigenvalues, sigma: float, k_min: int, why: str, *, k_max: int = 500,
+              cond_b: float = 1.0) -> dict[str, Any]:
+    """A 'nearest k' target at a given sigma with the smallest decidable k >= k_min (for a pencil
+    with cond(B) <= cond_b)."""
+    k = nearest_k_closed(eigenvalues, sigma, k_min, cond_b=cond_b)
     if k > k_max:
-        raise ValueError(f"target at sigma={sigma:.6g} needs k={k} > {k_max} to be unambiguous")
+        raise ValueError(f"target at sigma={sigma:.6g} needs k={k} > {k_max} to be decidable")
     return {"sigma": float(sigma), "k": int(k), "why": why}
 
 
@@ -137,7 +166,7 @@ def write_case(name: str, A, B, *, meta: dict[str, Any], targets: list[dict[str,
     spectrum as reference when it is known (otherwise drop a stale exact reference)."""
     meta = dict(meta)
     meta["targets"] = targets
-    config = case.default_config(targets[0]["sigma"], targets[0]["k"])
+    config = case.default_config(targets[0]["sigma"], targets[0]["k"], tol=DEFAULT_TOL)
     out = case.save_case(name, A, B, meta=meta, config=config, root=root)
     if eigenvalues is None:
         drop_generated_reference(name, root)
@@ -413,26 +442,39 @@ class Spectrum:
 SPECTRUM_KINDS = ("zero-cluster", "multiplicity", "near-singular", "wide-range")
 
 
-def spectrum_preset(kind: str, n: int, seed: int) -> Spectrum:
+def spectrum_preset(kind: str, n: int, seed: int, *, cond_b: float = 1.0) -> Spectrum:
     """Spectra for the solver's failure scenarios (docs: competition item e). Values are O(1)
-    except 'wide-range'.
+    except 'wide-range'. cond_b bounds cond(B) of the pencil the spectrum will be placed in (1 for
+    a standard problem): the targets are decidable at DEFAULT_TOL for it.
 
-    zero-cluster : n/10 eigenvalues uniform in [-1e-6, 1e-6] (low-frequency breakdown), the rest
-                   uniform in +-[0.05, 1].
+    zero-cluster : n/10 (at least 20) eigenvalues uniform in [-h, h] (low-frequency breakdown), the
+                   rest uniform in +-[0.05, 1]. The cluster is as dense as a decidable "nearest k
+                   to 0" target allows: its mean distance spacing h/nc from 0 equals the gap
+                   nearest_k_closed requires (h = 1e-6 for a standard problem with n = 1e4).
     multiplicity : ~60% of the spectrum in multiplets of multiplicity 2..12, the rest simple.
     near-singular: uniform in [-1, 1]; targets sigma = lambda_i (1 + 1e-12).
-    wide-range   : |lambda| log-uniform in [1e-6, 1e6], random signs.
+    wide-range   : |lambda| log-uniform in [1e-6, 1e6], random signs. At the default tolerance a
+                   solver resolves eigenvalues only to ~tol * 1e6 = 1e-4 absolute, so no target is
+                   placed among the smallest ones (none would be decidable).
     """
     rng = np.random.default_rng(seed)
     if kind == "zero-cluster":
-        width, nc = 1e-6, max(20, n // 10)
+        nc = max(20, n // 10)
+        if n < 2 * nc:
+            raise ValueError(f"zero-cluster needs n >= 40 (a cluster of >= 20 eigenvalues and a regular part), got {n}")
+        # rho <= 1, so this spacing is at least the required gap SEPARATION * error bound at 0;
+        # a gap that wide then follows about every third eigenvalue (exponential spacings).
+        h = nc * SEPARATION * eigenvalue_error_bound(0.0, 1.0, cond_b)
+        if h >= 0.05:
+            raise ValueError(f"cond_b={cond_b:g} and n={n} would need a cluster reaching the regular part")
         rest = rng.uniform(0.05, 1.0, n - nc) * rng.choice([-1.0, 1.0], n - nc)
-        w = np.sort(np.concatenate((rng.uniform(-width, width, nc), rest)))
-        targets = [target_at(w, 0.0, 20, f"sigma=0 inside a cluster of {nc} eigenvalues in [-1e-6, 1e-6]"),
-                   target_at(w, 0.5, 10, "regular part of the spectrum")]
+        w = np.sort(np.concatenate((rng.uniform(-h, h, nc), rest)))
+        targets = [target_at(w, 0.0, 20, f"sigma=0 inside a cluster of {nc} eigenvalues", cond_b=cond_b),
+                   target_at(w, 0.5, 10, "regular part of the spectrum", cond_b=cond_b)]
         return Spectrum(kind, w, targets, ["zero-cluster", "clustered"], "random",
-                        f"{nc} eigenvalues clustered in [-1e-6, 1e-6], others in +-[0.05, 1]",
-                        {"cluster_size": nc, "cluster_halfwidth": width})
+                        f"{nc} eigenvalues clustered in [-{h:.3g}, {h:.3g}] (spacing at the resolution "
+                        "limit of the default tolerance), others in +-[0.05, 1]",
+                        {"cluster_size": nc, "cluster_halfwidth": h})
     if kind == "multiplicity":
         values, mults, filled = [], [], 0
         while filled < 0.6 * n:
@@ -445,8 +487,9 @@ def spectrum_preset(kind: str, n: int, seed: int) -> Spectrum:
         top = int(np.argmax(mults))
         level = int(np.searchsorted(lev, values[top]))
         targets = [target_between_levels(w, level, mults[top] + 2,
-                                         f"next to a {mults[top]}-fold eigenvalue {values[top]:.6g}"),
-                   target_at(w, 0.0, 40, "several multiplets around sigma=0")]
+                                         f"next to a {mults[top]}-fold eigenvalue {values[top]:.6g}",
+                                         cond_b=cond_b),
+                   target_at(w, 0.0, 40, "several multiplets around sigma=0", cond_b=cond_b)]
         return Spectrum(kind, w, targets, ["multiplicity"], "random",
                         f"{len(values)} multiplets (multiplicity 2..12) covering {filled} eigenvalues",
                         {"multiplets": len(values), "max_multiplicity": int(max(mults))})
@@ -456,15 +499,17 @@ def spectrum_preset(kind: str, n: int, seed: int) -> Spectrum:
         for anchor in (0.3, -0.7):
             lam_i = float(w[np.argmin(np.abs(w - anchor))])
             targets.append(target_at(w, lam_i * (1 + 1e-12), 10,
-                                     f"sigma = lambda_i (1 + 1e-12), lambda_i = {lam_i:.17g}"))
+                                     f"sigma = lambda_i (1 + 1e-12), lambda_i = {lam_i:.17g}",
+                                     cond_b=cond_b))
         return Spectrum(kind, w, targets, ["near-singular"], "random",
                         "simple spectrum uniform in [-1, 1]; targets within 1e-12 (relative) of an eigenvalue")
     if kind == "wide-range":
         w = np.sort(10.0 ** rng.uniform(-6.0, 6.0, n) * rng.choice([-1.0, 1.0], n))
-        targets = [target_at(w, 1.0, 10, "|lambda| ~ 1 in a spectrum spanning 1e-6..1e6"),
-                   target_at(w, 1e-4, 10, "small eigenvalues: absolute accuracy ~ tol * 1e6 limits them")]
+        targets = [target_at(w, 1.0, 10, "|lambda| ~ 1, six decades below ||A||", cond_b=cond_b),
+                   target_at(w, -1e3, 10, "negative part, |lambda| ~ 1e3", cond_b=cond_b)]
         return Spectrum(kind, w, targets, ["clustered"], "magnitude",
-                        "|lambda| log-uniform in [1e-6, 1e6] with random signs (12 decades)")
+                        "|lambda| log-uniform in [1e-6, 1e6] with random signs (12 decades); the "
+                        "smallest are resolved only to ~1e-4 at the default tolerance, so no target lies there")
     raise ValueError(f"unknown spectrum kind {kind!r}; choose from {SPECTRUM_KINDS}")
 
 
@@ -474,9 +519,9 @@ def spectrum_preset(kind: str, n: int, seed: int) -> Spectrum:
 def congruence_factor(n: int, *, b_cond: float, bandwidth: int, complex_: bool,
                       rng: np.random.Generator) -> sp.csr_matrix:
     """W = D (I + N): N strictly lower banded (half bandwidth `bandwidth`, ~half the band filled)
-    with |N_ij| <= 0.5/bandwidth, so ||N||_inf <= 1/2 and cond(I + N) <= 3; D diagonal with
-    log-uniform entries in [1, sqrt(b_cond)]. Hence cond(W^H W) <~ 9 b_cond: B can be made as
-    ill-conditioned as a real mass matrix without making the exact eigenvalues inaccurate."""
+    with |N_ij| <= 0.5/bandwidth; D diagonal with log-uniform entries in [1, sqrt(b_cond)]. Hence
+    cond(W^H W) <= congruence_cond_bound(b_cond): B can be made as ill-conditioned as a real mass
+    matrix without making the exact eigenvalues inaccurate."""
     rows, cols, vals = [], [], []
     for j in range(1, bandwidth + 1):
         r = np.arange(j, n)
@@ -491,6 +536,14 @@ def congruence_factor(n: int, *, b_cond: float, bandwidth: int, complex_: bool,
                           shape=(n, n))
     d = 10.0 ** rng.uniform(0.0, 0.5 * np.log10(b_cond), n)
     return (sp.diags(d) @ (sp.identity(n) + lower)).tocsr()
+
+
+def congruence_cond_bound(b_cond: float) -> float:
+    """Upper bound 9 b_cond on cond(B) = cond(W)^2 for W = congruence_factor(b_cond=b_cond): N has
+    at most `bandwidth` entries of modulus <= 0.5/bandwidth per row and per column, so
+    ||N||_2 <= sqrt(||N||_1 ||N||_inf) <= 1/2 and the singular values of I + N lie in [1/2, 3/2];
+    those of D lie in [1, sqrt(b_cond)]."""
+    return 9.0 * b_cond
 
 
 def congruence_pair(eigenvalues, *, b_cond: float = 100.0, bandwidth: int = 3, block: int = 8,
@@ -564,7 +617,7 @@ def make_prescribed_case(name: str, kind: str, n: int, complex_: bool, seed: int
 
 def make_pair_case(name: str, kind: str, n: int, complex_: bool, seed: int, b_cond: float,
                    root: str | Path) -> Path:
-    spec = spectrum_preset(kind, n, seed)
+    spec = spectrum_preset(kind, n, seed, cond_b=congruence_cond_bound(b_cond))
     a, b = congruence_pair(spec.eigenvalues, b_cond=b_cond, complex_=complex_, seed=seed + 1,
                            grouping=spec.grouping)
     meta = {"family": FAMILY, "problem": "GHEP",
@@ -577,7 +630,8 @@ def make_pair_case(name: str, kind: str, n: int, complex_: bool, seed: int, b_co
             "scenarios": spec.scenarios + (["complex-hermitian"] if complex_ else [])}
     return write_case(name, a, b, meta=meta, targets=spec.targets, root=root,
                       eigenvalues=spec.eigenvalues,
-                      ref_note=_rounding_note(f"congruence W^H (.) W with cond(B) <~ {9 * b_cond:g}, "
+                      ref_note=_rounding_note(f"congruence W^H (.) W with cond(B) <= "
+                                              f"{congruence_cond_bound(b_cond):g}, "
                                               "error ~ eps * cond(B) * max|lambda|"))
 
 
