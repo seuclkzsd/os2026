@@ -34,7 +34,8 @@ struct RitzVectors {
   /// (the other member's eigenvector is the conjugate), scaled so ||Re y||^2 + ||Im y||^2 = 1.
   DenseMatrix<T> y;
   /// Per position: |b^T y|. With the Krylov-Schur relation Op V = V H + v b^T and orthonormal
-  /// [V v], this equals ||Op x - theta x||_2 for x = V y exactly (both members of a pair share it).
+  /// [V v], this equals ||Op x - theta x||_2 for x = V y (exactly in exact arithmetic; both
+  /// members of a pair share it).
   std::vector<double> estimate;
 };
 

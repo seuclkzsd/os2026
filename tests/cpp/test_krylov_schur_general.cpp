@@ -66,13 +66,14 @@ std::vector<cplx> general_eigenvalues(DenseMatrix<T> a) {
   return w;
 }
 
-/// A = X D X^{-1} with X = I + 0.5 R / sqrt(n) (well conditioned, far from normal).
+/// A = X D X^{-1} with X = I + strength R / sqrt(n) (well conditioned for strength < 1, far from
+/// normal).
 template <class T>
-DenseMatrix<T> similar_to(const DenseMatrix<T>& d, std::uint64_t seed) {
+DenseMatrix<T> similar_to(const DenseMatrix<T>& d, std::uint64_t seed, double strength = 0.5) {
   const index_t n = d.rows();
   DenseMatrix<T> x = random_matrix<T>(n, n, seed);
   for (index_t j = 0; j < n; ++j) {
-    for (index_t i = 0; i < n; ++i) x(i, j) *= 0.5 / std::sqrt(static_cast<double>(n));
+    for (index_t i = 0; i < n; ++i) x(i, j) *= strength / std::sqrt(static_cast<double>(n));
     x(j, j) += T(1);
   }
   DenseMatrix<T> eye(n, n);
@@ -109,6 +110,14 @@ DenseMatrix<T> block_diagonal(const std::vector<cplx>& values, std::vector<cplx>
     }
   }
   return d;
+}
+
+template <class T>
+double frobenius(const DenseMatrix<T>& a) {
+  double s = 0.0;
+  for (index_t j = 0; j < a.cols(); ++j)
+    for (index_t i = 0; i < a.rows(); ++i) s += hs::abs2(a(i, j));
+  return std::sqrt(s);
 }
 
 double rank_key(const cplx& v, Which which) {
@@ -164,6 +173,22 @@ std::vector<cplx> apply_complex(hs::LinearOperator<T>& op, const cplx* x) {
   return y;
 }
 
+/// ||Op x - theta x||_2.
+template <class T>
+double true_residual(hs::LinearOperator<T>& op, const cplx& theta, const cplx* x) {
+  const index_t n = op.size();
+  std::vector<cplx> y = apply_complex(op, x);
+  for (index_t k = 0; k < n; ++k) y[k] -= theta * x[k];
+  return hs::linalg::norm2(n, y.data());
+}
+
+/// Scale of the convergence test for theta: |theta|, or the largest |Ritz value| for theta == 0.
+/// The solver's zero level is ncv * eps * ||H||_F; in these tests every Ritz value above
+/// 1e-10 * largest is far above that level and every exact zero far below it.
+double test_scale(const cplx& theta, double largest) {
+  return std::abs(theta) > 1e-10 * largest ? std::abs(theta) : largest;
+}
+
 /// Runs the enclosing scope with one OpenMP thread. linalg::dot/norm2 use an OpenMP reduction
 /// whose partial sums libgomp combines in thread-arrival order, which is bitwise reproducible
 /// only for up to two threads (interface request to the linalg owner). Tests comparing whole
@@ -179,12 +204,15 @@ class SingleThreadedOpenMP {
   int saved_;
 };
 
-/// Checks every structural promise of the GeneralEigResult contract and the accuracy of the
-/// estimates against true residuals. op_norm is an upper bound of ||Op||_2.
+/// Checks every structural promise of the GeneralEigResult contract, the converged prefix and
+/// its invariant subspace, and the estimates against true residuals. op_norm is an upper bound
+/// of ||Op||_2; the estimates may drift from the true residuals by O(eps ||Op||) per restart.
 template <class T>
 void check_contract(hs::LinearOperator<T>& op, const hs::GeneralEigResult<T>& r, Which which,
-                    index_t nev, double tol, double op_norm) {
+                    const hs::KrylovSchurOptions<T>& opt, double op_norm) {
   const index_t n = op.size();
+  const index_t nev = opt.nev;
+  const double tol = opt.tol;
   const auto m = static_cast<index_t>(r.theta.size());
   ASSERT_TRUE(m == nev || (!hs::is_complex_v<T> && m == nev + 1)) << "m=" << m << " nev=" << nev;
   ASSERT_EQ(static_cast<index_t>(r.estimate.size()), m);
@@ -200,15 +228,41 @@ void check_contract(hs::LinearOperator<T>& op, const hs::GeneralEigResult<T>& r,
   ASSERT_FALSE(r.history.empty());
   EXPECT_EQ(static_cast<index_t>(r.history.size()), r.restarts + 1);
   EXPECT_EQ(r.history.back().op_applies, r.op_applies);
+  EXPECT_EQ(r.history.back().nconv, r.nconv);
+  // A partial result names the reason: some wanted value or Schur block above the tolerance.
+  EXPECT_TRUE(r.nconv == m || r.history.back().max_estimate > tol);
 
+  // ritz_all: all ncv Ritz values of the final basis (auto ncv rule of eigen.hpp), in ranking
+  // order, conjugate partners adjacent; theta is taken from them.
+  const index_t basis = std::min(n, opt.ncv == 0 ? std::max(2 * nev + 1, nev + 16) : opt.ncv);
+  ASSERT_EQ(static_cast<index_t>(r.ritz_all.size()), basis);
+  for (std::size_t i = 0; i < r.ritz_all.size(); ++i) {
+    if (i + 1 < r.ritz_all.size()) {
+      EXPECT_LE(rank_key(r.ritz_all[i], which), rank_key(r.ritz_all[i + 1], which)) << i;
+    }
+    if (!hs::is_complex_v<T> && r.ritz_all[i].imag() != 0.0) {
+      ASSERT_GT(r.ritz_all[i].imag(), 0.0) << i;
+      ASSERT_LT(i + 1, r.ritz_all.size());
+      EXPECT_EQ(r.ritz_all[i + 1], std::conj(r.ritz_all[i]));
+      ++i;
+    }
+  }
+  for (const cplx& t : r.theta) {
+    EXPECT_NE(std::find(r.ritz_all.begin(), r.ritz_all.end(), t), r.ritz_all.end()) << t;
+  }
   double largest = 0.0;
   for (const cplx& t : r.ritz_all) largest = std::max(largest, std::abs(t));
+  const double rounding = (100.0 + static_cast<double>(r.restarts)) * kEps * op_norm;
+
+  double scale2 = 0.0;  // sum of test_scale^2 over [0, nconv)
   for (index_t i = 0; i < m; ++i) {
-    // [0, nconv) converged, both partitions sorted by the ranking.
+    // [0, nconv) converged; theta as a whole in ranking order ([0, nconv) is a ranking prefix).
     if (i < r.nconv) {
-      EXPECT_LE(r.estimate[i], tol * std::abs(r.theta[i])) << i;
+      const double s = test_scale(r.theta[i], largest);
+      EXPECT_LE(r.estimate[i], tol * s) << i;
+      scale2 += s * s;
     }
-    if (i + 1 < m && i + 1 != r.nconv) {
+    if (i + 1 < m) {
       EXPECT_LE(rank_key(r.theta[i], which), rank_key(r.theta[i + 1], which)) << i;
     }
     // Conjugate pairs adjacent, positive imaginary part first, conjugate vectors; nconv and
@@ -220,24 +274,24 @@ void check_contract(hs::LinearOperator<T>& op, const hs::GeneralEigResult<T>& r,
       EXPECT_EQ(r.estimate[i + 1], r.estimate[i]);
       EXPECT_NE(r.nconv, i + 1);
       for (index_t k = 0; k < n; ++k) ASSERT_EQ(r.vectors(k, i + 1), std::conj(r.vectors(k, i)));
+      if (i + 1 < r.nconv) scale2 += std::pow(test_scale(r.theta[i + 1], largest), 2);
       ++i;
     }
   }
-  // Unit vectors; true residuals agree with the estimates up to rounding.
+  // Unit vectors; true residuals agree with the estimates up to the rounding drift.
   for (index_t i = 0; i < m; ++i) {
     const cplx* x = r.vectors.col(i);
     EXPECT_NEAR(hs::linalg::norm2(n, x), 1.0, 1e-13);
-    std::vector<cplx> y = apply_complex(op, x);
-    for (index_t k = 0; k < n; ++k) y[k] -= r.theta[i] * x[k];
-    const double res = hs::linalg::norm2(n, y.data());
-    EXPECT_NEAR(res, r.estimate[i], 1e3 * kEps * op_norm) << "pair " << i;
+    EXPECT_NEAR(true_residual(op, r.theta[i], x), r.estimate[i], rounding) << "pair " << i;
   }
-  // Orthonormal Schur basis, quasi-triangular S without a cut 2x2 block.
+  // Orthonormal Schur basis (each compression V <- V Q costs O(eps) of orthogonality), and a
+  // quasi-triangular S without a cut 2x2 block.
+  const double orthogonality = 1e-12 + 10.0 * static_cast<double>(r.restarts) * kEps;
   DenseMatrix<T> gram(m, m);
   hs::linalg::gram(n, m, r.schur_basis.data(), n, r.schur_basis.data(), n, gram.data(), m);
   for (index_t j = 0; j < m; ++j) {
     for (index_t i = 0; i < m; ++i) {
-      EXPECT_NEAR(std::abs(gram(i, j) - T(i == j ? 1.0 : 0.0)), 0.0, 1e-12);
+      EXPECT_NEAR(std::abs(gram(i, j) - T(i == j ? 1.0 : 0.0)), 0.0, orthogonality);
     }
   }
   const DenseMatrix<T>& s = r.schur_form;
@@ -259,7 +313,8 @@ void check_contract(hs::LinearOperator<T>& op, const hs::GeneralEigResult<T>& r,
     expect_same_values(general_eigenvalues(lead),
                        std::vector<cplx>(r.theta.begin(), r.theta.begin() + r.nconv),
                        1e-10 * largest);
-    // Leading nconv Schur vectors span an approximately invariant subspace.
+    // The leading nconv Schur vectors span an invariant subspace of Op + E with
+    // ||E||_2 = ||Op Q1 - Q1 S11||_2 <= tol * ||scale(theta[0:nconv))||_2.
     DenseMatrix<T> oq(n, r.nconv);
     op.apply(r.schur_basis.data(), n, oq.data(), n, r.nconv);
     double res2 = 0.0;
@@ -271,16 +326,8 @@ void check_contract(hs::LinearOperator<T>& op, const hs::GeneralEigResult<T>& r,
         res2 += hs::abs2(oq(i, j) - qs);
       }
     }
-    EXPECT_LE(std::sqrt(res2), 1e2 * std::sqrt(static_cast<double>(r.nconv)) * tol * op_norm);
+    EXPECT_LE(std::sqrt(res2), tol * std::sqrt(scale2) + rounding);
   }
-}
-
-template <class T>
-double frobenius(const DenseMatrix<T>& a) {
-  double s = 0.0;
-  for (index_t j = 0; j < a.cols(); ++j)
-    for (index_t i = 0; i < a.rows(); ++i) s += hs::abs2(a(i, j));
-  return std::sqrt(s);
 }
 
 // --------------------------------------------------------------------------------- spectra
@@ -323,7 +370,7 @@ TYPED_TEST(KrylovSchurGeneralTyped, KnownSpectrumLargestMagnitude) {
   EXPECT_EQ(r.op_applies, op.applications());
   expect_same_values(
       r.theta, expected_wanted(all, Which::LargestMagnitude, opt.nev, !hs::is_complex_v<T>), 1e-10);
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, frobenius(a));
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
 }
 
 TYPED_TEST(KrylovSchurGeneralTyped, KnownSpectrumAlgebraicEnds) {
@@ -338,7 +385,7 @@ TYPED_TEST(KrylovSchurGeneralTyped, KnownSpectrumAlgebraicEnds) {
     const auto r = hs::krylov_schur_general(op, which, opt);
     ASSERT_TRUE(r.converged);
     expect_same_values(r.theta, expected_wanted(all, which, opt.nev, !hs::is_complex_v<T>), 1e-10);
-    check_contract(op, r, which, opt.nev, opt.tol, frobenius(a));
+    check_contract(op, r, which, opt, frobenius(a));
   }
 }
 
@@ -359,7 +406,7 @@ TEST(KrylovSchurGeneral, ConjugatePairAtNevBoundaryGivesNevPlusOne) {
   EXPECT_NEAR(r.theta[3].real(), 7.0, 1e-10);
   EXPECT_NEAR(r.theta[3].imag(), 2.0, 1e-10);
   EXPECT_EQ(r.theta[4], std::conj(r.theta[3]));
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, frobenius(a));
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
 
   // nev = 3 cuts before the pair: m == nev.
   opt.nev = 3;
@@ -367,7 +414,50 @@ TEST(KrylovSchurGeneral, ConjugatePairAtNevBoundaryGivesNevPlusOne) {
   const auto r3 = hs::krylov_schur_general(op3, Which::LargestMagnitude, opt);
   ASSERT_TRUE(r3.converged);
   EXPECT_EQ(r3.theta.size(), 3u);
-  check_contract(op3, r3, Which::LargestMagnitude, opt.nev, opt.tol, frobenius(a));
+  check_contract(op3, r3, Which::LargestMagnitude, opt, frobenius(a));
+}
+
+TEST(KrylovSchurGeneral, ConvergedPairBehindUnconvergedValueIsNotCounted) {
+  // Wanted for nev = 3 by |theta|: 1, 0.9997, then the pair 0.5 +- 0.6i straddling the cut
+  // (m = 4). The isolated pair converges restarts before the close values 1 and 0.9997 do, so
+  // stopping early leaves converged values ranked behind unconverged ones. They must not count:
+  // otherwise the pair plus one of the two reaches nconv = nev and reports success while the
+  // best value is still unconverged.
+  std::vector<cplx> values{{1.0, 0}, {0.9997, 0}, {0.5, 0.6}};
+  for (index_t i = 0; i < 60; ++i)
+    values.emplace_back((i % 2 ? -1.0 : 1.0) * (0.05 + 0.65 * static_cast<double>(i) / 59.0), 0.0);
+  std::vector<cplx> all;
+  const DenseMatrix<double> a = similar_to(block_diagonal<double>(values, &all), 60);
+  hs::KrylovSchurOptions<double> opt;
+  opt.nev = 3;
+  opt.ncv = 10;
+  opt.tol = 1e-12;
+  opt.seed = 2;
+  hs::test::DenseOperator<double> full_op(a);
+  const auto full = hs::krylov_schur_general(full_op, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(full.converged);
+  ASSERT_EQ(full.theta.size(), 4u);
+  index_t behind = 0;  // stops with a converged value ranked behind an unconverged one
+  for (index_t stop = 0; stop <= full.restarts; ++stop) {
+    hs::test::DenseOperator<double> op(a);
+    opt.max_restarts = stop;
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+    const auto m = static_cast<index_t>(r.theta.size());
+    bool all_pass = true;
+    index_t first_fail = m;
+    for (index_t i = 0; i < m; ++i) {
+      const bool pass = r.estimate[i] <= opt.tol * std::abs(r.theta[i]);
+      all_pass = all_pass && pass;
+      if (!pass && first_fail == m) first_fail = i;
+      if (pass && first_fail < i) ++behind;
+    }
+    EXPECT_LE(r.nconv, first_fail) << "stop " << stop;
+    if (r.converged) {
+      EXPECT_TRUE(all_pass) << "stop " << stop << ": success with an open value";
+    }
+  }
+  EXPECT_GT(behind, 0) << "the run never stopped in the critical state";
 }
 
 // ------------------------------------------------------------- generalized indefinite pencils
@@ -434,7 +524,7 @@ TYPED_TEST(KrylovSchurGeneralTyped, GhiepShiftInvertMatchesDenseReference) {
   double scale = 0.0;
   for (const cplx& l : ref) scale = std::max(scale, std::abs(l));
   expect_nearest(to_lambda(r.theta, sigma), ref, sigma, opt.nev, 1e-9 * scale);
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, shift_invert_norm(a, b, sigma));
+  check_contract(op, r, Which::LargestMagnitude, opt, shift_invert_norm(a, b, sigma));
 }
 
 /// Waveguide-like pencil (Lee-Sun-Cendes structure) on an nx x ny node grid with the grid
@@ -558,8 +648,7 @@ TEST(KrylovSchurGeneral, WaveguideZeroClusterWantedComesOutReal) {
   nearest.resize(found_nonzero.size());
   expect_same_values(found_nonzero, nearest, 1e-10 * ref.scale);
   for (const cplx& l : found_nonzero) EXPECT_LE(std::abs(l.imag()), 1e-12 * ref.scale) << l;
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol,
-                 shift_invert_norm(w.a, w.b, sigma));
+  check_contract(op, r, Which::LargestMagnitude, opt, shift_invert_norm(w.a, w.b, sigma));
 }
 
 TEST(KrylovSchurGeneral, WaveguideShiftAwayFromZeroClusterFindsNearestModes) {
@@ -585,8 +674,7 @@ TEST(KrylovSchurGeneral, WaveguideShiftAwayFromZeroClusterFindsNearestModes) {
   nearest.resize(lambda.size());
   expect_same_values(lambda, nearest, 1e-10 * ref.scale);
   for (const cplx& l : lambda) EXPECT_LE(std::abs(l.imag()), 1e-12 * ref.scale) << l;
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol,
-                 shift_invert_norm(w.a, w.b, sigma));
+  check_contract(op, r, Which::LargestMagnitude, opt, shift_invert_norm(w.a, w.b, sigma));
 }
 
 // ----------------------------------------------------------------------- behaviour/contract
@@ -694,7 +782,7 @@ TYPED_TEST(KrylovSchurGeneralTyped, NonConvergenceIsReportedNotThrown) {
   EXPECT_EQ(r.history.size(), 1u);
   EXPECT_GT(r.history[0].max_estimate, opt.tol);
   EXPECT_EQ(r.op_applies, opt.ncv);
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, frobenius(a));
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
 }
 
 TYPED_TEST(KrylovSchurGeneralTyped, PartialConvergenceKeepsConvergedSchurBlockOnTop) {
@@ -718,7 +806,92 @@ TYPED_TEST(KrylovSchurGeneralTyped, PartialConvergenceKeepsConvergedSchurBlockOn
   const index_t dominant = hs::is_complex_v<T> ? 3 : 4;
   ASSERT_EQ(r.nconv, dominant);
   EXPECT_NEAR(std::abs(r.theta[0] - cplx(100)), 0.0, 1e-8);
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, frobenius(a));
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, EveryStopSatisfiesTheContract) {
+  using T = TypeParam;
+  // Stopping after each restart count gives partial results in which the passing ranking prefix
+  // often does not lead the Schur form (an unconverged wanted value sits above a converged
+  // better-ranked one). The prefix must then be moved to the top of S, and the Ritz data
+  // recomputed, before its invariant-subspace test: [0, nconv) is the whole passing prefix, not
+  // merely some valid one (certifying nothing would be safe but useless). The eigenbasis is well
+  // conditioned, so the subspace test cannot reject a prefix whose pairs pass by a factor of 10.
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(60), &all), 12);
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 6;
+  opt.ncv = 14;
+  hs::test::DenseOperator<T> full_op(a);
+  const auto full = hs::krylov_schur_general(full_op, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(full.converged);
+  index_t partial = 0;  // stops with 0 < nconv < m
+  for (index_t stop = 0; stop <= full.restarts; ++stop) {
+    hs::test::DenseOperator<T> op(a);
+    opt.max_restarts = stop;
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    EXPECT_EQ(r.converged, stop == full.restarts) << "stop " << stop;
+    check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+    // Leading pairs passing estimate <= factor * tol * |theta|; pairs share estimate and |theta|,
+    // so the count never ends inside a pair.
+    const auto m = static_cast<index_t>(r.theta.size());
+    auto passing_prefix = [&](double factor) {
+      index_t p = 0;
+      while (p < m && r.estimate[p] <= factor * opt.tol * std::abs(r.theta[p])) ++p;
+      return p;
+    };
+    EXPECT_LE(passing_prefix(0.1), r.nconv) << "stop " << stop;
+    EXPECT_LE(r.nconv, passing_prefix(1.0)) << "stop " << stop;
+    partial += r.nconv > 0 && r.nconv < m ? 1 : 0;
+  }
+  EXPECT_GT(partial, 0) << "no partial result: the sweep does not test the prefix";
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, IllConditionedEigenbasisNeedsInvariantSubspace) {
+  using T = TypeParam;
+  // Leading block [[1, 100], [0, 0.98]]: the eigenvectors of 1 and 0.98 are nearly parallel
+  // (condition ~ 100 / 0.02), so both eigenvector estimates pass the tolerance while the Schur
+  // vectors they define are still ~1e3 times further from invariant. Counting the pairs as
+  // converged on their estimates alone left ||Op Q1 - Q1 S11|| near 6e-10 for tol = 1e-12.
+  const index_t n = 52;
+  DenseMatrix<T> d(n, n);
+  d(0, 0) = T(1.0), d(0, 1) = T(100.0), d(1, 1) = T(0.98);
+  for (index_t i = 2; i < n; ++i) d(i, i) = T(0.01 + 0.49 * static_cast<double>(i - 2) / 49.0);
+  const DenseMatrix<T> a = similar_to(d, 66);
+  hs::test::DenseOperator<T> op(a);
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 2;
+  opt.ncv = 12;
+  opt.tol = 1e-12;
+  const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r.converged);
+  expect_same_values(r.theta, {cplx(1.0), cplx(0.98)}, 1e-9);
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, ZeroEigenvalueUsesLargestRitzScale) {
+  using T = TypeParam;
+  // Wanted by LargestAlgebraic: 0, -0.1, -0.2. The computed Ritz value of the exact 0 is an error
+  // of the size of its residual estimate or below, so a test against its own magnitude could
+  // never pass: it must be recognized as zero (|theta| <= ncv eps ||H||_F) and tested against the
+  // largest |Ritz value|. (tol = 1e-8 stops the run while that estimate is still far above
+  // tol * |theta|, where the two tests differ.)
+  std::vector<cplx> values;
+  for (index_t i = 0; i < 60; ++i) values.emplace_back(-0.1 * static_cast<double>(i), 0.0);
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(values, &all), 72);
+  hs::test::DenseOperator<T> op(a);
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 3;
+  opt.tol = 1e-8;
+  const auto r = hs::krylov_schur_general(op, Which::LargestAlgebraic, opt);
+  ASSERT_TRUE(r.converged);
+  double largest = 0.0;
+  for (const cplx& t : r.ritz_all) largest = std::max(largest, std::abs(t));
+  EXPECT_LE(std::abs(r.theta[0]), 1e-13 * largest);
+  EXPECT_GT(r.estimate[0], opt.tol * std::abs(r.theta[0])) << "the zero rule was not needed";
+  expect_same_values(r.theta, {cplx(0.0), cplx(-0.1), cplx(-0.2)}, 1e-6);
+  check_contract(op, r, Which::LargestAlgebraic, opt, frobenius(a));
 }
 
 TEST(KrylovSchurGeneral, MinimalBasisWithManyPairsConverges) {
@@ -740,7 +913,30 @@ TEST(KrylovSchurGeneral, MinimalBasisWithManyPairsConverges) {
   const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
   ASSERT_TRUE(r.converged);
   expect_same_values(r.theta, expected_wanted(all, Which::LargestMagnitude, opt.nev, true), 1e-9);
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, frobenius(a));
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
+}
+
+TEST(KrylovSchurGeneral, ManyRestartsKeepEstimatesNearTrueResiduals) {
+  // A clustered, strongly non-normal spectrum with the smallest basis: thousands of restarts.
+  // Each compression adds O(eps ||Op||) of rounding to the Krylov-Schur relation, so the
+  // estimates drift from the true residuals by that much per restart, and no faster
+  // (check_contract allows (100 + restarts) eps ||Op||_F).
+  std::vector<cplx> values;
+  for (index_t i = 0; i < 6; ++i) values.emplace_back(1.0 - 2e-4 * static_cast<double>(i), 0.0);
+  values.emplace_back(0.99, 0.02);
+  for (index_t i = 0; i < 200; ++i)
+    values.emplace_back((i % 2 ? -1.0 : 1.0) * (0.01 + 0.975 * static_cast<double>(i) / 199.0),
+                        0.0);
+  std::vector<cplx> all;
+  const DenseMatrix<double> a = similar_to(block_diagonal<double>(values, &all), 67, 0.9);
+  hs::test::DenseOperator<double> op(a);
+  hs::KrylovSchurOptions<double> opt;
+  opt.nev = 6;
+  opt.ncv = 8;
+  opt.max_restarts = 3000;
+  const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+  EXPECT_EQ(r.restarts, opt.max_restarts);
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
 }
 
 TYPED_TEST(KrylovSchurGeneralTyped, BreakdownOnInvariantStartVectorRecovers) {
@@ -763,7 +959,7 @@ TYPED_TEST(KrylovSchurGeneralTyped, BreakdownOnInvariantStartVectorRecovers) {
     EXPECT_NEAR(r.theta[i].real(), 1.0 + 0.5 * (n - 1 - i), 1e-10);
     EXPECT_NEAR(r.theta[i].imag(), 0.0, hs::is_complex_v<T> ? 1e-12 : 0.0);
   }
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, 1.0 + 0.5 * n);
+  check_contract(op, r, Which::LargestMagnitude, opt, 1.0 + 0.5 * n);
 }
 
 TYPED_TEST(KrylovSchurGeneralTyped, WholeSpaceBasisIsExactAtOnce) {
@@ -779,7 +975,7 @@ TYPED_TEST(KrylovSchurGeneralTyped, WholeSpaceBasisIsExactAtOnce) {
   EXPECT_EQ(r.restarts, 0);
   EXPECT_EQ(r.op_applies, n);
   expect_same_values(r.theta, all, 1e-12);
-  check_contract(op, r, Which::SmallestAlgebraic, opt.nev, opt.tol, frobenius(a));
+  check_contract(op, r, Which::SmallestAlgebraic, opt, frobenius(a));
 
   // n = 1.
   hs::test::DiagonalOperator<T> one(std::vector<T>{T(-3)});
@@ -803,7 +999,7 @@ TEST(KrylovSchurGeneral, RealRotationNevOneReturnsWholePair) {
   ASSERT_EQ(r.theta.size(), 2u);
   EXPECT_NEAR(std::abs(r.theta[0] - cplx(0.5, 2.0)), 0.0, 1e-14);
   EXPECT_EQ(r.theta[1], std::conj(r.theta[0]));
-  check_contract(op, r, Which::LargestMagnitude, opt.nev, opt.tol, frobenius(a));
+  check_contract(op, r, Which::LargestMagnitude, opt, frobenius(a));
 }
 
 TYPED_TEST(KrylovSchurGeneralTyped, PhaseTimesAccountForTheRun) {
