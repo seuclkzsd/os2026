@@ -147,7 +147,8 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   out.applies += res.op_applies;
   out.converged = res.converged;
   event(c, "lanczos", {{"sigma", sigma}, {"which", std::string(which_name(which))},
-                       {"nev", static_cast<std::int64_t>(nev)}, {"block_size", static_cast<std::int64_t>(ko.block_size)},
+                       {"nev", static_cast<std::int64_t>(nev)},
+                       {"block_size", static_cast<std::int64_t>(ko.block_size)},
                        {"nconv", static_cast<std::int64_t>(res.nconv)},
                        {"restarts", static_cast<std::int64_t>(res.restarts)},
                        {"op_applies", static_cast<std::int64_t>(res.op_applies)},
@@ -226,7 +227,6 @@ void permute_columns(DenseMatrix<T>& x, const std::vector<index_t>& perm) {
     }
   }
 }
-
 
 /// Metrics of sel; pairs above tol get residual correction with the factorization that
 /// prepare() makes the object hold (that of the run's shift; called only when a pair needs it),

@@ -41,7 +41,8 @@ void expect_same_set(std::vector<double> got, std::vector<double> want, double t
   ASSERT_EQ(got.size(), want.size());
   std::sort(got.begin(), got.end());
   std::sort(want.begin(), want.end());
-  for (std::size_t i = 0; i < got.size(); ++i) EXPECT_NEAR(got[i], want[i], tol * std::max(1.0, std::abs(want[i]))) << i;
+  for (std::size_t i = 0; i < got.size(); ++i)
+    EXPECT_NEAR(got[i], want[i], tol * std::max(1.0, std::abs(want[i]))) << i;
 }
 
 void expect_times_add_up(const hs::SolveReport& r) {

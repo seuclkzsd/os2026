@@ -262,7 +262,8 @@ int run(const Args& args, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b, 
   const double upper = std::isnan(args.upper) ? sigma + 0.1 * std::abs(sigma) + 1e-3 * scale : args.upper;
   int ordering = args.ordering;
   for (const auto& e : args.exps) {
-    if ((e == "counter" || e == "solves") && ordering < 0) ordering = adaptive_ordering(pencil, sigma, args.threads, k, b != nullptr);
+    if ((e == "counter" || e == "solves") && ordering < 0)
+      ordering = adaptive_ordering(pencil, sigma, args.threads, k, b != nullptr);
     if (e == "setup") exp_setup(args, a, b);
     else if (e == "analysis") exp_analysis(args, pencil, sigma);
     else if (e == "counter") exp_counter(args, pencil, sigma, lower, upper, ordering);

@@ -109,7 +109,8 @@ int main(int argc, char** argv) {
   auto* o_budget = app.add_option("--memory-budget-gb", budget, "memory budget in GiB");
   auto* o_prec = app.add_option("--precision", precision, "factorization precision: double|single");
   auto* o_slice = app.add_option("--slice-size", slice_size, "max eigenvalues per shift in sliced targets (0 = auto)");
-  auto* o_block = app.add_option("--block-size", block_size, "Krylov block width of the HEP/GHEP runs (0 = auto, 1 = single vector)");
+  auto* o_block = app.add_option("--block-size", block_size,
+                                 "Krylov block width of the HEP/GHEP runs (0 = auto, 1 = single vector)");
   auto* o_zero = app.add_option("--zero-filter-tol", zero_filter, "drop |lambda| <= TOL*scale (zero modes); < 0 off");
   app.add_option("--log", log_path, "JSON-lines event log file");
   app.add_flag("-v,--verbose", verbose, "debug output");
