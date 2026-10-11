@@ -13,8 +13,9 @@
 //      |lambda| ||B||_1) ||x||) (1-norms: a cheap, slightly optimistic scale, the same for every
 //      p), largest relative eigenvalue difference to the first p of the list, set size.
 // Mode "e2e": hs::solve with the case's config.json (threads from OMP_NUM_THREADS) for every p,
-// via SolverConfig::block_size (requires that field: see the module's interface request; without
-// it the bench exits with an error). Records the report's phase times, applications, success,
+// via SolverConfig::block_size; p = 0 leaves the configuration alone (the driver's automatic
+// rule). p > 0 requires that field (see the module's interface request; without it the bench
+// exits with an error). Records the report's phase times, applications, success,
 // largest backward error, real/complex counts and the eigenvalue differences to the first p.
 // Repetitions are the outer loop in both modes, so slow load drifts of the shared machine affect
 // every p alike; summarize with medians.
@@ -271,7 +272,7 @@ void run_e2e(const Args& args, const std::string& name, const CsrMatrix<double>&
   for (int rep = 0; rep < args.reps; ++rep) {
     for (const index_t p : args.p) {
       hs::SolverConfig cfg = base;
-      if (!set_block_size(cfg, p, 0))
+      if (p != 0 && !set_block_size(cfg, p, 0))
         throw std::runtime_error("this build has no SolverConfig::block_size: e2e needs it");
       const hs::Solution<double> sol = hs::solve(a, &b, cfg);
       const hs::SolveReport& r = sol.report;
