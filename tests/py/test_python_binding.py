@@ -72,10 +72,15 @@ def nearest(values: np.ndarray, sigma: complex, k: int) -> np.ndarray:
 
 
 def assert_same_set(got, want, rtol: float, scale: float = 1.0):
-    got = np.sort_complex(np.asarray(got, dtype=complex))
-    want = np.sort_complex(np.asarray(want, dtype=complex))
-    assert got.shape == want.shape, (got, want)
-    np.testing.assert_allclose(got, want, rtol=0, atol=rtol * scale)
+    """Same multiset within rtol*scale. Matched greedily by distance, not by sorting: sorting
+    complex values orders a conjugate pair by real parts that may differ only by rounding."""
+    got = list(np.asarray(got, dtype=complex).ravel())
+    want = np.asarray(want, dtype=complex).ravel()
+    assert len(got) == want.size, (got, want)
+    for w in want:
+        j = int(np.argmin([abs(g - w) for g in got]))
+        assert abs(got[j] - w) <= rtol * scale, (w, got)
+        got.pop(j)
 
 
 def residuals(a, b, w, v) -> np.ndarray:

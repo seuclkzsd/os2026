@@ -14,8 +14,13 @@ PYTHONPATH=build/release/python python -c "import hsolve; print(hsolve.version()
 
 - 产物在 `build/<preset>/python/hsolve/`（`__init__.py` + `_hsolve.cpython-*.so`），无需安装。
 - CMake 选项 `HSOLVE_BUILD_PYTHON`：找到 pybind11 时默认 ON；`-DHSOLVE_BUILD_PYTHON=OFF` 关闭，
-  显式 ON 而缺 pybind11 时报错。debug 预设带 ASan，扩展无法被普通 python 导入，请用 release。
+  显式 ON 而缺 pybind11 时报错。debug 预设带 ASan/UBSan，普通 python 须预加载运行库才能导入：
+  `LD_PRELOAD=$CONDA_PREFIX/lib/libasan.so.8:$CONDA_PREFIX/lib/libubsan.so.1 ASAN_OPTIONS=detect_leaks=0
+  HSOLVE_PYTHON_DIR=build/debug/python python -m pytest tests/py/test_python_binding.py`
+  （2026-10-11 实测 54 项全过、无 sanitizer 报告，约 4 分钟）；日常使用 release。
 - 依赖：numpy；scipy 仅在传入 scipy 稀疏矩阵或调用 `load_matrix` 时需要。
+- 测试：`python -m pytest tests/py/test_python_binding.py`（`tools/dev/test.sh release` 也会运行）；
+  默认从 `build/release/python` 导入，`HSOLVE_PYTHON_DIR=<dir>` 指定其它构建；未构建时整个文件跳过。
 
 ## 2. 快速上手
 
