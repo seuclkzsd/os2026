@@ -41,6 +41,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
   "inner_tol_factor": 0.1,
   "hermitian_tol": 1e-10,
   "ncv": 0,
+  "block_size": 0,
   "slice_size": 0,
   "max_restarts": 1000,
   "seed": 2026,
@@ -52,6 +53,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
   "blr": "auto",
   "out_of_core": "auto",
   "inertia_check": "auto",
+  "inertia_counter": "auto",
   "zero_filter_tol": -1.0,
   "complex_tol": 1e-8,
   "max_shift_retries": 5
@@ -61,29 +63,42 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 枚举取值：`target.mode ∈ {nearest, interval, smallest, largest}`（interval 用 `lower`/`upper`）；
 `problem ∈ {auto, standard, generalized_definite, generalized_indefinite}`；
 `method ∈ {auto, shift_invert_lanczos, shift_invert_krylov_schur, lanczos}`；
-`factor_precision ∈ {double, single}`；`blr / out_of_core / inertia_check ∈ {auto, on, off}`。
+`factor_precision ∈ {double, single}`；`blr / out_of_core / inertia_check / inertia_counter ∈ {auto, on, off}`。
 
 取值与语义（校验见 `parse_config`；算法见 `docs/DESIGN.md` §3.6）：
-- `tol ∈ (0, 1)`；`inner_tol_factor ∈ (0, 1]`；`ncv, slice_size, threads, max_shift_retries ≥ 0`；
+- `tol ∈ (0, 1)`；`inner_tol_factor ∈ (0, 1]`；`ncv, block_size, slice_size, threads, max_shift_retries ≥ 0`；
   `max_restarts ≥ 1`；`memory_budget_gb > 0`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
+- `block_size`（P4）：整数 ≥ 0，位移反演 Krylov 运行的块宽 p；0（默认）= 自动，1 = 单向量。
+  HEP/GHEP：自动时需求 ≥ 8 对的运行（含切片、单边运行）p = 4，否则 1；配置 > 0 时直接使用；证书收缩
+  重跑缺 m 对时用 max(p, min(4, m 上取偶))。GHIEP：自动时 n ≥ 2e4 且 nev ≥ 4 的运行 p = 2，否则 1；
+  配置值被限到 min(p, nev, 64, n/16)，探测运行（nev ≤ 2）恒为 1。两条路径都会在块基放不下内存预算时
+  把 p 减半（告警）。规则与依据见 DESIGN §3.6-5。
+- `inertia_counter`（P4）：证书的 Sylvester 计数是否在 InertiaCounter（只计惯性的分解，复用主分析的
+  主元顺序）上做。auto（默认）= nearest 证书在代价模型判定划算时、以及主分解为单精度/BLR 时一律；
+  on = 总是（含窗口/切片的计数）；off = 在主分解对象上计数（主分解为单精度/BLR 时仍用计数器——其自身
+  惯性不可信）。谱隙点上的计数相同（测试与实测一致），区别在速度与峰值内存（DESIGN §3.6-8）。
 - `slice_size`：整数 ≥ 0，默认 0 = 自动（代价模型）。interval / smallest / largest 目标（B 正定或
   B = I）以及零带干扰时的窗口化 nearest：每个位移至多求这么多个特征值（谱切片）；内存预算可能把它
   再压低（报告中有告警）。
-- `ordering`：−1（默认）= 自适应 AMD/SCOTCH；0..7 = MUMPS ICNTL(7)（7 自动、5 METIS、3 SCOTCH、0 AMD）。
+- `ordering`：−1（默认）= 自适应：AMD 或嵌套剖分（由确定性代价模型选择；嵌套剖分为 SCOTCH，
+  `deterministic = true` 时为 METIS）；0..7 = MUMPS ICNTL(7)（7 自动、5 METIS、3 SCOTCH、0 AMD、
+  4 PORD、6 QAMD、2 AMF）。hsolve 自研的并行嵌套剖分（factor 层的 10）目前**不**是合法配置值。
 - `deterministic`：false（默认）= MUMPS L0-OpenMP，回代更快，结果在容差内可复现；true = 同线程数下
-  分解与回代逐位可复现（逐位复现另需固定 `ordering`）。
+  分解与回代逐位可复现，自适应排序随之用 METIS（SCOTCH 的排序逐次运行都会变，显式 `ordering = 3`
+  亦然，逐位复现时不要用）。
 - `zero_filter_tol`：< 0（默认）关闭；否则 |λ| ≤ zero_filter_tol·scale 为非物理零模，靠位移放置排除
   （HEP/GHEP 由惯性在两个计数点间切掉零带，计入报告 `zero_modes_filtered`；GHIEP 零簇本来就不被
   需要，零带取 max(zero_filter_tol, 1e-8)·scale）。用于零附近密集谱 / 低频击穿场景。
 - `inertia_check`：off 关闭 nearest 的证书；interval / smallest / largest 本身由惯性计数构成，off 被
   忽略（告警）。
 - 当前限制：B 不定（GHIEP）只支持 `mode = nearest`（其余抛 Unsupported）；`method = lanczos`
-  （免分解）抛 Unsupported。块 Krylov 的 `block_size` 只是 eigen 层选项，**不是**配置键（driver 恒用 1）。
+  （免分解）抛 Unsupported。
 
 **CLI 覆盖参数**（`hsolve --A A.npz [--B B.npz] [--config config.json] --out DIR [...]`，覆盖配置文件
 中的对应键，合并后整体再校验）：`--sigma S`（nearest）、`--k K`、`--interval LO HI`、
 `--smallest K`、`--largest K`、`--tol`、`--threads`（0 = 全部）、`--memory-budget-gb`、
-`--precision double|single`、`--slice-size N`（→ `slice_size`）、`--zero-filter-tol TOL`
+`--precision double|single`、`--slice-size N`（→ `slice_size`）、`--block-size N`（→ `block_size`，
+0 = 自动，1 = 单向量）、`--zero-filter-tol TOL`
 （→ `zero_filter_tol`，< 0 关闭）；另有 `--log FILE`（JSON-lines 事件日志）、`-v/--verbose`、
 `-q/--quiet`、`--version`。退出码：0 = 全部达标（且证书通过），1 = 完成但未达标，2 = 错误。
 
@@ -97,21 +112,31 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 | `complex_eigenvectors.npy` | 同上，形状 (n, c) |
 | `report.json` | `SolveReport` 的全部字段（键名同 C++ 字段名），外加 `schema_version: 1` |
 
-`report.json` 主要键：`n, nnz_a, nnz_b, complex_scalars, problem, norm2_a, norm2_b, scale,
-hermitian_defect_a, hermitian_defect_b, method, sigma_requested, sigma_used, shift_retries,
-factor_options{...}, factor_stats{...}, restarts, op_applies, time_total_s, time_setup_s,
-time_factor_s, time_iterate_s, time_verify_s, peak_rss_bytes, pairs[{lambda_re, lambda_im,
-abs_residual, rel_residual, backward_error, accepted}], certificate{performed, lower, upper,
-count_inertia, count_found, endpoint_moves, passed, note}, slices[...], zero_cluster_dim,
-zero_modes_filtered, success, warnings[]`。`pairs` 先列实特征对（与 `eigenvalues.npy` 同序），
-再列复特征对。
+`report.json` 主要键（键序同 `SolveReport::to_json`）：`schema_version, solver, version, n, nnz_a,
+nnz_b, complex_scalars, problem, norm2_a, norm2_b, scale, hermitian_defect_a, hermitian_defect_b, method,
+sigma_requested, sigma_used, shift_retries, block_size, factor_options{...}, factor_stats{...}, restarts,
+op_applies, time_total_s, time_setup_s, time_factor_s, time_iterate_s, time_verify_s,
+time_certificate_s, peak_rss_bytes, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
+backward_error, accepted}], certificate{performed, lower, upper, count_inertia, count_found,
+endpoint_moves, passed, note}, slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
+`pairs` 先列实特征对（与 `eigenvalues.npy` 同序），再列复特征对。
 
-- **计时**（互斥分阶段，`docs/DESIGN.md` §3.6-0）：
-  `time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s`，各项 ≥ 0。
-  `time_setup_s`：输入检查、范数估计、问题类型判定、规划；`time_factor_s`：**每一次**符号分析（含
-  自适应排序的 AMD 探测）与**每一次**数值分解（含惯性计数、B 正定性检测、A 的零主元计数）；
+- `solver`（P4）：恒为 `"hsolve"`（评测在调用方未指名时用它作求解器名，§4）；`version`：`hs::version()`。
+  Python 接口的 `report` 是同一份 JSON。
+- `block_size`（P4）：HEP/GHEP 第一次位移反演运行实际使用的块宽（配置解析 + 内存适配之后，DESIGN
+  §3.6-5）。GHIEP 的报告目前恒为 1（driver 未写入），各次运行的实际块宽见事件日志的 `krylov_schur`
+  事件。
+- `factor_stats` 只统计主分解对象（分析、分解、回代次数与时间、估计）；InertiaCounter 的分析与计数
+  不在其中，只计入 `time_certificate_s`（事件日志：`inertia_counter`、`main_factors_released`）。
+- **计时**（五个互斥阶段，`docs/DESIGN.md` §3.6-0）：
+  `time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s + time_certificate_s`，
+  各项 ≥ 0。`time_setup_s`：输入检查、范数估计、问题类型判定、规划；`time_factor_s`：**每一次**符号
+  分析（含自适应排序的 AMD 探测）与位移、B（正定性检测）、A（GHIEP 零主元计数）的数值分解；
   `time_iterate_s`：Krylov 求解（回代、正交化、重启）；`time_verify_s`：Rayleigh–Ritz、残差、补救、
-  选择与证书簿记。时间只覆盖 `hs::solve`（CLI 读矩阵不计入）。
+  选择与证书簿记；`time_certificate_s`（P4）：HEP/GHEP 的全部 Sylvester 惯性计数（证书端点、窗口端点、
+  切点、簇检查；主对象上的重分解或 InertiaCounter 的计数，含计数器的分析），GHIEP 与关闭证书的
+  nearest 为 0。P3 的报告没有此键，惯性计数在 `time_factor_s` 中。时间只覆盖 `hs::solve`（CLI 读矩阵
+  不计入）。
 - `certificate.lower / upper`：±∞ 写作 `null`（smallest：lower = null；largest：upper = null）。
   `count_inertia` 是按 Sylvester 惯性**要求**的个数（smallest/largest 结束于数值相等的大簇内时为簇前
   个数加仍需的副本数）；`count_found` 是窗口内不同 B-正交向量数。GHIEP：`performed = false`，
@@ -139,8 +164,9 @@ zero_modes_filtered, success, warnings[]`。`pairs` 先列实特征对（与 `ei
   `complex_scalars`、`config`、`target`、`tol`、`tolerances{match_rtol, cluster_rtol, tie_rtol,
   dup_tol}`（默认 1e-6、1e-6、10·tol、1e-4）。
 - 簿记：`time_total_s`；`solve_time_s` 与 `solve_time_scope`（同口径的求解时间：报告同时有
-  `time_setup_s` 与 `time_solve_s` 时取二者之和——SLEPc 基线，其 `time_total_s` 还含 Python 读测例、
-  PETSc 组装与取特征对——否则取 `time_total_s`——hsolve、scipy 基线）；`peak_rss_bytes`（求解器自报，
+  `time_setup_s` 与 `time_solve_s` 时取二者之和——SLEPc 基线：EPSSetUp（MUMPS 分析与分解）+ EPSSolve +
+  EPSSolve 推迟到首次 EPSGetEigenpair 的特征向量计算（广义问题的纯化，P4 起计入 `time_solve_s`），其
+  `time_total_s` 还含读测例、PETSc 组装与输出——否则取 `time_total_s`——hsolve、scipy 基线）；`peak_rss_bytes`（求解器自报，
   缺时取 SLEPc 基线的 `peak_rss_bytes_sum`）；`measured{wall_s, peak_rss_bytes, returncode, killed,
   cores, threads}`（guard 摘要，没有时为 null）；`solver_success`；`solver_warnings`。
 - `norms{norm2_a, norm2_b, scale, norm_method{A, B}}`（n ≤ 4000 稠密精确，否则 ARPACK 下界，
