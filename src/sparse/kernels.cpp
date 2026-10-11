@@ -20,6 +20,7 @@
 // __builtin_cpu_supports("avx512f") (CPUID and OS register state) says it can run.
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -51,9 +52,16 @@ constexpr index_t kRowBlock = 256;  // rows per scheduling unit of the fast kern
 constexpr index_t kMinReuseNarrow = 2;
 constexpr index_t kMinReuseWide = 8;
 
+/// HS_KERNELS_NO_AVX512 set to anything but "" or "0": behave as on a CPU without AVX-512F.
+[[maybe_unused]] bool avx512_masked_by_environment() noexcept {
+  const char* v = std::getenv("HS_KERNELS_NO_AVX512");
+  return v != nullptr && v[0] != '\0' && std::strcmp(v, "0") != 0;
+}
+
 bool cpu_has_avx512f() noexcept {
 #if HS_KERNELS_AVX512
   static const bool ok = [] {
+    if (avx512_masked_by_environment()) return false;
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx512f") != 0;
   }();

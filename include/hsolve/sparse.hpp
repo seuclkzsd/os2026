@@ -125,6 +125,10 @@ struct KernelOptions {
 };
 
 /// Whether `path` can run on this machine (Auto, Reference and Portable always can).
+/// The environment variable HS_KERNELS_NO_AVX512 (any value but "" or "0", read once, at the
+/// first kernel call) makes the library behave as on a CPU without AVX-512F: Avx512 is then
+/// unavailable and Auto takes the fallback. For testing that fallback on AVX-512 machines and for
+/// measuring what a CPU without AVX-512 would run.
 bool kernel_path_available(KernelPath path) noexcept;
 /// The path `path` runs as: Auto resolves to Avx512 or Portable; an unavailable Avx512 throws
 /// Unsupported. Cheap (the CPU check is done once).
