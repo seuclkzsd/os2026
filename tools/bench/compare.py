@@ -120,7 +120,10 @@ def main() -> int:
                 rep = res.report
                 etas = [p.get("backward_error", np.nan) for p in rep.get("pairs", [])]
                 entry.update(success=rep.get("success"), max_eta=float(np.nanmax(etas)) if etas else None,
-                             pairs=len(res.eigenvalues))
+                             pairs=len(res.eigenvalues),
+                             # solver-internal time: excludes process/MPI start-up and Python imports
+                             solve_s=(rep.get("time_setup_s", 0) + rep.get("time_solve_s", 0)) if s == "slepc"
+                             else rep.get("time_total_s"))
                 sets[s] = np.asarray(res.eigenvalues)
             else:
                 entry.update(success=False, error=g.get("stderr_tail", "")[-300:])
@@ -144,17 +147,20 @@ def main() -> int:
                                     "rows": rows}, indent=1))
     # Markdown summary
     lines = [f"# {args.tag}", "", f"cores `{args.cores}`, SLEPc ranks {args.slepc_ranks}, wall/peak from guard.py", "",
-             "| case | n | type | k | " + " | ".join(f"{s} time (s) | {s} GiB | {s} ok" for s in solvers) +
-             " | speedup vs slepc | set check |", "|" + "---|" * (4 + 3 * len(solvers) + 2)]
+             "| case | n | type | k | " + " | ".join(f"{s} wall/solve (s) | {s} GiB | {s} ok" for s in solvers) +
+             " | speedup vs slepc (wall / solve) | set check |", "|" + "---|" * (4 + 3 * len(solvers) + 2)]
     for r in rows:
         cells = [r["case"], str(r["n"]), r["problem"], str(r["k"])]
         for s in solvers:
             e = r["solvers"][s]
-            cells += [f"{e['wall_s']:.2f}" if e.get("wall_s") is not None else "-",
+            cells += [(f"{e['wall_s']:.2f}" if e.get("wall_s") is not None else "-") +
+                      (f" / {e['solve_s']:.2f}" if e.get("solve_s") is not None else ""),
                       f"{e['peak_rss_gib']:.2f}" if e.get("peak_rss_gib") is not None else "-",
                       "yes" if e.get("success") else "NO"]
         hs, sl = r["solvers"].get("hsolve", {}), r["solvers"].get("slepc", {})
         sp = f"{sl['wall_s'] / hs['wall_s']:.2f}x" if hs.get("wall_s") and sl.get("wall_s") else "-"
+        if hs.get("solve_s") and sl.get("solve_s"):
+            sp += f" / {sl['solve_s'] / hs['solve_s']:.2f}x"
         chk = []
         for s in solvers:
             e = r["solvers"][s]
