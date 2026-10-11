@@ -16,6 +16,13 @@ v3（P3 合并后，a8ed8f4）——低内存输入装配、无散射映射的�
 块 Krylov-Schur、LOBPCG、Jacobi-Davidson；driver 的谱切片、惯性搜索的单边目标、零带切除、GHIEP 零簇
 移位放置、互斥分阶段计时；Python 接口。实测数据汇总在 `results/p3_measurements.md`。
 
+v4（P4 合并后，6a3d7c1）——稀疏核运行时分派（Reference / Portable / AVX-512）与融合的修正残差
+`shifted_residual`；修正只解活跃列、到舍入水平即停；`FactorSolveOperator`；自研并行嵌套剖分排序
+（factor 层，driver 尚未使用）；一般 Krylov-Schur 的块模式与 `krylov_schur_general_peak_columns`；
+新模块 src/verify（随机排除检验、单精度计数规则、代价模型；尚未接入 driver）；driver 的块 Krylov
+（`block_size`）、InertiaCounter 证书计数与第五个互斥阶段 certificate、确定性的排序代价模型、B 的
+O(nnz) 正定性筛查、GHIEP 块运行与后处理内存；集群节点部署。实测汇总在 `results/p4_measurements.md`。
+
 ---
 
 ## 1. 问题范围
@@ -41,20 +48,25 @@ python/                    pybind11 进程内接口 hsolve._hsolve + hsolve 包�
         │
 src/driver   诊断、策略、位移管理、谱切片与单边目标、零簇处理、惯性证书、精修、残差验证、报告(JSON)
         │
-src/eigen    厚重启 Lanczos（厄密 Krylov-Schur，含块模式 block_size）、Krylov-Schur（一般/非厄密）、
-        │    LOBPCG、Jacobi-Davidson（eigen_iterative.hpp）
+src/verify   完备性检验构件：随机排除检验、单精度计数规则、代价模型（verify.hpp；依赖 eigen、factor、
+        │    sparse、linalg；driver 尚未调用，P5 接入）
+src/eigen    厚重启 Lanczos（厄密 Krylov-Schur）与一般 Krylov-Schur（GHIEP），二者都有块模式
+        │    block_size；LOBPCG、Jacobi-Davidson（eigen_iterative.hpp）
         │        ↑ 只依赖 include/hsolve/linear_operator.hpp、eigen.hpp 与 src/linalg
-src/ops      LinearOperator 实现：CsrOperator（A）、ShiftInvertOperator（(A−σB)⁻¹B，可选迭代修正）
-        │
-src/factor   MUMPS：分析/估计/分解/多右端回代/惯性；复数走实嵌入；InertiaCounter（只计惯性）
-src/sparse   CsrMatrix 工具、SpMV/SpMM、ShiftedPencil（上三角并模式，无散射映射）、实嵌入、厄密化
+src/ops      LinearOperator 实现：CsrOperator（A）、ShiftInvertOperator（(A−σB)⁻¹B，可选迭代修正）、
+        │    FactorSolveOperator（K⁻¹，预条件子用）
+src/factor   MUMPS：分析/估计/分解/多右端回代/惯性；复数走实嵌入；InertiaCounter（只计惯性）；
+        │    自研并行嵌套剖分 compute_ordering（以 PERM_IN 交给 MUMPS）
+src/sparse   CsrMatrix 工具、SpMV/SpMM 与融合残差 shifted_residual（运行时分派：Reference / Portable /
+             AVX-512）、ShiftedPencil（上三角并模式，无散射映射）、实嵌入、厄密化
 src/linalg   DenseMatrix、BLAS/LAPACK 封装、随机向量、确定性归约、CGS2 / 块 CGS2 正交化（dense_ops）
 src/io       npy / npz / mtx 读写（流式、低内存装配）、三角存储恢复、厄密性检查与厄密化
 src/util     错误、日志(JSON lines)、计时、内存(RSS)
 ```
 
-- 下层模块（io / sparse / linalg / factor / ops / eigen）**不打印、不依赖日志**；统计信息通过
-  返回的结构体（`FactorStats`、`InertiaCounterStats`、`*EigResult::history`）交给 driver 统一记录。
+- 下层模块（io / sparse / linalg / factor / ops / eigen / verify）**不打印、不依赖日志**；统计信息
+  通过返回的结构体（`FactorStats`、`InertiaCounterStats`、`*EigResult::history`、`ExclusionResult`）
+  交给 driver 统一记录。
 - 头文件：`include/hsolve/` 为公共接口；`src/<module>/*.hpp` 为模块内部头文件。
 - `python/` 只用公共接口 `hs::solve` / `hs::load_matrix`：与 CLI 同一条求解路径、同一份配置格式；
   scipy/numpy 输入一次转换为 `CsrMatrix`（不稠密化），特征向量零拷贝交给 numpy，求解期间释放 GIL。
@@ -113,7 +125,23 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   4.1 → 5.7 ms（约一次分解的 0.1%）。
   K(σ) = 1·A + (−σ)·B，B 自身 = 0·A + 1·B，A 自身 = 1·A + 0·B，同一模式服务所有位移、B 正定性检测
   与 A 的零主元计数。`assemble_full` 仅供测试/小问题。
-- spmv/spmm 为参考实现（OpenMP）；SIMD 版本（P3 未做）须与之在 1e-14 相对误差内一致。
+- **稀疏核与运行时分派**（`src/sparse/kernels.cpp`，P4）：spmv / spmm / `shifted_residual` 有
+  `KernelPath`：Reference（P1 循环：跨步 spmm，每遍 8 个向量）、Portable（交错块内核，按块宽 1..16
+  分别编译，累加器为构建 ISA 宽度的 GCC/Clang 向量扩展）、Avx512（AVX-512F intrinsics，运行时以
+  `__builtin_cpu_supports` 检测，不可用时显式请求抛 Unsupported）。Auto = 每行 ≥ 8 个 double 的块
+  （实数 q ≥ 8、复数 q ≥ 4）用 AVX-512，否则 Portable（窄块上 Portable 更快，`results/p4_measurements.md`
+  §1）。环境变量 `HS_KERNELS_NO_AVX512`（首次调用时读一次）屏蔽 AVX-512，用于在 AVX-512 机器上测试回退。
+  - 多向量（p ≥ 2）先把 X 拷成行主序交错块（每遍 A 服务 16 个向量，连续读），工作区 n·min(p, 16)
+    标量，可由 `KernelOptions::workspace` 复用；A 每列平均非零 < 2（p ≤ 4）或 < 8（更宽）时 spmm 保留
+    Reference 跨步循环（如对角 B）；单个向量在所有路径上都走 Reference 行循环。
+  - **确定性**：每个输出行由一个线程按固定顺序计算 ⇒ 同一路径的结果与线程数无关、逐次运行逐位相同；
+    不同路径舍入不同（求和顺序、FMA），对 Reference 的差 ≤ 1e-14·（|A||X| 尺度）（测试契约，典型
+    ~1e-15），不逐位一致。
+  - `shifted_residual(A, B, σ, X, Y, R, p, …, ω)`：R = BX − (AY − σBY)（B = nullptr 即 I），快路径按
+    B(X + σY) − AY 一次扫描 A、B（Reference 为三次 spmm）；可选输出每列分量后向误差
+    ω_k = maxᵢ |r_ik| / (|B||w| + |A||y|)ᵢ（w = x + σy；复数 |z| = |Re z| + |Im z|；0/0 = 0；r/0 = inf；
+    任一行 r 或分母非有限 ⇒ ω_k = inf），同一次扫描算出，max 精确故与线程数无关。ω 为几个 eps 时
+    残差就是自身求值的舍入噪声。
 
 ### 3.3 linalg（`include/hsolve/dense.hpp`、`src/linalg/`）
 - `DenseMatrix<T>`：列主序、64 字节对齐、`ld == rows`。
@@ -144,8 +172,10 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   列之间**不**正交化（调用者再做块内 QR）。只要单线程 gemm 确定，结果与线程数无关。工作区上界
   `orthogonalize_block_cgs2_workspace_bytes(k, p)`（≈ max(2 MB, 32·8(k·p·d + p))，d = 1 实 / 2 复）。
   n = 2e5、k = 64、p = 8、两遍时比 8 次逐列调用快 2.9–4.6×（对旧 BLAS2 实现 3.5–7.0×）。
-- eigen 的 `BlockOrthonormalizer`（`src/eigen/block_ortho.*`：块 CGS2 + M 内积 Cholesky-QR，块
-  Krylov-Schur 专用）是同类核，暂归 eigen；是否并入 dense_ops 由 lead 决定。
+- eigen 的 `BlockOrthonormalizer`（`src/eigen/block_ortho.*`：块 CGS2 + M 内积 Cholesky-QR，两遍，
+  块 Krylov-Schur 专用；一般 Krylov-Schur 块模式的回退核）与 `eigen_detail::block_cgs_cholqr2`
+  （`src/eigen/block_general.*`：本节的 `orthogonalize_block_cgs2` + 两次 Cholesky-QR，一般块模式的
+  快路径，§3.5）是同类核，暂归 eigen；是否并入 dense_ops 由 lead 决定。
 
 ### 3.4 factor（`include/hsolve/factor.hpp`）
 - 唯一后端 MUMPS 5.8（顺序版 + OpenMP）。**一条分解路径且始终有惯性**：实数 SYM=2（LDLᵀ，
@@ -220,16 +250,27 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   主分解为单精度/BLR 时用 `compute_inertia`）。InertiaCounter 的接入在 P4 进行中，计划规则见 §3.6-8。
 
 ### 3.4b ops（`include/hsolve/operator.hpp`）
+- 稀疏乘积走 §3.2 的内核，构造参数 `KernelPath kernels`（默认 Auto；Reference 只换稀疏乘积，修正
+  策略在所有路径上都是 P4 的，因此开修正时没有路径复现 P1 算子——`bench/solvephase_fix_refine.cpp`
+  有其副本）；各算子在两次 apply 之间保留内核工作区。
 - `CsrOperator`：Y = A X（spmm）。
-- `ShiftInvertOperator(factor, pencil, σ, refinement)`：Y = K⁻¹ B X（B = I 时复制）一次多右端回代；
-  `refinement.max_steps>0` 时做**双精度迭代修正**：r = BX − (A Y − σ B Y)（两次 spmm，K 不物化），
-  Y += K⁻¹ r，直到每列 ‖r‖ ≤ rel_tol·‖BX‖。**单精度或 BLR 分解必须配合修正**（否则特征对只是
-  扰动矩阵的特征对，后向误差停在 1e-7 / blr_tol）。单精度仅当 σ 与所有特征值的相对距离
-  ≳ 1e-6‖K‖ 时可用（修正收敛需 eps_s·cond(K) < 1），否则修正发散（`last_relative_residual()` 可见）。
-  driver 不会自动换精度（§3.6-3）。P3 实测：单精度因子作 Jacobi-Davidson 的预条件子比「单精度 +
-  修正」更快更稳（§3.5），计划作为内存受限时的回退路径（P4）；它需要一个只做回代的算子
-  y = K⁻¹x（任意 B，不乘 B、不修正），目前只在测试与 bench 中有局部副本，应加到 ops。
-- 构造时记录分解次数，apply 时断言未变（防止同一对象被重分解到别的位移后悄悄改变 Op）。
+- `ShiftInvertOperator(factor, pencil, σ, refinement, kernels)`：Y = K⁻¹ B X（B = I 时复制）一次多
+  右端回代（回代占一次 apply 的 80–100%，p = 16 时每列代价是 p = 1 的 1/4–1/9，`results/p4_measurements.md`
+  §1）；`refinement.max_steps > 0` 时做**双精度迭代修正**：r = B(X + σY) − A Y（shifted_residual：
+  一次融合扫描 A、B，K 不物化，同时给出每列分量后向误差 ω；非有限残差 ω = inf），修正只对仍活跃的
+  列做块求解 Y += K⁻¹ r；列在以下任一条件时停止：‖r‖ ≤ rel_tol·‖BX‖；ω ≤ 8 eps
+  （`SolveRefinement::stop_at_rounding_level`，默认开；false 恢复 P1 的停止规则，修正仍只解活跃列）；
+  或修正未降低 ‖r‖（丢弃该修正，保留最优迭代）。每次 apply 至多 max_steps 次块修正。rel_tol 不可达时
+  返回列可能 ‖r‖ > rel_tol·‖BX‖，调用方须读 `last_relative_residual()` / `last_backward_error()`。
+  **单精度或 BLR 分解必须配合修正**（否则特征对只是扰动矩阵的特征对，后向误差停在 1e-7 / blr_tol）。
+  单精度仅当 σ 与所有特征值的相对距离 ≳ 1e-6‖K‖ 时可用（修正收敛需 eps_s·cond(K) < 1），否则修正
+  停滞或发散（实测 syn-mem27-46、σ = 0：10 步后 ‖r‖/‖Bx‖ ≈ 5e-6）。**driver 目前不检查**
+  `last_relative_residual()`，也不会自动换精度（§3.6-3、§3.6-5）。修正工作区 2·n·p 标量。
+- `FactorSolveOperator(factor)`（P4）：y = K⁻¹x，一次 p 列回代（任意精度的因子，不乘 B、不修正），
+  如 LOBPCG / JD 的预条件子；构造检查与重分解防护同 ShiftInvertOperator。测试与 bench 中的局部副本
+  （`test_jacobi_davidson.cpp`、`bench/lobpcg_jd_memory.cpp`）尚未换成它。
+- 构造时要求可用的分解（`inertia().valid`，否则 InvalidInput），记录分解次数，apply 时断言未变
+  （防止同一对象被重分解到别的位移后悄悄改变 Op，违反抛 Internal）。
 
 ### 3.5 eigen（`include/hsolve/eigen.hpp`、`include/hsolve/eigen_iterative.hpp`）
 - 只依赖 `linear_operator.hpp`、`eigen.hpp` 与 `src/linalg`。不因不收敛抛异常（返回 converged=false）。
