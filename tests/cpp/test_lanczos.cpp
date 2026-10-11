@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "hsolve/eigen.hpp"
@@ -736,6 +738,70 @@ TYPED_TEST(LanczosTyped, InvalidOptionsThrowInvalidInput) {
   const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
   EXPECT_TRUE(r.converged);
   EXPECT_LT(gram_deviation<T>(d, nullptr, r.vectors, false), 1e-13);
+}
+
+TYPED_TEST(LanczosTyped, NumericallyMalformedInputsThrowInvalidInput) {
+  // Input errors that only show up in the arithmetic (non-finite blocks or operator values, a
+  // b_inner that is not positive definite) are InvalidInput, never Internal.
+  using T = TypeParam;
+  const index_t n = 40;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  std::vector<double> spectrum(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) spectrum[i] = 1.0 + static_cast<double>(i);
+  auto op = diagonal_operator<T>(spectrum);
+  // `topic`: a word the message must contain, so that it names the actual problem.
+  auto expect_invalid = [](LinearOperator<T>& o, LinearOperator<T>* b,
+                           const KrylovSchurOptions<T>& opt, const char* what, const char* topic) {
+    try {
+      hs::lanczos_krylov_schur<T>(o, b, Which::LargestAlgebraic, opt);
+      ADD_FAILURE() << "no exception for " << what;
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << what << ": " << e.what();
+      EXPECT_NE(std::string(e.what()).find(topic), std::string::npos) << what << ": " << e.what();
+    }
+  };
+  KrylovSchurOptions<T> base;
+  base.nev = 3;
+
+  // std::max(dev, NaN) == dev: a NaN entry must not pass the orthonormality check of D.
+  DenseMatrix<T> d(n, 2);
+  d(0, 0) = T(1.0);
+  d(1, 1) = T(nan);
+  auto opt = base;
+  opt.deflation = &d;
+  expect_invalid(op, nullptr, opt, "deflation block with a NaN entry", "deflation");
+  DenseMatrix<T> x0(n, 1);
+  x0(0, 0) = T(1.0);
+  x0(3, 0) = T(nan);
+  opt = base;
+  opt.initial = &x0;
+  expect_invalid(op, nullptr, opt, "initial vector with a NaN entry", "initial");
+  auto nan_op = diagonal_operator<T>([&] {
+    auto s = spectrum;
+    s[7] = nan;
+    return s;
+  }());
+  expect_invalid(nan_op, nullptr, base, "operator returning NaN", "non-finite");
+
+  // Not positive definite b_inner: M = -I fails on the start vector; M = diag(+-1) fails on the
+  // start vector or on a later random vector (whichever first has w^H M w <= 0; indefiniteness
+  // is not detectable in general, but must never surface as an internal error).
+  auto negative = diagonal_operator<T>(std::vector<double>(static_cast<std::size_t>(n), -1.0));
+  std::vector<double> signs(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) signs[i] = i % 2 ? -1.0 : 1.0;
+  auto indefinite = diagonal_operator<T>(signs);
+  DenseMatrix<T> e0(n, 1);
+  e0(0, 0) = T(1.0);
+  for (bool store : {false, true}) {
+    SCOPED_TRACE(store ? "store_bv" : "recompute");
+    opt = base;
+    opt.store_bv = store;
+    expect_invalid(op, &negative, opt, "negative definite b_inner", "positive definite");
+    expect_invalid(op, &indefinite, opt, "indefinite b_inner", "positive definite");
+    opt.initial = &e0;
+    expect_invalid(op, &negative, opt, "negative definite b_inner, user start vector",
+                   "positive definite");
+  }
 }
 
 }  // namespace

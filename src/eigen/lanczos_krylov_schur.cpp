@@ -88,9 +88,9 @@ constexpr double kLockTol = 4 * kEps;
 constexpr double kDeflationOrthoTol = 1e-8;
 /// A user start vector must keep at least this fraction of its M-norm after projecting out D.
 constexpr double kStartMinRatio = 1e-12;
-/// Random vectors are drawn only while the free space is not exhausted; a random vector losing
-/// more than this fraction of its norm to [D V] means the basis lost orthogonality (a bug or a
-/// b_inner that is not HPD).
+/// Random vectors are drawn only while the free space is not exhausted. With an M-orthonormal
+/// basis a random vector keeps most of its M-norm, so losing more than this fraction to [D V]
+/// means that M (b_inner) is not positive definite.
 constexpr double kRandomMinRatio = 1e-8;
 /// Rows per block of the in-place basis rotation (temporary of kRowBlock x k scalars instead of
 /// a second n x k basis).
@@ -252,20 +252,25 @@ void ThickRestartLanczos<T>::load_deflation() {
                    T(0), gram.col(c0), dd);
     }
   }
+  // NaN-propagating maximum (once NaN, `e > dev` is never true again): std::max(dev, NaN) would
+  // keep dev and accept a non-finite block.
   double dev = 0.0;
   for (index_t j = 0; j < d_; ++j)
-    for (index_t i = 0; i < d_; ++i)
-      dev = std::max(dev, std::abs(gram(i, j) - T(i == j ? 1.0 : 0.0)));
-  if (dev > kDeflationOrthoTol)
+    for (index_t i = 0; i < d_; ++i) {
+      const double e = std::abs(gram(i, j) - T(i == j ? 1.0 : 0.0));
+      if (std::isnan(e) || e > dev) dev = e;
+    }
+  if (!(dev <= kDeflationOrthoTol))
     HS_THROW(InvalidInput,
              "lanczos_krylov_schur: deflation block is not orthonormal in the solver inner "
-             "product (max |D^H M D - I| = "
+             "product, or not finite (max |D^H M D - I| = "
                  << dev << ")");
 }
 
 /// Orthogonalizes basis vector j (stored in place) against [D v_0 .. v_{j-1}] and returns
 /// {M-norm before, M-norm after}. The norm before follows from Pythagoras, ||w||^2 =
 /// ||coef||^2 + ||w_perp||^2 (the columns are M-orthonormal), so it costs no M application.
+/// Throws InvalidInput when the vector is not finite (Inf/NaN from the operator or b_inner).
 template <class T>
 std::pair<double, double> ThickRestartLanczos<T>::orthogonalize(index_t j) {
   T* w = vcol(j);
@@ -278,6 +283,7 @@ std::pair<double, double> ThickRestartLanczos<T>::orthogonalize(index_t j) {
     T* bw = bvcol(j);
     linalg::orthogonalize_cgs2(n_, k, basis_.data(), n_, bbasis_.data(), n_, w, bw, coef_.data());
     b_inner_->apply(w, n_, bw, n_, 1);
+    // std::max keeps a NaN (first argument) so that the finiteness check below sees it.
     after = std::sqrt(std::max(std::real(linalg::dot(n_, w, bw)), 0.0));
   } else {
     after = linalg::orthogonalize_cgs2<T>(n_, k, basis_.data(), n_, nullptr, n_, w,
@@ -286,7 +292,12 @@ std::pair<double, double> ThickRestartLanczos<T>::orthogonalize(index_t j) {
   }
   double c2 = after * after;
   for (index_t i = 0; i < k; ++i) c2 += abs2(coef_[i]);
-  return {std::sqrt(c2), after};
+  const double before = std::sqrt(c2);
+  if (!std::isfinite(before))
+    HS_THROW(InvalidInput,
+             "lanczos_krylov_schur: non-finite basis vector (the operator or b_inner returned "
+             "Inf/NaN)");
+  return {before, after};
 }
 
 template <class T>
@@ -298,21 +309,28 @@ void ThickRestartLanczos<T>::normalize(index_t j, double norm) {
 template <class T>
 void ThickRestartLanczos<T>::set_start_vector() {
   T* v0 = vcol(0);
-  if (opt_.initial) {
+  const bool user = opt_.initial != nullptr;
+  if (user) {
     std::copy(opt_.initial->data(), opt_.initial->data() + n_, v0);
-    if (linalg::norm2(n_, v0) == 0.0)
-      HS_THROW(InvalidInput, "lanczos_krylov_schur: initial vector is zero");
+    const double norm = linalg::norm2(n_, v0);
+    if (!(norm > 0.0) || !std::isfinite(norm))
+      HS_THROW(InvalidInput,
+               "lanczos_krylov_schur: initial vector must be nonzero and finite, 2-norm " << norm);
   } else {
     linalg::fill_random(v0, n_, opt_.seed, next_stream_++);
   }
   const auto [before, after] = orthogonalize(0);
   if (!(after > kStartMinRatio * before)) {
-    // n - d >= nev >= 1 leaves room, so only a user vector can lie in span(D).
-    HS_ASSERT(opt_.initial != nullptr,
-              "random start vector lies in span(D): M-norm " << after << " of " << before);
-    HS_THROW(InvalidInput,
-             "lanczos_krylov_schur: initial vector has no component outside span(deflation) in "
-             "the solver inner product (or b_inner is not positive definite)");
+    // n - d >= nev >= 1 leaves room, so only a user vector can lie in span(D); any other loss
+    // of the M-norm (a nonzero vector with w^H M w <= 0) means that M is not positive definite.
+    if (user && d_ > 0)
+      HS_THROW(InvalidInput,
+               "lanczos_krylov_schur: initial vector has no component outside span(deflation) in "
+               "the solver inner product (M-norm "
+                   << after << " of " << before << "), or b_inner is not positive definite");
+    HS_THROW(InvalidInput, "lanczos_krylov_schur: start vector has M-norm "
+                               << after << " (of " << before
+                               << "): b_inner is not Hermitian positive definite");
   }
   normalize(0, after);
 }
@@ -321,9 +339,10 @@ template <class T>
 void ThickRestartLanczos<T>::set_random_vector(index_t j) {
   linalg::fill_random(vcol(j), n_, opt_.seed, next_stream_++);
   const auto [before, after] = orthogonalize(j);
-  HS_ASSERT(after > kRandomMinRatio * before, "random vector lost its norm against [D V] ("
-                                                  << after << " of " << before
-                                                  << "): basis not orthonormal or b_inner not HPD");
+  if (!(after > kRandomMinRatio * before))
+    HS_THROW(InvalidInput, "lanczos_krylov_schur: a random vector lost its M-norm against [D V] ("
+                               << after << " of " << before
+                               << "): b_inner is not Hermitian positive definite");
   normalize(j, after);
 }
 
