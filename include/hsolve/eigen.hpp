@@ -88,9 +88,11 @@ struct GeneralEigResult {
   DenseMatrix<cplx> vectors;     ///< n x m unit-2-norm eigenvector approximations (one per theta)
   DenseMatrix<T> schur_basis;    ///< n x m orthonormal Q with Op*Q ~= Q*S; leading nconv columns
                                  ///< span an (approximately) Op-invariant subspace
-  DenseMatrix<T> schur_form;     ///< m x m S, quasi-upper-triangular for real T, no split 2x2 block
+  DenseMatrix<T> schur_form;     ///< m x m S, quasi-upper-triangular for real T, no split 2x2 block;
+                                 ///< spec(S(0:nconv, 0:nconv)) = theta[0, nconv) as a set (the
+                                 ///< diagonal order need not follow theta)
   std::vector<double> estimate;  ///< eigenvector residual estimates ||Op x - theta x||_2
-  std::vector<cplx> ritz_all;
+  std::vector<cplx> ritz_all;    ///< all Ritz values of the final basis, in `which` ranking order
   index_t nconv = 0;             ///< never splits a conjugate pair
   index_t restarts = 0;
   index_t op_applies = 0;
@@ -101,6 +103,16 @@ struct GeneralEigResult {
 /// Krylov-Schur for a general (non-self-adjoint) operator in the Euclidean inner product.
 /// Real T works in real arithmetic with a real Schur form (dgees/dtrsen); complex-conjugate
 /// Ritz pairs are never split. Used for GHIEP (indefinite B). `deflation` is not supported.
+/// Options: ncv must be >= min(n, nev + 2) for real T (room for a straddling pair plus one new
+/// vector), >= min(n, nev + 1) for complex T; larger than n is clamped to n (exact basis).
+/// tol >= 0 and max_restarts >= 0; violations throw InvalidInput. A Ritz value with
+/// |theta| <= eps * max|Ritz value| counts as theta == 0 in the convergence test. history holds
+/// one record per Rayleigh-Ritz step (restarts + 1 records). Locking is soft (no deflation of b).
+/// A single-vector Krylov space sees further copies of an exactly multiple eigenvalue only through
+/// rounding, so the result may converge before all copies of such a cluster are found.
+/// Cost per restart: about ncv/2 operator applications, O(n ncv^2) flops for CGS2 and the basis
+/// update, O(ncv^3) dense work. Memory: n (ncv + 1) scalars plus the n x m outputs.
+/// Not thread-safe for a shared `op`; otherwise reentrant.
 template <class T>
 GeneralEigResult<T> krylov_schur_general(LinearOperator<T>& op, Which which,
                                          const KrylovSchurOptions<T>& options);
