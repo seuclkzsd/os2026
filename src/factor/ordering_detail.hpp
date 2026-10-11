@@ -137,8 +137,12 @@ struct DissectionStats {
   std::int64_t top_separator = 0;   ///< vertices in the first (largest) separator
   std::vector<std::int64_t> depth_separator;  ///< separator vertices summed per dissection depth
   double top_separator_s = 0.0;     ///< time of the first separator (the serial part)
-  double work_s = 0.0;              ///< summed over threads: time in separators, subgraph
-                                    ///< extraction and leaves (wall time x threads minus idle)
+  double work_s = 0.0;              ///< time in separators, subgraph extraction and leaves, summed
+                                    ///< over the pieces
+  double critical_path_s = 0.0;     ///< longest root-to-leaf chain of that work, i.e. the wall
+                                    ///< time with unlimited threads (Brent: T_p <= work/p +
+                                    ///< critical). Exact with 1 thread; with more, a piece's
+                                    ///< time includes waiting for its stolen trial bisections
   int threads = 1;                  ///< OpenMP threads that ran the dissection
 };
 

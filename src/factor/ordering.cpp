@@ -35,6 +35,7 @@ struct Piece {
   std::int64_t first = 0;
   std::uint64_t seed = 0;
   int depth = 0;
+  std::int64_t path_ns = 0;  ///< work on the ancestors (critical-path accounting)
 };
 
 class Dissector {
@@ -58,6 +59,7 @@ class Dissector {
       stats->top_separator = top_separator_.load();
       stats->top_separator_s = top_separator_s_;
       stats->work_s = static_cast<double>(work_ns_.load()) * 1e-9;
+      stats->critical_path_s = static_cast<double>(critical_ns_.load()) * 1e-9;
       stats->depth_separator.clear();
       for (const auto& d : depth_separator_) stats->depth_separator.push_back(d.load());
       while (!stats->depth_separator.empty() && stats->depth_separator.back() == 0) stats->depth_separator.pop_back();
@@ -80,7 +82,18 @@ class Dissector {
     }
   }
 
-  void add_work(const Timer& t) { work_ns_ += static_cast<std::int64_t>(t.seconds() * 1e9); }
+  // Accounts the work of one piece (started at t, after `path_ns` of work on its ancestors):
+  // total work and the longest root-to-leaf chain of work (the critical path). Returns the
+  // path including this piece.
+  std::int64_t add_work(const Timer& t, std::int64_t path_ns) {
+    const auto own = static_cast<std::int64_t>(t.seconds() * 1e9);
+    work_ns_ += own;
+    const std::int64_t path = path_ns + own;
+    std::int64_t seen = critical_ns_.load();
+    while (path > seen && !critical_ns_.compare_exchange_weak(seen, path)) {
+    }
+    return path;
+  }
 
   void dissect(std::unique_ptr<Piece> pc) {
     const Graph& g = pc->g;
@@ -88,7 +101,7 @@ class Dissector {
     Timer work;
     if (g.n <= p_.leaf_size || g.edges() == 0) {
       leaf(*pc);
-      add_work(work);
+      add_work(work, pc->path_ns);
       return;
     }
     const std::vector<std::uint8_t> where = vertex_separator(g, pc->seed, p_.separator);
@@ -97,7 +110,7 @@ class Dissector {
     for (const std::uint8_t w : where) ++count[w];
     if (count[0] == g.n || count[1] == g.n || count[kSeparator] == g.n) {
       leaf(*pc);  // no progress possible
-      add_work(work);
+      add_work(work, pc->path_ns);
       return;
     }
     ++separators_;
@@ -125,8 +138,9 @@ class Dissector {
       h->depth = pc->depth + 1;
       half[side] = std::move(h);
     }
+    const std::int64_t path = pc->path_ns;
     pc.reset();  // free the parent before descending
-    add_work(work);
+    half[0]->path_ns = half[1]->path_ns = add_work(work, path);
 
     const bool spawn = half[0]->g.n >= p_.task_size;
     Piece* first_half = half[0].release();
@@ -138,7 +152,7 @@ class Dissector {
   const DissectionParams& p_;
   std::vector<std::int32_t> order_;
   static constexpr int kMaxDepth = 64;
-  std::atomic<std::int64_t> separators_{0}, leaves_{0}, top_separator_{0}, work_ns_{0};
+  std::atomic<std::int64_t> separators_{0}, leaves_{0}, top_separator_{0}, work_ns_{0}, critical_ns_{0};
   double top_separator_s_ = 0.0;  // written by the task at depth 0 only
   std::atomic<std::int64_t> depth_separator_[kMaxDepth] = {};
   std::mutex error_mutex_;
