@@ -330,13 +330,39 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   - 重数 ≤ p 的特征值的全部副本一轮内找到；超出 p 的副本只能靠舍入进入（同 p = 1）。
   - 内存：基 n·(d + ncv + p) 标量（store_bv 时加倍），无 store_bv 时另加 n·p 的 M·W 工作区；自动 ncv
     更大（nev = 12、p = 8：ncv = 64，基 72 列，p = 1 时 29 列）。每步 3 次块 M 作用（store_bv 2 次）。
-  - driver 尚未开放 block_size（恒为 1）：30 个最近型测例上相同精度下几何平均加速 p = 2/4/8 为
-    1.41×/1.36×/1.37×，但在小而易的问题上更慢，且 4–8 个测例的块运行残差底更高、追不上 p = 1；默认
-    值的改变须先做 driver 端到端测量。预期用途是证书报缺副本后的收缩重跑（p ≥ 缺的副本数）。
+  - driver 的用法（P4，§3.6-5）：HEP/GHEP 的每次位移反演运行用 `block_size_for`（自动：nev ≥ 8 时
+    p = 4，否则 1），证书收缩重跑宽度 max(p, min(4, 缺数上取偶))。P3 的 eigen 层测量（相同精度下
+    几何平均 1.36–1.41×）由 driver 端到端测量取代（`results/p4_measurements.md` §3）。
 - `krylov_schur_general`：欧氏内积，实数用实 Schur 形（dgees/dtrsen），共轭对永不拆开：
   m ∈ {nev, nev+1}，共轭对相邻、正虚部在前，nconv 不拆对，schur_form 无被截断的 2×2 块，
   前 nconv 列 Schur 基张成（近似）不变子空间。**不支持 deflation**（非正规算子的不变子空间的
-  正交补不是不变的；用法上以更大的 nev/ncv 重跑代替）；block_size ≠ 1 抛 InvalidInput。
+  正交补不是不变的；用法上以更大的 nev/ncv 重跑代替）；block_size < 1 抛 InvalidInput。
+  - 结果向量：先形成 Schur 基 Q1 = V Q(:, 0:m)，释放 Krylov 基，再算 x = Q1 z（z 来自投影特征向量），
+    峰值为 max(基 + Q1, Q1 + 向量)（wg-square-1e6：736 → 448 MB）；与旧的 V y 相差 ≤ 2e-15。
+  - **块模式**（P4，`block_size = p > 1`，块 Arnoldi Krylov-Schur）：每步一次 p 列的 `op.apply`
+    （多右端回代）；新块对基做块 CGS（`linalg::orthogonalize_block_cgs2`，DGKS 判据决定是否第二遍），
+    块内两次 Cholesky-QR（`eigen_detail::block_cgs_cholqr2`）；某列崩溃、首个 Cholesky 因子的列缩放
+    2-范数条件数 > 64 或第二个 Gram 阵偏离 I 时，恢复该块并交给两遍核 `BlockOrthonormalizer`
+    （相关列换成确定性随机向量——块版的 Arnoldi 中断）。关系 Op V = V H + U C，C 为 p×m 耦合块：
+    对的估计为 ‖C y‖₂，不变子空间检验用 ‖C Q1‖_F；选择、认证、实 Schur 形与输出与 p = 1 共用。
+    快路径核比两遍核快 1.3–3.1×（p = 2..16；p = 64 为 1.0–1.3×），实测运行中从未回退
+    （`results/p4_measurements.md` §4）。
+  - 布局（`eigen_detail::block_general_layout`）：基数 = 单向量 ncv（自动或给定）上取整到 p 的倍数，
+    且 ≥ s + 2p（s = nev + 2（实）/ nev + 1（复）上取整到 p 的倍数）；给定 ncv 时即为基数，自动时再加
+    4p（受 n ≥ 2(ncv + p) 限制）。重启保留约 nev + (ncv − nev)/2 个 Schur 向量（p 的倍数、≥ s，共轭对
+    处调整 1）。起始块：`initial` 的前 min(p, cols) 列 + 随机列。
+  - 提前停止：在块边界做 Rayleigh–Ritz 探测（首轮从基数处起，之后从第一个新块起），nev 个全部认证
+    即结束本轮；块运行因此恰好达到 tol，与 p = 1 须在相同残差下比较。
+  - n < 2(ncv + p)（或 p 大到放不下一个块基）时用一轮覆盖整个空间的单向量循环精确求解（n 次作用，
+    n×n 基：driver 把配置的 p 限制在 min(64, n/16)，直接调用 eigen 者自负）。
+  - 重数 ≤ p 的特征值一轮内取全副本；超出 p 的只能靠舍入。内存：基 n(ncv + p) 标量，自动 ncv 更大
+    （nev = 18、p = 8、实数：ncv = 72，p = 1 时 37）。
+  - `krylov_schur_general_peak_columns(n, options)`：给定选项时的峰值 n-向量数（Krylov 基 + Schur
+    基，与 Schur 基 + 结果向量取大；基为 p = 1 的 ncv + 1、块布局的 ncv + p 或整空间循环的 n + 1），
+    按求解器同样规则校验选项；driver 的 GHIEP 用它做内存适配（§3.6-3）。
+  - p = 1 与 a8ed8f4 逐位一致（Ritz 向量除外，见上；`test_krylov_schur_general_bitwise.cpp`：每种标量
+    10 种配置，哈希表以平台指纹 + `/proc/cpuinfo` 型号为键——Xeon Silver 4314 与 Gold 6336Y 在配置
+    10 的 OpenBLAS 乘积末位不同；未知平台只检查计数）。
 - 以上两者都通过 `history` 返回每次重启的收敛数与最大残差估计。
 - **LOBPCG 与 Jacobi-Davidson**（`eigen_iterative.hpp`；直接作用于铅笔 (A, B)，不做谱变换）：
   - 共同约定：A 厄密、B（nullptr = I）厄密正定（不检查）；预条件子为近似 (A − sB)⁻¹ 的任意线性算子。
@@ -367,8 +393,42 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     更快更稳；σ 距 6 重特征值 9.5e-9 / 2.5e-11（eps_s·cond > 1，单精度修正发散、双精度因子甚至奇异）
     时 JD 仍全部正确。LOBPCG 免分解路径在 syn-mem27-46 最小 12 个：15.1 s / 0.16 GiB（无预条件）、
     8.7 s / 0.54 GiB（单精度因子预条件），对照位移反演 Lanczos 双精度因子 12.7 s / 0.69 GiB。
-    **driver 尚未调用二者**（P4：JD + 单精度因子作最近 k 个的内存受限回退；LOBPCG 用于极低内存的
-    最小/最大 k 个）。
+    **driver 尚未调用二者**（P4 未接入；计划：JD + 单精度因子作最近 k 个的内存受限回退，LOBPCG 用于
+    极低内存的最小/最大 k 个）。
+
+### 3.5b verify（`include/hsolve/verify.hpp`，P4）
+完备性检验的构件，用回代代替分解，供 driver 的策略 certificate = exact | randomized | auto 使用。
+**driver 尚未调用**（接入在 P5；在此之前 `hs::solve` 的证书仍是 §3.6-8 的精确计数）。依赖 eigen
+（`lanczos_krylov_schur`）、factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程数时确定。
+- `exclusion_check(op, b_inner, X, σ, r, opt)`：B 正定（或 B = I），持有 K = A − σB 的分解，
+  Op = K⁻¹B。问：除 X 张成的已找到特征对外，σ 的半径 r 内是否还有特征值（|θ| ≥ 1/r）？
+  - 严格界：X 先 B-正交归一（Cholesky-QR，列均衡后的秩检验）；耦合 e = ‖Op X − X H11‖_B 由一次块
+    作用算出（或调用方给出 `coupling_bound` 与 H11 的特征值）。Weyl：r 内多于 m_in 个特征值 ⇒ 收缩
+    算子 H22 有 |θ| ≥ 1/r − e 的特征值（漏掉的重特征值副本亦然）。以收缩 = X、高斯起始块 S·G、
+    s 个块步、无重启无提前停止的块 Lanczos 运行，**通过当且仅当** 补空间上所有 Ritz 值 |θ| < 1/r'
+    （r' = `pass_radius` > r，须小于下一个合法特征值的距离）。Chebyshev（直接与平方两种，
+    Kuczynski–Woźniakowski 式，适用于不定算子）+ 高斯起始分量的 Beta 分布给出
+    P(通过且漏特征值) ≤ F(κ·t*(ε, s))^p，ε = 1 − (1/r')/((1/r − e)(1 − margin))，κ ≥ cond(S B S)；
+    s 在运行**之前**由 `delta` 定出（`exclusion_block_steps`，倍增 + 二分），Krylov 空间覆盖整个
+    补空间时 δ = 0。结果为 Passed / Detected（附新 Ritz 对）/ Inconclusive（ε ≤ 0、步数上限、κ 非有限、
+    计划超资源预算）。
+  - 资源预算：计划（`exclusion_run_size`）超过 `max_krylov_vectors`（512）或 `max_memory_bytes`
+    （1 GiB）时不分配、不作用即返回 Inconclusive（窄谱隙下 s ~ log(Nκ/δ)/√ε 会规划 GB 级的基）。
+  - κ 的严格性：`start_scaling_for(B)`：B = I 时 κ = 1；对角 B 取 S = B^{-1/2}、κ = 1（精确）；对角
+    占优时 Gershgorin 上下界（严格）；否则只是估计（100 × Gershgorin 上界 / Lanczos 下界估计），
+    结果标 `rigorous = false`、陈述写明「κ 为假设，筛查结果而非证书」。B = I 而给了 S 时检验自算
+    κ = cond(S²)。
+- 单精度计数规则：`single_count_validity` / `single_precision_certificate`：B = I 或对角 B > 0 时，单精度
+  LDLᵀ 计数是 K + E 的精确惯性，‖E‖ ≤ c·g·u_s·‖K‖₁；把窗口两端各收缩 η = ‖E‖/min bᵢᵢ 后若所有已找到
+  特征值（含误差棒）都在收缩窗口内且计数相等，则认证。唯一非严格输入是 c·g = 1e3（MUMPS 阈值选主
+  无可用的先验增长界；有 certpar 实测支持，未证明）。一般 B 不适用、不声称证书。
+- `certificate_cost`：由已测得的分解时间、单次作用时间等预测 exact（主对象重分解对 / 计数器对）、
+  single、randomized（p ∈ {1, 2, 4, 8} 中最快且计划在预算内者）的秒数并推荐；randomized 须比最好的
+  精确方案快 `preference` = 1.2 倍才推荐。
+- 实测（2 线程，`results/p4_measurements.md` §5）：完整 X 全部通过、删掉一个副本或最远特征值全部
+  检出；随机检验只在分解贵（三维填充）**且**谱隙宽时占优（syn-mem27-46 比认证的单精度计数快 3.3×，
+  yee-pec-cube-32 1.3×），窄谱隙（yee-pec-box-1e5，ε = 0.15）与廉价分解（1e4 测例）上更慢；代价模型
+  在 7 个测例上都推荐了实测最快的认证方法。
 
 ### 3.6 driver（`include/hsolve/solver.hpp`）
 实现：`solver.cpp`（编排）、`steps.cpp`（共用步骤：位移、计数、分析与预算、自适应排序、代价模型）、
