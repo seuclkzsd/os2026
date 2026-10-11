@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "driver/norms.hpp"
@@ -235,7 +236,10 @@ template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed = false);
 
-/// The adaptive ordering's decision from the AMD probe's estimate (deterministic, see steps.cpp).
+/// The P4 rule of the adaptive ordering (AMD probe; one MUMPS nested dissection, nd_ordering, if
+/// the P3 model's saving exceeds kNdAnalysisOverAmd AMD analyses). Replaced in the driver by
+/// choose_ordering / adaptive_analysis below; kept as the reference the P5 choice is compared
+/// against (bench/anaint_decide.cpp, bench/drvint_*). Deterministic.
 struct OrderingDecision {
   double fill_ratio = 0.0;      ///< AMD factor entries / nnz(K)
   double saving_s = 0.0;        ///< predicted saving of nested dissection on the run
@@ -246,17 +250,87 @@ struct OrderingDecision {
 OrderingDecision decide_ordering(const FactorEstimate& amd, const MumpsInputSize& in, double pencil_nnz,
                                  int threads, index_t expected_factorizations, index_t expected_solves);
 
-/// MUMPS ICNTL(7) of the nested-dissection branch of the adaptive ordering: SCOTCH (3), or METIS
-/// (5, fixed seed) when cfg.deterministic asks for bitwise-reproducible runs - SCOTCH's orderings
-/// vary from run to run (measurements in steps.cpp).
+/// MUMPS ICNTL(7) of the P4 rule's nested dissection: SCOTCH (3), or METIS (5, fixed seed) when
+/// cfg.deterministic asks for bitwise-reproducible runs - SCOTCH's orderings vary from run to run
+/// (measurements in steps.cpp).
 int nd_ordering(const SolverConfig& cfg);
 
-/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe + cost model, nested dissection
-/// (nd_ordering) if it pays.
+// ------------------------------------------------------------------------------ ordering choice
+
+/// What a solve plans to do with the factors of its one analysis, from the configuration and the
+/// problem type known before the analysis (ProblemType::Auto: B's inertia is still to be counted,
+/// one factorization). Deterministic (no timing); calibrated on the data cases' end-to-end runs
+/// (plan_work in steps.cpp). The adaptive ordering prices every candidate on it.
+struct PlannedWork {
+  double factorizations = 1.0;  ///< numeric factorizations of the main object (shifts, B, A's null space)
+  double counts = 0.0;          ///< certificate inertia counts (an InertiaCounter's or the main object's)
+  double solve_calls = 0.0;     ///< multi-RHS solve calls of the Krylov runs
+  index_t block = 1;            ///< right-hand sides per call (block Krylov width)
+};
+/// scale: ||A||_2 / ||B||_2 (GHIEP: a shift in the zero band means one-sided runs).
+PlannedWork plan_work(const SolverConfig& cfg, ProblemType type, index_t n, double scale);
+
+/// One candidate fill-reducing ordering of the adaptive analysis, priced on the planned work.
+struct OrderingCandidate {
+  int ordering = 0;         ///< FactorOptions::ordering (0 AMD, kOrderingNestedDissection, 5, 4, 3)
+  bool analysed = false;    ///< flops / entries are its own analysis estimate (else predicted)
+  double analysis_s = 0.0;  ///< predicted analysis time still to pay (0 once analysed)
+  double flops = 0.0;       ///< factorization flops (RINFOG(1))
+  double entries = 0.0;     ///< factor entries (INFOG(20))
+  double numeric_s = 0.0;   ///< predicted time of the planned factorizations, counts and solves
+  /// What the choice compares: the analysed candidates' numeric_s; for the others their analysis
+  /// plus numeric_s less the expected gain of knowing their actual estimate (choose_ordering).
+  double score_s = 0.0;
+};
+
+/// Orderings the adaptive analysis chooses from, in order of preference on equal scores (cheapest
+/// analysis first): AMD, hsolve's nested dissection (multithreaded), METIS, PORD (steps.cpp: why
+/// SCOTCH is not among them).
+std::vector<int> candidate_orderings(const SolverConfig& cfg);
+
+/// Sizes of the graphs the orderings work on: MUMPS orders its input (mumps_input_size), hsolve's
+/// nested dissection the same graph - or, for a complex pencil whose couplings are mostly complex,
+/// the n-vertex graph of K (compute_ordering's Embedding::Auto rule), with pencil.nnz() entries.
+struct OrderingInput {
+  MumpsInputSize mumps;
+  MumpsInputSize nd;
+};
+template <class T>
+OrderingInput ordering_input(const ShiftedPencil<T>& pencil);
+
+/// The ordering cost model (steps.cpp: fit and measurements). Predicted wall time of one analysis
+/// with `ordering` (MUMPS orderings are serial, hsolve's nested dissection runs on `threads`) of an
+/// input of sizes `in` whose factors hold `factor_entries`.
+double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_entries, int threads);
+/// Predicted time of the planned numeric work with factors of `flops` and `entries` on `threads`:
+/// factorizations, certificate counts (on an InertiaCounter when counter_pays, which then adds the
+/// counter's analysis) and the solve calls of width w.block.
+double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
+                         double entries, int threads);
+/// Predicted (flops, entries) of `ordering` on an input whose AMD analysis estimated `amd`
+/// (pencil_nnz: upper entries of the pencil), scaled from the actual estimate `anchor` of the
+/// analysed ordering `anchor_ordering` (AMD itself, or a nested dissection: the relative
+/// prediction between two nested dissections is much tighter than from AMD).
+std::pair<double, double> predicted_shape(int ordering, const FactorEstimate& amd, double pencil_nnz,
+                                          int anchor_ordering, const FactorEstimate& anchor);
+
+/// The choice step of adaptive_analysis: given the candidates (at least one analysed), the index
+/// of the one to take if it is analysed, or to analyse next. Scores ties go to the earlier
+/// candidate; a candidate must beat an earlier one by kOrderingMargin of its score. Pure function.
+std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates);
+/// A later candidate must score below (1 - kOrderingMargin) times an earlier one to be preferred.
+constexpr double kOrderingMargin = 0.05;
+
+/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe, then the candidate orderings
+/// priced on `work` by the ordering cost model; the most promising one is analysed, its actual
+/// estimate replaces the prediction, and so on until an analysed candidate is the best choice
+/// (steps.cpp). Every input of the decisions is deterministic (analysis estimates of
+/// deterministic orderings, models, the thread count), so identical runs choose the same ordering.
+/// cfg.deterministic runs keep the P4 rule (decide_ordering: AMD or METIS).
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
-                                                          index_t expected_factorizations, index_t expected_solves);
+                                                          const PlannedWork& work);
 
 // ------------------------------------------------------------------------------ cost model
 

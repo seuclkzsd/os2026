@@ -288,14 +288,13 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   rep.factor_options = fopts;
 
   // 4. One analysis serves every factorization on the pencil's pattern: the B-definiteness test,
-  //    K(sigma), certificate endpoints and reruns. ordering < 0 selects it adaptively.
+  //    K(sigma), certificate endpoints and reruns. ordering < 0 selects it adaptively, priced on
+  //    the work the planned problem type will do with the factors (plan_work).
   const double sigma0 = initial_shift(cfg.target, na, scale, rep.norm2_b);
   std::unique_ptr<SparseFactorization<T>> fac;
   if (cfg.ordering < 0) {
-    const index_t kk = cfg.target.mode == TargetMode::Interval ? 32 : cfg.target.k;
-    const bool cert = cfg.inertia_check != Toggle::Off;
-    fac = driver::adaptive_analysis(c, fopts, pencil, sigma0, 1 + (cert ? 2 : 0) + (b ? 1 : 0),
-                                    std::max<index_t>(40, 3 * kk));
+    const driver::PlannedWork work = driver::plan_work(cfg, type, n, scale);
+    fac = driver::adaptive_analysis(c, fopts, pencil, sigma0, work);
     driver::analyze_within_budget(c, *fac, pencil, sigma0, /*already_analyzed=*/true);
   } else {
     fac = make_mumps_factorization<T>(fopts);
