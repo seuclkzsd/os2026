@@ -14,11 +14,15 @@
 //      asked for a band) the eigenvalues are taken from one-sided runs at sigma+ > band
 //      (LargestAlgebraic: theta > 0 <=> lambda > sigma+) and sigma- < -band (SmallestAlgebraic),
 //      where the cluster sits at the unwanted end (theta = -1/sigma+, -1/sigma-) - shift placement,
-//      no explicit deflation of the null space. Each side shift goes mid-way between the cluster
-//      and the first eigenvalue on that side, located by a probe run (one pair, loose tolerance)
-//      at the band edge: a shift right at the band edge leaves the cluster's |theta| = 1/band
-//      dominating the wanted ones by lambda_first/band (measured: residuals stall at 1e-10..1e-9
-//      for band = 1e-8 scale), mid-gap the two are balanced. An empty side shows up in the probe.
+//      no explicit deflation of the null space. Each side shift goes mid-way between the last
+//      eigenvalue already held on that side (the cluster, or a plain run's outermost pair) and the
+//      next one, located by a probe run (two pairs, loose tolerance) at the inner edge: a shift
+//      right at the band edge leaves the cluster's |theta| = 1/band dominating the wanted ones by
+//      lambda_first/band (measured: residuals stall at 1e-10..1e-9 for band = 1e-8 scale), and one
+//      just inside a plain run's outermost pair (an eigenvalue) does the same; mid-gap the two
+//      neighbours are balanced. An empty side shows up in the probe. Complex eigenvalues whose
+//      real part lies between the side shifts are unwanted by both runs: recover_strip finds them
+//      from the runs' Ritz values and adds a recovery run.
 //      The union of all Ritz vectors is refined once on the projected pencil and the k nearest
 //      sigma outside the band are selected. A side is rerun with more pairs until its converged
 //      range covers the final radius, or it runs out of eigenvalues (exhausted: the unconverged
@@ -57,6 +61,13 @@ constexpr index_t kSideFirstRestarts = 16;
 /// Ritz tolerance (placement only needs a few digits), within this many restarts.
 constexpr double kProbeTol = 1e-6;
 constexpr index_t kProbeRestarts = 4;
+/// Ritz value of a one-sided run counted as a complex eigenvalue estimate (recover_strip): the
+/// imaginary part of lambda exceeds this fraction of |lambda| (unconverged estimates of real
+/// eigenvalues stay far below it); estimates within kStripMatch relative are the same eigenvalue.
+constexpr double kStripImag = 1e-4;
+constexpr double kStripMatch = 1e-3;
+/// Estimates of the same eigenvalue from two Krylov spaces agree to this relative distance.
+constexpr double kStripConfirm = 1e-2;
 
 template <class T>
 struct KsRun {
@@ -292,6 +303,146 @@ index_t null_dimension(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<
   return std::max<index_t>(in.zero, 0);
 }
 
+/// Ritz values of a Krylov space (shift sigma) kept as evidence for recover_strip.
+struct RitzSet {
+  double sigma = 0.0;
+  std::vector<cplx> theta;
+};
+
+// Complex eigenvalues x +- iy whose real part lies between the two side shifts are on the unwanted
+// side of both one-sided runs (Re theta has the wrong sign for each), and a run near the cluster
+// sees only the cluster: without care they are dropped while the run reports success. Being
+// extremes of the operator's spectrum in modulus, they show up among the Ritz values of every
+// Krylov space built near the cluster (probes and side runs); an estimate seen in one space only
+// is a Ritz value of a mixture (unconverged ones of a non-normal operator are complex in general).
+// Each estimate confirmed by two spaces, nearer sigma than the selection's radius and not yet
+// found gets a recovery run, one-sided at a quarter of its real part: there Re theta of the pair
+// has the wanted sign and the cluster's theta the other one; nev covers the real eigenvalues
+// ranked before the pair. The union is then refined and selected again. An estimate is spurious
+// when the recovery run converges every eigenvalue ranked before it without finding it. Returns
+// false when an estimate was neither found nor excluded (or its real part lies inside the band) -
+// reported as a warning.
+template <class T>
+bool recover_strip(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double scale, double n2a,
+                   double n2b, double band, double band_place, std::vector<KsRun<T>>& runs,
+                   const std::vector<RitzSet>& probes, Refined<T>& ref, std::vector<Cand>& sel, index_t& good,
+                   index_t& in_band) {
+  const SolverConfig& cfg = c.cfg;
+  const Target& t = cfg.target;
+  const index_t k = t.k;
+  double r_sel = kInf;
+  if (static_cast<index_t>(sel.size()) >= k && good >= k) {
+    r_sel = 0.0;
+    for (const auto& cd : sel) r_sel = std::max(r_sel, std::abs(cd.lambda - cplx(t.sigma)));
+  }
+  auto found = [&](const cplx& l) {
+    for (const auto& cd : ref.cands)
+      if (!cd.real && cd.pm.backward_error <= cfg.tol && std::abs(cd.lambda - l) <= kStripMatch * std::abs(l))
+        return true;
+    return false;
+  };
+  // Estimates near the cluster (relative to the side shifts) are mixtures with its copies.
+  double near_cluster = kInf;
+  for (const auto& run : runs)
+    if (run.which != Which::LargestMagnitude) near_cluster = std::min(near_cluster, kStripMatch * std::abs(run.sigma));
+  if (!std::isfinite(near_cluster)) return true;  // no side runs
+  std::vector<RitzSet> spaces = probes;
+  for (const auto& run : runs) spaces.push_back({run.sigma, run.res.ritz_all});
+  std::vector<cplx> est;
+  std::vector<std::size_t> origin;  // space of each estimate
+  for (std::size_t i = 0; i < spaces.size(); ++i)
+    for (const cplx& th : spaces[i].theta) {
+      if (th == cplx(0.0)) continue;
+      const cplx l = cplx(spaces[i].sigma) + 1.0 / th;
+      if (std::abs(l.imag()) > kStripImag * std::abs(l) && std::abs(l) > std::max(band_place, near_cluster)) {
+        est.push_back(l);
+        origin.push_back(i);
+      }
+    }
+  auto seen = [&](const cplx& v, std::size_t other_than) {  // in a space other than `other_than`
+    for (std::size_t q = 0; q < est.size(); ++q)
+      if (origin[q] != other_than && std::abs(est[q] - v) <= kStripConfirm * std::abs(v)) return true;
+    return false;
+  };
+  std::vector<cplx> strip;
+  for (std::size_t e = 0; e < est.size(); ++e) {
+    const cplx l = est[e];
+    if (l.imag() < 0 || std::abs(l - cplx(t.sigma)) >= r_sel || found(l)) continue;
+    if (!seen(l, origin[e])) continue;
+    // Complex eigenvalues of a Hermitian pencil come in conjugate pairs; for complex arithmetic the
+    // Ritz values do not, so the partner must show too.
+    if (is_complex_v<T> && !seen(std::conj(l), std::numeric_limits<std::size_t>::max())) continue;
+    bool dup = false;
+    for (const cplx& q : strip) dup = dup || std::abs(q - l) <= kStripMatch * std::abs(l);
+    if (!dup) strip.push_back(l);
+  }
+  if (strip.empty()) return true;
+  bool resolved = true, ran = false;
+  for (const cplx& l : strip) {
+    const double x = l.real(), sgn = x > 0 ? 1.0 : -1.0;
+    double sc = 0.25 * x;
+    if (std::abs(sc) <= 2.0 * band_place) sc = 0.5 * x;
+    if (std::abs(sc) <= 2.0 * band_place) {
+      warn(c, "complex eigenvalue estimate " + fmt(x) + (l.imag() >= 0 ? "+" : "") + fmt(l.imag()) +
+                  "i has its real part inside the zero band: not resolved");
+      resolved = false;
+      continue;
+    }
+    const Which w = x > 0 ? Which::LargestAlgebraic : Which::SmallestAlgebraic;
+    // Real eigenvalues ranked before the pair at sc: sgn * theta_r > sgn * Re theta_pair.
+    const double re_th = (x - sc) / std::norm(l - cplx(sc));
+    index_t ahead = 0;
+    std::vector<double> reals;
+    for (const auto& cd : ref.cands)
+      if (cd.real && cd.pm.backward_error <= kTrustworthy) reals.push_back(cd.lambda.real());
+    for (const auto& run : runs)
+      for (const cplx& th : run.res.ritz_all)
+        if (th != cplx(0.0) && std::abs(th.imag()) <= kStripImag * std::abs(th))
+          reals.push_back(run.sigma + 1.0 / th.real());
+    std::sort(reals.begin(), reals.end());
+    for (std::size_t i = 0; i < reals.size(); ++i) {
+      if (i > 0 && std::abs(reals[i] - reals[i - 1]) <= kStripMatch * std::abs(reals[i])) continue;  // same value twice
+      const double d = reals[i] - sc;
+      if (sgn * d > 0 && sgn / d > sgn * re_th) ++ahead;
+    }
+    index_t nev = ahead + 4;
+    bool got = false, absent = false;
+    for (int attempt = 0; attempt < 2 && !got && !absent && nev <= std::max<index_t>(4 * k, 64); ++attempt, nev *= 2) {
+      KsRun<T> run = ks_run(c, fac, pencil, scale, sc, w, nev, cfg.max_restarts);
+      // Every eigenvalue ranked before the estimate converged without it: there is none there (a
+      // Ritz value of a mixture, e.g. an unconverged one of complex arithmetic).
+      absent = run.res.converged && run.res.nconv > 0 && sgn * run.res.theta[run.res.nconv - 1].real() < sgn * re_th;
+      event(c, "strip_recovery",
+            {{"re", x}, {"im", l.imag()}, {"sigma", run.sigma}, {"nev", static_cast<std::int64_t>(nev)},
+             {"nconv", static_cast<std::int64_t>(run.res.nconv)}});
+      SliceReport sr;
+      sr.lower = x > 0 ? run.sigma : -kInf;
+      sr.upper = x > 0 ? kInf : run.sigma;
+      sr.sigma = run.sigma;
+      sr.which = x > 0 ? "largest_algebraic" : "smallest_algebraic";
+      sr.nev = run.nev;
+      sr.count_found = run.res.nconv;
+      sr.reruns = attempt;
+      sr.restarts = run.res.restarts;
+      sr.op_applies = run.res.op_applies;
+      sr.passed = run.res.converged;
+      c.rep.slices.push_back(sr);
+      runs.push_back(std::move(run));
+      ran = true;
+      ref = refine_union(c, pencil, runs, n2a, n2b, scale);
+      got = found(l);
+      absent = absent && !got;
+    }
+    if (!got && !absent) {
+      warn(c, "complex eigenvalue estimate " + fmt(x) + "+" + fmt(l.imag()) +
+                  "i between the one-sided shifts: recovery runs neither found nor excluded it");
+      resolved = false;
+    }
+  }
+  if (ran) sel = select_nearest(ref.cands, t.sigma, k, band, cfg.tol, good, in_band);
+  return resolved;
+}
+
 }  // namespace
 
 template <class T>
@@ -317,6 +468,7 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
   std::vector<Cand> sel;
   index_t good = 0, in_band = 0;
   bool cluster_mode = false;
+  bool strip_unresolved = false;
   auto cluster_dimension = [&]() {
     rep.zero_cluster_dim = null_dimension(c, fac, pencil);
     event(c, "zero_cluster", {{"dimension", static_cast<std::int64_t>(rep.zero_cluster_dim)}});
@@ -358,14 +510,23 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     // holds every genuine eigenvalue in its disk |lambda - sigma| < r_plain (its converged pairs,
     // cluster copies included): a side then only needs what lies beyond the disk - the shortfall -
     // searched from the disk edge (or from the band, if the disk reaches it). A probe at the inner
-    // edge finds the first eigenvalue beyond it; the shift goes mid-way between the cluster and
-    // that eigenvalue when this is farther out than the inner edge.
+    // edge finds the next eigenvalues; the shift goes mid-way between the last eigenvalue held on
+    // that side (the cluster, or the plain run's outermost pair) and the next distinct one.
     index_t need_side[2] = {k, k};
     double inner[2] = {band_place, -band_place};
+    // Outermost eigenvalue a plain run already holds on each side beyond the band (NaN: none):
+    // the side shift goes beyond it, mid-way to the next eigenvalue.
+    double plain_edge[2] = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
+    double r_plain = 0.0;
     if (plain_runs > 0) {
       const auto& pr = runs.front().res;
-      double r_plain = 0.0;
-      for (index_t j = 0; j < pr.nconv; ++j) r_plain = std::max(r_plain, 1.0 / std::abs(pr.theta[j]));
+      for (index_t j = 0; j < pr.nconv; ++j) {
+        r_plain = std::max(r_plain, 1.0 / std::abs(pr.theta[j]));
+        const double l = (runs.front().sigma + 1.0 / pr.theta[j]).real();
+        const int side = l > 0 ? 0 : 1;
+        if (std::abs(l) > band && (std::isnan(plain_edge[side]) || std::abs(l) > std::abs(plain_edge[side])))
+          plain_edge[side] = l;
+      }
       index_t good_out = 0;
       for (const auto& cd : sel)
         if (cd.pm.backward_error <= std::max(kTrustworthy, cfg.tol) && std::abs(cd.lambda) > band) ++good_out;
@@ -380,6 +541,7 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     index_t side_run[2] = {-1, -1};
     double place[2] = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
     index_t probe_applies = 0;
+    std::vector<RitzSet> probes;
     const int first = t.sigma >= 0 ? 0 : 1;
     for (int attempt = 0; attempt < 3; ++attempt) {
       bool ran = false;
@@ -390,9 +552,10 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
         const Which w = s == 0 ? Which::LargestAlgebraic : Which::SmallestAlgebraic;
         const double sgn = s == 0 ? 1.0 : -1.0;
         if (std::isnan(place[s])) {
-          // Probe at the inner edge for the first eigenvalue on this side.
-          const KsRun<T> probe = ks_run(c, fac, pencil, scale, inner[s], w, 1, kProbeRestarts, kProbeTol);
+          // Probe at the inner edge for the first two eigenvalues on this side.
+          const KsRun<T> probe = ks_run(c, fac, pencil, scale, inner[s], w, 2, kProbeRestarts, kProbeTol);
           probe_applies += probe.res.op_applies;
+          probes.push_back({probe.sigma, probe.res.ritz_all});
           place[s] = probe.sigma;
           // An eigenvalue beyond the band on this side has theta of the wanted sign, and the nearest
           // one is an extreme of the spectrum of Op: the first Krylov cycle shows it. No Ritz value
@@ -416,12 +579,35 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
             rep.slices.push_back(sr);
             continue;
           }
-          if (probe.res.nconv >= 1 && sgn * probe.res.theta[0].real() > 0) {
-            // Mid-gap between the cluster and the first eigenvalue beyond the inner edge, unless
-            // the inner edge (a plain disk's edge) is already farther out: no eigenvalue is skipped.
-            const double first = probe.sigma + (1.0 / probe.res.theta[0]).real();
-            if (std::abs(first) > 4.0 * band_place && sgn * (0.5 * first - probe.sigma) > 0) place[s] = 0.5 * first;
-            event(c, "side_probe", {{"side", static_cast<std::int64_t>(s)}, {"first", first}, {"shift", place[s]}});
+          // The probe's distinct eigenvalues beyond the inner edge, nearest first: converged ones,
+          // then the Ritz estimates on the wanted side (placement needs only a few digits). Copies
+          // of a multiple eigenvalue count once.
+          std::vector<double> beyond;
+          const double same = 1e-6 * std::max(std::abs(inner[s]), r_plain);
+          auto add = [&](double l) {
+            for (double b : beyond)
+              if (std::abs(l - b) <= same) return;
+            beyond.push_back(l);
+          };
+          for (index_t j = 0; j < probe.res.nconv; ++j)
+            if (sgn * probe.res.theta[j].real() > 0) add(probe.sigma + (1.0 / probe.res.theta[j]).real());
+          for (const cplx& th : probe.res.ritz_all)
+            if (sgn * th.real() > 0 && std::abs(th.imag()) <= 1e-3 * std::abs(th)) add(probe.sigma + (1.0 / th).real());
+          std::sort(beyond.begin(), beyond.end(), [&](double x, double y) { return sgn * x < sgn * y; });
+          // Mid-gap between the last eigenvalue already held on this side (the cluster, or the
+          // plain run's outermost pair) and the next one: the inner edge lies just inside a plain
+          // run's outermost pair, which the probe then finds first - it is held already.
+          double held = std::isnan(plain_edge[s]) ? 0.0 : plain_edge[s];
+          std::size_t nxt = 0;
+          if (!beyond.empty() && !std::isnan(plain_edge[s]) && std::abs(beyond[0] - plain_edge[s]) <= same) {
+            held = beyond[0];
+            nxt = 1;
+          }
+          if (nxt < beyond.size()) {
+            const double mid = 0.5 * (held + beyond[nxt]);
+            if (std::abs(mid) > 2.0 * band_place) place[s] = mid;
+            event(c, "side_probe", {{"side", static_cast<std::int64_t>(s)}, {"held", held}, {"next", beyond[nxt]},
+                                    {"shift", place[s]}});
           }
         }
         const double sigma_s = place[s];
@@ -487,6 +673,8 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
           if (!exhausted[s]) need_side[s] = std::min(n, need_side[s] + (k - good) + 2);
       }
     }
+    strip_unresolved =
+        !recover_strip(c, pencil, fac, scale, n2a, n2b, band, band_place, runs, probes, ref, sel, good, in_band);
     rep.zero_modes_filtered = in_band;
     rep.sigma_used = runs.empty() ? t.sigma : runs.front().sigma;
     rep.op_applies += probe_applies;
@@ -532,7 +720,7 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     warn(c, "only " + std::to_string(sel.size()) + " of " + std::to_string(k) + " pairs found");
   if (rep.zero_modes_filtered > 0)
     warn(c, std::to_string(rep.zero_modes_filtered) + " computed zero mode(s) filtered (|lambda| <= band)");
-  rep.success = all_ok;
+  rep.success = all_ok && !strip_unresolved;
   return sol;
 }
 
