@@ -54,8 +54,9 @@ struct SolveRefinement {
 /// Self-adjoint in the B inner product when B is Hermitian positive definite.
 ///
 /// One apply of p columns = B X (spmm) + one p-column block solve; the block solve dominates
-/// (bench/solvephase_profile.cpp: 85-99% of an apply on the 1e5 test cases), and its cost per
-/// column falls steeply with p (one sweep over the factors serves all p columns).
+/// (bench/solvephase_profile.cpp, six 1e5 test cases, 1-4 threads: 80-100% of an apply, B X at
+/// most ~10%, on the 2-D GHIEP case at p = 16), and its cost per column falls steeply with p
+/// (one sweep over the factors serves all p columns: 4-9x less per column at p = 16 than at 1).
 ///
 /// With refinement enabled each block solve is corrected in double precision against the exact
 /// K (never formed: r = B (x + sigma y) - A y in one fused sweep over A and B, shifted_residual),
