@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "hsolve/error.hpp"
@@ -130,48 +131,109 @@ constexpr index_t kDoubles = is_complex_v<T> ? 2 : 1;
 // ---- CGS kernels on one row block --------------------------------------------------------------
 // All operate on `len` doubles of each column (len = rows, or 2 * rows interleaved for complex
 // data) with column stride ldp / ldv in doubles, the columns in register groups (projections:
-// 8, 4, 1 real / 4, 1 complex; updates: 8, 4, 1 real / 2, 1 complex). A projection sums every
-// column with the same lane structure whichever group it falls in; an update subtracts the sum
-// over its group. Either way the arithmetic depends on k only.
+// 8, 4, 1 real / 4, 1 complex; updates: 8, 4, 1 real / kCplxUpdateGroup, 2, 1 complex). A
+// projection sums every column with the same lane structure (kLanes lanes, lane_sum /
+// cross_sum) whichever group it falls in; an update subtracts the sum over its group. Either way
+// the arithmetic depends on k only.
+//
+// The kernels use GCC/Clang vector extensions: every accumulator is a local vector value, which
+// the compiler keeps in a register. The previous form, two-dimensional accumulator arrays
+// a[column][lane], was vectorized by GCC 13 (-march=native, Ice Lake) with half of the
+// accumulators in stack memory (a load-FMA-store chain per iteration): about 32 GB/s per core on
+// L2-resident blocks against 60 GB/s now for the complex projection (46 vs 36 real), which made
+// the fused sweeps slower than BLAS gemv when the basis fits in cache (complex, n ~ 1e4; see
+// bench/ortho_fix_kernels.cpp). The projection lanes are unchanged, so the projections are
+// bitwise those of the array form. Vector extensions lower to whatever SIMD the target has
+// (SSE2 in the portable build); no intrinsics.
 
-// The kernels below were tuned on Ice Lake (bench/ortho_kernels): two-dimensional accumulator
-// arrays a[column][lane] over restrict pointers vectorize well with GCC, separately named arrays
-// per column did not (20 instead of 35 GB/s); complex updates vectorize in the explicit pair form.
+// Without AVX (portable build) GCC warns that returning 32-byte vectors by value has another ABI
+// (arguments are passed by reference for the same reason); these helpers are internal and
+// inlined, so the ABI is irrelevant. Ignored for the rest of the file: GCC reports it at the end
+// of the translation unit.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wpsabi"
+#endif
+
+/// 4 doubles; loads and stores go through memcpy (unaligned, no aliasing assumptions).
+typedef double Vec4 __attribute__((vector_size(32)));
+
+inline Vec4 load4(const double* p) {
+  Vec4 r;
+  std::memcpy(&r, p, sizeof r);
+  return r;
+}
+inline void store4(double* p, const Vec4& v) { std::memcpy(p, &v, sizeof v); }
+inline Vec4 splat4(double s) { return Vec4{s, s, s, s}; }
+
+/// (v1, v0, v3, v2): swaps the real and imaginary parts of two interleaved complex numbers.
+inline Vec4 swap_pairs(const Vec4& v) {
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 12)
+  return __builtin_shufflevector(v, v, 1, 0, 3, 2);
+#else
+  typedef long long Mask4 __attribute__((vector_size(32)));
+  return __builtin_shuffle(v, Mask4{1, 0, 3, 2});
+#endif
+}
+
+/// The kLanes = 8 lanes of an accumulator held as two vectors (lanes 0-3, 4-7).
+inline void spill_lanes(const Vec4& lo, const Vec4& hi, double* a) {
+  store4(a, lo);
+  store4(a + 4, hi);
+}
 
 /// acc[c] += P(:, c)^T x for C columns (real; len rows).
 template <int C>
 inline void proj_real_cols(index_t len, const double* __restrict p, index_t ldp, const double* __restrict x,
                            double* __restrict acc) {
-  double a[C][kLanes] = {};
+  static_assert(kLanes == 8, "two 4-wide vectors per accumulator");
+  Vec4 lo[C], hi[C];
+  for (int c = 0; c < C; ++c) lo[c] = hi[c] = splat4(0.0);
   index_t t = 0;
-  for (; t + kLanes <= len; t += kLanes)
-    for (int c = 0; c < C; ++c)
-      for (int l = 0; l < kLanes; ++l) a[c][l] += p[c * ldp + t + l] * x[t + l];
-  for (int c = 0; c < C; ++c)
-    for (int l = 0; t + l < len; ++l) a[c][l] += p[c * ldp + t + l] * x[t + l];
-  for (int c = 0; c < C; ++c) acc[c] += lane_sum(a[c]);
+  for (; t + kLanes <= len; t += kLanes) {
+    const Vec4 xlo = load4(x + t), xhi = load4(x + t + 4);
+    for (int c = 0; c < C; ++c) {
+      lo[c] += load4(p + c * ldp + t) * xlo;
+      hi[c] += load4(p + c * ldp + t + 4) * xhi;
+    }
+  }
+  for (int c = 0; c < C; ++c) {
+    double a[kLanes];
+    spill_lanes(lo[c], hi[c], a);
+    for (int l = 0; t + l < len; ++l) a[l] += p[c * ldp + t + l] * x[t + l];
+    acc[c] += lane_sum(a);
+  }
 }
 
-/// (acc[2c], acc[2c+1]) += P(:, c)^H x for C columns (complex interleaved; len = 2 * rows).
+/// (acc[2c], acc[2c+1]) += P(:, c)^H x for C columns (complex interleaved; len = 2 * rows):
+/// lanes a += p .* x (real part), b += p .* swap_pairs(x) (cross terms of the imaginary part).
 template <int C>
 inline void proj_cplx_cols(index_t len, const double* __restrict p, index_t ldp, const double* __restrict x,
                            double* __restrict acc) {
-  double a[C][kLanes] = {}, b[C][kLanes] = {};
+  static_assert(kLanes == 8, "two 4-wide vectors per accumulator");
+  Vec4 alo[C], ahi[C], blo[C], bhi[C];
+  for (int c = 0; c < C; ++c) alo[c] = ahi[c] = blo[c] = bhi[c] = splat4(0.0);
   index_t t = 0;
-  for (; t + kLanes <= len; t += kLanes)
-    for (int c = 0; c < C; ++c)
-      for (int l = 0; l < kLanes; ++l) {
-        a[c][l] += p[c * ldp + t + l] * x[t + l];
-        b[c][l] += p[c * ldp + t + l] * x[t + (l ^ 1)];
-      }
-  for (int c = 0; c < C; ++c)
-    for (int l = 0; t + l < len; ++l) {  // len is even: the remainder holds whole pairs
-      a[c][l] += p[c * ldp + t + l] * x[t + l];
-      b[c][l] += p[c * ldp + t + l] * x[t + (l ^ 1)];
+  for (; t + kLanes <= len; t += kLanes) {
+    const Vec4 xlo = load4(x + t), xhi = load4(x + t + 4);
+    const Vec4 slo = swap_pairs(xlo), shi = swap_pairs(xhi);
+    for (int c = 0; c < C; ++c) {
+      const Vec4 plo = load4(p + c * ldp + t), phi = load4(p + c * ldp + t + 4);
+      alo[c] += plo * xlo;
+      ahi[c] += phi * xhi;
+      blo[c] += plo * slo;
+      bhi[c] += phi * shi;
     }
+  }
   for (int c = 0; c < C; ++c) {
-    acc[2 * c] += lane_sum(a[c]);
-    acc[2 * c + 1] += cross_sum(b[c]);
+    double a[kLanes], b[kLanes];
+    spill_lanes(alo[c], ahi[c], a);
+    spill_lanes(blo[c], bhi[c], b);
+    for (int l = 0; t + l < len; ++l) {  // len is even: the remainder holds whole pairs
+      a[l] += p[c * ldp + t + l] * x[t + l];
+      b[l] += p[c * ldp + t + l] * x[t + (l ^ 1)];
+    }
+    acc[2 * c] += lane_sum(a);
+    acc[2 * c + 1] += cross_sum(b);
   }
 }
 
@@ -179,38 +241,59 @@ inline void proj_cplx_cols(index_t len, const double* __restrict p, index_t ldp,
 template <int C>
 inline void update_real_cols(index_t len, const double* __restrict v, index_t ldv, const double* __restrict c,
                              double* __restrict x) {
-  double cc[C];
-  for (int j = 0; j < C; ++j) cc[j] = c[j];
-#pragma omp simd
-  for (index_t t = 0; t < len; ++t) {
+  Vec4 cc[C];
+  for (int j = 0; j < C; ++j) cc[j] = splat4(c[j]);
+  index_t t = 0;
+  for (; t + 4 <= len; t += 4) {
+    Vec4 s = splat4(0.0);
+    for (int j = 0; j < C; ++j) s += load4(v + j * ldv + t) * cc[j];
+    store4(x + t, load4(x + t) - s);
+  }
+  for (; t < len; ++t) {
     double s = 0.0;
-    for (int j = 0; j < C; ++j) s += v[j * ldv + t] * cc[j];
+    for (int j = 0; j < C; ++j) s += v[j * ldv + t] * c[j];
     x[t] -= s;
   }
 }
 
-/// x -= V(:, 0:C) c (complex interleaved: len = 2 * rows doubles, c interleaved).
+/// x -= V(:, 0:C) c (complex interleaved: len = 2 * rows doubles, c interleaved). Per row pair
+/// u = sum_j v_j Re(c_j) and s = sum_j v_j Im(c_j) (no shuffle per column), then
+/// V c = u + (-s_im, s_re) = u + sign .* swap_pairs(s) (multiplication by +-1 is exact).
 template <int C>
 inline void update_cplx_cols(index_t len, const double* __restrict v, index_t ldv, const double* __restrict c,
                              double* __restrict x) {
-  double cr[C], ci[C];
+  Vec4 cr[C], ci[C];
   for (int j = 0; j < C; ++j) {
-    cr[j] = c[2 * j];
-    ci[j] = c[2 * j + 1];
+    cr[j] = splat4(c[2 * j]);
+    ci[j] = splat4(c[2 * j + 1]);
   }
-  const index_t m = len / 2;
-#pragma omp simd
-  for (index_t i = 0; i < m; ++i) {
-    double sr = 0.0, si = 0.0;
+  const Vec4 sign = {-1.0, 1.0, -1.0, 1.0};
+  index_t t = 0;
+  for (; t + 4 <= len; t += 4) {
+    Vec4 u = splat4(0.0), s = splat4(0.0);
     for (int j = 0; j < C; ++j) {
-      const double a = v[j * ldv + 2 * i], b = v[j * ldv + 2 * i + 1];
-      sr += a * cr[j] - b * ci[j];
-      si += b * cr[j] + a * ci[j];
+      const Vec4 a = load4(v + j * ldv + t);
+      u += a * cr[j];
+      s += a * ci[j];
     }
-    x[2 * i] -= sr;
-    x[2 * i + 1] -= si;
+    store4(x + t, load4(x + t) - (u + sign * swap_pairs(s)));
+  }
+  if (t < len) {  // one complex entry left (len is even)
+    double ur = 0.0, ui = 0.0, sr = 0.0, si = 0.0;
+    for (int j = 0; j < C; ++j) {
+      const double a = v[j * ldv + t], b = v[j * ldv + t + 1];
+      ur += a * c[2 * j];
+      ui += b * c[2 * j];
+      sr += a * c[2 * j + 1];
+      si += b * c[2 * j + 1];
+    }
+    x[t] -= ur - si;
+    x[t + 1] -= ui + sr;
   }
 }
+
+/// Columns per group of the complex update (measured: bench/ortho_fix_kernels.cpp).
+constexpr int kCplxUpdateGroup = 8;
 
 /// acc[j] += P(:, j)^T x, j < k (real).
 inline void proj_real(index_t len, index_t k, const double* p, index_t ldp, const double* x, double* acc) {
@@ -244,6 +327,8 @@ inline void update_real(index_t len, index_t k, const double* v, index_t ldv, co
 /// x -= V c (complex).
 inline void update_cplx(index_t len, index_t k, const double* v, index_t ldv, const double* c, double* x) {
   index_t j = 0;
+  for (; j + kCplxUpdateGroup <= k; j += kCplxUpdateGroup)
+    update_cplx_cols<kCplxUpdateGroup>(len, v + j * ldv, ldv, c + 2 * j, x);
   for (; j + 2 <= k; j += 2) update_cplx_cols<2>(len, v + j * ldv, ldv, c + 2 * j, x);
   for (; j < k; ++j) update_cplx_cols<1>(len, v + j * ldv, ldv, c + 2 * j, x);
 }
