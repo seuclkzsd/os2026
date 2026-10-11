@@ -35,6 +35,11 @@
 // per restart, growing linearly, i.e. a few 1e-14 ||Op|| after 1000 restarts). Re-orthonormalizing
 // V would not remove it: the drift is in the relation, not in the orthogonality of V. The driver
 // checks true residuals of every pair (DESIGN §3.6-7).
+//
+// Magnitude. linalg::norm2 is a plain sum of squares, which over- or underflows for entries beyond
+// about 1e+-154. The iteration therefore runs on Op / 2^e, with e fixed by the largest entry of
+// the first nonzero operator output. Scaling by a power of two is exact, so the iteration is
+// bitwise the same for every e, and the results are multiplied back exactly.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -68,6 +73,8 @@ constexpr index_t kRowBlock = 2048;
 // A random vector orthogonalized against a proper subspace keeps a fraction ~sqrt((n-j)/n) of its
 // norm; needing more than one attempt already means numerical trouble.
 constexpr int kRandomAttempts = 8;
+// Bound of the binary exponent of the operator scale: 2^e and 2^-e stay normal numbers.
+constexpr int kMaxScaleExponent = 1000;
 
 /// Adds the lifetime of a scope to *acc; no-op (no clock reads) when acc == nullptr.
 class PhaseClock {
@@ -89,6 +96,29 @@ class PhaseClock {
 
 double* phase(GeneralPhaseTimes* times, double GeneralPhaseTimes::* member) {
   return times ? &(times->*member) : nullptr;
+}
+
+/// max_i max(|Re x_i|, |Im x_i|), or +infinity when an entry is NaN or infinite. Serial O(n): it
+/// runs at most twice per solve (initial vector, first nonzero operator output).
+template <class T>
+double max_abs_component(index_t n, const T* x) {
+  double amax = 0.0;
+  for (index_t i = 0; i < n; ++i) {
+    double a = 0.0;
+    if constexpr (is_complex_v<T>) {
+      a = std::max(std::abs(x[i].real()), std::abs(x[i].imag()));
+    } else {
+      a = std::abs(x[i]);
+    }
+    if (!(a <= std::numeric_limits<double>::max())) return kInf;
+    amax = std::max(amax, a);
+  }
+  return amax;
+}
+
+/// e with 2^e <= amax < 2^(e+1) for finite amax > 0, clamped to +-kMaxScaleExponent.
+int binary_exponent(double amax) {
+  return std::clamp(std::ilogb(amax), -kMaxScaleExponent, kMaxScaleExponent);
 }
 
 struct Dimensions {
@@ -129,9 +159,10 @@ Dimensions validate(index_t n, const KrylovSchurOptions<T>& o) {
                                  << o.initial->rows() << " x " << o.initial->cols() << ", need "
                                  << n << " x >=1");
     }
-    const double nrm = linalg::norm2(n, o.initial->col(0));
-    if (!(nrm > 0.0) || !std::isfinite(nrm)) {
-      HS_THROW(InvalidInput, "krylov_schur_general: initial vector norm " << nrm);
+    // The largest entry rather than the norm: a sum of squares could overflow for valid input.
+    const double amax = max_abs_component(n, o.initial->col(0));
+    if (!(amax > 0.0) || !std::isfinite(amax)) {
+      HS_THROW(InvalidInput, "krylov_schur_general: initial vector must be nonzero and finite");
     }
   }
   // Larger requests are clamped: a basis of the whole space is exact.
@@ -140,6 +171,7 @@ Dimensions validate(index_t n, const KrylovSchurOptions<T>& o) {
 
 /// Storage of the Krylov-Schur decomposition Op V(:, 0:m) = V(:, 0:m) H(0:m, 0:m) + V(:, m) b^T
 /// with b^T = H(m, 0:m) and m = ncv after each expansion. V is n x (ncv+1), H is (ncv+1) x ncv.
+/// Op stands for the scaled operator Op / op_scale() throughout (see the file comment).
 template <class T>
 class KrylovSchurBasis {
  public:
@@ -153,12 +185,16 @@ class KrylovSchurBasis {
   /// True once the basis spans the whole space (only with ncv == n): then b = 0 and the
   /// decomposition Op V = V H is exact.
   bool complete() const noexcept { return complete_; }
+  /// The power of two s the operator is divided by: Ritz values of H times s are those of Op.
+  double op_scale() const noexcept { return std::ldexp(1.0, scale_exponent_); }
 
   /// V(:, 0) = v0 / ||v0||, or a deterministic random unit vector (stream 0) when v0 == nullptr.
   void start(const T* v0) {
     T* v = v_.col(0);
     if (v0) {
       std::copy(v0, v0 + n_, v);
+      // Bring the largest entry to [1, 2) first (exact): the norm is a plain sum of squares.
+      linalg::scal(n_, T(std::ldexp(1.0, -binary_exponent(max_abs_component(n_, v)))), v);
     } else {
       linalg::fill_random(v, n_, seed_, 0);
     }
@@ -166,6 +202,7 @@ class KrylovSchurBasis {
   }
 
   /// Arnoldi steps j = k .. ncv-1, i.e. columns k.. of H and V(:, k+1 .. ncv).
+  /// Throws InvalidInput when the operator returns a non-finite vector.
   void expand(LinearOperator<T>& op, index_t k, GeneralPhaseTimes* times) {
     for (index_t j = k; j < ncv_; ++j) {
       T* w = v_.col(j + 1);
@@ -174,8 +211,15 @@ class KrylovSchurBasis {
         op.apply(v_.col(j), n_, w, n_, 1);
       }
       PhaseClock clock(phase(times, &GeneralPhaseTimes::orthogonalize_s));
+      const double wnorm = scale_output(w);
+      if (!std::isfinite(wnorm)) {
+        // Not a breakdown: NaN/Inf would end up in H, where gees either fails or deflates them
+        // into "converged" garbage.
+        HS_THROW(InvalidInput, "krylov_schur_general: operator output of Arnoldi step "
+                                   << j << " is not finite (NaN/Inf entries, or a norm beyond "
+                                   << "the double range relative to the first output)");
+      }
       T* hj = h_.col(j);
-      const double wnorm = linalg::norm2(n_, w);
       double beta =
           linalg::orthogonalize_cgs2<T>(n_, j + 1, v_.data(), n_, nullptr, 0, w, nullptr, hj);
       if (j + 1 == n_) {
@@ -255,6 +299,20 @@ class KrylovSchurBasis {
   }
 
  private:
+  /// Divides an operator output by the operator scale, fixing the scale at the first nonzero
+  /// output, and returns ||w||_2 (not finite when w has NaN or infinite entries).
+  double scale_output(T* w) {
+    if (!scale_fixed_) {
+      const double amax = max_abs_component(n_, w);
+      // An exactly zero output (breakdown) or a non-finite one (the caller throws) fixes nothing.
+      if (amax == 0.0 || !std::isfinite(amax)) return linalg::norm2(n_, w);
+      scale_exponent_ = binary_exponent(amax);
+      scale_fixed_ = true;
+    }
+    if (scale_exponent_ != 0) linalg::scal(n_, T(std::ldexp(1.0, -scale_exponent_)), w);
+    return linalg::norm2(n_, w);
+  }
+
   /// Extra CGS2 pass after heavy cancellation (DGKS test). Returns the new norm if w is a genuine
   /// new direction, 0 if it was rounding noise inside span(V(:, 0:cols)).
   double recheck(index_t cols, T* w, T* hj, double beta) {
@@ -286,6 +344,8 @@ class KrylovSchurBasis {
   std::uint64_t seed_;
   std::uint64_t next_stream_ = 1;  ///< stream 0 is the start vector
   bool complete_ = false;
+  bool scale_fixed_ = false;
+  int scale_exponent_ = 0;  ///< the iteration works with Op / 2^scale_exponent_
   DenseMatrix<T> v_;
   DenseMatrix<T> h_;
 };
@@ -468,8 +528,8 @@ index_t select_retained(Cycle<T>& cyc, index_t keep, index_t ncv, Which which) {
   return k;
 }
 
-/// The result from the cycle that ends the run: Ritz vectors x = V y (unit 2-norm) and the Schur
-/// basis.
+/// The result from the cycle that ends the run: Ritz vectors x = V y (unit 2-norm), the Schur
+/// basis, and the values scaled back to Op.
 template <class T>
 GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>& cyc,
                                 Which which) {
@@ -478,11 +538,12 @@ GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>
   const index_t m = ps.order();
   const index_t m_out = cyc.m_out;
   const index_t n = basis.n();
+  const double s = basis.op_scale();
   const std::vector<index_t> ranked = ps.ranking(which);
   GeneralEigResult<T> res;
   for (const index_t blk : ranked) {
-    res.ritz_all.push_back(blocks[blk].value);
-    if (blocks[blk].size == 2) res.ritz_all.push_back(std::conj(blocks[blk].value));
+    res.ritz_all.push_back(s * blocks[blk].value);
+    if (blocks[blk].size == 2) res.ritz_all.push_back(std::conj(s * blocks[blk].value));
   }
   // Output order: the certified prefix, then the rest of the wanted block, each by ranking. The
   // prefix is a ranking prefix of the wanted set, so this is the ranking order of all m values.
@@ -500,17 +561,17 @@ GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>
   index_t c = 0;
   for (const index_t blk_index : order) {
     const SchurBlock& blk = blocks[blk_index];
-    const double est = cyc.ritz.estimate[blk.start];
+    const double est = s * cyc.ritz.estimate[blk.start];
     for (index_t e = 0; e < blk.size; ++e) {
       const T* y = cyc.ritz.y.col(blk.start + e);
       std::copy(y, y + m, coef.col(c + e));
     }
     if (blk.size == 1) {
-      res.theta.push_back(blk.value);
+      res.theta.push_back(s * blk.value);
       res.estimate.push_back(est);
     } else {
       pair_at[c] = 1;
-      res.theta.insert(res.theta.end(), {blk.value, std::conj(blk.value)});
+      res.theta.insert(res.theta.end(), {s * blk.value, std::conj(s * blk.value)});
       res.estimate.insert(res.estimate.end(), {est, est});
     }
     c += blk.size;
@@ -548,7 +609,7 @@ GeneralEigResult<T> materialize(const KrylovSchurBasis<T>& basis, const Cycle<T>
   basis.combine(ps.vectors().data(), m, m_out, res.schur_basis.data(), n);
   res.schur_form.resize(m_out, m_out);
   for (index_t j = 0; j < m_out; ++j) {
-    std::copy(ps.form().col(j), ps.form().col(j) + m_out, res.schur_form.col(j));
+    for (index_t i = 0; i < m_out; ++i) res.schur_form(i, j) = T(s) * ps.form()(i, j);
   }
   res.nconv = cyc.nconv;
   return res;

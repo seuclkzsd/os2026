@@ -765,6 +765,128 @@ TYPED_TEST(KrylovSchurGeneralTyped, InvalidOptionsThrow) {
   EXPECT_TRUE(hs::krylov_schur_general(op, Which::LargestMagnitude, big).converged);
 }
 
+/// diag(1 / (1 + i)) whose output entry 3 is replaced by `value` on the bad_at-th application.
+template <class T>
+class PoisonedOperator final : public hs::LinearOperator<T> {
+ public:
+  PoisonedOperator(index_t n, double value, index_t bad_at)
+      : n_(n), value_(value), bad_at_(bad_at) {}
+  index_t size() const override { return n_; }
+
+ protected:
+  void do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) override {
+    for (index_t k = 0; k < p; ++k) {
+      for (index_t i = 0; i < n_; ++i)
+        y[i + k * ldy] = x[i + k * ldx] / (1.0 + static_cast<double>(i));
+      if (++count_ == bad_at_) y[3 + k * ldy] = T(value_);
+    }
+  }
+
+ private:
+  index_t n_;
+  double value_;
+  index_t bad_at_;
+  index_t count_ = 0;
+};
+
+TYPED_TEST(KrylovSchurGeneralTyped, NonFiniteOperatorOutputThrows) {
+  using T = TypeParam;
+  // NaN/Inf would otherwise be mistaken for a breakdown (first application) or reach gees.
+  for (const double value : {std::nan(""), std::numeric_limits<double>::infinity()}) {
+    for (const index_t bad_at : {index_t{1}, index_t{5}}) {
+      PoisonedOperator<T> op(60, value, bad_at);
+      hs::KrylovSchurOptions<T> opt;
+      opt.nev = 4;
+      opt.ncv = 12;
+      try {
+        hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+        ADD_FAILURE() << "value " << value << " at application " << bad_at << " not detected";
+      } catch (const hs::Error& e) {
+        EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+      }
+      EXPECT_EQ(op.applications(), bad_at);
+    }
+  }
+}
+
+/// The result for Op / s from the result r for Op: every eigenvalue-sized quantity divided by s.
+template <class T>
+hs::GeneralEigResult<T> divided_by(hs::GeneralEigResult<T> r, double s) {
+  for (cplx& t : r.theta) t /= s;
+  for (cplx& t : r.ritz_all) t /= s;
+  for (double& e : r.estimate) e /= s;
+  for (index_t j = 0; j < r.schur_form.cols(); ++j)
+    for (index_t i = 0; i < r.schur_form.rows(); ++i) r.schur_form(i, j) /= s;
+  return r;
+}
+
+/// s * A for a dense A.
+template <class T>
+class ScaledOperator final : public hs::LinearOperator<T> {
+ public:
+  ScaledOperator(const DenseMatrix<T>& a, double s) : a_(a), s_(s) {}
+  index_t size() const override { return a_.size(); }
+
+ protected:
+  void do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) override {
+    a_.apply(x, ldx, y, ldy, p);
+    for (index_t k = 0; k < p; ++k) hs::linalg::scal(size(), T(s_), y + k * ldy);
+  }
+
+ private:
+  hs::test::DenseOperator<T> a_;
+  double s_;
+};
+
+TYPED_TEST(KrylovSchurGeneralTyped, OperatorMagnitudeDoesNotMatter) {
+  // linalg::norm2 is a plain sum of squares: without the solver's power-of-two scaling, operator
+  // entries near 1e-170 underflow and near 1e+160 overflow, which looked like breakdowns.
+  using T = TypeParam;
+  std::vector<cplx> all;
+  const DenseMatrix<T> a = similar_to(block_diagonal<T>(mixed_spectrum<T>(50), &all), 81);
+  const index_t n = a.rows();
+  hs::KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.ncv = 14;
+  SingleThreadedOpenMP serial;  // bitwise comparisons below
+  hs::test::DenseOperator<T> ref_op(a);
+  const auto ref = hs::krylov_schur_general(ref_op, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(ref.converged);
+  for (const int e : {-560, 520}) {
+    // A power-of-two multiple of A is the same iteration bit for bit, scaled back exactly.
+    const double s = std::ldexp(1.0, e);
+    ScaledOperator<T> op(a, s);
+    const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+    ASSERT_EQ(r.theta.size(), ref.theta.size()) << e;
+    EXPECT_EQ(r.nconv, ref.nconv);
+    EXPECT_EQ(r.restarts, ref.restarts);
+    for (std::size_t i = 0; i < r.theta.size(); ++i) {
+      EXPECT_EQ(r.theta[i], s * ref.theta[i]) << e << " " << i;
+      EXPECT_EQ(r.estimate[i], s * ref.estimate[i]) << e << " " << i;
+    }
+    for (index_t j = 0; j < r.vectors.cols(); ++j)
+      for (index_t i = 0; i < n; ++i) ASSERT_EQ(r.vectors(i, j), ref.vectors(i, j));
+  }
+  for (const double s : {1e-170, 1e+160}) {
+    // Inexact multiples: the same eigenpairs up to rounding. The contract is checked on A,
+    // where this test's own residual norms neither underflow nor overflow.
+    ScaledOperator<T> op(a, s);
+    const auto r = divided_by(hs::krylov_schur_general(op, Which::LargestMagnitude, opt), s);
+    ASSERT_TRUE(r.converged) << s;
+    expect_same_values(r.theta, ref.theta, 1e-10);
+    hs::test::DenseOperator<T> unscaled(a);
+    check_contract(unscaled, r, Which::LargestMagnitude, opt, frobenius(a));
+  }
+  // A start vector whose norm alone would overflow is accepted.
+  DenseMatrix<T> huge = random_matrix<T>(n, 1, 5);
+  hs::linalg::scal(n, T(1e200), huge.data());
+  opt.initial = &huge;
+  hs::test::DenseOperator<T> op(a);
+  const auto r = hs::krylov_schur_general(op, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r.converged);
+  expect_same_values(r.theta, ref.theta, 1e-10);
+}
+
 TYPED_TEST(KrylovSchurGeneralTyped, NonConvergenceIsReportedNotThrown) {
   using T = TypeParam;
   std::vector<cplx> all;

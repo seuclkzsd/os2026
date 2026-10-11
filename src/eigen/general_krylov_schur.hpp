@@ -11,7 +11,8 @@ namespace hs::eigen_detail {
 /// Wall-clock seconds per phase, accumulated over the whole call.
 struct GeneralPhaseTimes {
   double apply_s = 0.0;          ///< operator applications
-  double orthogonalize_s = 0.0;  ///< CGS2 + DGKS checks, breakdown vectors, normalization
+  double orthogonalize_s = 0.0;  ///< output scaling, CGS2 + DGKS checks, breakdown vectors,
+                                 ///< normalization
   double projected_s = 0.0;      ///< dense m x m work: Schur form, ranking, Ritz vectors, trsen
   double update_s = 0.0;         ///< n x m products: basis compression and final vectors
   double total_s = 0.0;

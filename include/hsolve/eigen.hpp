@@ -110,7 +110,7 @@ struct GeneralEigResult {
 /// Options: ncv must be >= min(n, nev + 2) for real T (room for a straddling pair plus one new
 /// vector), >= min(n, nev + 1) for complex T; larger than n is clamped to n (exact basis).
 /// tol >= 0 and max_restarts >= 0, initial (if given) nonzero and finite; violations throw
-/// InvalidInput.
+/// InvalidInput, and so does an operator output with NaN or infinite entries.
 ///
 /// Convergence (refines the shared result contract above). A pair passes when
 /// estimate <= tol * scale(theta), scale(theta) = |theta|, or the largest |Ritz value| when
@@ -134,6 +134,11 @@ struct GeneralEigResult {
 /// and O(eps) loss of orthogonality to the basis; near the rounding floor eps ||Op|| the estimate
 /// can be optimistic. Callers needing certified residuals compute ||Op x - theta x|| themselves
 /// (the driver does, DESIGN §3.6-7).
+/// Magnitude: the iteration runs on Op / 2^e, with 2^e fixed by the largest entry of the first
+/// nonzero operator output (exact scaling), so ||Op|| may lie anywhere in the double range:
+/// 2^k * Op gives bitwise the vectors of Op and 2^k times its theta, estimate, schur_form and
+/// ritz_all. Later outputs must stay within ~1e150 of that first one (an overflowing norm is
+/// reported as non-finite output).
 /// A single-vector Krylov space sees further copies of an exactly multiple eigenvalue only through
 /// rounding, so the result may converge before all copies of such a cluster are found.
 /// For a fixed seed the result is bitwise reproducible whenever linalg::dot/norm2 are.
