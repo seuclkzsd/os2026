@@ -37,13 +37,24 @@ Structure of the discrete problems (the expectations written into meta.json rely
   TM cutoff.
 * Hollow guide: the pencil decouples exactly into discrete TE modes (lambda = kc^2 - k0^2, kc^2 a
   nonzero curl-curl eigenvalue) and TM modes (kc^2 a P1 Dirichlet-Laplacian eigenvalue), so the
-  whole spectrum is real.
-* Slab-loaded guide: the continuous LSE / LSM families are real, but B is indefinite and the
-  evanescent part (lambda > 0) mixes eigenvalues of both sign characteristics (x^H B x > 0 for
-  LSE-like, < 0 for LSM-like modes).  Where two such branches nearly cross, the discretization
-  couples them and they collide into complex-conjugate pairs (dense checks: 24 / 46 / 52 complex
-  eigenvalues for 8 / 12 / 16 cells per side, all with Re lambda > 0.46).  The propagating modes
-  (lambda < 0) all have positive type and stay real, so they remain a well-posed target.
+  whole spectrum is real.  Each family is a symmetric-definite problem (the cavity2d pencil is
+  the TE family alone), which the error model below exploits.
+* Sign characteristic: for a simple real eigenvalue with eigenvector x = [e; z], differentiating
+  A x = lambda B x in k0^2 gives
+      d lambda / d k0^2 = -(e^H T_tt^eps e - lambda z^H T_zz^eps z) / x^H B x,
+  and the numerator is negative for lambda < 0.  A propagating mode therefore has positive type
+  (x^H B x > 0) exactly when it is a forward wave (beta^2 grows with frequency).
+* Slab-loaded guide: every continuous LSE / LSM family is a regular Sturm-Liouville problem in
+  lambda (weight 1/mu resp. 1/eps), so the continuous spectrum is real, and lambda decreases
+  with k0^2: all continuous propagating modes are forward waves of positive type.  The evanescent
+  part (lambda > 0) mixes both sign characteristics (x^H B x > 0 for LSE-like, < 0 for LSM-like
+  modes).  Where two branches of opposite type nearly cross, the discretization couples them and
+  they collide into complex-conjugate pairs (dense checks, eps_r = 2.25: 24 / 46 / 52 complex
+  eigenvalues for 8 / 12 / 16 cells per side, all with Re lambda > 0.46).  The discrete
+  propagating modes inherit the positive type only on meshes that resolve them: on coarse meshes
+  of high-contrast slabs a discrete propagating eigenvalue can have negative type (eps_r = 30 on
+  a 2 mm slab, 12 cells) or join a complex pair (eps_r = 30 on a 1 mm slab, 16 cells: a pair at
+  Re lambda = -0.149).  The dense check records such pairs and targets keep clear of them.
 
 Units: lengths in mm and frequency in GHz, so k0 [rad/mm] = 2 pi f / c with c = 299.792458 mm/ns
 and every eigenvalue is in mm^-2.  This reproduces the competition's real case (10 mm square air
@@ -53,7 +64,8 @@ Reference values are those of the continuous model (kind "partial-analytic"); th
 eigenvalues differ by O(h^2), bounded a priori by ``error_bound``.  Reference windows and target
 suggestions are placed in spectral gaps that this bound cannot close (``safe_cuts``), so their
 counts are valid for the discrete problem.  Cases with n <= DENSE_LIMIT are additionally checked
-with dense eigensolvers and their exact discrete inertia is recorded.
+with dense eigensolvers: their exact discrete inertia is recorded, the reference window is
+verified and the targets are taken from the exact spectrum.
 
 Usage: python -m tools.gen.waveguide --family waveguide --a 10 --b 10 --freq 50 --target-n 1000 \
            --name wg_square_1e3            (see --help; output via tools/case.py)
@@ -82,13 +94,22 @@ FAMILIES = ("waveguide", "cavity2d")
 DENSE_LIMIT = 2000          # dense verification of inertia / spectrum only for n <= DENSE_LIMIT
 LARGE_N = 500_000           # scenario tags "large" and "memory" from this size on
 CAVITY_LISTED = 64          # cavity2d references list the lowest CAVITY_LISTED nonzero kc^2
+WAVEGUIDE_EVANESCENT = 16   # waveguide references list at least this many evanescent modes
 # A-priori bound |lambda_h - lambda| <= ERR_CONST * h^2 * kt^4 with h the longest mesh edge and
 # kt^2 = lambda + k0^2 max(eps mu) (waveguide) or kt^2 = kc^2 (cavity2d), the transverse
-# wavenumber of the mode.  Measured constants on union-jack / diagonal meshes, unperturbed and
-# perturbed (0.24), 16 and 32 cells per side (tests/py/test_gen_waveguide.py re-checks the bound):
-# <= 0.025 cavity2d (Nedelec TE cutoffs), <= 0.069 hollow guide (dominated by the P1 TM cutoffs),
-# <= 0.047 slab-loaded guide; 0.15 leaves at least a 2x margin.
+# wavenumber of the mode, for the k-th discrete eigenvalue against the k-th continuous one (in
+# ascending order, per DISCRETE_FAMILY where the discrete problem decouples).  Measured constants
+# on union-jack / diagonal meshes, unperturbed and perturbed (0.24), 16 and 32 cells per side
+# (tests/py/test_gen_waveguide.py re-checks the bound): <= 0.025 Nedelec TE family (cavity2d),
+# <= 0.077 P1 TM family, <= 0.069 hollow guide (both families merged), <= 0.047 slab-loaded guide
+# (eps_r 2.25; eps_r 4 with mu_r 2; mu_r 3); 0.15 leaves a margin of about 2.
 ERR_CONST = 0.15
+# Mode families that the discrete problem keeps apart exactly (hollow guide and cavity2d, see the
+# module docstring), each the sorted spectrum of one symmetric-definite problem: TE = nonzero
+# Nedelec curl-curl eigenvalues, TM = P1 Dirichlet-Laplacian eigenvalues.  The LSE / LSM modes of a
+# loaded guide are coupled by the discretization and belong to no family (see safe_cuts).
+DISCRETE_FAMILY = {"TE": 0, "TM": 1}
+NO_FAMILY = -1
 
 
 def wavenumber(freq_ghz: float) -> float:
@@ -413,13 +434,36 @@ def error_bound(values, kt2_shift: float, h: float) -> np.ndarray:
     return ERR_CONST * h * h * kt2 * kt2
 
 
-def safe_cuts(values: np.ndarray, errs: np.ndarray) -> list[tuple[int, float]]:
-    """Cuts that no perturbed eigenvalue can cross.  For ascending values with error bars, a cut
-    after index i exists when max_{j<=i}(v_j + e_j) < min_{j>i}(v_j - e_j); it is placed at the
-    midpoint of that free interval.  Returns [(i, cut)] for every such gap."""
-    upper = np.maximum.accumulate(values + errs)
-    lower = np.minimum.accumulate((values - errs)[::-1])[::-1]
-    return [(i, 0.5 * (upper[i] + lower[i + 1])) for i in range(values.size - 1) if upper[i] < lower[i + 1]]
+def safe_cuts(values: np.ndarray, errs: np.ndarray, family: np.ndarray | None = None) -> list[tuple[int, float]]:
+    """Cuts that no perturbed eigenvalue can cross, for ascending values with error bars.
+
+    A cut after index i separates values[:i+1] from values[i+1:].  A value without a family
+    (family[j] < 0, or ``family`` None) is only known to have a discrete counterpart within its
+    bar, so each one constrains the cut: max_{j<=i}(v_j + e_j) < cut < min_{j>i}(v_j - e_j).
+    The members of a family f >= 0 are matched to the sorted eigenvalues of one symmetric-definite
+    discrete problem in order (k-th to k-th), so the discrete members below the cut are bounded
+    by the last continuous member below it and those above by the first member above it.  Only
+    these two members constrain the cut.  The bars of high, poorly resolved members can therefore
+    not close gaps far below them, although they grow like kt^4.  A family continues beyond its
+    last validated member, so no cut may lie above that member.  Each cut is the midpoint of its
+    free interval.  Returns [(i, cut)] for every gap."""
+    v = np.asarray(values, dtype=float)
+    e = np.asarray(errs, dtype=float)
+    fam = np.full(v.size, NO_FAMILY) if family is None else np.asarray(family)
+    free = fam < 0
+    upper = np.maximum.accumulate(np.where(free, v + e, -np.inf))                 # j <= i
+    lower = np.minimum.accumulate(np.where(free, v - e, np.inf)[::-1])[::-1]
+    lower = np.append(lower[1:], np.inf)                                         # j > i
+    index = np.arange(v.size)
+    for f in np.unique(fam[~free]):
+        members = np.nonzero(fam == f)[0]
+        last = np.searchsorted(members, index, side="right") - 1                 # -1: none <= i
+        nxt = last + 1
+        upper = np.maximum(upper, np.where(last >= 0, (v + e)[members[np.maximum(last, 0)]], -np.inf))
+        # No validated member above the cut: the family's continuation is unknown, refuse.
+        lower = np.minimum(lower, np.where(nxt < members.size,
+                                           (v - e)[members[np.minimum(nxt, members.size - 1)]], -np.inf))
+    return [(i, 0.5 * (upper[i] + lower[i])) for i in range(v.size - 1) if upper[i] < lower[i]]
 
 
 @dataclass(frozen=True)
@@ -433,16 +477,25 @@ class Target:
         return {"sigma": float(self.sigma), "k": int(self.k), "why": self.why}
 
 
-def nearest_block(cuts: list[tuple[int, float]], first: int, min_size: int,
-                  lower_edge: float) -> tuple[float, int] | None:
-    """(sigma, k) of a robust 'nearest k' query for the block of sorted values starting at index
-    ``first`` (all of them above ``lower_edge``): the block ends at the first safe cut leaving at
-    least ``min_size`` values in it and sigma is the midpoint of [lower_edge, cut].  Every block
-    member then lies strictly closer to sigma than every other eigenvalue, even after the
-    worst-case discretization shift.  None if the spectrum has no such cut."""
+def disk_is_clear(obstacles, lower_edge: float, cut: float) -> bool:
+    """No obstacle (complex eigenvalue) lies in the closed disk with diameter [lower_edge, cut],
+    i.e. at distance <= radius from the 'nearest k' shift sigma = midpoint."""
+    distance = np.abs(np.asarray(obstacles) - 0.5 * (lower_edge + cut))
+    return not np.any(distance <= 0.5 * (cut - lower_edge))
+
+
+def nearest_block(cuts: list[tuple[int, float]], first: int, min_size: int, lower_edge: float,
+                  obstacles=()) -> tuple[float, int] | None:
+    """(sigma, k) of a robust 'nearest k' query for the block of sorted real values starting at
+    index ``first`` (all of them above ``lower_edge``): the block ends at the first safe cut
+    leaving at least ``min_size`` values in it and sigma is the midpoint of [lower_edge, cut].
+    Every block member then lies strictly closer to sigma than every other real eigenvalue, even
+    after the worst-case discretization shift; ``obstacles`` (complex eigenvalues) must lie
+    outside that disk too.  Larger blocks have disks containing this one, so an obstacle inside
+    ends the search.  None if no block qualifies."""
     for i, c in cuts:
         if i - first + 1 >= min_size:
-            return 0.5 * (lower_edge + c), i - first + 1
+            return (0.5 * (lower_edge + c), i - first + 1) if disk_is_clear(obstacles, lower_edge, c) else None
     return None
 
 
@@ -451,20 +504,31 @@ class Spectrum:
     """Sorted eigenvalue model with error bars, the zero cluster included as exact zeros."""
     values: np.ndarray
     errs: np.ndarray
-    zero_first: int   # index range [zero_first, zero_last] of the zero cluster
+    family: np.ndarray   # DISCRETE_FAMILY id per value, NO_FAMILY if none (see safe_cuts)
+    zero_first: int      # index range [zero_first, zero_last] of the zero cluster
     zero_last: int
-    exact: bool       # True: dense discrete spectrum; False: continuous model + error bound
+    exact: bool          # True: dense discrete spectrum; False: continuous model + error bound
 
     @staticmethod
-    def build(values, errs, zero_tol: float, exact: bool) -> "Spectrum":
+    def build(values, errs, zero_tol: float, exact: bool, family=None) -> "Spectrum":
         order = np.argsort(values, kind="stable")
         v = np.asarray(values, dtype=float)[order]
         e = np.asarray(errs, dtype=float)[order]
+        fam = np.full(v.size, NO_FAMILY) if family is None else np.asarray(family, dtype=int)[order]
         zeros = np.nonzero(np.abs(v) <= zero_tol)[0]
-        return Spectrum(v, e, int(zeros[0]), int(zeros[-1]), exact)
+        return Spectrum(v, e, fam, int(zeros[0]), int(zeros[-1]), exact)
 
     def cuts(self) -> list[tuple[int, float]]:
-        return safe_cuts(self.values, self.errs)
+        return safe_cuts(self.values, self.errs, self.family)
+
+    def floor(self, widen: float = 1.0) -> float:
+        """Lower bound of the whole discrete spectrum according to the model, with the bars
+        multiplied by ``widen``: the lowest bar end over the values without a family and the
+        lowest member of each family (order matching puts the other members above it)."""
+        relevant = self.family < 0
+        for f in np.unique(self.family[~relevant]):
+            relevant[np.argmax(self.family == f)] = True
+        return float(np.min((self.values - widen * self.errs)[relevant]))
 
     def cut_below_zero(self) -> tuple[int, float] | None:
         below = [(i, c) for i, c in self.cuts() if i < self.zero_first]
@@ -475,10 +539,11 @@ class Spectrum:
         return above[0] if above else None
 
     def zero_isolated(self) -> bool:
-        """The zero cluster is separated from both neighbours, so the counts below / above it
-        are those of the discrete problem."""
+        """The zero cluster is separated from both neighbours (or nothing lies below it), so
+        the counts below / above it are those of the discrete problem."""
         below = self.cut_below_zero()
-        return (below is not None and below[0] == self.zero_first - 1 and self.cut_above_zero() is not None)
+        clear_below = self.zero_first == 0 or (below is not None and below[0] == self.zero_first - 1)
+        return clear_below and self.cut_above_zero() is not None
 
 
 # ---------------------------------------------------------------------------- case definition
@@ -605,17 +670,23 @@ class GeneratedCase:
 
 
 def _analytic_modes(spec: CaseSpec, k0: float, kt2_shift: float) -> tuple[list[Mode], list[Mode]]:
-    """(listed, validation) continuous-model modes.  Waveguide: listed = lambda <= k0^2 max(eps mu)
-    (all propagating plus the first evanescent modes); cavity2d: the lowest CAVITY_LISTED kc^2
-    (with ties).  The validation set extends to twice the listed kt^2 range so that window edges
-    near the end of the listing are checked against the next unlisted eigenvalues too."""
+    """(listed, validation) continuous-model modes, ties included.  Waveguide: listed = every
+    propagating mode and the evanescent ones up to lambda = k0^2 max(eps mu), but at least the
+    WAVEGUIDE_EVANESCENT least evanescent modes (below cutoff the guide has no propagating mode);
+    cavity2d: the lowest CAVITY_LISTED kc^2.  The validation set extends to twice the listed kt^2
+    range so that window edges near the end of the listing are checked against the next
+    unlisted eigenvalues too."""
     if spec.family == "waveguide":
-        lam_list = kt2_shift
-        lam_ext = 3.0 * kt2_shift
-        if spec.loaded:
-            ext = slab_guide_modes(spec.a, spec.b, k0, spec.width, spec.eps_slab, spec.mu_slab, lam_ext)
-        else:
-            ext = hollow_guide_modes(spec.a, spec.b, k0, lam_ext)
+        def modes(lam_max: float) -> list[Mode]:
+            if spec.loaded:
+                return slab_guide_modes(spec.a, spec.b, k0, spec.width, spec.eps_slab, spec.mu_slab, lam_max)
+            return hollow_guide_modes(spec.a, spec.b, k0, lam_max)
+
+        lam = max(kt2_shift, (np.pi / max(spec.a, spec.b)) ** 2)
+        while len(positive := [m.value for m in modes(lam) if m.value > 0.0]) < WAVEGUIDE_EVANESCENT:
+            lam *= 1.5
+        lam_list = max(kt2_shift, sorted(positive)[WAVEGUIDE_EVANESCENT - 1])
+        ext = modes(2.0 * lam_list + kt2_shift)      # kt^2 = lambda + kt2_shift doubled
         return [m for m in ext if m.value <= lam_list], ext
     kc2 = 4.0 * np.pi * CAVITY_LISTED / (spec.a * spec.b)   # Weyl: N(kc^2) ~ a b kc^2 / (4 pi)
     while len(rectangle_cutoffs(spec.a, spec.b, kc2, tm=False)) < CAVITY_LISTED:
@@ -646,23 +717,31 @@ def generate(spec: CaseSpec, name: str) -> GeneratedCase:
     t_assemble = time.perf_counter() - t0
 
     listed, validation = _analytic_modes(spec, k0, kt2_shift)
+    listed_values = np.array([m.value for m in listed])
     ext_values = np.array([m.value for m in validation])
+    family = [DISCRETE_FAMILY.get(m.label[:2], NO_FAMILY) for m in validation]
     # The zero cluster is exactly 0 in the discrete problem: append it with a zero error bar.
     model = Spectrum.build(np.append(ext_values, 0.0), np.append(error_bound(ext_values, kt2_shift, h), 0.0),
-                           0.0, exact=False)
-    window = _reference_window(model, len(listed), kt2_shift, wave)
+                           0.0, exact=False, family=np.append(family, NO_FAMILY))
+    propagating = wave and bool(np.any(listed_values < 0.0))
+    # The evanescent part of a loaded guide may hold complex-conjugate pairs that only a dense
+    # check can locate (module docstring): the model certifies no window or target there.
+    evanescent_real = not spec.loaded
+    window = (_reference_window(model, listed_values, kt2_shift, below_zero=propagating)
+              if propagating or evanescent_real else None)
     inertia = _inertia(spec, n, ne, nn, k0, h, model)
 
     t1 = time.perf_counter()
     targets_from = model
-    complex_count = None if spec.loaded else 0     # real spectrum proven for hollow guide / cavity
+    complex_values = None if spec.loaded else np.empty(0)   # real spectrum proven for hollow guide / cavity
     if n <= DENSE_LIMIT:
-        inertia, complex_count, targets_from = _dense_check(A, B, spec, inertia)
+        inertia, complex_values, targets_from = _dense_check(A, B, spec, inertia, window, listed_values)
     t_dense = time.perf_counter() - t1
-    # The evanescent region of a loaded guide may hold complex pairs: no robust target there.
-    targets = _targets(targets_from, wave, evanescent=not spec.loaded, null_dim=nn)
+    obstacles = np.empty(0) if complex_values is None else complex_values
+    targets = _targets(targets_from, wave, evanescent=evanescent_real or targets_from.exact, null_dim=nn,
+                       obstacles=obstacles)
     if not targets:
-        raise ValueError("mesh too coarse: no target can be separated from its neighbours")
+        raise ValueError(_refusal(spec, targets_from, h, propagating))
 
     meta = {
         "family": spec.family,
@@ -676,34 +755,40 @@ def generate(spec: CaseSpec, name: str) -> GeneratedCase:
                  "interior_edges": ne, "interior_nodes": nn, "h_max_mm": h,
                  "dof_layout": "[interior edges (e_t); interior nodes (e_z)]" if wave else "[interior edges]"},
         "inertia": inertia,
-        "complex_eigenvalue_count": complex_count,
+        # Unknown (null) for a loaded guide without dense check; min real part null if none.
+        "complex_eigenvalue_count": None if complex_values is None else int(complex_values.size),
+        "complex_eigenvalue_min_real": (float(np.real(complex_values).min())
+                                        if complex_values is not None and complex_values.size else None),
         "scenarios": _scenarios(spec, nx, ny, n, listed),
         "targets": [t.as_dict() for t in targets],
         "citation": "J.-F. Lee, D.-K. Sun, Z. J. Cendes, Full-wave analysis of dielectric waveguides using "
                     "tangential vector finite elements, IEEE Trans. MTT 39(8):1262-1271, 1991",
     }
     config = case.default_config(targets[0].sigma, targets[0].k)
-    ref = {"eigenvalues": np.array([m.value for m in listed]), "kind": "partial-analytic",
-           "note": _reference_note(spec, listed, window, h, kt2_shift, nn, wave),
+    ref = {"eigenvalues": listed_values, "kind": "partial-analytic",
+           "note": _reference_note(spec, listed, window, h, kt2_shift, nn, wave, propagating),
            "complete": window is not None, "window": window}
     return GeneratedCase(name=name, A=A, B=B, meta=meta, config=config, ref=ref,
                          timings={"assemble_s": t_assemble, "dense_check_s": t_dense})
 
 
-def _reference_window(model: Spectrum, num_listed: int, kt2_shift: float, wave: bool):
+def _reference_window(model: Spectrum, listed: np.ndarray, kt2_shift: float, below_zero: bool):
     """Window [lo, hi] in which the listed values are complete for the discrete problem: both
     edges are safe cuts and the zero cluster (never listed) lies outside.  None if none exists.
 
-    Waveguide: everything below the highest safe cut under the zero cluster (all of it listed);
-    lo is a lower bound of the whole discrete spectrum according to the model.  Cavity: from the
-    cut above the zero cluster to the highest safe cut that leaves only listed values below it
-    (the listing is the first num_listed values after the zero entry)."""
-    if wave:
+    below_zero (waveguide with propagating modes): everything below the highest safe cut under
+    the zero cluster (all of it listed); lo lies below the continuous spectrum (-kt2_shift) and
+    below the model's lower bound of the discrete one (bars doubled for margin).  Otherwise
+    (cavity2d, hollow guide below cutoff): from the cut above the zero cluster to the highest
+    safe cut that leaves only listed values below it (the listing holds the lowest positive
+    values of the model)."""
+    if below_zero:
         top = model.cut_below_zero()
-        lo = min(-kt2_shift, float(np.min(model.values - 2.0 * model.errs)))
+        lo = min(-kt2_shift, model.floor(widen=2.0))
         return None if top is None else (float(lo), float(top[1]))
     lo = model.cut_above_zero()
-    inside = [c for i, c in model.cuts() if model.zero_last < i <= model.zero_last + num_listed]
+    num_positive = int((listed > 0.0).sum())
+    inside = [c for i, c in model.cuts() if model.zero_last < i <= model.zero_last + num_positive]
     return None if lo is None or not inside else (float(lo), float(inside[-1]))
 
 
@@ -727,50 +812,68 @@ def _inertia(spec: CaseSpec, n: int, ne: int, nn: int, k0: float, h: float, mode
     return inertia
 
 
-def _dense_check(A, B, spec: CaseSpec, inertia: dict) -> tuple[dict, int, Spectrum]:
+def _dense_check(A, B, spec: CaseSpec, inertia: dict, window, listed: np.ndarray) -> tuple[dict, np.ndarray, Spectrum]:
     """Small cases: exact discrete spectrum (dense QZ / symmetric-definite solver).  Verifies the
-    structural expectations (inertia, real spectrum of the hollow guide and the cavity, complex
-    pairs of the loaded guide only above the zero cluster), replaces model-based counts by exact
-    ones ("pencil" counts the real eigenvalues by sign) and returns them together with the number
-    of complex eigenvalues and the real discrete spectrum (error bars = rounding tolerance) for
-    target selection."""
+    model-based claims (inertia, the reference window, the real spectrum of the hollow guide and
+    the cavity) and replaces the model-based counts by exact ones ("pencil" counts the real
+    eigenvalues by sign).  Returns them with the complex eigenvalues and with the real discrete
+    spectrum (error bars = rounding tolerance) for target selection.  Only a loaded guide has
+    complex eigenvalues: in its evanescent part and, on coarse meshes of high-contrast slabs,
+    also among its propagating modes (module docstring)."""
     wave = spec.family == "waveguide"
     lam = dense_pencil_eigenvalues(A, B) if wave else sla.eigh(A.toarray(), B.toarray(), eigvals_only=True)
     tol = 1e-8 * float(np.abs(lam).max())
     cplx = np.abs(np.imag(lam)) > tol
-    if cplx.any() and (not spec.loaded or np.real(lam[cplx]).min() <= tol):
-        raise RuntimeError("dense check: complex eigenvalues where the theory predicts real ones")
+    if cplx.any() and not spec.loaded:
+        raise RuntimeError("dense check: complex eigenvalues, but the hollow guide and the cavity have a real spectrum")
     real = np.real(lam[~cplx])
+    complex_values = lam[cplx]
     exact = {"A": dense_inertia(A), "B": dense_inertia(B), "pencil": count_signs(real, tol)}
     for key, expected in inertia.items():
         if any(e is not None and e != x for e, x in zip(expected, exact[key])):
             raise RuntimeError(f"dense check: inertia of {key} is {exact[key]}, expected {expected}")
-    return exact, int(cplx.sum()), Spectrum.build(real, np.full(real.size, tol), tol, exact=True)
+    if window is not None:
+        lo, hi = window
+        found = int(((real > lo) & (real < hi)).sum())
+        expected = int(((listed > lo) & (listed < hi)).sum())
+        if found != expected or np.any((np.real(complex_values) > lo) & (np.real(complex_values) < hi)):
+            raise RuntimeError(f"dense check: the reference window ({lo:.6g}, {hi:.6g}) holds {found} real "
+                               f"eigenvalues (or complex ones) but {expected} listed values")
+    return exact, complex_values, Spectrum.build(real, np.full(real.size, tol), tol, exact=True)
 
 
-def _targets(spec_model: Spectrum, wave: bool, evanescent: bool, null_dim: int) -> list[Target]:
-    """Robust 'nearest k' suggestions (see nearest_block).  Waveguide: all propagating modes and,
-    if ``evanescent``, the first evanescent group; cavity2d: the lowest and an interior group."""
+def _targets(spec_model: Spectrum, wave: bool, evanescent: bool, null_dim: int,
+             obstacles: np.ndarray) -> list[Target]:
+    """Robust 'nearest k' suggestions (see nearest_block) that keep the complex eigenvalues
+    ``obstacles`` out of their disks.  Waveguide: all propagating modes (or the largest lowest
+    group that can be separated) and, if ``evanescent``, the first evanescent group; cavity2d:
+    the lowest and an interior group."""
     s = spec_model
     cuts = s.cuts()
     basis = ("the dense discrete spectrum" if s.exact else
              "the continuous-model eigenvalues widened by the a-priori discretization error bound")
     robust = f"sigma lies mid-way between two spectral gaps that {basis} cannot close, so the k nearest " \
              "eigenvalues are exactly this group"
+    if obstacles.size:
+        robust += " (every complex eigenvalue lies farther from sigma)"
     out = []
     zero_cut = s.cut_above_zero()
     if wave:
-        top = s.cut_below_zero()
-        if top is not None:
-            k = top[0] + 1
+        # Largest block from the bottom first; disks shrink with the block.
+        for i, c in reversed([(i, c) for i, c in cuts if i < s.zero_first]):
+            k = i + 1
             # Nothing lies below the block, so its lower edge is its own lowest error-bar end.
-            sigma = 0.5 * (float(np.min(s.values[:k] - s.errs[:k])) + top[1])
+            low = float(np.min(s.values[:k] - s.errs[:k]))
+            if not disk_is_clear(obstacles, low, c):
+                continue
+            hurdle = "the zero cluster or from complex eigenvalues" if obstacles.size else "the zero cluster"
             what = ("all propagating modes (lambda = -beta^2 < 0)" if k == s.zero_first else
                     f"the lowest {k} of the {s.zero_first} propagating modes (the others are not separable "
-                    "from the zero cluster on this mesh)")
-            out.append(Target(sigma, k, f"{what}; {robust}; the zero cluster (lambda = 0) is excluded."))
+                    f"from {hurdle} on this mesh)")
+            out.append(Target(0.5 * (low + c), k, f"{what}; {robust}; the zero cluster (lambda = 0) is excluded."))
+            break
         if evanescent and zero_cut is not None:
-            blk = nearest_block(cuts, s.zero_last + 1, 6, zero_cut)
+            blk = nearest_block(cuts, s.zero_last + 1, 6, zero_cut, obstacles)
             if blk is not None:
                 out.append(Target(blk[0], blk[1], "the least evanescent modes just above the zero cluster "
                                                   f"(lambda > 0, close to cutoff); {robust}."))
@@ -814,29 +917,51 @@ def _description(spec: CaseSpec, ne: int, nn: int, nprop: int) -> str:
             f"(B: {nn} negative / {ne} positive), {nn}-fold zero eigenvalue (null space of A, non-physical), "
             f"{nprop} propagating modes in the continuous model.")
     if spec.loaded:
-        text += (" The evanescent part (lambda > 0) contains complex-conjugate eigenvalue pairs: LSE/LSM branches "
-                 "of opposite B-sign characteristic that the discretization couples where they nearly cross.")
+        text += (" The discrete pencil may contain complex-conjugate eigenvalue pairs (see complex_eigenvalue_count): "
+                 "LSE/LSM branches of opposite B-sign characteristic that the discretization couples where they "
+                 "nearly cross, in the evanescent part (lambda > 0) and, on coarse meshes of high-contrast slabs, "
+                 "also among the propagating modes.")
     return text
 
 
+def _refusal(spec: CaseSpec, s: Spectrum, h: float, propagating: bool) -> str:
+    """Why no robust target exists (generate raises ValueError with this message)."""
+    if s.exact:
+        return ("no robust target: no group of real eigenvalues of the dense discrete spectrum is separated from "
+                "the zero cluster and from the complex eigenvalues")
+    if spec.loaded and not propagating:
+        return (f"no robust target: the loaded guide has no propagating mode at {spec.freq_ghz} GHz, and its "
+                "evanescent spectrum may hold complex-conjugate pairs that only the dense check "
+                f"(n <= {DENSE_LIMIT}) locates")
+    return (f"no robust target: for n > {DENSE_LIMIT} targets rest on the a-priori error bound {ERR_CONST} h^2 kt^4 "
+            f"(h = {h:.3g} mm), which on this mesh is too wide to separate any target group from its neighbours; "
+            f"refine the mesh (the bound shrinks like h^2) or use n <= {DENSE_LIMIT} (exact dense spectrum)")
+
+
 def _reference_note(spec: CaseSpec, listed: list[Mode], window, h: float, kt2_shift: float, nn: int,
-                    wave: bool) -> str:
+                    wave: bool, propagating: bool) -> str:
     values = np.array([m.value for m in listed])
     err = error_bound(values, kt2_shift, h)
-    what = ("lambda = -beta^2 of all modes with lambda <= k0^2 max(eps mu)" if wave else
-            f"the lowest {len(listed)} nonzero TE cutoffs kc^2")
+    what = (f"lambda = -beta^2 of all propagating modes and of the least evanescent ones (lambda <= "
+            f"{values.max():.6g})" if wave else f"the lowest {len(listed)} nonzero TE cutoffs kc^2")
     family = ("closed form" if not spec.loaded and wave else
               "LSE/LSM transcendental equations (Brent)" if wave else "closed form (m pi/a)^2 + (n pi/b)^2")
-    win = (f"complete=true: every discrete eigenvalue in the window [{window[0]:.6g}, {window[1]:.6g}] "
-           "corresponds to a listed value (both edges lie in gaps the error bound cannot close)"
-           if window is not None else "complete=false: the mesh is too coarse to certify any window")
+    if window is not None:
+        win = (f"complete=true: every discrete eigenvalue in the window [{window[0]:.6g}, {window[1]:.6g}] "
+               "corresponds to a listed value (both edges lie in gaps the error bound cannot close)")
+    elif spec.loaded and not propagating:
+        win = ("complete=false: no propagating mode at this frequency, and the evanescent spectrum of a loaded "
+               "guide may hold complex-conjugate pairs")
+    else:
+        win = "complete=false: the mesh is too coarse to certify any window"
     return (f"Continuous-model (partial-analytic) values, {family}: {what}, in mm^-2. The discrete "
             f"eigenvalues differ by O(h^2): |lambda_h - lambda| <= {ERR_CONST} h^2 (lambda + {kt2_shift:.6g})^2 "
             f"with h = {h:.6g} mm (largest bound over the listing {err.max():.3g}, at the lowest mode "
             f"{err.min():.3g}); compare with that tolerance, not with the solver tolerance. The {nn}-fold zero "
             f"eigenvalue of the discrete pencil (non-physical null space) is not listed. {win}. "
-            + ("Positive (evanescent) listed values may appear as complex-conjugate pairs in the discrete pencil "
-               "(see meta complex_eigenvalue_count). " if spec.loaded else "")
+            + ("Listed values outside the window, evanescent ones in particular, may appear as complex-conjugate "
+               "pairs in the discrete pencil (see meta complex_eigenvalue_count / complex_eigenvalue_min_real). "
+               if spec.loaded else "")
             + f"Labels (ascending): {' '.join(m.label for m in listed)}.")
 
 
