@@ -132,7 +132,8 @@ CsrMatrix<T> read_scipy_compressed(const io::NpzFile& npz, bool csc, index_t n, 
   } catch (const Error& e) {
     throw Error(e.code(), npz.path().string() + ": " + e.what());
   }
-  return csc ? io::transpose(m) : m;
+  if (csc) return io::transpose(m);
+  return m;  // not `csc ? transpose(m) : m`: the conditional operator would copy m
 }
 
 RawMatrix read_scipy_npz(const std::filesystem::path& path, bool drop_zeros) {
