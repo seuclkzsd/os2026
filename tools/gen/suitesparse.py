@@ -14,7 +14,9 @@ Pipeline per matrix (archives are untrusted data):
      file holding a single triangle is symmetrized; the matrix must be Hermitian (complex-symmetric
      matrices are rejected: they are not valid cases); an O(eps) defect is removed by taking the
      Hermitian part.
-  4. problem by inspection: one matrix -> HEP; a pair -> GHEP when B is proven HPD by a symmetric
+  4. the file must match the collection index (field, n, nnz; spd of a pencil's B) - the only
+     integrity check available, as the collection publishes no checksums.
+     Problem by inspection: one matrix -> HEP; a pair -> GHEP when B is proven HPD by a symmetric
      diagonal-pivoting factorization (Sylvester inertia), GHIEP otherwise.
   5. targets: sigma inside the spectrum from a cheap Rayleigh-Ritz estimate (never from reference
      solutions): Krylov Ritz values of a Hermitian pencil with HPD B lie in [lambda_min, lambda_max]
@@ -71,8 +73,9 @@ class Matrix:
     is set, an auxiliary matrix shipped in the same archive (e.g. the mass matrix TEM27623_M).
 
     n, nnz, field and spd are the collection index values (ssstats.csv, 2023-10; n/nnz None where
-    the index has no entry, as for auxiliary members); field and Hermitian-ness are re-checked on
-    the downloaded file. archive_mb is the size of the (possibly shared) archive.
+    the index has no entry, as for auxiliary members; nnz counts both triangles without explicit
+    zeros). fetch_case checks the downloaded file against them (check_index; spd where a pencil's B
+    is tested for definiteness anyway). archive_mb is the size of the (possibly shared) archive.
     """
     group: str
     name: str
@@ -321,6 +324,18 @@ def read_hermitian(path: Path) -> tuple[sp.csr_matrix, dict[str, Any]]:
     return a, {"mm_header": header, "notes": notes}
 
 
+def check_index(matrix: Matrix, a: sp.csr_matrix, header: dict[str, Any]) -> None:
+    """Require the converted file to be the matrix the collection index describes: its field and,
+    where the index has them, n and nnz (full storage without explicit zeros, as read_hermitian
+    returns it). Archives come from a plain-HTTP mirror without published checksums, so these
+    facts are the integrity check left against a wrong, stale or substituted archive."""
+    found = {"field": header["field"], "n": a.shape[0], "nnz": a.nnz}
+    expected = {"field": matrix.field, "n": matrix.n, "nnz": matrix.nnz}
+    wrong = [f"{k}={found[k]} (index: {v})" for k, v in expected.items() if v is not None and found[k] != v]
+    if wrong:
+        raise Skipped(f"{matrix.key}.mtx does not match the collection index: {', '.join(wrong)}")
+
+
 # ============================================================================== inspection
 
 
@@ -438,6 +453,7 @@ def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[s
                                            timeout=timeout, max_seconds=max_seconds, refresh=refresh)
         extract_dir, record = archives[matrix.name]
         m, info = read_hermitian(find_mtx(extract_dir, matrix.key))
+        check_index(matrix, m, info["mm_header"])
         mats.append(m)
         sources.append({"group": matrix.group, "name": matrix.name, "file": f"{matrix.key}.mtx",
                         "url": record["url"], "archive_bytes": record["bytes"],
@@ -450,7 +466,11 @@ def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[s
     else:
         if b.shape != a.shape:
             raise Skipped(f"{name}: A is {a.shape}, B is {b.shape}")
-        if is_hpd(b):
+        hpd = is_hpd(b)
+        if hpd != registry[spec.b].spd:
+            raise Skipped(f"{name}: B is {'' if hpd else 'not '}HPD by factorization, but the "
+                          f"collection index says spd={registry[spec.b].spd}")
+        if hpd:
             problem = "GHEP"
             inertia["B"] = [0, 0, b.shape[0]]
         else:

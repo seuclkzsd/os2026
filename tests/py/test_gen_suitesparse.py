@@ -1,4 +1,5 @@
 """Offline tests for tools/gen/suitesparse.py: a file:// mirror of tiny .tar.gz archives."""
+import dataclasses
 import gzip
 import io
 import json
@@ -52,8 +53,9 @@ def _publish(mirror, name, matrix, symmetry, extra_members=(), compresslevel=9):
     return path
 
 
-def _registry(*names):
-    return {n: ss.Matrix(GROUP, n, 0, 0, "real", False, 0.1, f"test matrix {n}") for n in names}
+def _registry(*names, field="real", spd=()):
+    """Registry entries without index n/nnz; `spd` names the entries indexed as SPD."""
+    return {n: ss.Matrix(GROUP, n, None, None, field, n in spd, 0.1, f"test matrix {n}") for n in names}
 
 
 def _fetch(tmp_path, cname, cases, registry, **kw):
@@ -72,7 +74,8 @@ def _assert_sigma_inside(c):
 def test_hermitian_matrix_becomes_hep_case(tmp_path, symmetry, complex_):
     a = _sym(30, 1, complex_)
     _publish(tmp_path / "mirror", "M1", a, symmetry)
-    path = _fetch(tmp_path, "t-m1", {"t-m1": ss.CaseSpec("M1")}, _registry("M1"))
+    path = _fetch(tmp_path, "t-m1", {"t-m1": ss.CaseSpec("M1")},
+                  _registry("M1", field="complex" if complex_ else "real"))
     c = case.load_case(path)
     assert abs(c.A - a).max() < 1e-15 * abs(a).max()
     assert c.B is None and c.meta["problem"] == "HEP" and c.meta["family"] == "suitesparse"
@@ -142,19 +145,38 @@ def test_malformed_files_are_skipped(tmp_path, text):
         ss.read_hermitian(path)
 
 
+def test_download_must_match_the_collection_index(tmp_path):
+    a = _sym(30, 1)
+    a.eliminate_zeros()
+    _publish(tmp_path / "mirror", "M1", a, "symmetric")
+    cases = {"t-m1": ss.CaseSpec("M1")}
+    indexed = ss.Matrix(GROUP, "M1", 30, a.nnz, "real", False, 0.1, "index facts of the file")
+    assert case.load_case(_fetch(tmp_path, "t-m1", cases, {"M1": indexed})).A.nnz == a.nnz
+    for wrong, message in ((dataclasses.replace(indexed, n=31), "n=30 [(]index: 31[)]"),
+                           (dataclasses.replace(indexed, nnz=a.nnz + 2), f"nnz={a.nnz} [(]index: {a.nnz + 2}[)]"),
+                           (dataclasses.replace(indexed, field="complex"), "field=real [(]index: complex[)]")):
+        with pytest.raises(ss.Skipped, match=f"M1.mtx does not match the collection index: {message}"):
+            _fetch(tmp_path, "t-m1", cases, {"M1": wrong})
+
+
 def test_pencils_classified_by_inertia_of_b(tmp_path):
     mirror = tmp_path / "mirror"
     _publish(mirror, "K", _sym(30, 4), "symmetric")
     _publish(mirror, "M", _spd(30, 5), "symmetric")
     _publish(mirror, "S", _sym(30, 6), "symmetric")
     cases = {"t-km": ss.CaseSpec("K", "M", "pencil"), "t-ks": ss.CaseSpec("K", "S")}
-    reg = _registry("K", "M", "S")
+    reg = _registry("K", "M", "S", spd=("M",))
     c = case.load_case(_fetch(tmp_path, "t-km", cases, reg))
     assert c.meta["problem"] == "GHEP" and c.meta["inertia"]["B"] == [0, 0, 30]
     assert c.meta["description"].startswith("pencil")
     _assert_sigma_inside(c)
     c = case.load_case(_fetch(tmp_path, "t-ks", cases, reg))
     assert c.meta["problem"] == "GHIEP" and "indefinite-B" in c.meta["scenarios"]
+    # the definiteness test must agree with the collection index
+    with pytest.raises(ss.Skipped, match="B is HPD by factorization, but the collection index says spd=False"):
+        _fetch(tmp_path, "t-km", cases, _registry("K", "M", "S"))
+    with pytest.raises(ss.Skipped, match="B is not HPD by factorization, but the collection index says spd=True"):
+        _fetch(tmp_path, "t-ks", cases, _registry("K", "M", "S", spd=("S",)))
 
 
 def test_pencil_from_auxiliary_member_downloads_archive_once(tmp_path, monkeypatch):
@@ -181,7 +203,7 @@ def test_complex_symmetric_and_nonsymmetric_rejected(tmp_path):
     _publish(tmp_path / "mirror", "CS", m + m.T + sp.identity(20), "general")
     _publish(tmp_path / "mirror", "NS", sp.random(20, 20, density=0.3, random_state=rng) + sp.identity(20),
              "general")
-    reg = _registry("CS", "NS")
+    reg = _registry("CS", field="complex") | _registry("NS")
     cases = {"t-cs": ss.CaseSpec("CS"), "t-ns": ss.CaseSpec("NS")}
     with pytest.raises(ss.Skipped, match="complex symmetric"):
         _fetch(tmp_path, "t-cs", cases, reg)
