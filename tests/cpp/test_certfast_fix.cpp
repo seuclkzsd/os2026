@@ -2,6 +2,7 @@
 // on diagonal operators with known spectra:
 //   * a start scaling without b_inner (B = I) is charged in kappa = cond(S^2); before the fix
 //     kappa was 1 and a hidden eigenvalue under a tiny s_i passed with "P <= 1e-13";
+//   * the rank test of the B-orthonormalization ignores the column scaling of X;
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -135,6 +136,49 @@ TYPED_TEST(VerifyFixScaling, KappaWithoutBInnerIsExactAndCombinesWithBCondition)
               hs::Error::Code::InvalidInput)
         << bad;
   }
+}
+
+// ------------------------------------------------ column scaling of X (findings 2, 8)
+
+TYPED_TEST(VerifyFixScaling, ColumnScaledBasisIsAccepted) {
+  using T = TypeParam;
+  const index_t n = 200;
+  std::vector<T> d(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i)
+    d[i] = T(i < 4 ? 10.0 + static_cast<double>(i) : 0.5 * (1.0 - static_cast<double>(i) / static_cast<double>(n)));
+  hs::test::DiagonalOperator<T> op(d);
+  const auto check = [&](const std::vector<double>& col_scale) {
+    DenseMatrix<T> x(n, static_cast<index_t>(col_scale.size()));
+    for (index_t j = 0; j < x.cols(); ++j) x(j, j) = T(col_scale[static_cast<std::size_t>(j)]);
+    ExclusionOptions o;
+    o.pass_radius = 1.0 / 0.7;
+    return hs::exclusion_check<T>(op, nullptr, x, 0.0, 1.0 / 9.0, o);
+  };
+  // Exact eigenvectors normalized very differently (before the fix: "numerically rank deficient,
+  // diagonal ratio 1e-09" / "1e-08").
+  for (const std::vector<double>& scale :
+       {std::vector<double>{1.0, 1e-3, 1e-6, 1e-9}, std::vector<double>{1e4, 1.0, 1e-4, 1.0}}) {
+    const auto r = check(scale);
+    EXPECT_EQ(r.status, ExclusionStatus::Passed) << r.statement;
+    EXPECT_EQ(r.found_inside, 4);
+    EXPECT_LT(r.coupling, 1e-12);
+    ASSERT_EQ(r.deflated_theta.size(), 4u);
+    EXPECT_NEAR(r.deflated_theta.front(), 13.0, 1e-12);
+  }
+  // Still rejected: a zero column, a scaled duplicate, a nearly dependent pair (cond ~1e9).
+  const auto invalid = hs::Error::Code::InvalidInput;
+  EXPECT_EQ(error_code_of([&] { check({1.0, 0.0, 1.0}); }), invalid);
+  DenseMatrix<T> dup(n, 2);
+  dup(0, 0) = T(1.0);
+  dup(0, 1) = T(1e-6);
+  ExclusionOptions o;
+  o.pass_radius = 1.0 / 0.7;
+  EXPECT_EQ(error_code_of([&] { hs::exclusion_check<T>(op, nullptr, dup, 0.0, 1.0 / 9.0, o); }), invalid);
+  DenseMatrix<T> near(n, 2);
+  near(0, 0) = T(1.0);
+  near(0, 1) = T(1e3);
+  near(1, 1) = T(1e-6);  // column 1 = 1e3 (e_0 + 1e-9 e_1)
+  EXPECT_EQ(error_code_of([&] { hs::exclusion_check<T>(op, nullptr, near, 0.0, 1.0 / 9.0, o); }), invalid);
 }
 
 }  // namespace

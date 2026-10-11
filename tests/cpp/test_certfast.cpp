@@ -691,6 +691,39 @@ TYPED_TEST(VerifyExclusion, StartScalingKappaBoundsTheScaledCondition) {
 
 // ------------------------------------------------------------- P4 review regressions
 
+// Rescaled columns of X (B-norms spread over 1e10) give the verdict of the plain basis: complete
+// passes, a removed copy of the 4-fold eigenvalue is detected (before the fix: "numerically rank
+// deficient").
+TYPED_TEST(VerifyExclusion, ColumnScaledBasisGivesTheSameVerdict) {
+  using T = TypeParam;
+  Setup<T> st(BKind::General);
+  auto idx = within(st.pc.lambda, kSigma, kRadius);
+  ASSERT_EQ(idx.size(), 8u);
+  const auto scaled = [&](const std::vector<index_t>& cols) {
+    DenseMatrix<T> x = columns(st.pc.v, cols);
+    for (index_t j = 0; j < x.cols(); ++j) {
+      const double f = std::pow(10.0, j % 2 == 0 ? 5.0 - static_cast<double>(j) : -5.0 + static_cast<double>(j));
+      for (index_t i = 0; i < x.rows(); ++i) x(i, j) *= T(f);
+    }
+    return x;
+  };
+  auto opt = default_options();
+  hs::StartScaling sc = hs::start_scaling_for<T>(st.pc.b_ptr());
+  hs::set_start_scaling(opt, sc);
+  const auto pass = hs::exclusion_check<T>(*st.op, st.b_inner(), scaled(idx), kSigma, kRadius, opt);
+  EXPECT_EQ(pass.status, ExclusionStatus::Passed) << pass.statement;
+  EXPECT_EQ(pass.found_inside, 8);
+  EXPECT_LT(pass.coupling, 1e-7);
+  const auto it = std::find_if(idx.begin(), idx.end(), [&](index_t i) { return std::abs(st.pc.lambda[i] - 0.33) < 1e-9; });
+  ASSERT_NE(it, idx.end());
+  idx.erase(it);
+  const auto det = hs::exclusion_check<T>(*st.op, st.b_inner(), scaled(idx), kSigma, kRadius, opt);
+  ASSERT_EQ(det.status, ExclusionStatus::Detected) << det.statement;
+  EXPECT_EQ(det.new_inside, 1);
+  ASSERT_GE(det.new_lambda.size(), 1u);
+  EXPECT_NEAR(det.new_lambda[0], 0.33, 1e-8);
+}
+
 // A kappa that start_scaling_for only estimates (general, not diagonally dominant B) flags the
 // result as not rigorous and says so in the statement; proven kappas and exact runs do not.
 TYPED_TEST(VerifyExclusion, EstimatedKappaIsFlaggedNotRigorous) {

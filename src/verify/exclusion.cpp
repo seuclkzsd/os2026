@@ -1,8 +1,8 @@
 // The randomized exclusion check and its start scaling (include/hsolve/verify.hpp, "(1)"; the
 // header derives the probability statement). Implementation outline:
-//   1. B-orthonormalize X (Cholesky-QR, repeated until max |X^H B X - I| <= 1e-12; skipped for an
-//      X that is orthonormal already) - lanczos_krylov_schur demands an orthonormal deflation
-//      block, and the Weyl argument needs the B-orthogonal splitting [X Y].
+//   1. B-orthonormalize X (column-equilibrated Cholesky-QR, repeated until max |X^H B X - I| <=
+//      1e-12; skipped for an X that is orthonormal already) - lanczos_krylov_schur demands an
+//      orthonormal deflation block, and the Weyl argument needs the B-orthogonal splitting [X Y].
 //   2. Coupling e = ||Op X - X H11||_B and the spectrum of H11 = X^H B Op X (one block
 //      application of Op to the m columns), unless the caller supplies both.
 //   3. eps from the thresholds, s from delta, one cycle of (block) Lanczos with deflation = X from
@@ -39,8 +39,10 @@ constexpr double kNeverConverged = 1e-300;
 constexpr double kOrthoTol = 1e-12;
 /// Cholesky-QR passes before giving up on orthonormalizing X.
 constexpr int kMaxOrthoPasses = 3;
-/// X is rejected as numerically rank deficient when the Cholesky factor of X^H B X has
-/// min |R_ii| < kRankTol max |R_ii| (cond(X) above ~1e6: span X is then not well defined).
+/// X is rejected as numerically rank deficient when the Cholesky factor of the equilibrated Gram
+/// matrix D^{-1/2} X^H B X D^{-1/2} (D = its diagonal, unit B-norm columns) has min |R_ii| <
+/// kRankTol max |R_ii| (cond_B(X D^{-1/2}) above ~1e6: span X is then not well defined). The
+/// equilibration keeps the test about the conditioning of the span, not the column scaling.
 constexpr double kRankTol = 1e-6;
 /// The seed of the Gaussian start block is decorrelated from the solver's own random streams
 /// (lanczos_krylov_schur draws replacement vectors from options.seed).
@@ -91,11 +93,13 @@ bool all_finite(const DenseMatrix<T>& a) {
   return true;
 }
 
-/// x <- x R^{-1} (Cholesky-QR in the M inner product) until max |x^H M x - I| <= kOrthoTol;
-/// mx = M x on exit. Throws InvalidInput for a non-finite or numerically rank-deficient x.
+/// x <- x D^{-1/2} R^{-1} (column-equilibrated Cholesky-QR in the M inner product, D = diag(x^H M
+/// x)) until max |x^H M x - I| <= kOrthoTol; mx = M x on exit. Throws InvalidInput for a
+/// non-finite or numerically rank-deficient x.
 template <class T>
 void m_orthonormalize(LinearOperator<T>* m, DenseMatrix<T>& x, DenseMatrix<T>& mx) {
   const index_t n = x.rows(), k = x.cols();
+  std::vector<double> scale(static_cast<std::size_t>(k));
   for (int pass = 0;; ++pass) {
     apply_m(m, x, mx);
     DenseMatrix<T> g = hermitian_gram(x, mx);
@@ -111,6 +115,17 @@ void m_orthonormalize(LinearOperator<T>* m, DenseMatrix<T>& x, DenseMatrix<T>& m
     if (pass == kMaxOrthoPasses)
       HS_THROW(InvalidInput, "exclusion_check: x could not be B-orthonormalized (max |X^H B X - I| = "
                                  << dev << " after " << pass << " Cholesky-QR passes)");
+    // Equilibrate: unit M-norm columns, so that the rank test below measures the conditioning of
+    // the span and not the relative column scaling (Cholesky-QR itself is scaling invariant).
+    for (index_t j = 0; j < k; ++j) {
+      const double gjj = std::real(g(j, j));
+      if (!(gjj > 0.0))
+        HS_THROW(InvalidInput, "exclusion_check: x is numerically rank deficient in the B inner product (column "
+                                   << j << " has B-norm^2 " << gjj << ")");
+      scale[j] = 1.0 / std::sqrt(gjj);
+    }
+    for (index_t j = 0; j < k; ++j)
+      for (index_t i = 0; i < k; ++i) g(i, j) *= T(scale[i] * scale[j]);
     const fint info = lapack::potrf('U', static_cast<fint>(k), g.data(), static_cast<fint>(k));
     double dmin = std::numeric_limits<double>::infinity(), dmax = 0.0;
     if (info == 0)
@@ -120,8 +135,12 @@ void m_orthonormalize(LinearOperator<T>* m, DenseMatrix<T>& x, DenseMatrix<T>& m
       }
     if (info != 0 || !(dmin >= kRankTol * dmax))
       HS_THROW(InvalidInput, "exclusion_check: x is numerically rank deficient in the B inner product "
-                             "(Cholesky of X^H B X: info "
+                             "(Cholesky of the equilibrated X^H B X: info "
                                  << info << ", diagonal ratio " << (info == 0 ? dmin / dmax : 0.0) << ")");
+    for (index_t j = 0; j < k; ++j) {
+      T* col = x.col(j);
+      for (index_t i = 0; i < n; ++i) col[i] *= T(scale[j]);
+    }
     lapack::trsm('R', 'U', 'N', 'N', static_cast<fint>(n), static_cast<fint>(k), T(1), g.data(),
                  static_cast<fint>(k), x.data(), static_cast<fint>(n));
   }

@@ -211,8 +211,10 @@ index_t exclusion_block_steps(double epsilon, double delta, index_t dimension, i
 /// positive-definite-inner-product-compatible with b_inner = B (nullptr: B = I); x = n x m found
 /// eigenvectors (m >= 0, full column rank; B-orthonormalized internally, x is not modified);
 /// radius r > 0 (the claim: no eigenvalue beyond the found ones within r of sigma);
-/// opt.pass_radius > r. Throws InvalidInput for invalid sizes/options, a rank-deficient x, or a
-/// non-finite operator output. Cost and memory: header comment. Not thread-safe for a shared op.
+/// opt.pass_radius > r. x may hold any full-rank basis of the found span, with columns of any
+/// relative scaling (the rank test sees the column-equilibrated X: cond_B(X D^{-1/2}) above ~1e6 is
+/// rejected). Throws InvalidInput for invalid sizes/options, a rank-deficient x, or a non-finite
+/// operator output. Cost and memory: header comment. Not thread-safe for a shared op.
 template <class T>
 ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_inner,
                                    const DenseMatrix<T>& x, double sigma, double radius,
