@@ -1,5 +1,6 @@
 """Tests of the SLEPc baseline tooling (tools/bench): option handling of baseline_slepc.py, the
--log_view parser, configurations/profiles, the tuner's search logic and reports, and compare.py's
+-log_view parser, configurations/profiles, the tuner's search logic (descent and confirmation on
+synthetic trials) and reports, and compare.py's runs (guard mocked, tools/eval on tiny cases) and
 tables. No PETSc needed: everything runs on fixtures (log excerpts captured from real
 baseline_slepc.py runs with PETSc 3.26 / SLEPc 3.26, trimmed) and synthetic documents."""
 import json
@@ -484,6 +485,12 @@ def test_tune_trial_time_prefers_log_view():
     assert tune_slepc.trial_time({"phases": None, "report": None}) is None
 
 
+def test_bench_tools_share_one_core_parser():
+    assert slepc_profile.parse_cpulist("40,40-41") == [40, 41]       # P = 2 in both tools, as guard pins
+    assert slepc_profile.parse_cpulist("40,41,") == [40, 41]
+    assert tune_slepc.parse_cpulist is compare.parse_cpulist is slepc_profile.parse_cpulist
+
+
 def test_tune_random_failures_and_flaky_profiles():
     trials = [{**_trial(0, 1.0), "label": "a"}, {**_trial(1, 1.0, valid=False), "label": "a"},
               {**_trial(2, 1.0, valid=False), "label": "b"}, {**_trial(3, 1.0), "label": "c"}]
@@ -594,17 +601,22 @@ def test_tune_confirmation_includes_the_stored_profile_and_its_flaky_flag(tmp_pa
 
 def _entry(solver, t, ok=True, **extra):
     return {"solver": solver, "solver_s": t, "solver_s_scope": "x", "wall_s": t + 1, "peak_rss_gib": 0.5,
-            "solver_peak_bytes": 2**29, "success": ok, "max_eta": 1e-14, "pairs": 4, "eigenvalues": [1.0],
+            "solver_peak_bytes": 2**29, "success": ok, "valid": ok, "why": [] if ok else ["2 missing"],
+            "max_eta": 1e-14, "completeness": "complete", "pairs": 4, "eigenvalues": [1.0],
             "phases": {"analysis_s": 0.1, "numeric_s": 0.2, "factorizations": 1, "solves": 20, "solve_s": t / 2},
             **extra}
 
 
 def test_compare_summarize_medians():
-    s = compare.summarize([_entry("slepc", 2.0, config="1x2", config_source="default"), _entry("slepc", 4.0),
-                           _entry("slepc", 3.0, ok=False)])
+    s = compare.summarize([_entry("slepc", 2.0, config="1x2", config_source="default", config_scope="default"),
+                           _entry("slepc", 4.0), _entry("slepc", 3.0, ok=False)])
     assert s["solver_s"] == 3.0 and (s["solver_s_min"], s["solver_s_max"]) == (2.0, 4.0) and not s["ok"]
+    assert (s["valid_runs"], s["reps"]) == (2, 3) and s["invalid_reasons"] == ["2 missing"]
     assert s["phases"]["solve_s"] == 1.5 and s["config"] == "1x2" and s["solver_peak_gib"] == 0.5
+    assert s["config_scope"] == "default" and s["completeness"] == ["complete"]
     assert compare.summarize([_entry("hsolve", 1.0)])["ok"]
+    # success claimed but the evaluation failed: not ok
+    assert not compare.summarize([_entry("hsolve", 1.0, valid=False, why=["1 of 4 pairs have backward error"])])["ok"]
 
 
 def test_compare_render_markdown():
@@ -613,20 +625,28 @@ def test_compare_render_markdown():
            "rows": [{"case": "c1", "n": 10, "problem": "HEP", "target_desc": "k=4 @ 1",
                      "solvers": {"hsolve": {**compare.summarize([_entry("hsolve", 1.0), _entry("hsolve", 1.2)]),
                                             "set_err_vs_ref": 1e-15},
-                                 "slepc": {**compare.summarize([_entry("slepc", 2.4, config="2x1",
+                                 "slepc": {**compare.summarize([_entry("slepc", 2.4, config="2x1", config_scope="case",
                                                                        config_source="case profile c1")])}}},
                     {"case": "c2", "n": 10, "problem": "GHEP", "target_desc": "[1, 2]",
                      "solvers": {"hsolve": compare.summarize([_entry("hsolve", 1.0)]),
-                                 "slepc": compare.summarize([_entry("slepc", 3.0, ok=False)])}}]}
+                                 "slepc": compare.summarize([_entry("slepc", 3.0), _entry("slepc", 3.0, ok=False),
+                                                             _entry("slepc", 3.0)])}},
+                    {"case": "c3", "n": 10, "problem": "GHEP", "target_desc": "k=2 @ 0",
+                     "solvers": {"hsolve": compare.summarize([_entry("hsolve", 1.0)]),
+                                 "slepc": compare.summarize([_entry("slepc", 2.0, config="1x2", config_scope="class",
+                                                                    config_source="class profile GHEP/nearest")])}}]}
     md = compare.render_markdown(doc)
     lines = md.splitlines()
     assert lines[0] == "# t" and "SLEPc profile `best`" in md
     hs = next(line for line in lines if line.startswith("| c1 | 10 | HEP | k=4 @ 1 | hsolve"))
-    assert "1.10 [1.00-1.20]" in hs and "ref 1e-15" in hs and "| yes |" in hs
+    assert "1.10 [1.00-1.20]" in hs and "complete; ref 1e-15" in hs and "| yes (2/2) |" in hs
     sl = next(line for line in lines if line.startswith("| c1 | 10 | HEP | k=4 @ 1 | slepc"))
     assert "`2x1` (case profile c1)" in sl and "0.20 (1)" in sl and "20 / 1.20" in sl
+    bad = next(line for line in lines if line.startswith("| c2 | 10 | GHEP | [1, 2] | slepc"))
+    assert "| NO (2/3) |" in bad and "invalid: 2 missing" in bad
     assert "| c1 | 2.18x (1.62x) |" in md
-    assert "| c2 | 3.00x (2.00x) (not both ok) |" in md
+    assert "| c2 | - (slepc valid 2/3) |" in md                       # no speedup against an invalid baseline
+    assert "| c3 | 2.00x (1.50x) (vs class profile) |" in md        # not the tuned baseline
 
 
 def test_compare_reference_sets_and_errors():
@@ -635,30 +655,29 @@ def test_compare_reference_sets_and_errors():
     assert compare.expected_values(ref, {"mode": "interval", "lower": 0.0, "upper": 2.5}).tolist() == [0.5, 1.0, 2.0]
     assert compare.expected_values(cio.Reference(ref.eigenvalues, None, {"kind": "solver", "complete": False}),
                                    {"mode": "nearest", "sigma": 0, "k": 1}) is None
-    assert compare.set_error(np.array([1.0, 2.0]), np.array([2.0, 1.0 + 1e-3]), 1.0) == pytest.approx(1e-3)
+    # |lambda - mu| / (|mu| + scale), the evaluation's yardstick
+    assert compare.set_error(np.array([1.0, 2.0]), np.array([2.0, 1.0 + 1e-3]), 1.0) == pytest.approx(1e-3 / 2.001)
     assert compare.set_error(np.array([1.0]), np.array([1.0, 2.0]), 1.0) is None
     assert compare.target_desc({"mode": "interval", "lower": 40, "upper": 200}) == "[40, 200]"
 
 
-def test_compare_check_sets_marks_wrong_sets():
-    want = np.array([1.0, 2.0, 2.0])
+def test_compare_set_errors_resolve_wide_range_spectra():
+    # syn-wide-range-real-1e4 shape: wanted eigenvalues ~1, spectrum up to 1e6 (scale = ||A||/||B||).
+    # Returning the 11th-nearest eigenvalue instead of the 10th is a set error of 7.9e-3 / 2 = 4e-3,
+    # not 7.9e-9 as when divided by max |lambda|.
+    want = np.array([1.0, 1.0187])
+    got = np.array([1.0, 1.02656])
+    assert compare.set_error(got, want, 1.0) == pytest.approx((1.02656 - 1.0187) / 2.0187)
     row = {"solvers": {"hsolve": {"ok": True}, "slepc": {"ok": True}}}
-    sets = {"hsolve": [np.array([2.0, 1.0, 2.0]), np.array([1.0, 2.0, 2.0 + 1e-12])],
-            "slepc": [np.array([1.0, 2.0, 2.0]), np.array([1.0, 2.0, 3.0])]}   # 2nd rep missed a copy
-    compare.check_sets(row, sets, want, 3.0)
-    hs, sl = row["solvers"]["hsolve"], row["solvers"]["slepc"]
-    assert hs["ok"] and hs["set_err_vs_ref"] < 1e-12 and hs["set_diff_vs_slepc"] < 1e-12
-    assert not sl["ok"] and sl["set_wrong"] and sl["set_err_vs_ref"] == pytest.approx(1 / 3)
+    compare.check_sets(row, {"hsolve": [got], "slepc": [want]}, want, 1.0)
+    hs = row["solvers"]["hsolve"]
+    assert hs["set_err_vs_ref"] > 1e-3 and hs["set_diff_vs_slepc"] > 1e-3 and hs["ok"]   # informational only
     row = {"solvers": {"slepc": {"ok": True}}}
-    compare.check_sets(row, {"slepc": [np.array([1.0, 2.0])]}, want, 3.0)
-    assert row["solvers"]["slepc"]["set_mismatch"] == "2 values, reference has 3" and not row["solvers"]["slepc"]["ok"]
+    compare.check_sets(row, {"slepc": [np.array([1.0])]}, want, 1.0)
+    assert row["solvers"]["slepc"]["set_mismatch"] == "1 values, reference has 2"
     row = {"solvers": {"slepc": {"ok": True}}}
-    compare.check_sets(row, {"slepc": [np.array([1.0])]}, None, 3.0)   # no reference: nothing to judge
+    compare.check_sets(row, {"slepc": [np.array([1.0])]}, None, 1.0)   # no complete reference: nothing to compare
     assert row["solvers"]["slepc"] == {"ok": True}
-    doc = {"tag": "t", "cores": "1", "ncores": 1, "slepc_profile": "default", "reps": 1, "solvers": ["slepc"],
-           "rows": [{"case": "c", "n": 3, "problem": "HEP", "target_desc": "k=3 @ 0",
-                     "solvers": {"slepc": {**compare.summarize([_entry("slepc", 1.0)]), "ok": False, "set_wrong": True}}}]}
-    assert "| NO (set) |" in compare.render_markdown(doc)
 
 
 def test_compare_slepc_config_and_hsolve_command(tmp_path):
@@ -669,12 +688,13 @@ def test_compare_slepc_config_and_hsolve_command(tmp_path):
     slepc_profile.save_profiles([_profile("case", "tiny", ranks=2, eps_ncv="3k")], pf)
     args = compare.build_parser().parse_args(["tiny", "--tag", "t", "--cores", "40,41", "--slepc-profile", "best",
                                               "--slepc-profile-file", str(pf), "--root", str(tmp_path)])
-    cfg, src = compare.slepc_config(c, "nearest", 2, args)
-    assert cfg.label() == "2x1 eps_ncv=3k" and src == "case profile tiny"
-    cfg, src = compare.slepc_config(c, "interval", 2, args)
-    assert cfg == slepc_profile.default_config(2) and src == "default (no tuned profile)"
+    near = {"mode": "nearest", "sigma": 0.0, "k": 1}
+    assert compare.slepc_config(c, near, 2, args) == (SlepcConfig.make(2, 1, "none", {"eps_ncv": "3k"}),
+                                                      "case profile tiny", "case")
+    cfg, src, scope = compare.slepc_config(c, {"mode": "interval", "lower": 0, "upper": 1}, 2, args)
+    assert cfg == slepc_profile.default_config(2) and src == "default (no tuned profile)" and scope == "default"
     args.slepc_profile, args.slepc_ranks = "default", 2
-    assert compare.slepc_config(c, "nearest", 2, args) == (SlepcConfig(2, 1), "default")
+    assert compare.slepc_config(c, near, 2, args) == (SlepcConfig(2, 1), "default", "default")
     out = tmp_path / "raw" / "hsolve-nocert"
     cmd = compare.hsolve_command(c, "hsolve-nocert", out, 2, args, {"mode": "interval", "lower": 0, "upper": 1})
     cfg_doc = json.loads((out.parent / "config-hsolve-nocert.json").read_text())
@@ -686,3 +706,92 @@ def test_compare_slepc_config_and_hsolve_command(tmp_path):
                                 "time_iterate_s": 4.0, "time_verify_s": 0.3})
     assert ph == {"analysis_s": 1.0, "numeric_s": 2.0, "factorizations": 3, "solves": 40, "solve_s": 0.5,
                   "ortho_s": None, "iterate_s": 4.0, "verify_s": 0.3}
+
+
+# run_once with a mocked guarded(): the "solver" writes the result the test hands it.
+
+WIDE = np.concatenate([1.0 + 0.01 * np.arange(12) ** 1.3, np.geomspace(10.0, 1e6, 20)])   # wanted ~1, max 1e6
+
+
+def _wide_case(tmp_path, k=4):
+    cio.save_case("wide", sp.diags(WIDE).tocsr(), meta={"family": "test", "problem": "HEP"},
+                  config=cio.default_config(1.0, k), root=tmp_path)
+    cio.save_ref("wide", WIDE, kind="dense", complete=True, root=tmp_path)
+    return cio.load_case("wide", root=tmp_path)
+
+
+def _write_result(out, values, success=True):
+    idx = [int(np.argmin(np.abs(WIDE - v))) for v in values]
+    cio.save_result(out, np.asarray(values, dtype=float), np.eye(WIDE.size)[:, idx],
+                    {"success": success, "time_total_s": 0.5, "pairs": [{"backward_error": 1e-16}] * len(values)})
+
+
+def _fake_guard(monkeypatch, writes=None, rc=0, killed=None):
+    calls = []
+
+    def fake(cmd, summary, cores, mem_gb, timeout, threads, exclusive):
+        calls.append(cmd)
+        if writes is not None:
+            writes(cmd)
+        return {"returncode": rc, "killed": killed, "wall_s": 1.0, "peak_rss_gib": 0.1, "stderr_tail": "boom"}
+    monkeypatch.setattr(compare, "guarded", fake)
+    return calls
+
+
+def _compare_args(tmp_path, *extra):
+    return compare.build_parser().parse_args(["wide", "--tag", "t", "--cores", "40,41", "--root", str(tmp_path),
+                                              "--slepc-profile-file", str(tmp_path / "p.json"), *extra])
+
+
+def test_compare_run_once_expands_k_rules_with_the_override_k(tmp_path, monkeypatch):
+    c = _wide_case(tmp_path, k=1)
+    slepc_profile.save_profiles([{**_profile("case", "wide", eps_nev="k+4", eps_ncv="2k")}], tmp_path / "p.json")
+    calls = _fake_guard(monkeypatch, rc=1)
+    args = _compare_args(tmp_path, "--slepc-profile", "best")
+    override = {"mode": "nearest", "sigma": 0.0, "k": 20}
+    compare.run_once("slepc", c, override, tmp_path / "raw" / "slepc", args, override)
+    cmd = calls[-1]
+    assert json.loads(cmd[cmd.index("--target") + 1])["k"] == 20
+    assert cmd[cmd.index("-eps_nev") + 1] == "24" and cmd[cmd.index("-eps_ncv") + 1] == "40"
+    # an interval config with a nearest override must not need the config's k
+    cio.save_case("wide", sp.diags(WIDE).tocsr(), meta={"family": "test", "problem": "HEP"},
+                  config={**cio.default_config(1.0, 1), "target": {"mode": "interval", "lower": 0.5, "upper": 2.0}},
+                  root=tmp_path)
+    interval_case = cio.load_case("wide", root=tmp_path)
+    compare.run_once("slepc", interval_case, override, tmp_path / "raw" / "slepc", args, override)
+    assert calls[-1][calls[-1].index("-eps_nev") + 1] == "24"
+
+
+def test_compare_run_once_never_reads_a_stale_result(tmp_path, monkeypatch):
+    c = _wide_case(tmp_path)
+    out = tmp_path / "raw" / "hsolve"
+    _write_result(out, WIDE[:4])                                      # an earlier successful run, same tag
+    (out.parent / "log_view-hsolve.txt").write_text("stale")
+    _fake_guard(monkeypatch, rc=-11)                                  # this run crashes before writing
+    args = _compare_args(tmp_path)
+    e = compare.run_once("hsolve", c, c.config["target"], out, args, None)
+    assert not e["success"] and not e["valid"] and e["rc"] == -11 and "solver_s" not in e
+    assert not out.exists() and not (out.parent / "log_view-hsolve.txt").exists()
+    assert not compare.summarize([e])["ok"]
+    # a result written by a run that exited non-zero (or was killed) does not count either
+    _fake_guard(monkeypatch, writes=lambda cmd: _write_result(out, WIDE[:4]), killed="timeout 10s")
+    e = compare.run_once("hsolve", c, c.config["target"], out, args, None)
+    assert e["claimed_success"] and not e["success"] and not e["valid"] and "run failed" in e["why"][0]
+
+
+def test_compare_run_once_validity_comes_from_the_evaluation(tmp_path, monkeypatch):
+    c = _wide_case(tmp_path, k=4)                                      # sigma 1: the 4 smallest are wanted
+    from tools.eval import evaluate
+    judge = compare.make_judge(c, c.config["target"], evaluate.estimate_norms(c.A, c.B))
+    args = _compare_args(tmp_path)
+    out = tmp_path / "raw" / "hsolve"
+    _fake_guard(monkeypatch, writes=lambda cmd: _write_result(out, WIDE[:4]))
+    e = compare.run_once("hsolve", c, c.config["target"], out, args, None, judge)
+    assert e["valid"] and e["verdict"] == "pass" and e["completeness"] == "complete" and e["certified"]
+    assert (out / "evaluation.json").exists() and not (out / "eigenvectors.npy").exists()   # vectors dropped
+    # the 4th-nearest eigenvalue missed, the 5th returned instead: success claimed, set wrong
+    _fake_guard(monkeypatch, writes=lambda cmd: _write_result(out, np.r_[WIDE[:3], WIDE[4]]))
+    e = compare.run_once("hsolve", c, c.config["target"], out, args, None, judge)
+    assert e["success"] and not e["valid"] and e["completeness"] == "incomplete"
+    assert any("completeness incomplete" in r for r in e["why"])
+    assert not compare.summarize([e])["ok"]
