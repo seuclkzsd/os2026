@@ -356,7 +356,7 @@ TEST(LanczosBlockLayout, BasisSizesAreWholeBlocks) {
     return s;
   };
   // Driver-like sizes: single-vector auto ncv = max(2 nev + 1, nev + 16) = 28 for nev = 12.
-  // Requested ncv: whole blocks only. Auto: 4 more blocks.
+  // Requested ncv: whole blocks only, at least round_up(nev + 1, p) + 2p. Auto: 4 more blocks.
   struct Case {
     index_t nev, ncv1, p;
     bool automatic;
@@ -371,11 +371,16 @@ TEST(LanczosBlockLayout, BasisSizesAreWholeBlocks) {
       {12, 28, 8, true, 64, 32, 32},   // 32 + 4 * 8; 12 + 52 / 2 = 38 -> 32
       {10, 26, 4, false, 28, 16, 28},  // 26 -> 28; 10 + 18 / 2 = 19 -> 16
       {10, 26, 4, true, 44, 24, 28},   // 28 + 16; 10 + 34 / 2 = 27 -> 24
-      {5, 7, 4, false, 12, 8, 12},     // a small ncv grows to round_up(nev, p) + p
+      // Small requested ncv: grows to spare + 2p, spare = round_up(nev + 1, p); keep >= spare.
+      {5, 7, 4, false, 16, 8, 16},     // spare 8; 5 + 11 / 2 = 10 -> 8
+      {7, 10, 8, false, 24, 8, 24},    // spare 8; 7 + 17 / 2 = 15 -> 8
+      {12, 15, 3, false, 21, 15, 21},  // spare 15; 12 + 9 / 2 = 16 -> 15
+      {12, 15, 4, false, 24, 16, 24},  // spare 16 (keep == nev = 12 before); 12 + 6 -> 16
+      {8, 24, 8, true, 64, 32, 32},    // spare 16: base 32 (> 24), + 4 * 8
   };
   for (const Case& c : cases) {
-    SCOPED_TRACE("nev " + std::to_string(c.nev) + " p " + std::to_string(c.p) +
-                 (c.automatic ? " auto" : " requested"));
+    SCOPED_TRACE("nev " + std::to_string(c.nev) + " ncv " + std::to_string(c.ncv1) + " p " +
+                 std::to_string(c.p) + (c.automatic ? " auto" : " requested"));
     const auto d = block_dimensions(setup(100000, c.nev, c.ncv1), c.p, c.automatic);
     EXPECT_EQ(d.ncv, c.ncv);
     EXPECT_EQ(d.keep, c.keep);
@@ -384,28 +389,50 @@ TEST(LanczosBlockLayout, BasisSizesAreWholeBlocks) {
   }
   for (bool automatic : {false, true}) {
     for (index_t p : {2, 3, 4, 8}) {
-      for (index_t nev : {1, 3, 7, 12, 30}) {
-        const auto d =
-            block_dimensions(setup(5000, nev, std::max(2 * nev + 1, nev + 16)), p, automatic);
-        EXPECT_EQ(d.ncv % p, 0);
-        EXPECT_EQ(d.keep % p, 0);
-        EXPECT_GE(d.keep, nev);
-        EXPECT_LE(d.keep + p, d.ncv);
-        EXPECT_LE(d.first_probe, d.ncv);
-        EXPECT_GE(d.first_probe, nev + 1);
+      for (index_t nev : {1, 3, 7, 8, 12, 30}) {
+        for (index_t ncv1 : {nev + 1, nev + 3, std::max(2 * nev + 1, nev + 16)}) {
+          const auto d = block_dimensions(setup(5000, nev, ncv1), p, automatic);
+          EXPECT_TRUE(d.feasible);
+          EXPECT_EQ(d.ncv % p, 0);
+          EXPECT_EQ(d.keep % p, 0);
+          EXPECT_GE(d.keep, nev + 1);           // a spare Ritz pair
+          EXPECT_LE(d.keep + p, d.ncv);         // a new block per cycle
+          EXPECT_GE(d.ncv, nev + 1 + 2 * p);    // room for two
+          EXPECT_LE(d.first_probe, d.ncv);
+          EXPECT_GE(d.first_probe, ncv1);       // never less evidence than p = 1
+        }
       }
     }
   }
-  // Basis + residual block must fit into the free space; the auto extension shrinks to fit; a
-  // full-space ncv never takes blocks.
-  auto d = block_dimensions(setup(32, 4, 20), 4, false);
-  EXPECT_TRUE(d.feasible);  // 20 + 4 <= 32
+  // The free space must hold twice the basis plus its residual block (else the dispatcher takes
+  // the exact single-vector cycle); the auto extension shrinks to fit; a full-space ncv never
+  // takes blocks.
+  auto d = block_dimensions(setup(48, 4, 20), 4, false);
+  EXPECT_TRUE(d.feasible);  // 2 (20 + 4) <= 48
   EXPECT_EQ(d.ncv, 20);
-  d = block_dimensions(setup(32, 4, 20), 4, true);
-  EXPECT_TRUE(d.feasible);  // 20 + 16 shrinks to 28: 28 + 4 <= 32
+  EXPECT_FALSE(block_dimensions(setup(47, 4, 20), 4, false).feasible);
+  d = block_dimensions(setup(64, 4, 20), 4, true);
+  EXPECT_TRUE(d.feasible);  // 20 + 16 shrinks to 28: 2 (28 + 4) <= 64
   EXPECT_EQ(d.ncv, 28);
-  EXPECT_FALSE(block_dimensions(setup(23, 4, 20), 4, true).feasible);   // 24 > 23
+  EXPECT_FALSE(block_dimensions(setup(47, 4, 20), 4, true).feasible);   // 2 (20 + 4) > 47
   EXPECT_FALSE(block_dimensions(setup(20, 4, 20), 2, false).feasible);  // ncv == n_free
+  // Large block sizes: infeasible without overflowing (p up to INT64_MAX); the largest feasible
+  // p for n_free = 100, nev = 4, ncv = 20 is 12 (base 36, 2 (36 + 12) <= 100).
+  d = block_dimensions(setup(100, 4, 20), 12, false);
+  EXPECT_TRUE(d.feasible);
+  EXPECT_EQ(d.ncv, 36);
+  const index_t big = std::numeric_limits<index_t>::max();
+  for (index_t p : {index_t{13}, index_t{1000}, index_t{1} << 40, index_t{1} << 62, big / 2 - 1,
+                    big / 2, big - 1, big}) {
+    for (bool automatic : {false, true}) {
+      SCOPED_TRACE("p " + std::to_string(p));
+      EXPECT_FALSE(block_dimensions(setup(100, 4, 20), p, automatic).feasible);
+      // A free space of INT64_MAX: feasible up to p = n_free / 8, no arithmetic overflows.
+      const auto huge = block_dimensions(setup(big, 4, 20), p, automatic);
+      EXPECT_EQ(huge.feasible, p <= big / 8);
+      if (huge.feasible) EXPECT_EQ(huge.ncv % p, 0);
+    }
+  }
 }
 
 TEST(KrylovSchurGeneralBlock, BlockSizeOtherThanOneIsRejected) {

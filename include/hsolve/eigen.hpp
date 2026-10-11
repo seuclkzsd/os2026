@@ -105,16 +105,22 @@ struct HermitianEigResult {
 ///   * Start block: the first min(p, initial->cols()) columns of `initial` (column 0 nonzero, all
 ///     finite), the remaining ones random; dependent columns other than column 0 are replaced.
 ///   * ncv: base = the single-vector value (auto or requested) rounded up to a multiple of p, at
-///     least nev rounded up to one plus p. A requested ncv gives ncv = base; ncv = 0 gives
-///     base + 4p (as far as n - d >= ncv + p). Each restart keeps k Ritz pairs, k = nev +
-///     (ncv - nev) / 2 rounded down to a multiple of p, but at least nev rounded up to one and at
-///     most ncv - p.
+///     least s + 2p with s = nev + 1 rounded up to a multiple of p. A requested ncv gives
+///     ncv = base; ncv = 0 gives base + 4p (as far as n - d >= 2 (ncv + p)). Each restart keeps
+///     k Ritz pairs, k = nev + (ncv - nev) / 2 rounded down to a multiple of p, but at least s
+///     (one spare pair) and at most ncv - p.
 ///   * Early stop: a cycle also runs Rayleigh-Ritz at block boundaries, from base basis vectors on
 ///     in the first cycle and from k + p on in later ones, and ends there once all nev wanted
 ///     pairs have converged (one heev of the projected matrix per block); ritz_all then holds the
-///     Ritz values of that shorter basis.
-///   * A free space too small for that (n - d < ncv + p) is solved exactly by one single-vector
-///     cycle over the whole free space, as ncv >= n - d does for p = 1.
+///     Ritz values of that shorter basis. The result then just meets tol, whereas p = 1 tests
+///     only at cycle ends and usually overshoots tol by orders of magnitude: compare the two at
+///     matched residuals, not at equal tol.
+///   * A free space below twice the basis plus its residual block (n - d < 2 (ncv + p)), and any
+///     block_size too large for one (up to INT64_MAX), is solved exactly by one single-vector
+///     cycle over the whole free space (n - d applications), as ncv >= n - d does for p = 1.
+///   * Copies of a multiple eigenvalue beyond p enter only through rounding (as for p = 1 beyond
+///     one), so when the wanted set holds more than p copies, when and whether they converge
+///     depends on rounding.
 ///   * Per step: one block of p operator applications, 3 block M applications (2 with store_bv)
 ///     plus O(n (d + ncv) p) BLAS3 flops. Memory: the basis holds n*(d + ncv + p) scalars (twice
 ///     that with store_bv), plus an n*p M*W workspace without store_bv; note the larger auto ncv

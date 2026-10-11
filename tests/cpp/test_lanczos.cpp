@@ -1398,6 +1398,159 @@ TYPED_TEST(LanczosBlockTyped, CycleStopsEarlyAtTheFirstConvergedBlockBoundary) {
   expect_values(full.theta, {100.0, 90.0, 80.0, 70.0}, 1e-10);
 }
 
+TYPED_TEST(LanczosBlockTyped, FirstCycleIsNotProbedBeforeTheSingleVectorSize) {
+  // Three distinct eigenvalues of multiplicity >= 30: the block Krylov space breaks down every
+  // three blocks and each round adds p exact (converged) copies of every value. With p = 2,
+  // nev = 5, ncv = 16 (keep = 10) a first-cycle probe at keep + p = 12 sees 4 copies of the
+  // extreme value plus a converged copy of the next one and would accept that wrong set (measured
+  // with the probe rule mutated to m >= keep + p in the first cycle: wrong in all four
+  // configurations below, at 12 applications). The first cycle is probed only from the
+  // single-vector basis size (here ncv itself): the run continues and returns 5 copies.
+  using T = TypeParam;
+  std::vector<double> spectrum;
+  for (index_t i = 0; i < 100; ++i) spectrum.push_back(i < 30 ? 1.0 : (i < 60 ? 2.0 : 3.0));
+  auto op = operator_with_spectrum<T>(spectrum, 51);
+  for (auto [p, ncv] : {std::pair<index_t, index_t>{2, 16}, {4, 12}}) {
+    for (Which which : {Which::LargestAlgebraic, Which::SmallestAlgebraic}) {
+      SCOPED_TRACE("p = " + std::to_string(p) + ", ncv = " + std::to_string(ncv) + ", which " +
+                   std::to_string(static_cast<int>(which)));
+      KrylovSchurOptions<T> opt;
+      opt.nev = 5;
+      opt.ncv = ncv;
+      opt.block_size = p;
+      const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, which, opt);
+      EXPECT_TRUE(r.converged);
+      EXPECT_GT(r.op_applies, 12);
+      check_contract<T>(op, nullptr, r, which, opt);
+      expect_values(r.theta, wanted(spectrum, which, opt.nev), 1e-12);
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, SmallRequestedNcvKeepsASpareRitzPairAndTwoNewBlocks) {
+  // Review finding (P3 blockks): a requested ncv near nev gave keep == nev (no spare Ritz pair)
+  // and one new block per cycle, and block runs converged to a wrong wanted set far more often
+  // than p = 1 (ncv = nev + 3: 13% of the runs for p = 3, 4). The basis now holds at least
+  // round_up(nev + 1, p) + 2p vectors. Configurations below: wrong sets before for the listed p
+  // (random shift-invert pencils, B inner product, LargestMagnitude, from the review sweep).
+  using T = TypeParam;
+  const index_t n = 150;
+  const bool cplx_t = hs::is_complex_v<T>;
+  const int s = 1;
+  const double sigma = cplx_t ? -0.27 : 0.13;
+  const index_t nev = cplx_t ? 12 : 7;
+  const auto a = hs::test::random_hermitian<T>(n, 0.1, 1000 + 7 * s + n);
+  const auto b = hs::test::random_hpd<T>(n, 0.1, 1000 + 7 * s + n + 1);
+  const auto bd = hs::test::to_dense(b);
+  hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), &bd, sigma);
+  DenseOperator<T> bop(bd);
+  std::vector<double> theta_exact;
+  for (double l : hs::test::dense_eigenvalues(a, &b)) theta_exact.push_back(1.0 / (l - sigma));
+  const auto expect = wanted(theta_exact, Which::LargestMagnitude, nev);
+  std::vector<double> expect_sorted = expect;
+  std::sort(expect_sorted.begin(), expect_sorted.end());
+  const double kappa = condition_number(hs::add(T(1), a, T(-sigma), b));
+  for (index_t p : {1, 2, 3, 4, 8}) {
+    SCOPED_TRACE("p = " + std::to_string(p));
+    KrylovSchurOptions<T> opt;
+    opt.nev = nev;
+    opt.ncv = nev + 3;
+    opt.tol = 1e-11;
+    opt.block_size = p;
+    opt.seed = 2026 + s;
+    const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, &bop, r, Which::LargestMagnitude, opt, kappa);
+    std::vector<double> got = r.theta;
+    std::sort(got.begin(), got.end());
+    expect_values(got, expect_sorted, 1e-7 * std::abs(expect[0]));
+    if (p > 1) {
+      // The first cycle (not probed before its end for a requested ncv) spans the whole basis.
+      const index_t spare = (nev + 1 + p - 1) / p * p;
+      EXPECT_EQ(r.history.front().op_applies, spare + 2 * p);
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, HugeBlockSizesTakeTheExactSingleVectorCycle) {
+  // Review finding (P3 blockks): block sizes near INT64_MAX overflowed the layout arithmetic
+  // (undefined behaviour; an unrelated DenseMatrix error or an internal assertion). Any p with
+  // no feasible block layout solves the free space with one exact single-vector cycle.
+  using T = TypeParam;
+  const index_t n = 100;
+  std::vector<double> spectrum;
+  for (index_t i = 0; i < n; ++i) spectrum.push_back(1.0 + static_cast<double>(i));
+  auto op = diagonal_operator<T>(spectrum);
+  const index_t big = std::numeric_limits<index_t>::max();
+  for (index_t p : {index_t{13}, index_t{101}, index_t{1} << 40, index_t{1} << 62, big / 2 - 1,
+                    big / 2, big - 1, big}) {
+    for (index_t ncv : {0, 10}) {
+      SCOPED_TRACE("p = " + std::to_string(p) + ", ncv = " + std::to_string(ncv));
+      KrylovSchurOptions<T> opt;
+      opt.nev = 4;
+      opt.ncv = ncv;
+      opt.block_size = p;
+      const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+      EXPECT_TRUE(r.converged);
+      EXPECT_EQ(r.restarts, 0);
+      EXPECT_EQ(r.op_applies, n);
+      expect_values(r.theta, {100.0, 99.0, 98.0, 97.0}, 1e-10);
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, FreeSpaceBelowTwiceTheBlockBasisIsSolvedExactly) {
+  // Review finding (P3 blockks): just above the old feasibility boundary (ncv + p <= n - d) a
+  // restarted block run took several times n - d applications (nev = 4, p = 8: 104-200 against
+  // 32-41). Free spaces below kFreeSpaceFactor (ncv + p) = 2 (24 + 8) now take the exact
+  // single-vector cycle (n - d applications); from 64 on the block solver runs.
+  using T = TypeParam;
+  for (index_t n : {32, 41, 63, 64}) {
+    SCOPED_TRACE("n = " + std::to_string(n));
+    const auto a = hs::test::random_hermitian<T>(n, 0.1, 5);
+    const auto b = hs::test::random_hpd<T>(n, 0.1, 6);
+    const auto bd = hs::test::to_dense(b);
+    hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), &bd, 0.0);
+    DenseOperator<T> bop(bd);
+    std::vector<double> theta_exact;
+    for (double l : hs::test::dense_eigenvalues(a, &b)) theta_exact.push_back(1.0 / l);
+    KrylovSchurOptions<T> opt;
+    opt.nev = 4;
+    opt.tol = 1e-11;
+    opt.block_size = 8;
+    const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+    EXPECT_TRUE(r.converged);
+    const auto expect = wanted(theta_exact, Which::LargestMagnitude, 4);
+    expect_values(r.theta, expect, 1e-9 * std::abs(expect[0]));
+    if (n < 64) {
+      EXPECT_EQ(r.op_applies, n);
+      EXPECT_EQ(r.restarts, 0);
+    } else {
+      EXPECT_EQ(r.op_applies % 8, 0);
+      EXPECT_EQ(r.ritz_all.size() % 8, 0u);
+    }
+  }
+  // Deflated: n = 61, d = 20 leaves 41 < 64.
+  const index_t n = 61;
+  const auto a = hs::test::random_hermitian<T>(n, 0.1, 9);
+  const auto b = hs::test::random_hpd<T>(n, 0.1, 10);
+  const auto bd = hs::test::to_dense(b);
+  hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), &bd, 0.0);
+  DenseOperator<T> bop(bd);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 20;
+  opt.tol = 1e-11;
+  const auto first = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(first.converged);
+  opt.nev = 4;
+  opt.block_size = 8;
+  opt.deflation = &first.vectors;
+  const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+  EXPECT_TRUE(r.converged);
+  EXPECT_EQ(r.op_applies, n - 20);
+  EXPECT_LT(gram_deviation<T>(first.vectors, &bop, r.vectors, false), 1e-10);
+}
+
 TYPED_TEST(LanczosBlockTyped, SmallFreeSpaceIsSolvedExactly) {
   // n - d too small for a block basis plus its residual block: one exact single-vector cycle over
   // the free space (as ncv >= n - d does for p = 1), also with deflation.
@@ -1499,7 +1652,8 @@ TYPED_TEST(LanczosBlockTyped, BlockSizeOneKeepsTheSingleVectorBasisLayout) {
 
 TYPED_TEST(LanczosBlockTyped, InvalidAndMalformedInputsThrowInvalidInput) {
   using T = TypeParam;
-  const index_t n = 40;
+  // n = 60 >= 2 (ncv + p) = 44 for nev = 3, p = 2: the block solver runs (not the exact cycle).
+  const index_t n = 60;
   std::vector<double> spectrum(static_cast<std::size_t>(n));
   for (index_t i = 0; i < n; ++i) spectrum[i] = 1.0 + static_cast<double>(i);
   auto op = diagonal_operator<T>(spectrum);

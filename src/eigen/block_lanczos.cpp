@@ -28,8 +28,8 @@
 // ||new part||_M <= kBreakdownTol * ||Op v||_M after both passes (the local test of the
 // single-vector solver applied per column), gets R_j(i, i) = 0 and a deterministic random
 // replacement; the dropped part is a rounding-level coupling as for a single-vector breakdown.
-// A block keeps its width p throughout, which needs d + ncv + p <= n (else the dispatcher solves
-// the free space exactly with one single-vector cycle).
+// A block keeps its width p throughout, which needs d + ncv + p <= n; the dispatcher solves free
+// spaces below twice that exactly with one single-vector cycle (block_dimensions).
 //
 // Early stop. Every block boundary m also satisfies the relation, with the next block as residual
 // block. A Rayleigh-Ritz probe at the boundaries ends a cycle as soon as all nev wanted pairs have
@@ -38,10 +38,15 @@
 // p = 8: 48 operator applications with the probe, the full 64 without). Probes start at m = k + p
 // in restarted cycles (the kept Ritz vectors carry the earlier cycles), but only at the
 // single-vector basis size in the first cycle: a smaller Krylov space can hold nev converged pairs
-// that are not the nev wanted ones (a multiple eigenvalue with fewer than its copies yet, measured
-// on an operator with three distinct eigenvalues), and the first cycle never accepts on less
-// evidence than p = 1 does. The single-vector solver keeps its cycle-end-only test (p = 1 stays
-// bitwise unchanged).
+// that are not the nev wanted ones. Example (test FirstCycleIsNotProbedBeforeTheSingleVectorSize):
+// three distinct eigenvalues of multiplicity >= 30, p = 2: after each invariant-subspace breakdown
+// the space holds two more copies of each value, all converged exactly, so a probe after two
+// breakdowns sees 4 copies of the largest value plus a converged copy of the next one and accepts
+// a wrong set. The first cycle therefore never accepts on less evidence than p = 1 does. A probe
+// stops as soon as the estimates pass tol, whereas p = 1 tests only at cycle ends and usually
+// overshoots tol by orders of magnitude: equal tol is not equal final accuracy (bench
+// blockks_fix_matched compares the two at matched residuals). The single-vector solver keeps its
+// cycle-end-only test (p = 1 stays bitwise unchanged).
 //
 // Locking. A kept converged pair l gets b(:, l) := 0 once ||b(:, l)||_2 <= kLockTol * (smallest
 // reference |theta| of the wanted pairs), the single-vector rule with |b_l| replaced by the norm of
@@ -55,8 +60,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <limits>
-#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -74,6 +77,8 @@ using lapack::fint;
 /// Blocks added to the single-vector auto basis size when ncv is chosen automatically (see
 /// "Early stop"; measured on shift-invert cases, bench/blockks_shiftinvert.cpp).
 constexpr index_t kAutoExtraBlocks = 4;
+/// Smallest number of new blocks a cycle adds after the kept Ritz pairs (see block_dimensions).
+constexpr index_t kMinNewBlocks = 2;
 
 template <class T>
 class BlockThickRestartLanczos {
@@ -341,20 +346,32 @@ HermitianEigResult<T> BlockThickRestartLanczos<T>::run() {
 
 BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv) {
   HS_ASSERT(p >= 1, "block_dimensions: p=" << p);
-  const auto round_up = [p](index_t x) { return (x + p - 1) / p * p; };
   BlockDimensions dims;
-  const index_t nev_up = round_up(setup.nev);
-  const index_t base = std::max(round_up(setup.ncv), nev_up + p);
+  // Every layout has ncv >= spare + kMinNewBlocks p >= 3p, so kFreeSpaceFactor * (ncv + p) <=
+  // n_free needs p <= n_free / (4 kFreeSpaceFactor). Larger p (up to INT64_MAX) is infeasible
+  // before the rounding below could overflow.
+  if (p > setup.n_free / ((kMinNewBlocks + 2) * kFreeSpaceFactor)) return dims;
+  const auto round_up = [p](index_t x) { return (x + p - 1) / p * p; };
+  // A restart keeps at least one Ritz pair beyond the wanted ones (in whole blocks) and the basis
+  // leaves room for kMinNewBlocks new blocks. The old minimum (round_up(nev) + p: possibly no
+  // spare pair, one new block per cycle) converged to wrong wanted sets for small requested ncv;
+  // measured (random shift-invert pencils, B inner product, LargestMagnitude, ncv = nev + 3,
+  // n = 150/250, nev 3..12, 480 runs per p, scratch sweep of the P3 blockks review): wrong sets
+  // for p = 1/2/3/4/8: 1/5/51/44/5 before, 1/1/1/0/0 with this minimum (spare + p alone:
+  // 1/5/0/2/5), with 40-66% fewer applications for p > 1.
+  const index_t spare = round_up(setup.nev + 1);
+  const index_t base = std::max(round_up(setup.ncv), spare + kMinNewBlocks * p);
   dims.ncv = base;
   if (auto_ncv) {
-    // Up to kAutoExtraBlocks more blocks, as far as the free space holds them with the residual
-    // block (never below base).
-    const index_t room = (setup.n_free - p) / p * p;
+    // Up to kAutoExtraBlocks more blocks, as far as the free space stays kFreeSpaceFactor times
+    // the basis plus residual block (never below base).
+    const index_t room = (setup.n_free / kFreeSpaceFactor - p) / p * p;
     dims.ncv = std::max(base, std::min(base + kAutoExtraBlocks * p, room));
   }
-  dims.keep = std::clamp((setup.nev + (dims.ncv - setup.nev) / 2) / p * p, nev_up, dims.ncv - p);
+  dims.keep = std::clamp((setup.nev + (dims.ncv - setup.nev) / 2) / p * p, spare, dims.ncv - p);
   dims.first_probe = base;
-  dims.feasible = setup.ncv < setup.n_free && dims.ncv + p <= setup.n_free;
+  // kFreeSpaceFactor * (ncv + p) <= n_free, written without the product.
+  dims.feasible = setup.ncv < setup.n_free && dims.ncv + p <= setup.n_free / kFreeSpaceFactor;
   return dims;
 }
 
@@ -367,8 +384,11 @@ HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
   const LanczosSetup setup = validate_lanczos(op, b_inner, options);
   const BlockDimensions dims = block_dimensions(setup, options.block_size, options.ncv == 0);
   if (!dims.feasible) {
-    // The free space cannot hold a block basis plus its residual block: one single-vector cycle
-    // over the whole free space is exact, and cheap since the free space is that small.
+    // The free space is below twice a block basis plus its residual block: one single-vector
+    // cycle over the whole free space is exact (all copies of multiple eigenvalues included) and
+    // costs n_free <= 2 (ncv + p) applications. Measured just above the old feasibility boundary
+    // (ncv + p <= n_free, nev = 4, p = 8, n_free = 32..41): restarted block runs took 104-200
+    // applications against n_free for the exact cycle.
     KrylovSchurOptions<T> single = options;
     single.block_size = 1;
     single.ncv = setup.n_free;

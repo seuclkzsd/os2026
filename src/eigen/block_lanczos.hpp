@@ -110,19 +110,26 @@ struct RitzPairs {
 };
 
 /// Basis layout of the block solver for block width p > 1 (see lanczos_krylov_schur in eigen.hpp).
-/// base = max(setup.ncv rounded up to a multiple of p, round_up(nev, p) + p) is the single-vector
-/// basis in whole blocks; ncv = base for a requested ncv, base + 4p (as far as ncv + p <= n_free)
-/// for the automatic one. A restart keeps keep = clamp(round_down(nev + (ncv - nev) / 2, p),
-/// round_up(nev, p), ncv - p) Ritz pairs, so that ncv - keep is a whole number of blocks.
+/// spare = nev + 1 rounded up to a multiple of p (a restart keeps at least one Ritz pair beyond
+/// the wanted ones, in whole blocks). base = max(setup.ncv rounded up to a multiple of p,
+/// spare + 2p) is the single-vector basis in whole blocks, with room for at least two new blocks
+/// per cycle; ncv = base for a requested ncv, base + 4p for the automatic one, as far as the free
+/// space allows (below). A restart keeps keep = clamp(round_down(nev + (ncv - nev) / 2, p),
+/// spare, ncv - p) Ritz pairs, so that ncv - keep is a whole number of blocks.
 /// first_probe = base: the first cycle checks convergence at block boundaries from there on.
-/// feasible: the free space holds the basis plus the residual block (ncv + p <= n_free) and
-/// setup.ncv < n_free; otherwise the call is solved by one single-vector cycle over the free space.
+/// feasible: setup.ncv < n_free and the free space holds at least twice the basis plus its
+/// residual block, kFreeSpaceFactor * (ncv + p) <= n_free; otherwise the call is solved by one
+/// single-vector cycle over the free space, n_free < 2 (ncv + p) applications (about what a
+/// restarted block run of that size costs). p > n_free / 8 is infeasible before any arithmetic
+/// (every layout has ncv >= 3p), so no p overflows.
 struct BlockDimensions {
   index_t ncv = 0;
   index_t keep = 0;
   index_t first_probe = 0;
   bool feasible = false;
 };
+/// Free space needed by a block run, in units of its basis plus residual block (see above).
+constexpr index_t kFreeSpaceFactor = 2;
 BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv);
 
 /// Block Krylov-Schur, options.block_size > 1 (lanczos_krylov_schur_timed dispatches here). Same
