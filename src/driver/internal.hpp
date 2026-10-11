@@ -124,10 +124,12 @@ bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool 
 /// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2), moving s outward (direction
 /// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`. With an
 /// exact (double, non-BLR) factor the object then holds K(s) (Ctx::held), counted with null-pivot
-/// detection unless *detection_off (optional) reports otherwise.
+/// detection unless *detection_off (optional) reports otherwise. s_is_gap: s lies mid-way between
+/// computed eigenvalues (count there without detection if flagged); otherwise a flagged s is first
+/// moved by step / 10 (it may sit on an eigenvalue) - see steps.cpp.
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step, bool* detection_off = nullptr);
+                    double step, bool* detection_off = nullptr, bool s_is_gap = false);
 
 /// Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3).
 template <class T>

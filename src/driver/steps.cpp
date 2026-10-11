@@ -155,28 +155,31 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
     HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
 }
 
-// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2). Endpoints are placed at spectral-gap
-// midpoints. The count must come from an exact (double, full-rank) factorization: the inertia of a
-// single-precision or BLR factor is that of the rounded/compressed matrix, so then compute_inertia
-// builds a separate double factorization. The first attempt uses null-pivot detection only (a null
-// pivot means s sits on an eigenvalue: move it outward). Inside a cluster denser than the detection
-// threshold every s is flagged, so later attempts count WITHOUT detection: a backward-stable LDL^T
-// gives the exact inertia of K + E with ||E|| ~ eps*growth*||K||, i.e. it counts correctly every
-// eigenvalue farther than that from s - and s is a gap midpoint. Returns the final s via `s`.
+// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2). The count must come from an exact
+// (double, full-rank) factorization: the inertia of a single-precision or BLR factor is that of the
+// rounded/compressed matrix, so then compute_inertia builds a separate double factorization. Each
+// position is tried with null-pivot detection first (certified). A null pivot means an eigenvalue
+// at s, or a cluster denser than the detection threshold around s; then (exact factor only) the
+// count is taken WITHOUT detection: a backward-stable LDL^T gives the exact inertia of K + E with
+// ||E|| ~ eps*growth*||K||, i.e. it counts correctly every eigenvalue farther than that from s.
+//   * s_is_gap (certificate endpoints placed at gap midpoints of computed eigenvalues): that count
+//     is taken at s itself - in a dense cluster any move would cross eigenvalues;
+//   * otherwise (user bounds, interpolated cuts, band edges: arbitrary points that may coincide
+//     with a - possibly multiple - eigenvalue, whose copies a count right at s would put on
+//     arbitrary sides) it is taken at s + outward * step / 10, which resolves an eigenvalue at s
+//     (1e-11 relative for the window counts: far above eps*growth, far below spectral gaps).
+// Positions where even that fails (exactly singular K) move outward by step * 4^i. Returns the
+// final s via `s`.
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step, bool* detection_off) {
+                    double step, bool* detection_off, bool s_is_gap) {
   PhaseScope phase(c.clock, Phase::Factor);
   const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
   if (exact) c.held = FactorHeld{};
   for (int tries = 0; tries < 8; ++tries) {
-    // At each position: detection on (certified), then - exact factor only, from the second
-    // position on - detection off at the SAME position; move outward when that fails. Counting
-    // without detection right at a null pivot would put the eigenvalue(s) at s on an arbitrary
-    // side (a multiple eigenvalue exactly on an interval end lost one copy that way), so the
-    // requested position only moves; after one move only a dense cluster still flags it.
     for (const bool detection : {true, false}) {
-      if (!detection && (!exact || tries < 1)) break;
+      if (!detection && !exact) break;
+      if (!detection && tries == 0 && !s_is_gap) s += outward * 0.1 * step;
       Inertia in;
       if (exact) {
         fac.set_null_pivot_detection(detection);
@@ -344,7 +347,7 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   template void refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                             \
   template bool try_refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                         \
   template index_t count_below<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double&, double,  \
-                                  double, bool*);                                                           \
+                                  double, bool*, bool);                                                     \
   template void analyze_within_budget<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double, bool); \
   template std::unique_ptr<SparseFactorization<T>> adaptive_analysis<T>(                                    \
       Ctx&, const FactorOptions&, const ShiftedPencil<T>&, double, index_t, index_t);

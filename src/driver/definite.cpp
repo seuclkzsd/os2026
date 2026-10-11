@@ -328,8 +328,8 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     double b_end = push_out(t.sigma + r, +1.0);
     if (zero_tol >= 0 && a_end <= zero_tol && b_end >= -zero_tol) return hand_over();  // window meets the band
     const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-    const index_t nu_a = count_below(c, fac, pencil, a_end, -1.0, step);
-    const index_t nu_b = count_below(c, fac, pencil, b_end, +1.0, step);
+    const index_t nu_a = count_below(c, fac, pencil, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+    const index_t nu_b = count_below(c, fac, pencil, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
     cert.performed = true;
     cert.lower = a_end;
     cert.upper = b_end;
@@ -1023,7 +1023,8 @@ Solution<T> WindowSolver<T>::solve() {
     const double vec = static_cast<double>(n_) * sizeof(T);
     const double avail =
         cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
-    const double out_bytes = vec * static_cast<double>(total + 16);
+    // + up to 4 pairs per slice found just outside it (see step 3)
+    const double out_bytes = vec * static_cast<double>(total + 4 * (total / std::max<index_t>(c_target_, 1) + 2) + 8);
     if (out_bytes > 0.9 * avail)
       HS_THROW(OutOfMemoryBudget, "the target holds " << total << " eigenvalues: their eigenvectors need "
                                                       << out_bytes / 1073741824.0 << " GiB, "
@@ -1038,14 +1039,15 @@ Solution<T> WindowSolver<T>::solve() {
       c_target_ = std::max<index_t>(1, std::min(c_target_, c_max_));
       warn(c_, "slice size capped at " + std::to_string(c_max_) + " pairs by the memory budget");
     }
-    reserve_pool(total + 8);
   }
 
-  // ---- 3. Slices, runs, merge.
+  // ---- 3. Slices, runs, merge. The pool holds the output plus the few pairs per slice found just
+  //         outside it (resolved by deduplicate()), reserved once: growing it would copy it.
   for (const auto& w : windows) {
     const auto s = plan(w.first, w.second);
     slices_.insert(slices_.end(), s.begin(), s.end());
   }
+  reserve_pool(total + 4 * static_cast<index_t>(slices_.size()) + 8);
   event(c_, "slices", {{"slices", static_cast<std::int64_t>(slices_.size())}});
   for (std::size_t i = 0; i < slices_.size(); ++i) run_slice(slices_[i], static_cast<index_t>(i));
   const index_t removed = deduplicate();
