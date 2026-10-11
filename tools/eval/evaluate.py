@@ -60,10 +60,14 @@ solver or the reference is wrong and needs a look.
 
 Pooled references: a case without a comparable stored reference can be checked against the accepted,
 distinct pairs of several solvers (pooled_reference; tools/eval/sweep.py does this per case). It is
-uncertified (consistent / inconsistent), but sound in the direction that matters: every accepted pair
-is backed by a true eigenvalue, so a solver that lacks a pooled eigenvalue nearer than its own k-th
-one, or fewer copies of a multiple one than another solver proved to exist, missed it. Eigenvalue
-errors are not reported against it (it holds the solvers' own values).
+uncertified (consistent / inconsistent), but sound in the direction that matters: an accepted pair
+of a Hermitian problem is backed by a true eigenvalue within eta (||A||_2 + |lambda|) (residual
+bound; for a definite pencil the bound grows with cond(B), for GHIEP it holds only as far as the
+eigenvalue is well conditioned), and
+B-orthonormal accepted vectors in one cluster are backed by as many eigenvalues, so a solver that
+lacks a pooled eigenvalue nearer than its own k-th one, or fewer copies of a multiple one than another
+solver proved to exist, missed it. Eigenvalue errors are not reported against it (it holds the
+solvers' own values).
 
 Bookkeeping that is reported but not part of the verdict:
   * format (docs/FORMATS.md §3): eigenvalues.npy ordered for the target (inversions within the tie
