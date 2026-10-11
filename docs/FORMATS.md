@@ -120,7 +120,8 @@ zero_modes_filtered, success, warnings[]`。`pairs` 先列实特征对（与 `ei
   `{lower, upper (±∞ 为 null), sigma, which ∈ {largest_magnitude, smallest_algebraic,
   largest_algebraic}, count_inertia（GHIEP 为 −1）, count_found, nev, reruns, restarts, op_applies,
   passed}`。which 的含义：largest_magnitude = σ 两侧最近，smallest_algebraic = σ 以下，
-  largest_algebraic = σ 以上。GHIEP 的探测运行、两侧单边运行与复特征值恢复运行也列在这里。
+  largest_algebraic = σ 以上。GHIEP 的两侧单边运行、复特征值恢复运行，以及判定某侧为空的探测运行
+  （nev = 1）也列在这里。
 - `zero_cluster_dim`：GHIEP 需要时计算的零簇维数（A 的零主元数），未计算为 −1。
 - `zero_modes_filtered`：被 `zero_filter_tol` 排除的特征值个数（HEP/GHEP 窗口为惯性计数所得）。
 
