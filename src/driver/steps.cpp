@@ -107,13 +107,16 @@ template <class T>
 double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off) {
   PhaseScope phase(c.clock, Phase::Factor);
   detection_off = false;
+  if (c.held.shift == sigma0 && !c.held.detection_off) return sigma0;  // e.g. right after counting there
+  c.held = FactorHeld{};
   fac.set_null_pivot_detection(true);
   double s = sigma0;
   const index_t perturbations = std::min<index_t>(2, c.cfg.max_shift_retries);
   for (index_t r = 0;; ++r) {
     if (fac.factorize(1.0, -s)) {
-      c.rep.shift_retries = r;
+      c.rep.shift_retries = std::max(c.rep.shift_retries, r);
       if (r > 0) warn(c, "shift perturbed to " + fmt(s) + " (A - sigma B singular at the requested shift)");
+      c.held = FactorHeld{s, false};
       return s;
     }
     if (r >= perturbations) break;
@@ -123,9 +126,10 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
   fac.set_null_pivot_detection(false);
   if (fac.factorize(1.0, -sigma0)) {
     detection_off = true;
-    c.rep.shift_retries = perturbations + 1;
-    warn(c, "shift lies inside an eigenvalue cluster denser than the null-pivot threshold; factorized at the "
-            "requested shift without null-pivot detection");
+    c.rep.shift_retries = std::max(c.rep.shift_retries, perturbations + 1);
+    warn(c, "shift " + fmt(sigma0) + " lies inside an eigenvalue cluster denser than the null-pivot threshold; "
+            "factorized there without null-pivot detection");
+    c.held = FactorHeld{sigma0, true};
     return sigma0;
   }
   fac.set_null_pivot_detection(true);
@@ -134,10 +138,21 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
 
 // Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
 template <class T>
-void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off) {
+bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off) {
+  if (c.held.shift == sigma && c.held.detection_off == detection_off) return true;
   PhaseScope phase(c.clock, Phase::Factor);
+  c.held = FactorHeld{};
   fac.set_null_pivot_detection(!detection_off);
-  if (!fac.factorize(1.0, -sigma)) HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
+  const bool ok = fac.factorize(1.0, -sigma);
+  fac.set_null_pivot_detection(true);
+  if (ok) c.held = FactorHeld{sigma, detection_off};
+  return ok;
+}
+
+template <class T>
+void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off) {
+  if (!try_refactorize_at(c, fac, sigma, detection_off))
+    HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
 }
 
 // nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2). Endpoints are placed at spectral-gap
@@ -150,14 +165,18 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 // eigenvalue farther than that from s - and s is a gap midpoint. Returns the final s via `s`.
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step) {
+                    double step, bool* detection_off) {
   PhaseScope phase(c.clock, Phase::Factor);
   const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
+  if (exact) c.held = FactorHeld{};
   for (int tries = 0; tries < 8; ++tries) {
-    // At each position: detection on (certified), then - exact factor only - detection off at
-    // the SAME position; move outward only if both fail (exactly singular / no exact factor).
+    // At each position: detection on (certified), then - exact factor only, from the third
+    // position on - detection off at the SAME position; move outward when that fails. Counting
+    // without detection right at a null pivot would put the eigenvalue(s) at s on an arbitrary
+    // side (a multiple eigenvalue exactly on an interval end lost one copy that way), so the
+    // first two positions only move.
     for (const bool detection : {true, false}) {
-      if (!detection && !exact) break;
+      if (!detection && (!exact || tries < 2)) break;
       Inertia in;
       if (exact) {
         fac.set_null_pivot_detection(detection);
@@ -172,6 +191,8 @@ index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>&
         if (!detection && c.rep.certificate.note.empty())
           c.rep.certificate.note = "endpoint inertia counted without null-pivot detection (dense cluster)";
         fac.set_null_pivot_detection(true);
+        if (exact) c.held = FactorHeld{s, !detection};
+        if (detection_off) *detection_off = !detection;
         return in.neg;
       }
     }
@@ -207,6 +228,68 @@ void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPen
   }
 }
 
+// ------------------------------------------------------------------------------ cost model
+
+namespace {
+
+// Factorization / solve model of DESIGN §3.6-3b (calibrated on the 2x Xeon 6336Y node).
+double model_factor_s(const FactorEstimate& e, double order, int threads) {
+  return 6e-7 * order + e.flops / (12e9 * std::max(1, threads));
+}
+double model_solve_s(const FactorEstimate& e) { return 16.0 * static_cast<double>(e.factor_entries) / 12e9; }
+
+// Shift-invert Lanczos converging c pairs in one run (thick restart, ncv = 2c + 1), measured with
+// bench/slicing_sweep (yee-pec-box 1e4 and 1e5, slices of 12..1075 pairs, 2 threads):
+//   solves per pair      ~ kSolvesPerPair + kSolvesPerRun / c  (2.0 + 33/c fits 2.0 .. 5.0)
+//   basis work per pair  ~ (kVecPassesPerPair + kVecPassesPerPairPerC * c) n-vector passes
+//                          (CGS2 against a basis growing with c, B products, restarts; 4.5..5.1 and
+//                          176..225 passes measured at n = 1e4 / 1e5)
+//   factorizations       ~ kFactorizationsPerSlice per slice (its shift + ~1.2 inertia counts to
+//                          place the next cut)
+// at kStreamBwPerThread bytes/s per thread for the basis passes (saturating at kStreamBwMax).
+constexpr double kSolvesPerPair = 2.1;
+constexpr double kSolvesPerRun = 33.0;
+constexpr double kVecPassesPerPair = 200.0;
+constexpr double kVecPassesPerPairPerC = 5.0;
+constexpr double kFactorizationsPerSlice = 2.2;
+constexpr double kStreamBwPerThread = 6e9;
+constexpr double kStreamBwMax = 60e9;
+constexpr index_t kMinSlice = 16;
+constexpr index_t kMaxSlice = 1000;
+
+}  // namespace
+
+double CostModel::per_pair(index_t c) const {
+  const double cc = static_cast<double>(std::max<index_t>(c, 1));
+  return t_solve * (kSolvesPerPair + kSolvesPerRun / cc) +
+         vec_bytes / stream_bw * (kVecPassesPerPair + kVecPassesPerPairPerC * cc);
+}
+
+double CostModel::marginal_pair(index_t c) const {
+  // d/dc of c * per_pair(c): one more pair in a run that converges c.
+  const double cc = static_cast<double>(std::max<index_t>(c, 1));
+  return t_solve * kSolvesPerPair + vec_bytes / stream_bw * (kVecPassesPerPair + 2.0 * kVecPassesPerPairPerC * cc);
+}
+
+index_t CostModel::best_slice() const {
+  // Per pair: (F t_factor + kSolvesPerRun t_solve) / c + const + kVecPassesPerPairPerC (vec/bw) c,
+  // minimal at c* = sqrt((F t_factor + kSolvesPerRun t_solve) / (kVecPassesPerPairPerC vec/bw)).
+  const double fixed = kFactorizationsPerSlice * t_factor + kSolvesPerRun * t_solve;
+  const double slope = kVecPassesPerPairPerC * vec_bytes / stream_bw;
+  const double c = slope > 0 ? std::sqrt(fixed / slope) : static_cast<double>(kMaxSlice);
+  return std::clamp<index_t>(static_cast<index_t>(std::llround(c)), kMinSlice, kMaxSlice);
+}
+
+CostModel make_cost_model(const FactorEstimate& est, index_t n, int threads, bool complex_scalars) {
+  CostModel m;
+  const double order = static_cast<double>(n) * (complex_scalars ? 2.0 : 1.0);
+  m.t_factor = model_factor_s(est, order, threads);
+  m.t_solve = model_solve_s(est);
+  m.vec_bytes = static_cast<double>(n) * (complex_scalars ? 16.0 : 8.0);
+  m.stream_bw = std::min(kStreamBwMax, kStreamBwPerThread * std::max(1, threads));
+  return m;
+}
+
 // Adaptive fill-reducing ordering (DESIGN §3.6-3b). Nested dissection (SCOTCH) minimises fill but
 // its analysis costs ~7x an AMD analysis; on 2-D-like graphs AMD's extra fill is cheap. Probe with
 // AMD (fast), predict what nested dissection could save on the run's factorizations and solves,
@@ -229,8 +312,8 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   const FactorEstimate e = fac->estimate();
   const double threads = std::max(1, fopts.threads);
   const double n = static_cast<double>(pencil.order()) * (is_complex_v<T> ? 2.0 : 1.0);
-  const double t_f = 6e-7 * n + e.flops / (12e9 * threads);
-  const double t_s = 16.0 * static_cast<double>(e.factor_entries) / 12e9;
+  const double t_f = model_factor_s(e, n, static_cast<int>(threads));
+  const double t_s = model_solve_s(e);
   const double fill_ratio = static_cast<double>(e.factor_entries) / std::max<double>(1.0, pencil.nnz());
   const bool three_d_like = fill_ratio > 20.0;
   const double keep_f = three_d_like ? 0.35 : 0.6, keep_e = three_d_like ? 0.6 : 0.85;
@@ -255,8 +338,9 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   template void append_columns<T>(DenseMatrix<T>&, const DenseMatrix<T>&);                                  \
   template double factorize_near<T>(Ctx&, SparseFactorization<T>&, double, double, bool&);                  \
   template void refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                             \
+  template bool try_refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                         \
   template index_t count_below<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double&, double,  \
-                                  double);                                                                  \
+                                  double, bool*);                                                           \
   template void analyze_within_budget<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double, bool); \
   template std::unique_ptr<SparseFactorization<T>> adaptive_analysis<T>(                                    \
       Ctx&, const FactorOptions&, const ShiftedPencil<T>&, double, index_t, index_t);

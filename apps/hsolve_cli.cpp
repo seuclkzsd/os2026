@@ -88,8 +88,8 @@ int run(const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b, const hs::SolverCo
 int main(int argc, char** argv) {
   CLI::App app{"hsolve - eigensolver for large sparse Hermitian (indefinite) eigenproblems"};
   std::string a_path, b_path, config_path, out_dir = "hsolve_out", log_path;
-  double sigma = 0.0, tol = 0.0, budget = 0.0;
-  long long k = 0, smallest = 0, largest = 0;
+  double sigma = 0.0, tol = 0.0, budget = 0.0, zero_filter = 0.0;
+  long long k = 0, smallest = 0, largest = 0, slice_size = 0;
   std::vector<double> interval;
   int threads = -1;
   std::string precision;
@@ -108,6 +108,8 @@ int main(int argc, char** argv) {
   auto* o_threads = app.add_option("--threads", threads, "threads (0 = all available)");
   auto* o_budget = app.add_option("--memory-budget-gb", budget, "memory budget in GiB");
   auto* o_prec = app.add_option("--precision", precision, "factorization precision: double|single");
+  auto* o_slice = app.add_option("--slice-size", slice_size, "max eigenvalues per shift in sliced targets (0 = auto)");
+  auto* o_zero = app.add_option("--zero-filter-tol", zero_filter, "drop |lambda| <= TOL*scale (zero modes); < 0 off");
   app.add_option("--log", log_path, "JSON-lines event log file");
   app.add_flag("-v,--verbose", verbose, "debug output");
   app.add_flag("-q,--quiet", quiet, "no summary on stdout");
@@ -140,6 +142,8 @@ int main(int argc, char** argv) {
     if (*o_tol) cfg.tol = tol;
     if (*o_threads) cfg.threads = threads;
     if (*o_budget) cfg.memory_budget_gb = budget;
+    if (*o_slice) cfg.slice_size = static_cast<hs::index_t>(slice_size);
+    if (*o_zero) cfg.zero_filter_tol = zero_filter;
     if (*o_prec) cfg = hs::parse_config("{\"factor_precision\": \"" + precision + "\"}", cfg);
     // Re-validate the merged configuration (overrides bypass parse_config's checks otherwise).
     cfg = hs::parse_config(hs::config_to_json(cfg));

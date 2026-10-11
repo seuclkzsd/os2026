@@ -10,11 +10,35 @@
 
 namespace hs::driver {
 
+namespace {
+
+/// Ritz values of the Lanczos tridiagonal (alpha, beta) -> estimate fields.
+NormEstimate from_tridiagonal(const std::vector<double>& alpha, const std::vector<double>& beta) {
+  NormEstimate est;
+  const auto m = static_cast<lapack::fint>(alpha.size());
+  if (m == 0) return est;
+  // Eigenvalues of the m x m symmetric tridiagonal matrix (dense heev; m <= ~30).
+  std::vector<double> t(static_cast<std::size_t>(m) * m, 0.0), theta(static_cast<std::size_t>(m));
+  for (lapack::fint i = 0; i < m; ++i) {
+    t[i + i * m] = alpha[i];
+    if (i + 1 < m) t[(i + 1) + i * m] = t[i + (i + 1) * m] = beta[i];
+  }
+  lapack::heev('N', 'U', m, t.data(), m, theta.data());
+  est.steps = static_cast<int>(m);
+  est.ritz_min = theta.front();
+  est.ritz_max = theta.back();
+  est.ritz_min2 = theta[std::min<std::size_t>(1, theta.size() - 1)];
+  est.ritz_max2 = theta[theta.size() - std::min<std::size_t>(2, theta.size())];
+  est.norm2 = std::max(std::abs(theta.front()), std::abs(theta.back()));
+  return est;
+}
+
+}  // namespace
+
 template <class T>
 NormEstimate estimate_norm2(const CsrMatrix<T>& a, int steps, std::uint64_t seed) {
-  NormEstimate est;
   const index_t n = a.nrows;
-  if (n == 0 || a.nnz() == 0) return est;
+  if (n == 0 || a.nnz() == 0) return NormEstimate{};
   steps = static_cast<int>(std::min<index_t>(steps, n));
   std::vector<T> v(static_cast<std::size_t>(n)), v_prev(static_cast<std::size_t>(n), T(0)),
       w(static_cast<std::size_t>(n));
@@ -40,22 +64,49 @@ NormEstimate estimate_norm2(const CsrMatrix<T>& a, int steps, std::uint64_t seed
     for (index_t i = 0; i < n; ++i) v[i] = w[i] / bj;
     beta_prev = bj;
   }
-  // Eigenvalues of the m x m symmetric tridiagonal matrix (dense heev; m <= 30).
-  const auto m = static_cast<lapack::fint>(alpha.size());
-  std::vector<double> t(static_cast<std::size_t>(m) * m, 0.0), theta(static_cast<std::size_t>(m));
-  for (lapack::fint i = 0; i < m; ++i) {
-    t[i + i * m] = alpha[i];
-    if (i + 1 < m) t[(i + 1) + i * m] = t[i + (i + 1) * m] = beta[i];
-  }
-  lapack::heev('N', 'U', m, t.data(), m, theta.data());
-  est.steps = static_cast<int>(m);
-  est.ritz_min = theta.front();
-  est.ritz_max = theta.back();
-  est.norm2 = std::max(std::abs(theta.front()), std::abs(theta.back()));
-  return est;
+  return from_tridiagonal(alpha, beta);
 }
 
-#define HS_INSTANTIATE_NORMS(T) template NormEstimate estimate_norm2<T>(const CsrMatrix<T>&, int, std::uint64_t);
+template <class T>
+NormEstimate estimate_pencil_spectrum(const CsrMatrix<T>& a, const CsrMatrix<T>& b, const SolveFn<T>& solve_b,
+                                      int steps, std::uint64_t seed) {
+  const index_t n = a.nrows;
+  if (n == 0 || a.nnz() == 0) return NormEstimate{};
+  steps = static_cast<int>(std::min<index_t>(steps, n));
+  // Lanczos for Op = B^{-1} A in <x, y>_B = y^H B x: v_j B-orthonormal, alpha_j = v_j^H A v_j,
+  // w = B^{-1} A v_j - alpha_j v_j - beta_{j-1} v_{j-1}, beta_j = ||w||_B.
+  std::vector<T> v(static_cast<std::size_t>(n)), v_prev(static_cast<std::size_t>(n), T(0)),
+      w(static_cast<std::size_t>(n)), bw(static_cast<std::size_t>(n));
+  linalg::fill_random(v.data(), n, seed, /*stream=*/0x70656e63ULL);
+  spmv(b, v.data(), bw.data());
+  const double nv = std::sqrt(std::max(std::real(linalg::dot(n, v.data(), bw.data())), 1e-300));
+  linalg::scal(n, T(1.0 / nv), v.data());
+
+  std::vector<double> alpha, beta;
+  double beta_prev = 0.0;
+  for (int j = 0; j < steps; ++j) {
+    spmv(a, v.data(), w.data());
+    const double aj = std::real(linalg::dot(n, v.data(), w.data()));  // v^H A v
+    solve_b(w.data());                                                 // w = B^{-1} A v
+    if (j > 0) linalg::axpy(n, T(-beta_prev), v_prev.data(), w.data());
+    linalg::axpy(n, T(-aj), v.data(), w.data());
+    alpha.push_back(aj);
+    spmv(b, w.data(), bw.data());
+    const double bj = std::sqrt(std::max(std::real(linalg::dot(n, w.data(), bw.data())), 0.0));
+    const double scale = std::max(std::abs(aj), beta_prev);
+    if (!(bj > 1e-13 * std::max(scale, 1e-300)) || j + 1 == steps) break;
+    beta.push_back(bj);
+    std::swap(v_prev, v);
+    for (index_t i = 0; i < n; ++i) v[i] = w[i] / bj;
+    beta_prev = bj;
+  }
+  return from_tridiagonal(alpha, beta);
+}
+
+#define HS_INSTANTIATE_NORMS(T)                                                                     \
+  template NormEstimate estimate_norm2<T>(const CsrMatrix<T>&, int, std::uint64_t);                 \
+  template NormEstimate estimate_pencil_spectrum<T>(const CsrMatrix<T>&, const CsrMatrix<T>&,       \
+                                                    const SolveFn<T>&, int, std::uint64_t);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_NORMS)
 #undef HS_INSTANTIATE_NORMS
 

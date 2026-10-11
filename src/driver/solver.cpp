@@ -42,20 +42,33 @@ const CsrMatrix<T>* hermitian_input(const CsrMatrix<T>& m, double tol, const cha
   return &m;
 }
 
-// Shift used for the analysis and the main factorization (Smallest/Largest: just beyond the
-// estimated end of the spectrum; standard problems only).
-double initial_shift(const Target& t, const driver::NormEstimate& na, double scale, bool has_b) {
+// Representative shift of the symbolic analysis (its values feed MUMPS' analysis-time matching):
+// the target shift, the interval centre, or just beyond the estimated end of the spectrum
+// (generalized problems: A's Ritz estimates divided by ||B||_2, a rough guess that is enough here).
+double initial_shift(const Target& t, const driver::NormEstimate& na, double scale, double norm2_b) {
   switch (t.mode) {
     case TargetMode::Nearest: return t.sigma;
     case TargetMode::Interval: return 0.5 * (t.lower + t.upper);
     case TargetMode::Smallest:
     case TargetMode::Largest: {
-      if (has_b) HS_THROW(Unsupported, "smallest/largest targets are implemented for standard problems only (roadmap P3)");
-      const double spread = std::max(na.ritz_max - na.ritz_min, 1e-12 * std::max(scale, 1.0));
-      return t.mode == TargetMode::Smallest ? na.ritz_min - 0.05 * spread : na.ritz_max + 0.05 * spread;
+      const double nb = norm2_b > 0 ? norm2_b : 1.0;
+      const double spread = std::max(na.ritz_max - na.ritz_min, 1e-12 * std::max(scale, 1.0)) / nb;
+      return t.mode == TargetMode::Smallest ? na.ritz_min / nb - 0.05 * spread : na.ritz_max / nb + 0.05 * spread;
     }
   }
   return t.sigma;
+}
+
+// Is B diagonal (lumped / Yee mass matrices)?
+template <class T>
+bool is_diagonal(const CsrMatrix<T>& b) {
+  const index_t n = b.nrows;
+  if (b.nnz() > n) return false;
+  for (index_t i = 0; i < n; ++i) {
+    const index_t len = b.rowptr[i + 1] - b.rowptr[i];
+    if (len > 1 || (len == 1 && b.colind[b.rowptr[i]] != i)) return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -113,7 +126,7 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   rep.factor_options = fopts;
   // 3. One analysis serves every factorization on the pencil's pattern: the B-definiteness test,
   //    K(sigma), certificate endpoints and reruns. ordering < 0 selects it adaptively.
-  const double sigma0 = initial_shift(cfg.target, na, scale, b != nullptr);
+  const double sigma0 = initial_shift(cfg.target, na, scale, rep.norm2_b);
   std::unique_ptr<SparseFactorization<T>> fac;
   if (cfg.ordering < 0) {
     const index_t kk = cfg.target.mode == TargetMode::Interval ? 32 : cfg.target.k;
@@ -128,6 +141,8 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
 
   // 4. Problem type: B is HPD iff its exact LDL^T has no negative or zero pivots (Sylvester).
   ProblemType type = cfg.problem;
+  const bool b_diagonal = b && is_diagonal(*b);
+  bool b_factorized = false;  // the main object holds the factorization of B
   if (!b) {
     type = ProblemType::Standard;
   } else if (type == ProblemType::Auto) {
@@ -135,10 +150,7 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     Inertia ib;
     // A diagonal B (e.g. lumped/Yee mass matrices) is HPD iff its diagonal is positive: no
     // factorization needed. Otherwise count the inertia of B on the main analysis.
-    bool diagonal = b->nnz() <= n;
-    for (index_t i = 0; diagonal && i < n; ++i)
-      diagonal = (b->rowptr[i + 1] - b->rowptr[i] == 0) || (b->rowptr[i + 1] - b->rowptr[i] == 1 && b->colind[b->rowptr[i]] == i);
-    if (diagonal) {
+    if (b_diagonal) {
       ib.neg = ib.zero = ib.pos = 0;
       for (index_t i = 0; i < n; ++i) {
         const double d = (b->rowptr[i + 1] > b->rowptr[i]) ? std::real(b->values[b->rowptr[i]]) : 0.0;
@@ -148,6 +160,7 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     } else if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
       driver::PhaseScope phase(clock, driver::Phase::Factor);
       if (fac->factorize(0.0, 1.0)) ib = fac->inertia();  // false: B singular -> not HPD
+      b_factorized = ib.valid;
     } else {
       driver::PhaseScope phase(clock, driver::Phase::Factor);
       ib = compute_inertia(pencil, 0.0, 1.0, fopts);  // forces an exact double factorization
@@ -165,10 +178,39 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     HS_THROW(InvalidInput, "shift_invert_lanczos needs B positive definite; B is indefinite");
   rep.method = method;
 
+  // Smallest / largest: Ritz estimates of the ends of the spectrum seed the inertia search
+  // (A alone, or B^{-1}A in the B inner product with B's factorization on the main analysis).
+  driver::SpectrumEstimate spectrum;
+  const bool one_end = cfg.target.mode == TargetMode::Smallest || cfg.target.mode == TargetMode::Largest;
+  if (one_end && method == Method::ShiftInvertLanczos) {
+    driver::NormEstimate e = na;
+    if (b) {
+      driver::SolveFn<T> solve_b;
+      std::vector<double> inv_diag;
+      if (b_diagonal) {
+        for (index_t i = 0; i < n; ++i)
+          inv_diag.push_back(b->rowptr[i + 1] > b->rowptr[i] ? 1.0 / std::real(b->values[b->rowptr[i]]) : 0.0);
+        solve_b = [&](T* x) {
+          for (index_t i = 0; i < n; ++i) x[i] *= inv_diag[i];
+        };
+      } else {
+        if (!b_factorized) {
+          driver::PhaseScope phase(clock, driver::Phase::Factor);
+          if (!fac->factorize(0.0, 1.0)) HS_THROW(InvalidInput, "B is singular: not a definite generalized problem");
+        }
+        c.held = driver::FactorHeld{};
+        solve_b = [&](T* x) { fac->solve(x, 1, n); };
+      }
+      e = driver::estimate_pencil_spectrum(*a, *b, solve_b, 30, cfg.seed);
+    }
+    spectrum = {e.ritz_min, e.ritz_min2, e.ritz_max, e.ritz_max2, true};
+    event(c, "spectrum_estimate", {{"lo1", spectrum.lo1}, {"lo2", spectrum.lo2}, {"hi1", spectrum.hi1}, {"hi2", spectrum.hi2}});
+  }
+
   // 5-11. Solve along the chosen path.
   Solution<T> sol = (method == Method::ShiftInvertKrylovSchur)
                         ? driver::solve_indefinite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale)
-                        : driver::solve_definite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale, sigma0);
+                        : driver::solve_definite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale, sigma0, spectrum);
   rep.factor_stats = fac->stats();
   // Exclusive phase times: they add up to the total by construction (driver::PhaseClock).
   rep.time_setup_s = clock.seconds(driver::Phase::Setup);

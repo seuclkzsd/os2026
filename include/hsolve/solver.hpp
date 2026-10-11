@@ -63,6 +63,8 @@ struct SolverConfig {
                                     ///< below it the driver replaces A by (A+A^H)/2
   double inner_tol_factor = 0.1;    ///< Krylov tolerance = tol * inner_tol_factor
   index_t ncv = 0;                  ///< 0 = auto
+  index_t slice_size = 0;           ///< spectrum slicing (interval / smallest / largest, B HPD): at
+                                    ///< most this many eigenvalues per shift; 0 = auto (cost model)
   index_t max_restarts = 1000;
   std::uint64_t seed = 2026;
   int threads = 0;                  ///< 0 = OMP_NUM_THREADS / all available
@@ -108,6 +110,24 @@ struct InertiaCertificate {
   std::string note;            ///< e.g. "not available for GHIEP"
 };
 
+/// One shift-invert Krylov run of a sliced or one-sided solve (DESIGN §3.6): spectrum slices of
+/// interval / smallest / largest targets, and the one-sided runs that keep the GHIEP zero
+/// cluster unwanted. Empty for single-shift nearest solves.
+struct SliceReport {
+  double lower = 0.0;          ///< slice window (-inf / +inf: one-sided)
+  double upper = 0.0;
+  double sigma = 0.0;          ///< shift of the run
+  std::string which;           ///< "largest_magnitude" (both sides of sigma), "smallest_algebraic"
+                               ///< (eigenvalues below sigma), "largest_algebraic" (above sigma)
+  index_t count_inertia = -1;  ///< eigenvalues in [lower, upper] by Sylvester inertia (-1: GHIEP)
+  index_t count_found = -1;    ///< distinct verified pairs found in [lower, upper]
+  index_t nev = 0;             ///< pairs requested from the Krylov solver (first run)
+  index_t reruns = 0;          ///< deflated / enlarged reruns
+  index_t restarts = 0;
+  index_t op_applies = 0;
+  bool passed = false;         ///< count_found == count_inertia (GHIEP: run converged)
+};
+
 struct SolveReport {
   // problem
   index_t n = 0;
@@ -141,6 +161,11 @@ struct SolveReport {
   // results
   std::vector<PairReport> pairs;
   InertiaCertificate certificate;
+  std::vector<SliceReport> slices;  ///< per-run records of sliced / one-sided solves
+  index_t zero_cluster_dim = -1;    ///< GHIEP: dim null(A) (zero pivots of A), when it was needed;
+                                    ///< -1 = not computed
+  index_t zero_modes_filtered = 0;  ///< eigenvalues with |lambda| <= zero_filter_tol*scale left out
+                                    ///< (counted by inertia for HEP/GHEP windows)
   bool success = false;
   std::vector<std::string> warnings;
 

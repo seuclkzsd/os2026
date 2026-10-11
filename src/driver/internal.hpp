@@ -65,11 +65,19 @@ class PhaseScope {
 
 // ------------------------------------------------------------------------------ context
 
+/// What the main factorization object currently holds, so that a factorization done for an
+/// inertia count can serve as the shift of the next Krylov run without refactorizing.
+struct FactorHeld {
+  double shift = std::numeric_limits<double>::quiet_NaN();  ///< K(shift) factorized; NaN: other
+  bool detection_off = false;  ///< factorized without null-pivot detection (dense cluster)
+};
+
 struct Ctx {
   const SolverConfig& cfg;
   Logger* log;
   SolveReport& rep;
   PhaseClock& clock;
+  FactorHeld held{};
 };
 
 void warn(Ctx& c, const std::string& msg);
@@ -106,14 +114,20 @@ template <class T>
 double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off);
 
 /// Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
+/// No-op when the object already holds exactly that factorization (Ctx::held).
 template <class T>
 void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off);
+/// The same, returning false instead of throwing when K(sigma) is now flagged singular.
+template <class T>
+bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off);
 
 /// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2), moving s outward (direction
-/// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`.
+/// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`. With an
+/// exact (double, non-BLR) factor the object then holds K(s) (Ctx::held), counted with null-pivot
+/// detection unless *detection_off (optional) reports otherwise.
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step);
+                    double step, bool* detection_off = nullptr);
 
 /// Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3).
 template <class T>
@@ -126,12 +140,42 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
                                                           const ShiftedPencil<T>& pencil, double sigma0,
                                                           index_t expected_factorizations, index_t expected_solves);
 
+// ------------------------------------------------------------------------------ cost model
+
+/// Run-time model of the shift-invert building blocks on this machine, from the analysis
+/// estimate (the adaptive-ordering model of DESIGN §3.6-3b plus the Krylov basis work). Only
+/// ratios matter: it decides how many eigenvalues one shift should serve (slice capacity) and
+/// when another inertia count is cheaper than computing extra eigenpairs.
+struct CostModel {
+  double t_factor = 0.0;    ///< seconds per numeric factorization
+  double t_solve = 0.0;     ///< seconds per single right-hand-side solve
+  double vec_bytes = 0.0;   ///< bytes of one n-vector
+  double stream_bw = 1.0;   ///< bytes/s of the BLAS2 passes over the Krylov basis
+  /// Seconds per converged pair in a Lanczos run that converges c pairs (solves + CGS2 passes over
+  /// a basis of ~2c vectors).
+  double per_pair(index_t c) const;
+  /// Extra seconds for one more pair in a run that converges c pairs.
+  double marginal_pair(index_t c) const;
+  /// Pairs per shift minimizing (factorizations + solves + basis work) per pair.
+  index_t best_slice() const;
+};
+
+CostModel make_cost_model(const FactorEstimate& est, index_t n, int threads, bool complex_scalars);
+
+/// Ritz estimates of the ends of the spectrum of the pencil (from inside): lowest two and
+/// highest two Ritz values of a short Lanczos run (A alone for B = I, B^{-1}A otherwise).
+struct SpectrumEstimate {
+  double lo1 = 0.0, lo2 = 0.0, hi1 = 0.0, hi2 = 0.0;
+  bool valid = false;
+};
+
 // ------------------------------------------------------------------------------ solve paths
 
-/// HEP / GHEP (B HPD): shift-invert Lanczos, Rayleigh-Ritz, rescue, inertia certificate.
+/// HEP / GHEP (B HPD): shift-invert Lanczos, Rayleigh-Ritz, rescue, inertia certificate;
+/// nearest targets with one shift, interval / smallest / largest with spectrum slicing.
 template <class T>
 Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double n2a,
-                           double n2b, double scale, double sigma0);
+                           double n2b, double scale, double sigma0, const SpectrumEstimate& spectrum);
 
 /// GHIEP (B indefinite): shift-invert general Krylov-Schur, projected refinement, real/complex
 /// classification.
