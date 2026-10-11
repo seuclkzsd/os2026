@@ -1,5 +1,5 @@
 // ShiftInvertOperator: Op = (A - sigma B)^{-1} B with optional double-precision iterative
-// refinement (docs/DESIGN.md §3.4b).
+// refinement (docs/DESIGN.md §3.4b); FactorSolveOperator: Op = K^{-1}.
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -16,12 +16,20 @@ namespace {
 // Y = B X for p columns (B = I when b == nullptr).
 template <class T>
 void apply_b(const CsrMatrix<T>* b, index_t n, const T* x, index_t ldx, T* y, index_t ldy,
-             index_t p) {
+             index_t p, const KernelOptions& kernels) {
   if (b) {
-    spmm(*b, x, ldx, y, ldy, p);
+    spmm(*b, x, ldx, y, ldy, p, T(1), T(0), kernels);
     return;
   }
   for (index_t k = 0; k < p; ++k) std::copy(x + k * ldx, x + k * ldx + n, y + k * ldy);
+}
+
+// The factor must hold a usable factorization (the operators' construction check).
+template <class T>
+void check_usable(const SparseFactorization<T>& factor, const char* who) {
+  if (!factor.inertia().valid)
+    HS_THROW(InvalidInput, who << ": the factor holds no usable factorization (the last factorize() "
+                                  "failed or was never called)");
 }
 
 }  // namespace
@@ -29,40 +37,31 @@ void apply_b(const CsrMatrix<T>* b, index_t n, const T* x, index_t ldx, T* y, in
 template <class T>
 ShiftInvertOperator<T>::ShiftInvertOperator(SparseFactorization<T>& factor,
                                             const ShiftedPencil<T>& pencil, double sigma,
-                                            SolveRefinement refinement)
+                                            SolveRefinement refinement, KernelPath kernels)
     : factor_(&factor),
       pencil_(&pencil),
       sigma_(sigma),
       refinement_(refinement),
+      kernels_(kernels),
       factorization_id_(factor.stats().factorizations) {
   if (factor.order() != pencil.order())
     HS_THROW(InvalidInput, "ShiftInvertOperator: factor order "
                                << factor.order() << " != pencil order " << pencil.order());
-  if (!factor.inertia().valid)
-    HS_THROW(InvalidInput,
-             "ShiftInvertOperator: the factor holds no usable factorization (the last factorize() "
-             "failed or was never called)");
+  check_usable(factor, "ShiftInvertOperator");
   if (!std::isfinite(sigma))
     HS_THROW(InvalidInput, "ShiftInvertOperator: non-finite sigma " << sigma);
   if (refinement.max_steps < 0 || !(refinement.rel_tol >= 0.0))
     HS_THROW(InvalidInput, "ShiftInvertOperator: invalid refinement policy max_steps="
                                << refinement.max_steps << ", rel_tol=" << refinement.rel_tol);
+  resolve_kernel_path(kernels);  // an unavailable path fails here, not at the first apply
 }
 
 template <class T>
 void ShiftInvertOperator<T>::residual(const T* x, index_t ldx, const T* y, index_t ldy, index_t p) {
-  const index_t n = size();
-  const CsrMatrix<T>* b = pencil_->b();
-  T* r = residual_.data();
-  // r = Bx - (A y - sigma B y): B x is recomputed rather than stored (one spmm, or a copy when
-  // B = I, against a block solve per step) to keep the workspace at two n x p blocks.
-  apply_b(b, n, x, ldx, r, n, p);
-  spmm(pencil_->a(), y, ldy, r, n, p, T(-1), T(1));
-  if (b) {
-    spmm(*b, y, ldy, r, n, p, T(sigma_), T(1));
-  } else {
-    for (index_t k = 0; k < p; ++k) linalg::axpy(n, T(sigma_), y + k * ldy, r + k * n);
-  }
+  // r = Bx - (A y - sigma B y) = B (x + sigma y) - A y: one sweep over A and B (B x is
+  // recomputed rather than stored, against a block solve per step, to keep the workspace small).
+  shifted_residual(pencil_->a(), pencil_->b(), sigma_, x, ldx, y, ldy, residual_.data(), size(), p,
+                   KernelOptions{kernels_, &scratch_});
 }
 
 template <class T>
@@ -73,7 +72,7 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
                                    << "): its factorization object was refactorized after the "
                                       "operator was built");
   const index_t n = size();
-  apply_b(pencil_->b(), n, x, ldx, y, ldy, p);
+  apply_b(pencil_->b(), n, x, ldx, y, ldy, p, KernelOptions{kernels_, &scratch_});
   if (refinement_.max_steps == 0) {
     factor_->solve(y, p, ldy);
     return;
@@ -142,7 +141,25 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
   last_rel_residual_ = p > 0 ? *std::max_element(rel.begin(), rel.end()) : 0.0;
 }
 
-#define HS_INSTANTIATE_SHIFT_INVERT(T) template class ShiftInvertOperator<T>;
+template <class T>
+FactorSolveOperator<T>::FactorSolveOperator(SparseFactorization<T>& factor)
+    : factor_(&factor), factorization_id_(factor.stats().factorizations) {
+  check_usable(factor, "FactorSolveOperator");
+}
+
+template <class T>
+void FactorSolveOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) {
+  HS_ASSERT(factor_->stats().factorizations == factorization_id_,
+            "FactorSolveOperator: its factorization object was refactorized after the operator "
+            "was built");
+  const index_t n = size();
+  for (index_t k = 0; k < p; ++k) std::copy(x + k * ldx, x + k * ldx + n, y + k * ldy);
+  factor_->solve(y, p, ldy);
+}
+
+#define HS_INSTANTIATE_SHIFT_INVERT(T) \
+  template class ShiftInvertOperator<T>; \
+  template class FactorSolveOperator<T>;
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_SHIFT_INVERT)
 #undef HS_INSTANTIATE_SHIFT_INVERT
 
