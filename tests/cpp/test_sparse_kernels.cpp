@@ -545,8 +545,10 @@ TYPED_TEST(SparseKernelPaths, ShiftedResidualRejectsMismatchedOrders) {
   }
 }
 
-// Runtime dispatch: Auto is the AVX-512 path exactly when it can run, and gives its bits; an
-// unavailable AVX-512 path is refused instead of crashing; the portable fallback always runs.
+// Runtime dispatch: Auto is the AVX-512 path exactly when it can run, and gives its bits for
+// chunks of at least 8 doubles per row (real p >= 8, complex p >= 4) and the Portable bits for
+// narrower ones; an unavailable AVX-512 path is refused instead of crashing; the portable
+// fallback always runs.
 TEST(SparseKernelDispatch, AutoResolvesToTheBestAvailablePath) {
   EXPECT_TRUE(hs::kernel_path_available(KernelPath::Auto));
   EXPECT_TRUE(hs::kernel_path_available(KernelPath::Reference));
@@ -566,13 +568,35 @@ TEST(SparseKernelDispatch, AutoResolvesToTheBestAvailablePath) {
       EXPECT_EQ(e.code(), hs::Error::Code::Unsupported);
     }
   }
-  const auto a = hs::test::random_hermitian<double>(300, 0.03, 9);
-  const auto x = random_block<double>(300, 6, 300, 10);
-  std::vector<double> y_auto(300 * 6), y_best(300 * 6);
-  hs::spmm(a, x.data(), 300, y_auto.data(), 300, 6);
-  hs::spmm(a, x.data(), 300, y_best.data(), 300, 6, 1.0, 0.0,
-           {hs::resolve_kernel_path(KernelPath::Auto)});
-  EXPECT_TRUE(y_auto == y_best);
+  auto check = [](auto zero) {
+    using T = decltype(zero);
+    const index_t n = 300;
+    const auto a = hs::test::random_hermitian<T>(n, 0.03, 9);
+    const auto x = random_block<T>(n, 19, n, 10);
+    // p = 19: a 16-column chunk (AVX-512 when available) and a 3-column one (Portable).
+    for (index_t p : {2, 3, 4, 6, 8, 12, 16, 19}) {
+      const std::size_t len = static_cast<std::size_t>(n * p);
+      std::vector<T> y_auto(len), y_exp(len), r_auto(len), r_exp(len);
+      std::vector<double> o_auto(static_cast<std::size_t>(p)), o_exp(o_auto.size());
+      hs::spmm(a, x.data(), n, y_auto.data(), n, p);
+      hs::shifted_residual(a, nullptr, 0.3, x.data(), n, x.data(), n, r_auto.data(), n, p, {},
+                           o_auto.data());
+      for (index_t k0 = 0; k0 < p; k0 += 16) {
+        const index_t q = std::min<index_t>(16, p - k0);
+        const bool wide = q * (hs::is_complex_v<T> ? 2 : 1) >= 8;
+        const KernelOptions expected{wide ? hs::resolve_kernel_path(KernelPath::Auto)
+                                          : KernelPath::Portable};
+        const T* xk = x.data() + k0 * n;
+        hs::spmm(a, xk, n, y_exp.data() + k0 * n, n, q, T(1), T(0), expected);
+        hs::shifted_residual(a, nullptr, 0.3, xk, n, xk, n, r_exp.data() + k0 * n, n, q, expected,
+                             o_exp.data() + k0);
+      }
+      EXPECT_TRUE(y_auto == y_exp) << "spmm p=" << p;
+      EXPECT_TRUE(r_auto == r_exp && o_auto == o_exp) << "residual p=" << p;
+    }
+  };
+  check(0.0);
+  check(cplx(0.0));
 }
 
 }  // namespace

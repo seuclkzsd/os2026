@@ -9,7 +9,8 @@
 //              arithmetic (no NaN-recovery calls; complex in the split form of the AVX-512 path).
 //              Compiled for every width q = 1 .. 16 with the accumulators in vector registers of
 //              the build's ISA (GCC / Clang vector extension: 2 doubles with SSE2, 4 with AVX), so
-//              it is fast on any x86-64 (or other) CPU; Auto runs it on CPUs without AVX-512F.
+//              it is fast on any x86-64 (or other) CPU. Auto runs it on CPUs without AVX-512F,
+//              and on AVX-512 CPUs for chunks narrower than 8 doubles per row (kAvx512MinWords).
 //   Avx512     the same formulation with AVX-512F intrinsics: one broadcast + ceil(q/8) loads and
 //              FMAs per nonzero (complex: 2 broadcasts, ceil(2q/8) loads, 2 FMAs per load; the
 //              swap of the imaginary products is done once per row), two nonzeros in flight per
@@ -688,6 +689,23 @@ void with_chunk_width(index_t q, F&& f) {
 
 // --------------------------------------------------------------------------- dispatchers
 
+// Auto runs the AVX-512 intrinsics only on chunks of at least this many doubles per interleaved
+// row (real q >= 8, complex q >= 4). Narrower chunks fill a fraction of every 8-lane register, and
+// there the Portable kernels (compiled for the build's ISA) measured 1.2-1.4x faster for real
+// p = 2, 4 and complex p = 2 on the six 1e5 test cases (-march=native, 4 threads), equal at
+// 8 doubles; 16 complex vectors were 1.2x faster on AVX-512 (bench/solvephase_kernels.cpp).
+constexpr index_t kAvx512MinWords = 8;
+
+/// The path a chunk of q vectors runs: `path` (resolved), except that a requested Auto takes the
+/// Portable kernels for chunks too narrow for AVX-512. An explicit Avx512 always runs AVX-512.
+template <class T>
+KernelPath chunk_path(KernelPath requested, KernelPath path, index_t q) {
+  if (requested == KernelPath::Auto && path == KernelPath::Avx512 &&
+      q * kWords<T> < kAvx512MinWords)
+    return KernelPath::Portable;
+  return path;
+}
+
 template <class T>
 void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_t ldy, T alpha,
                 T beta, KernelPath path) {
@@ -793,7 +811,8 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
   for (index_t k0 = 0; k0 < p; k0 += kChunk) {
     const index_t q = std::min(kChunk, p - k0);
     interleave<T>(m, q, x + k0 * ldx, ldx, 0.0, nullptr, 0, xp.data());
-    spmm_chunk(a, xp.data(), q, y + k0 * ldy, ldy, alpha, beta, path);
+    spmm_chunk(a, xp.data(), q, y + k0 * ldy, ldy, alpha, beta,
+               chunk_path<T>(options.path, path, q));
   }
 }
 
@@ -829,7 +848,8 @@ void shifted_residual(const CsrMatrix<T>& a, const non_deduced_t<CsrMatrix<T>>* 
     } else {
       interleave<T>(n, q, yk, ldy, 0.0, nullptr, 0, yp);
       interleave<T>(n, q, xk, ldx, sigma, yk, ldy, wp);
-      residual_chunk(a, b, wp, yp, q, r + k0 * ldr, ldr, path, bm);
+      residual_chunk(a, b, wp, yp, q, r + k0 * ldr, ldr, chunk_path<T>(options.path, path, q),
+                     bm);
     }
     bm.finish();
   }

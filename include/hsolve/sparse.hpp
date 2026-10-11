@@ -109,7 +109,9 @@ double hermitian_defect(const CsrMatrix<T>& a);
 
 /// Instruction-set path of the sparse kernels.
 enum class KernelPath {
-  Auto,       ///< Avx512 when the CPU and OS support AVX-512F (checked at run time), else Portable
+  Auto,       ///< Avx512 when the CPU and OS support AVX-512F (checked at run time), else
+              ///< Portable; with AVX-512, chunks of fewer than 8 doubles per row (real p < 8,
+              ///< complex p < 4) still run Portable, which is faster there
   Reference,  ///< the P1 loops (strided spmm, 8 vectors per pass): for tests and benchmarks
   Portable,   ///< interleaved kernels in plain C++ (vector extension at the build ISA's width)
   Avx512,     ///< AVX-512F intrinsics; Unsupported (hs::Error) where AVX-512F is unavailable
@@ -130,7 +132,8 @@ struct KernelOptions {
 /// unavailable and Auto takes the fallback. For testing that fallback on AVX-512 machines and for
 /// measuring what a CPU without AVX-512 would run.
 bool kernel_path_available(KernelPath path) noexcept;
-/// The path `path` runs as: Auto resolves to Avx512 or Portable; an unavailable Avx512 throws
+/// The instruction-set path `path` runs as: Auto resolves to Avx512 or Portable (Auto then still
+/// runs narrow chunks on Portable, see KernelPath::Auto); an unavailable Avx512 throws
 /// Unsupported. Cheap (the CPU check is done once).
 KernelPath resolve_kernel_path(KernelPath path);
 
