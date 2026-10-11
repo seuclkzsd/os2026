@@ -1,0 +1,17 @@
+# build outputs
+/build/
+compile_commands.json
+# generated matrices and raw experiment output (summaries in results/*.md|json are tracked)
+/data/
+/results/raw/
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+# editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+# large source material kept outside version control
+开放原子上海.docx

@@ -1,0 +1,33 @@
+# Reproducible development/runtime environment (conda-forge only).
+#   conda env create -f env/environment.yml && conda activate os2026
+# Versions below are the ones validated on the development machine (2026-10).
+name: os2026
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy=2.4
+  - scipy=1.17
+  - pytest
+  # toolchain
+  - gcc_linux-64=13
+  - gxx_linux-64=13
+  - gfortran_linux-64=13
+  - cmake>=3.20
+  - ninja
+  - make
+  - pkg-config
+  # numerical libraries (all open source, see docs/DEPENDENCIES.md)
+  - mumps-seq=5.8.2
+  - mumps-include=5.8.2
+  - metis=5.1.0
+  - libscotch=7.0
+  - openblas=0.3.34
+  - libblas=*=*openblas
+  - liblapack=*=*openblas
+  - zlib
+  # header-only / test libraries
+  - nlohmann_json=3.12
+  - cli11=2.7
+  - gtest=1.18
+  - pybind11=3.1

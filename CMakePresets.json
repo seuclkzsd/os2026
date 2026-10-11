@@ -1,0 +1,43 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": { "CMAKE_PREFIX_PATH": "$env{CONDA_PREFIX}" }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Release (-O3 -march=native)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug with ASan/UBSan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "HSOLVE_SANITIZE": "address,undefined"
+      }
+    },
+    {
+      "name": "portable",
+      "inherits": "base",
+      "displayName": "Release without -march=native (for distribution)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "HSOLVE_NATIVE": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release", "jobs": 4 },
+    { "name": "debug", "configurePreset": "debug", "jobs": 4 },
+    { "name": "portable", "configurePreset": "portable", "jobs": 4 }
+  ],
+  "testPresets": [
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true }, "execution": { "jobs": 4 } },
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true }, "execution": { "jobs": 4 } }
+  ]
+}
