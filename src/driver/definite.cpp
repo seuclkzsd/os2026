@@ -459,6 +459,8 @@ constexpr double kEqualWidth = 1e-8;
 constexpr int kExtraRerunRounds = 4;
 constexpr int kMaxRerunRounds = 32;
 constexpr int kStallRounds = 2;
+/// Rerun shift of a multiple eigenvalue: this fraction of the gap to its nearest neighbour away.
+constexpr double kMultipletOffset = 0.01;
 
 /// Pairs accepted from all slices, eigenvalue order maintained per slice.
 template <class T>
@@ -512,6 +514,7 @@ class WindowSolver {
   // ---- runs
   bool run_slice(const Slice& s, index_t id, const Block<T>* seed = nullptr);
   double multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const;
+  double multiplet_rerun_shift(double mean, const Block<T>& sel, const Slice& s) const;
   bool cluster_verified(const Slice& s, const std::vector<double>& lambda, double& mean, double& delta);
   void reserve_pool(index_t pairs);
   void append_to_pool(const Block<T>& blk, const std::vector<PairMetrics>& m, index_t id);
@@ -825,9 +828,9 @@ Block<T> WindowSolver<T>::take_from_pool(const std::vector<index_t>& cols) {
 }
 
 // A multiple eigenvalue among the pairs found inside the slice (two or more within kEqualWidth,
-// not tried before): its copies sit at one theta, and a single-vector Krylov run at a shift on it
-// - where it dominates the operator - recovers the missing copies through rounding, while a run at
-// a distant shift does not. Returns its mean, or NaN.
+// not tried before): its copies sit at one theta, and a single-vector Krylov run at a shift next to
+// it - where it dominates the operator - recovers the missing copies through rounding, while a run
+// at a distant shift does not (multiplet_rerun_shift). Returns its mean, or NaN.
 template <class T>
 double WindowSolver<T>::multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const {
   std::vector<double> l;
@@ -851,6 +854,31 @@ double WindowSolver<T>::multiplet_shift(const Block<T>& sel, const Slice& s, std
     i = j;
   }
   return best;
+}
+
+// The shift of a multiplet's rerun: kMultipletOffset of the way from the multiplet (mean) to its
+// nearest other found eigenvalue (or the slice end) on the side with the larger gap. There the
+// multiplet dominates the operator ~1/kMultipletOffset times, so rounding supplies its missing
+// copies; a shift right on it (1e-8 relative) also resolves the spread of a numerically multiple
+// cluster (a null space: eigenvalues ~1e-14 scale apart) into distinct theta that must converge
+// one by one - measured on yee-pec-box-1e4 smallest 10: 215 solves on the multiplet, 87 at 1%;
+// exact multiplets (bench_slicing_fix_probe lap4, cluster_mid, mult) took +3..8% solves.
+template <class T>
+double WindowSolver<T>::multiplet_rerun_shift(double mean, const Block<T>& sel, const Slice& s) const {
+  double gl = kInf, gr = kInf;
+  for (double x : sel.lambda) {
+    const double d = x - mean;
+    if (std::abs(d) <= kEqualWidth * std::max(scale_, std::abs(mean))) continue;  // a copy
+    if (d > 0) {
+      gr = std::min(gr, d);
+    } else {
+      gl = std::min(gl, -d);
+    }
+  }
+  if (!std::isfinite(gl) && std::isfinite(s.lo.s)) gl = mean - s.lo.s;
+  if (!std::isfinite(gr) && std::isfinite(s.hi.s)) gr = s.hi.s - mean;
+  const double gap = std::isfinite(gr) && (gr >= gl || !std::isfinite(gl)) ? gr : -gl;
+  return std::isfinite(gap) ? mean + kMultipletOffset * gap : mean;
 }
 
 // A partial cluster slice's copies (lambda, inside the slice) prove the whole cluster numerically
@@ -991,7 +1019,8 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id, const Block<T>* seed
     if (std::isfinite(m_sigma)) {
       tried.push_back(m_sigma);
       bool off = false;
-      const double ms = factorize_near(c_, fac_, m_sigma, scale_, off, /*on_eigenvalue=*/true);
+      const double ms = factorize_near(c_, fac_, multiplet_rerun_shift(m_sigma, sel, s), scale_, off,
+                                       /*on_eigenvalue=*/true);
       lanczos_run(c_, fac_, pencil_, ms, Which::LargestMagnitude, nev_rerun, &defl, run);
     } else {
       refactorize_at(c_, fac_, sigma, detection_off);
