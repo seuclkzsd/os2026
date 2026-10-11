@@ -4,9 +4,11 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "blas/blas_hook.hpp"
 
@@ -102,6 +104,38 @@ void parallel_gemm(int threads, bool ta, bool tb, fint m, fint n, fint k, double
   }
 }
 
+// C = alpha * A^T * B + beta * C with A k x m, B k x n, split over K into `threads` fixed chunks:
+// each thread forms its partial product with the real dgemm (beta = 0), the partials are added
+// in thread order, so the result depends only on the shape and the thread count.
+void splitk_gemm_tn(int threads, fint m, fint n, fint k, double alpha, const double* a, fint lda,
+                    const double* b, fint ldb, double beta, double* c, fint ldc) {
+  const RealBlas& rb = real_blas();
+  const fint per = ((k + threads - 1) / threads + 7) / 8 * 8;
+  const std::size_t mn = static_cast<std::size_t>(m) * n;
+  std::vector<double> part(mn * threads, 0.0);
+#pragma omp parallel num_threads(threads)
+  {
+    const int t = omp_get_thread_num();
+    const fint k0 = static_cast<fint>(t) * per;
+    const fint k1 = std::min<fint>(k, k0 + per);
+    if (k0 < k1) {
+      const fint kc = k1 - k0;
+      const double one = 1.0, zero = 0.0;
+      const char tr = 'T', nt = 'N';
+      rb.dgemm(&tr, &nt, &m, &n, &kc, &one, a + k0, &lda, b + k0, &ldb, &zero, part.data() + mn * t,
+               &m, 1, 1);
+    }
+  }
+  for (fint j = 0; j < n; ++j)
+    for (fint i = 0; i < m; ++i) {
+      const std::size_t q = i + static_cast<std::size_t>(j) * m;
+      double s = part[q];
+      for (int t = 1; t < threads; ++t) s += part[q + mn * t];
+      double& cij = c[i + static_cast<std::size_t>(j) * ldc];
+      cij = beta == 0.0 ? alpha * s : alpha * s + beta * cij;
+    }
+}
+
 }  // namespace
 
 const RealBlas& real_blas() noexcept {
@@ -154,18 +188,21 @@ RouteConfig parse_route_config(const std::string& spec, std::string* unknown) {
       } else if (key == "gemv1") {
         c.gemm_n1_gemv = true;
       } else if (key == "trsv1") {
-        c.trsm_n1_trsv = true;
+        c.trsv_max_n = std::max(c.trsv_max_n, 1);
       } else if (key == "narrow") {
         c.narrow = true;
       } else if (key == "par") {
         c.parallel = true;
       } else if (key == "all") {
-        c.gemm_n1_gemv = c.trsm_n1_trsv = c.narrow = c.parallel = true;
+        c.gemm_n1_gemv = c.narrow = c.parallel = true;
+        c.trsv_max_n = 16;
       } else if (key == "portable") {
         portable = true;
       } else {
         ok = false;
       }
+    } else if (key == "trsv" && parse_int(val, 1, 64, &v)) {
+      c.trsv_max_n = static_cast<int>(v);
     } else if (key == "maxn" && parse_int(val, 1, 64, &v)) {
       c.narrow_max_n = static_cast<int>(v);
     } else if (key == "minkb" && parse_int(val, 0, 1LL << 30, &v)) {
@@ -191,7 +228,7 @@ std::string to_string(const RouteConfig& c) {
     s += t;
   };
   if (c.gemm_n1_gemv) add("gemv1");
-  if (c.trsm_n1_trsv) add("trsv1");
+  if (c.trsv_max_n > 0) add("trsv=" + std::to_string(c.trsv_max_n));
   if (c.narrow) add("narrow");
   if (c.parallel) add("par");
   if (s.empty()) add("off");
@@ -225,6 +262,8 @@ const char* route_name(Route r) noexcept {
       return "narrow";
     case Route::Parallel:
       return "parallel";
+    case Route::SplitK:
+      return "splitk";
   }
   return "?";
 }
@@ -233,7 +272,7 @@ int parallel_threads(const RouteConfig& cfg, double bytes) noexcept {
   if (omp_in_parallel()) return 1;
   const int max_t = cfg.threads > 0 ? cfg.threads : omp_get_max_threads();
   const double per = std::max<double>(1.0, static_cast<double>(cfg.parallel_min_bytes));
-  const double want = bytes / per;
+  const double want = std::floor(bytes / per);
   if (want < 2.0) return 1;
   return std::max(1, std::min(max_t, static_cast<int>(want)));
 }
@@ -257,6 +296,11 @@ Route dgemm(const RouteConfig& cfg, char ta_c, char tb_c, fint m, fint n, fint k
   const double a_bytes = 8.0 * static_cast<double>(m) * static_cast<double>(k);
   const int threads = cfg.parallel ? parallel_threads(cfg, a_bytes) : 1;
 
+  if (ta && !tb && n <= cfg.narrow_max_n && threads > 1 && m < 4 * threads &&
+      k >= 1024 * threads) {
+    splitk_gemm_tn(threads, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
+    return Route::SplitK;
+  }
   if (cfg.gemm_n1_gemv && n == 1) {
     // c(m) = alpha * op(A) * op(B)(:, 1) + beta * c: op(B) column = B(:,1) or B(1,:) (stride ldb).
     const fint incx = tb ? ldb : 1;
@@ -305,9 +349,11 @@ Route dtrsm(const RouteConfig& cfg, char side, char uplo, char ta, char diag, fi
                      (t == 'N' || t == 'T' || t == 'C') && (d == 'U' || d == 'N') && m >= 0 &&
                      n >= 0 && lda >= std::max<fint>(1, s == 'L' ? m : n) &&
                      ldb >= std::max<fint>(1, m);
-  if (cfg.trsm_n1_trsv && valid && s == 'L' && n == 1 && m >= 1 && alpha == 1.0) {
+  if (valid && s == 'L' && n >= 1 && n <= cfg.trsv_max_n && m >= 1 && alpha == 1.0) {
     const fint one = 1;
-    rb.dtrsv(&uplo, &ta, &diag, &m, a, &lda, b, &one, 1, 1, 1);
+    for (fint j = 0; j < n; ++j)
+      rb.dtrsv(&uplo, &ta, &diag, &m, a, &lda, b + static_cast<std::ptrdiff_t>(j) * ldb, &one, 1, 1,
+               1);
     return Route::Trsv;
   }
   rb.dtrsm(&side, &uplo, &ta, &diag, &m, &n, &alpha, a, &lda, b, &ldb, 1, 1, 1, 1);

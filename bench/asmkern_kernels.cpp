@@ -11,7 +11,8 @@
 //       interleaved (variant order rotated per repetition), median over repetitions; each
 //       repetition cycles through a pool of distinct operands (pool-mb in total) so that the
 //       matrix comes from memory as in MUMPS' solves (cold). SPEC: ';'-separated
-//       op:flags:m:n:k[:lda] with op gemm (flags NN/TN), trsm (flags LLN/LLT/LUN/LUT, k unused),
+//       op:flags:m:n:k[:lda] with op gemm (flags NN/TN), trsm (flags side uplo trans [diag], e.g.
+//       LLN or LUTU, k unused),
 //       gemv (flags N/T, n unused: m x k matrix). LIST: ','-separated route specifications
 //       (HS_BLAS_ROUTE syntax) with '+' instead of ',' inside one, e.g. "gemv1,narrow+par".
 //       Prints per shape: real time, each route's time, speedup, GB/s of the matrix, and the max
@@ -121,7 +122,7 @@ int run_stream(const std::map<std::string, std::string>& o) {
   for (int r = 0; r < reps; ++r) {
     double t0 = now();
     double s = 0;
-#pragma omp parallel for schedule(static) reduction(+ : s)
+#pragma omp parallel for simd schedule(static) reduction(+ : s)
     for (std::size_t i = 0; i < n; ++i) s += x[i];
     best_read = std::max(best_read, 8.0 * n / (now() - t0) * 1e-9);
     sink += s;
@@ -266,7 +267,8 @@ struct Case {
         rb.dgemm(&f0, &tb, &s.m, &s.n, &s.k, &alpha, a, &lda, b, &ldb, &beta, c, &ldc, 1, 1);
     } else if (s.op == "trsm") {
       const double alpha = 1.0;
-      const char side = s.flags[0], uplo = s.flags[1], tr = s.flags[2], diag = 'N';
+      const char side = s.flags[0], uplo = s.flags[1], tr = s.flags[2];
+      const char diag = s.flags.size() > 3 ? s.flags[3] : 'N';
       if (cfg)
         hs::blas::dtrsm(*cfg, side, uplo, tr, diag, s.m, s.n, alpha, a, lda, c, ldb);
       else

@@ -90,16 +90,20 @@ bool cpu_has_avx512f() noexcept;
 struct RouteConfig {
   /// dgemm with N = 1 (or M = 1), K >= 1, alpha != 0 -> the real dgemv (A read once, not packed).
   bool gemm_n1_gemv = false;
-  /// dtrsm with SIDE = 'L', N = 1, alpha = 1 -> the real dtrsv (no level-3 packing).
-  bool trsm_n1_trsv = false;
+  /// dtrsm with SIDE = 'L', 1 <= N <= trsv_max_n, alpha = 1 -> N calls of the real dtrsv, one per
+  /// column (no level-3 packing; OpenBLAS' dtrsm costs ~1 us even for an 8 x 8 triangle).
+  /// 0 = off.
+  int trsv_max_n = 0;
   /// dgemm with 2 <= N <= narrow_max_n, op(B) = B, alpha != 0, Isa::Avx512 -> the hook's narrow
   /// kernels (narrow_gemm_nn / narrow_gemm_tn: A streamed once, no packing).
   bool narrow = false;
-  /// Outside OpenMP parallel regions, calls that touch at least parallel_min_bytes of A run on all
-  /// threads, rows (or columns of A^T) split into fixed blocks: dgemv, dgemm with N <= narrow_max_n
-  /// (the routes above or the real dgemm per block). OpenBLAS threads dgemv only from
-  /// m*n >= 460800 and narrow dgemm from m*n*k > 262144, so most fronts above MUMPS' L0 layer
-  /// run on one core.
+  /// Outside OpenMP parallel regions, calls that touch at least 2 * parallel_min_bytes of A run on
+  /// up to `threads` threads (at least parallel_min_bytes each), split into fixed blocks: dgemv
+  /// and dgemm with N <= narrow_max_n by rows of C (the routes above or the real dgemm per block);
+  /// dgemm A^T B with too few rows of C to split (M < 4 threads) by K, the partial products summed
+  /// in thread order. OpenBLAS threads dgemv only from m*n >= 460800, narrow dgemm from
+  /// m*n*k > 262144 and never splits K, so most fronts above MUMPS' L0 layer and hsolve's Gram
+  /// products V^T W (k = n) run on one core.
   bool parallel = false;
   int narrow_max_n = 16;
   std::int64_t parallel_min_bytes = std::int64_t{1} << 18;
@@ -109,9 +113,10 @@ struct RouteConfig {
 };
 
 /// Parses a route specification: comma-separated tokens
-///   off | gemv1 | trsv1 | narrow | par | all | maxn=<1..64> | minkb=<int> | threads=<int> |
-///   portable
-/// ("all" = gemv1,trsv1,narrow,par). isa is Avx512 when cpu_has_avx512f(), unless "portable" is
+///   off | gemv1 | trsv1 | trsv=<1..64> | narrow | par | all | maxn=<1..64> | minkb=<int> |
+///   threads=<int> | portable
+/// ("trsv1" = trsv=1, "all" = gemv1,trsv=16,narrow,par). isa is Avx512 when cpu_has_avx512f(),
+/// unless "portable" is
 /// given. Unknown or malformed tokens are skipped and appended (comma-separated) to `unknown`
 /// when given.
 RouteConfig parse_route_config(const std::string& spec, std::string* unknown = nullptr);
@@ -124,7 +129,14 @@ std::string to_string(const RouteConfig& c);
 const RouteConfig& active_route_config() noexcept;
 
 /// How a call was executed (profiler key).
-enum class Route : std::uint8_t { Real = 0, Gemv = 1, Trsv = 2, Narrow = 3, Parallel = 4 };
+enum class Route : std::uint8_t {
+  Real = 0,
+  Gemv = 1,
+  Trsv = 2,
+  Narrow = 3,
+  Parallel = 4,
+  SplitK = 5
+};
 const char* route_name(Route r) noexcept;
 
 // ---- routed operations: Fortran BLAS semantics (column-major, op chars 'N'/'T'/'C' in any case,
@@ -154,8 +166,8 @@ void narrow_gemm_tn(Isa isa, int threads, fint m, fint n, fint k, double alpha, 
                     fint lda, const double* b, fint ldb, double beta, double* c, fint ldc);
 
 /// Threads the parallel route would use for a call touching `bytes` of matrix data: 1 inside a
-/// parallel region, else min(cfg.threads or omp_get_max_threads(), bytes / parallel_min_bytes),
-/// at least 1.
+/// parallel region or for bytes < 2 * parallel_min_bytes, else
+/// min(cfg.threads or omp_get_max_threads(), floor(bytes / parallel_min_bytes)).
 int parallel_threads(const RouteConfig& cfg, double bytes) noexcept;
 
 }  // namespace hs::blas

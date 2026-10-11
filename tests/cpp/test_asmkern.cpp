@@ -133,7 +133,7 @@ TEST(BlasHookConfig, ParsesTokensAndReportsUnknownOnes) {
   RouteConfig c = hs::blas::parse_route_config("gemv1, trsv1,maxn=8,minkb=64,threads=3", &unknown);
   EXPECT_TRUE(unknown.empty()) << unknown;
   EXPECT_TRUE(c.gemm_n1_gemv);
-  EXPECT_TRUE(c.trsm_n1_trsv);
+  EXPECT_EQ(c.trsv_max_n, 1);
   EXPECT_FALSE(c.narrow);
   EXPECT_FALSE(c.parallel);
   EXPECT_EQ(c.narrow_max_n, 8);
@@ -141,9 +141,10 @@ TEST(BlasHookConfig, ParsesTokensAndReportsUnknownOnes) {
   EXPECT_EQ(c.threads, 3);
 
   c = hs::blas::parse_route_config("all", &unknown);
-  EXPECT_TRUE(c.gemm_n1_gemv && c.trsm_n1_trsv && c.narrow && c.parallel);
+  EXPECT_TRUE(c.gemm_n1_gemv && c.narrow && c.parallel);
+  EXPECT_EQ(c.trsv_max_n, 16);
   c = hs::blas::parse_route_config("all,off", &unknown);
-  EXPECT_FALSE(c.gemm_n1_gemv || c.trsm_n1_trsv || c.narrow || c.parallel);
+  EXPECT_FALSE(c.gemm_n1_gemv || c.trsv_max_n > 0 || c.narrow || c.parallel);
 
   c = hs::blas::parse_route_config("gemv1,bogus,maxn=0,maxn=65,threads=x,par", &unknown);
   EXPECT_EQ(unknown, "bogus,maxn=0,maxn=65,threads=x");
@@ -154,12 +155,12 @@ TEST(BlasHookConfig, ParsesTokensAndReportsUnknownOnes) {
   unknown.clear();
   c = hs::blas::parse_route_config("", &unknown);
   EXPECT_TRUE(unknown.empty());
-  EXPECT_FALSE(c.gemm_n1_gemv || c.trsm_n1_trsv || c.narrow || c.parallel);
+  EXPECT_FALSE(c.gemm_n1_gemv || c.trsv_max_n > 0 || c.narrow || c.parallel);
 }
 
 TEST(BlasHookConfig, ToStringRoundTrips) {
   for (const char* spec : {"off", "gemv1", "all,maxn=4,minkb=16,threads=2", "narrow,portable",
-                           "trsv1,par,minkb=0"}) {
+                           "trsv1,par,minkb=0", "trsv=7"}) {
     const RouteConfig c = hs::blas::parse_route_config(spec);
     std::string unknown;
     const RouteConfig d = hs::blas::parse_route_config(hs::blas::to_string(c), &unknown);
@@ -416,8 +417,8 @@ TEST(BlasHookRouter, GemvRouteAndParallelSplitPropagateNaN) {
   for (fint i = 0; i < m; ++i) EXPECT_EQ(std::isnan(c[i]), i == 10) << i;
 }
 
-TEST(BlasHookRouter, DtrsmN1RoutesToTrsvAndMatchesReal) {
-  const RouteConfig on = hs::blas::parse_route_config("trsv1");
+TEST(BlasHookRouter, DtrsmNarrowRoutesToTrsvAndMatchesReal) {
+  const RouteConfig on = hs::blas::parse_route_config("trsv=2");
   const RouteConfig off = hs::blas::parse_route_config("off");
   std::uint64_t seed = 300;
   for (char side : {'L', 'R'})
@@ -441,7 +442,7 @@ TEST(BlasHookRouter, DtrsmN1RoutesToTrsvAndMatchesReal) {
                 EXPECT_EQ(hs::blas::dtrsm(off, side, uplo, tr, diag, m, n, alpha, a.data(), lda,
                                           want.data(), ldb),
                           Route::Real);
-                EXPECT_EQ(r, (side == 'L' && n == 1 && alpha == 1.0) ? Route::Trsv : Route::Real);
+                EXPECT_EQ(r, (side == 'L' && n <= 2 && alpha == 1.0) ? Route::Trsv : Route::Real);
                 for (std::size_t i = 0; i < got.size(); ++i)
                   ASSERT_NEAR(got[i], want[i], 1e-13 * (1.0 + std::abs(want[i])))
                       << side << uplo << tr << diag << " m=" << m << " n=" << n;
@@ -474,10 +475,42 @@ TEST(BlasHookRouter, DgemvParallelSplitMatchesRealAndIsDeterministic) {
         }
 }
 
+// A^T B with few rows of C and a long K (hsolve's Gram products V^T W): split over K.
+TEST(BlasHookRouter, SplitKMatchesRealAndIsDeterministic) {
+  const RouteConfig cfg = hs::blas::parse_route_config("par,minkb=0,threads=4");
+  for (fint m : {1, 3, 15, 16})
+    for (fint n : {1, 2, 5})
+      for (double beta : {0.0, -1.0}) {
+        const fint k = 40001, lda = k + 3, ldb = k + 1;
+        const auto a = random_vec(static_cast<std::size_t>(lda) * m, 31);
+        const auto b = random_vec(static_cast<std::size_t>(ldb) * n, 32);
+        const auto c0 = random_vec(static_cast<std::size_t>(m) * n, 33);
+        std::vector<double> got = c0, again = c0, want, bound;
+        if (beta == 0.0) {
+          std::fill(got.begin(), got.end(), kNaN);
+          std::fill(again.begin(), again.end(), kNaN);
+        }
+        ref_gemm('T', 'N', m, n, k, 0.5, a.data(), lda, b.data(), ldb, beta, got.data(), m, &want,
+                 &bound);
+        const Route r = hs::blas::dgemm(cfg, 'T', 'N', m, n, k, 0.5, a.data(), lda, b.data(), ldb,
+                                        beta, got.data(), m);
+        hs::blas::dgemm(cfg, 'T', 'N', m, n, k, 0.5, a.data(), lda, b.data(), ldb, beta,
+                        again.data(), m);
+        if (m < 16) {
+          EXPECT_EQ(r, Route::SplitK) << m << " " << n;
+        } else {
+          EXPECT_NE(r, Route::SplitK) << m << " " << n;
+        }
+        EXPECT_EQ(got, again);
+        expect_close(got, want, bound, "splitk m=" + std::to_string(m) + " n=" + std::to_string(n));
+      }
+}
+
 TEST(BlasHookRouter, ParallelThreadRule) {
   RouteConfig c = hs::blas::parse_route_config("par,minkb=64,threads=8");
   EXPECT_EQ(hs::blas::parallel_threads(c, 64 * 1024.0), 1);       // one block of work
   EXPECT_EQ(hs::blas::parallel_threads(c, 3 * 64 * 1024.0), 3);   // >= minkb per thread
+  EXPECT_EQ(hs::blas::parallel_threads(c, 3.9 * 64 * 1024.0), 3);
   EXPECT_EQ(hs::blas::parallel_threads(c, 1e12), 8);              // capped by threads
   int inside = 0;
 #pragma omp parallel num_threads(2)
