@@ -42,8 +42,8 @@
 // bitwise the same for every e, and the results are multiplied back exactly.
 //
 // Block mode (block_size = p > 1). The same cycle on a block Krylov-Schur decomposition
-// Op V = V H + U C (block_general.hpp: p new vectors per operator application, block CGS2 +
-// Cholesky-QR, random replacement of dependent columns): every test above uses the coupling block
+// Op V = V H + U C (block_general.hpp: p new vectors per operator application, block Gram-Schmidt
+// + Cholesky-QR, random replacement of dependent columns): every test above uses the coupling block
 // C in place of the row b^T (estimate ||C y||, subspace test ||C Q1||_F), and the selection,
 // certification and output code is shared, so both modes follow one contract. Differences: the
 // basis grows by whole blocks, so a cycle ends at the largest size <= ncv reachable from the kept

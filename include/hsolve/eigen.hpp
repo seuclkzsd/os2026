@@ -206,15 +206,17 @@ struct GeneralEigResult {
 ///
 /// Block mode (options.block_size = p > 1; block Arnoldi Krylov-Schur). The Krylov space grows by
 /// blocks of p vectors: one op.apply of p columns per step (multi-RHS solves are much cheaper per
-/// vector than single ones), block CGS2 against the basis and Cholesky-QR inside the new block
-/// (BLAS3), so that Op V = V H + U C with a p x m coupling block C. A pair's estimate is
-/// ||C y||_2 and the invariant-subspace test uses ||C Q1||_F; everything else (result contract,
-/// real Schur form with whole conjugate pairs, the certified ranking prefix, soft locking,
-/// magnitude scaling, InvalidInput rules) is that of p = 1. Columns of a new block that are
-/// linearly dependent on the basis and the block's earlier columns to working precision (the
-/// block analogue of an Arnoldi breakdown) are replaced by deterministic random vectors. A
-/// random start block has generic components in every eigenvector of an eigenvalue of
-/// multiplicity <= p, so all its copies are found in one run (beyond p only through rounding).
+/// vector than single ones), block classical Gram-Schmidt against the basis (DGKS second pass)
+/// and Cholesky-QR inside the new block, with the two-pass block kernel as fallback for
+/// ill-conditioned or dependent blocks (BLAS3; block_general.cpp), so that Op V = V H + U C with
+/// a p x m coupling block C. A pair's estimate is ||C y||_2 and the invariant-subspace test uses
+/// ||C Q1||_F; everything else (result contract, real Schur form with whole conjugate pairs, the
+/// certified ranking prefix, soft locking, magnitude scaling, InvalidInput rules) is that of
+/// p = 1. Columns of a new block that are linearly dependent on the basis and the block's earlier
+/// columns to working precision (the block analogue of an Arnoldi breakdown) are replaced by
+/// deterministic random vectors. A random start block has generic components in every
+/// eigenvector of an eigenvalue of multiplicity <= p, so all its copies are found in one run
+/// (beyond p only through rounding).
 ///   * Start block: the first min(p, initial->cols()) columns of `initial` (column 0 nonzero, all
 ///     of them finite, else InvalidInput), the remaining ones random; dependent columns other
 ///     than column 0 are replaced.

@@ -190,7 +190,7 @@ class BlockKrylovSchurBasis {
   DenseMatrix<T> v_;
   DenseMatrix<T> h_;
   BlockOrthonormalizer<T> ortho_;
-  DenseMatrix<T> coef_;  ///< block CGS2 coefficients of the last block step
+  DenseMatrix<T> coef_;  ///< projection coefficients C of the last block step
   DenseMatrix<T> rblk_;  ///< triangular factor of the last block step
 };
 
