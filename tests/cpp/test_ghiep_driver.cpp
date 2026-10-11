@@ -195,7 +195,7 @@ TYPED_TEST_SUITE(DriverGhiepBlock, ScalarTypes);
 
 TYPED_TEST(DriverGhiepBlock, PlainRunUsesBlocksAndMatchesTheSpectrum) {
   // sigma between two negative eigenvalues, k = 12: the nearest pairs stay clear of the cluster, so
-  // one plain run (nev = 12: p = 4) does it.
+  // one plain run (nev = 12: p = 2) does it.
   using T = TypeParam;
   const auto lam = waveguide_like();
   const auto p = block_pencil<T>(lam, {});
@@ -209,8 +209,8 @@ TYPED_TEST(DriverGhiepBlock, PlainRunUsesBlocksAndMatchesTheSpectrum) {
   const auto& r = sol.report;
   EXPECT_EQ(r.problem, hs::ProblemType::GeneralizedIndefinite);
   EXPECT_TRUE(r.success);
-  EXPECT_EQ(run_block_sizes(path), std::vector<index_t>{4});
-  EXPECT_EQ(r.op_applies % 4, 0);
+  EXPECT_EQ(run_block_sizes(path), std::vector<index_t>{2});
+  EXPECT_EQ(r.op_applies % 2, 0);
   EXPECT_TRUE(sol.complex_eigenvalues.empty());
   expect_same_set(sol.eigenvalues, nearest_nonzero(lam, -0.507, 12), 1e-9);
   expect_vectors_match_report(p, sol);
@@ -233,7 +233,7 @@ TEST(DriverGhiepBlock, ZeroClusterSidesUseBlocksAndNeverReturnTheCluster) {
   EXPECT_TRUE(r.success);
   EXPECT_EQ(r.zero_cluster_dim, 2048);
   const auto sizes = run_block_sizes(path);
-  EXPECT_NE(std::find(sizes.begin(), sizes.end(), index_t{4}), sizes.end());
+  EXPECT_NE(std::find(sizes.begin(), sizes.end(), index_t{2}), sizes.end());
   for (const double x : sol.eigenvalues) EXPECT_GT(std::abs(x), 1e-6) << "cluster copy returned";
   expect_same_set(sol.eigenvalues, nearest_nonzero(lam, 0.0, 10), 1e-9);
   expect_vectors_match_report(p, sol);
