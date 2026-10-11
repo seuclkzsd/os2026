@@ -262,16 +262,27 @@ void add_pair_reports(SolveReport& rep, const std::vector<double>& lambda, const
 
 // =============================================================================== nearest k
 
-// First radius of the windowed nearest solve: distance of the k-th nearest hint (Ritz values of
-// the plain run, converged or not) outside the band, or twice the farthest if there are fewer.
+// First radius of the windowed nearest solve, from the distances of the hints (Ritz values of the
+// plain run, converged or not) outside the band: mid-way between the k-th nearest and the next
+// distinct one, so that the window ends - which may become one-sided shifts - keep half that gap
+// from the hinted eigenvalues (a radius just beyond the k-th left the shift 1e-6 relative from
+// it: far pairs at eta ~7e-11 on yee-pec-box-1e4, sigma = 1, k = 6); 1.25 times the k-th without
+// a further hint, twice the farthest if there are fewer than k.
 double radius_from_hints(std::vector<double> hints, double sigma, index_t k, double band) {
   std::vector<double> d;
   for (double h : hints)
     if (std::isfinite(h) && std::abs(h) > band) d.push_back(std::abs(h - sigma));
   std::sort(d.begin(), d.end());
   const double floor_r = std::max(std::abs(sigma) + 2.0 * band, 4.0 * band);
-  if (static_cast<index_t>(d.size()) >= k) return std::max(d[static_cast<std::size_t>(k - 1)] * (1.0 + 1e-6), floor_r);
-  return std::max(d.empty() ? 0.0 : 2.0 * d.back(), floor_r);
+  if (static_cast<index_t>(d.size()) < k) return std::max(d.empty() ? 0.0 : 2.0 * d.back(), floor_r);
+  const double dk = d[static_cast<std::size_t>(k - 1)];
+  double r = 1.25 * dk;
+  for (std::size_t j = static_cast<std::size_t>(k); j < d.size(); ++j)
+    if (d[j] > dk * (1.0 + 1e-6)) {
+      r = 0.5 * (dk + d[j]);
+      break;
+    }
+  return std::max(r, floor_r);
 }
 
 // Nearest k with one shift at sigma. With a zero band (zero_filter_tol) that reaches the selection

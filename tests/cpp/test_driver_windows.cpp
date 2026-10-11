@@ -559,6 +559,30 @@ TEST(DriverTargets, NearestWithFewerEigenvaluesOutsideTheBandExplainsTheShortfal
   EXPECT_TRUE(explained);
 }
 
+TEST(DriverTargets, WindowedNearestEndsStayOffTheKthEigenvalue) {
+  // Nearest 5 next to an 80-dim null space with a zero filter: the windowed solve's radius came
+  // from the k-th nearest Ritz value times (1 + 1e-6), so the window end - the one-sided shift -
+  // sat 1e-6 relative from that (here double) eigenvalue. It now lies mid-gap to the next one.
+  std::vector<double> lam(80, 0.0);
+  for (int i = 1; i <= 300; ++i) lam.push_back(0.3 + 0.01 * i);
+  lam.push_back(0.35);  // the 5th and 6th nearest are copies
+  auto a = hs::test::prescribed_spectrum<double>(lam, 4, 53);
+  auto cfg = base_cfg();
+  cfg.target.sigma = 0.01;
+  cfg.target.k = 6;
+  cfg.zero_filter_tol = 1e-6;
+  auto sol = hs::solve(a, nullptr, cfg);
+  expect_window_ok(sol);
+  expect_same_set(sol.eigenvalues, {0.31, 0.32, 0.33, 0.34, 0.35, 0.35}, 1e-10);
+  ASSERT_FALSE(sol.report.slices.empty());
+  for (const auto& sl : sol.report.slices)
+    for (double x : lam) {
+      if (x != 0.0) {
+        EXPECT_GT(std::abs(sl.sigma - x), 1e-3 * x) << "shift " << sl.sigma << " on " << x;
+      }
+    }
+}
+
 TEST(DriverTargets, IndefiniteBSupportsNearestOnly) {
   const index_t n = 50;
   auto a = hs::test::laplacian_1d<double>(n);
