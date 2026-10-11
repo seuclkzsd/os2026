@@ -943,4 +943,583 @@ TYPED_TEST(LanczosTyped, NumericallyMalformedInputsThrowInvalidInput) {
   }
 }
 
+// --------------------------------------------------------- block Krylov-Schur (block_size > 1)
+
+template <class T>
+class LanczosBlockTyped : public ::testing::Test {};
+TYPED_TEST_SUITE(LanczosBlockTyped, Scalars);
+
+/// Copies of `value` among `theta` (within rel * |value|).
+index_t copies(const std::vector<double>& theta, double value, double rel) {
+  return static_cast<index_t>(std::count_if(theta.begin(), theta.end(), [&](double t) {
+    return std::abs(t - value) <= rel * std::abs(value);
+  }));
+}
+
+TYPED_TEST(LanczosBlockTyped, BlockSizesAgreeWithSingleVectorInBInnerProduct) {
+  // Shift-invert of a random pencil, B inner product: every block size returns the same pairs as
+  // p = 1 (values to tolerance, the same B-unit vectors up to a phase), in both store modes.
+  using T = TypeParam;
+  const index_t n = 240;
+  const auto a = hs::test::random_hermitian<T>(n, 0.05, 121);
+  const auto b = hs::test::random_hpd<T>(n, 0.05, 122);
+  const double sigma = 0.15;
+  const auto bd = hs::test::to_dense(b);
+  hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), &bd, sigma);
+  DenseOperator<T> bop(bd);
+  std::vector<double> theta_exact;
+  for (double l : hs::test::dense_eigenvalues(a, &b)) theta_exact.push_back(1.0 / (l - sigma));
+  const double kappa = condition_number(hs::add(T(1), a, T(-sigma), b));
+  const auto expect = wanted(theta_exact, Which::LargestMagnitude, 7);
+
+  KrylovSchurOptions<T> opt;
+  opt.nev = 7;
+  opt.tol = 1e-11;
+  const auto ref = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(ref.converged);
+  for (index_t p : {1, 2, 4, 8}) {
+    for (bool store : {false, true}) {
+      SCOPED_TRACE("p = " + std::to_string(p) + (store ? ", store_bv" : ", recompute"));
+      opt.block_size = p;
+      opt.store_bv = store;
+      const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+      EXPECT_TRUE(r.converged);
+      check_contract<T>(op, &bop, r, Which::LargestMagnitude, opt, kappa);
+      expect_values(r.theta, expect, 1e-10 * std::abs(expect[0]));
+      for (index_t i = 0; i < opt.nev; ++i) {
+        EXPECT_NEAR(r.theta[i], ref.theta[i], 1e-10 * std::abs(ref.theta[0])) << "pair " << i;
+        DenseMatrix<T> x0(n, 1), x1(n, 1);
+        std::copy(ref.vectors.col(i), ref.vectors.col(i) + n, x0.data());
+        std::copy(r.vectors.col(i), r.vectors.col(i) + n, x1.data());
+        EXPECT_NEAR(gram_deviation<T>(x0, &bop, x1, false), 1.0, 1e-8) << "pair " << i;
+      }
+      if (p > 1) {
+        EXPECT_EQ(r.op_applies % p, 0);
+      }
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, AllWhichModesWithAnOddBlockSize) {
+  using T = TypeParam;
+  const auto spectrum = cubic_spectrum(300);
+  auto op = operator_with_spectrum<T>(spectrum, 1);
+  for (Which which : kAllWhich) {
+    SCOPED_TRACE(static_cast<int>(which));
+    KrylovSchurOptions<T> opt;
+    opt.nev = 8;
+    opt.block_size = 3;
+    const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, which, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, which, opt);
+    expect_values(r.theta, wanted(spectrum, which, opt.nev), 1e-10);
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, FourFoldMultiplicityFoundInOneRun) {
+  // An eigenvalue of multiplicity 4 nearest to the shift: a single Krylov sequence sees one vector
+  // of its eigenspace in exact arithmetic (further copies only through rounding), while a block of
+  // p >= 4 random vectors has generic components in all of it, so one run returns all four
+  // copies by construction. (Measured: the single-vector runs here also recover all four through
+  // rounding, at tol 1e-6 and 1e-10; their count is reported, not asserted.) Shift-invert in the B
+  // inner product as in the driver: A = B^{1/2} Q diag(lambda) Q^H B^{1/2} with B diagonal, so the
+  // pencil's eigenvalues are lambda.
+  using T = TypeParam;
+  const index_t n = 300;
+  std::vector<double> lambda;
+  for (index_t i = 0; i < 4; ++i) lambda.push_back(0.5);
+  lambda.push_back(0.8);
+  lambda.push_back(-0.9);
+  for (index_t i = 6; i < n; ++i) lambda.push_back(1.5 + static_cast<double>(i) / 50.0);
+  const auto core = hs::test::to_dense(hs::test::prescribed_spectrum<T>(lambda, 8, 131));
+  std::vector<double> bdiag(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) bdiag[i] = 1.0 + 0.5 * std::sin(0.37 * static_cast<double>(i));
+  DenseMatrix<T> ad(n, n), bd(n, n);
+  for (index_t j = 0; j < n; ++j) {
+    bd(j, j) = T(bdiag[j]);
+    for (index_t i = 0; i < n; ++i) ad(i, j) = T(std::sqrt(bdiag[i] * bdiag[j])) * core(i, j);
+  }
+  const double sigma = 0.3;
+  hs::test::DenseShiftInvertOperator<T> op(ad, &bd, sigma);
+  DenseOperator<T> bop(bd);
+  std::vector<double> theta_exact;
+  for (double l : lambda) theta_exact.push_back(1.0 / (l - sigma));
+  const double theta4 = 1.0 / (0.5 - sigma);
+  for (double tol : {1e-6, 1e-10}) {
+    for (index_t p : {1, 4, 8}) {
+      SCOPED_TRACE("p = " + std::to_string(p) + ", tol " + std::to_string(tol));
+      KrylovSchurOptions<T> opt;
+      opt.nev = 6;
+      opt.tol = tol;
+      opt.block_size = p;
+      const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+      EXPECT_TRUE(r.converged);
+      check_contract<T>(op, &bop, r, Which::LargestMagnitude, opt, 1e3);
+      const index_t found = copies(r.theta, theta4, 1e-9);
+      if (p >= 4) {
+        EXPECT_EQ(found, 4);
+        expect_relative(r.theta, wanted(theta_exact, Which::LargestMagnitude, opt.nev), 1e-9);
+      } else {
+        std::cout << "[ info     ] tol " << tol
+                  << ": copies of the 4-fold eigenvalue found by a single-vector run: " << found
+                  << " of 4\n";
+        this->RecordProperty(tol > 1e-8 ? "p1_copies_tol1e-6" : "p1_copies_tol1e-10",
+                             static_cast<int>(found));
+      }
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, ExactFourFoldEigenvalueOfADiagonalOperator) {
+  // Op = diag(...) keeps the multiplicity exact (its application has only relative rounding):
+  // blocks of p >= 4 span the 4-dimensional eigenspace from the start block (an exactly rank-4
+  // share of the first block), the multiplicity case most prone to dependent block columns.
+  // A single Krylov sequence holds one direction of it in exact arithmetic; measured, rounding
+  // still supplies all four copies here (reported, not asserted).
+  using T = TypeParam;
+  std::vector<double> spectrum = {10.0, 10.0, 10.0, 10.0, 9.0};
+  for (index_t i = 0; i < 395; ++i) spectrum.push_back(static_cast<double>(i) / 394.0);
+  auto op = diagonal_operator<T>(spectrum);
+  for (index_t p : {1, 4, 8}) {
+    SCOPED_TRACE("p = " + std::to_string(p));
+    KrylovSchurOptions<T> opt;
+    opt.nev = 6;
+    opt.tol = 1e-10;
+    opt.block_size = p;
+    const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, Which::LargestAlgebraic, opt);
+    const index_t found = copies(r.theta, 10.0, 1e-12);
+    if (p >= 4) {
+      EXPECT_EQ(found, 4);
+      expect_values(r.theta, wanted(spectrum, Which::LargestAlgebraic, opt.nev), 1e-10);
+    } else {
+      std::cout << "[ info     ] diagonal operator: copies of the exact 4-fold eigenvalue found by "
+                << "a single-vector run: " << found << " of 4\n";
+      this->RecordProperty("p1_copies_diagonal", static_cast<int>(found));
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, LaplacianDoubleEigenvaluesFoundInOneRun) {
+  // 2-D Laplacian with nx == ny (eigenvalues of multiplicity 2), Op = L^{-1}: p = 2 and p = 4
+  // return the 8 smallest eigenvalues with multiplicity from one run each.
+  using T = TypeParam;
+  const index_t nx = 14, nev = 8;
+  const auto lap = hs::test::laplacian_2d<T>(nx, nx);
+  const auto lambda = hs::test::laplacian_2d_eigenvalues(nx, nx);
+  hs::test::DenseShiftInvertOperator<T> inverse(hs::test::to_dense(lap), nullptr, 0.0);
+  std::vector<double> theta;
+  for (double l : lambda) theta.push_back(1.0 / l);
+  const double kappa = condition_number(lap);
+  for (index_t p : {2, 4}) {
+    SCOPED_TRACE("p = " + std::to_string(p));
+    KrylovSchurOptions<T> opt;
+    opt.nev = nev;
+    opt.tol = 1e-11;
+    opt.block_size = p;
+    const auto r = hs::lanczos_krylov_schur<T>(inverse, nullptr, Which::LargestMagnitude, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(inverse, nullptr, r, Which::LargestMagnitude, opt, kappa);
+    expect_relative(r.theta, wanted(theta, Which::LargestMagnitude, nev), 1e-10);
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, InvariantSubspaceBreakdownOfWholeBlocks) {
+  // Three distinct eigenvalues: span{X, Op X, Op^2 X} is invariant, so the fourth block is
+  // dependent to rounding in every column; all p columns are replaced by random vectors and the
+  // cycle continues in a decoupled block. One cycle yields exact copies of each value.
+  using T = TypeParam;
+  std::vector<double> spectrum;
+  for (index_t i = 0; i < 100; ++i) spectrum.push_back(i < 30 ? 1.0 : (i < 60 ? 2.0 : 3.0));
+  auto op = operator_with_spectrum<T>(spectrum, 51);
+  for (index_t p : {2, 4}) {
+    for (Which which : kAllWhich) {
+      SCOPED_TRACE("p = " + std::to_string(p) + ", which " +
+                   std::to_string(static_cast<int>(which)));
+      KrylovSchurOptions<T> opt;
+      opt.nev = 5;
+      opt.block_size = p;
+      const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, which, opt);
+      EXPECT_TRUE(r.converged);
+      EXPECT_EQ(r.restarts, 0);
+      check_contract<T>(op, nullptr, r, which, opt);
+      expect_values(r.theta, wanted(spectrum, which, opt.nev), 1e-12);
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, DeflationInBInnerProduct) {
+  using T = TypeParam;
+  const index_t n = 160;
+  const auto a = hs::test::random_hermitian<T>(n, 0.06, 31);
+  const auto b = hs::test::random_hpd<T>(n, 0.06, 32);
+  const double sigma = -0.2;
+  const auto bd = hs::test::to_dense(b);
+  hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), &bd, sigma);
+  DenseOperator<T> bop(bd);
+  std::vector<double> theta_exact;
+  for (double l : hs::test::dense_eigenvalues(a, &b)) theta_exact.push_back(1.0 / (l - sigma));
+  const auto expect = wanted(theta_exact, Which::LargestMagnitude, 8);
+  const double kappa = condition_number(hs::add(T(1), a, T(-sigma), b));
+
+  KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.block_size = 4;
+  const auto first = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(first.converged);
+  expect_values(first.theta, std::vector<double>(expect.begin(), expect.begin() + 4),
+                1e-10 * std::abs(expect[0]));
+  for (index_t p : {2, 3}) {
+    for (bool store : {false, true}) {
+      SCOPED_TRACE("p = " + std::to_string(p) + (store ? ", store_bv" : ", recompute"));
+      opt.deflation = &first.vectors;
+      opt.store_bv = store;
+      opt.block_size = p;
+      const auto second = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+      EXPECT_TRUE(second.converged);
+      check_contract<T>(op, &bop, second, Which::LargestMagnitude, opt, kappa);
+      expect_values(second.theta, std::vector<double>(expect.begin() + 4, expect.end()),
+                    1e-10 * std::abs(expect[0]));
+      EXPECT_LT(gram_deviation<T>(first.vectors, &bop, second.vectors, false), 1e-12);
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, RowBlockedRotationLargeDeflationAndStoredBv) {
+  // As RowBlockedRotationAndChunkedDeflationCheck, with blocks: n > 2 * 4096 (row-blocked
+  // rotation of the basis and of M*V), d = 70 deflation columns checked in chunks.
+  using T = TypeParam;
+  const index_t n = 9001, nev = 5, d = 70, top = 80;
+  std::vector<double> a(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n - top; ++i)
+    a[i] = static_cast<double>(i) / static_cast<double>(n - top);
+  for (index_t k = 0; k < top; ++k)
+    a[n - top + k] = 1.0 + std::pow(1.1, static_cast<double>(k + 1));
+  std::vector<double> m(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i)
+    m[i] = 1.0 + 3.0 * std::fmod(0.6180339887 * static_cast<double>(i), 1.0);
+  auto op = diagonal_operator<T>(a);
+  auto mop = diagonal_operator<T>(m);
+  KrylovSchurOptions<T> opt;
+  opt.nev = nev;
+  opt.ncv = 12;
+  opt.block_size = 4;
+  for (bool store : {false, true}) {
+    SCOPED_TRACE(store ? "store_bv" : "recompute");
+    opt.store_bv = store;
+    const auto r = hs::lanczos_krylov_schur<T>(op, &mop, Which::LargestAlgebraic, opt);
+    EXPECT_TRUE(r.converged);
+    EXPECT_GT(r.restarts, 0);
+    check_contract<T>(op, &mop, r, Which::LargestAlgebraic, opt);
+    expect_values(r.theta, wanted(a, Which::LargestAlgebraic, nev), 1e-10);
+  }
+  DenseMatrix<T> defl(n, d);
+  for (index_t c = 0; c < d; ++c) defl(n - 1 - c, c) = T(1.0 / std::sqrt(m[n - 1 - c]));
+  opt.deflation = &defl;
+  const auto all = wanted(a, Which::LargestAlgebraic, d + nev);
+  for (bool store : {false, true}) {
+    SCOPED_TRACE(store ? "deflated, store_bv" : "deflated, recompute");
+    opt.store_bv = store;
+    const auto r = hs::lanczos_krylov_schur<T>(op, &mop, Which::LargestAlgebraic, opt);
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, &mop, r, Which::LargestAlgebraic, opt);
+    expect_values(r.theta, std::vector<double>(all.begin() + d, all.end()), 1e-10);
+    EXPECT_LT(gram_deviation<T>(defl, &mop, r.vectors, false), 1e-13);
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, EstimatesStayHonestOverManyRestarts) {
+  // Blocks raise the restart count of this slow problem (ncv = 24: 130 restarts for p = 1, 950
+  // for p = 4, measured), and every restart adds rounding drift of O(eps ||Op||) to the residuals
+  // of locked pairs; ncv = 32 keeps the count (<= 300) where the contract's floor still applies.
+  using T = TypeParam;
+  const index_t n = 400;
+  auto op = DenseOperator<T>(hs::test::to_dense(hs::test::laplacian_1d<T>(n)));
+  const auto exact = hs::test::laplacian_1d_eigenvalues(n);
+  for (index_t p : {2, 4}) {
+    for (double tol : {1e-6, 1e-10}) {
+      SCOPED_TRACE("p = " + std::to_string(p) + ", tol " + std::to_string(tol));
+      KrylovSchurOptions<T> opt;
+      opt.nev = 10;
+      opt.ncv = 32;
+      opt.tol = tol;
+      opt.block_size = p;
+      const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+      EXPECT_TRUE(r.converged);
+      EXPECT_GT(r.restarts, 3);
+      check_contract<T>(op, nullptr, r, Which::LargestAlgebraic, opt);
+      expect_values(r.theta, wanted(exact, Which::LargestAlgebraic, opt.nev), 4.0 * tol);
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, LockedPairsReportHonestZeroEstimates) {
+  // As ZeroEstimatesOfEarlyConvergedPairsAreHonest, with blocks of 2: decoupled pairs (estimate 0)
+  // have true residuals at rounding level.
+  using T = TypeParam;
+  std::vector<double> spectrum = {10.0, 6.0, 3.0, 2.0};
+  for (index_t i = 0; i < 396; ++i) spectrum.push_back(-1.0 + 2.0 * static_cast<double>(i) / 395.0);
+  auto op = diagonal_operator<T>(spectrum);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.ncv = 10;
+  opt.tol = 1e-12;
+  opt.block_size = 2;
+  const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  EXPECT_TRUE(r.converged);
+  EXPECT_GT(r.restarts, 2);
+  check_contract<T>(op, nullptr, r, Which::LargestAlgebraic, opt);
+  expect_values(r.theta, {10.0, 6.0, 3.0, 2.0}, 1e-11);
+  const auto res = true_residuals<T>(op, nullptr, r, nullptr);
+  for (index_t i = 0; i < opt.nev; ++i) {
+    if (r.estimate[i] == 0.0) {
+      EXPECT_LE(res[i], 1e-14 * std::abs(r.theta[i])) << "pair " << i;
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, StoredBvStaysOrthonormalOverManyRestarts) {
+  using T = TypeParam;
+  const index_t n = 400;
+  const auto lap = hs::test::laplacian_1d<T>(n);
+  const auto bd = hs::test::to_dense(hs::test::prescribed_spectrum<T>(
+      std::vector<double>(static_cast<std::size_t>(n), 1.0), 8, 3));
+  hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(lap), &bd, 0.0);
+  DenseOperator<T> bop(bd);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 8;
+  opt.ncv = 18;
+  opt.tol = 1e-14;
+  opt.max_restarts = 300;
+  opt.store_bv = true;
+  opt.block_size = 3;
+  const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::SmallestAlgebraic, opt);
+  EXPECT_EQ(r.restarts, opt.max_restarts);
+  check_contract<T>(op, &bop, r, Which::SmallestAlgebraic, opt, condition_number(lap));
+}
+
+TYPED_TEST(LanczosBlockTyped, BookkeepingAndNonConvergence) {
+  // ncv = 13 -> 14 (blocks of 2), keep = 6 + (14 - 6) / 2 = 10: 14 applications in the first cycle
+  // and 4 per restart; non-convergence is reported, not thrown.
+  using T = TypeParam;
+  const index_t n = 400;
+  auto op = DenseOperator<T>(hs::test::to_dense(hs::test::laplacian_1d<T>(n)));
+  KrylovSchurOptions<T> opt;
+  opt.nev = 6;
+  opt.ncv = 13;
+  opt.max_restarts = 2;
+  opt.block_size = 2;
+  const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::SmallestAlgebraic, opt);
+  EXPECT_FALSE(r.converged);
+  EXPECT_EQ(r.restarts, 2);
+  EXPECT_EQ(r.op_applies, 14 + 2 * 4);
+  EXPECT_EQ(r.ritz_all.size(), 14u);
+  check_contract<T>(op, nullptr, r, Which::SmallestAlgebraic, opt);
+  ASSERT_EQ(r.history.size(), 3u);
+  EXPECT_EQ(r.history[0].op_applies, 14);
+  EXPECT_EQ(r.history[1].op_applies, 18);
+}
+
+TYPED_TEST(LanczosBlockTyped, CycleStopsEarlyAtTheFirstConvergedBlockBoundary) {
+  // Four isolated top values converge within a few blocks. nev = 4, p = 2: single-vector auto
+  // ncv = 20, block auto ncv = 20 + 4 * 2 = 28. The first cycle is probed from the single-vector
+  // size 20 on and stops there: 20 applications instead of 28, a basis (and ritz_all) of 20, the
+  // full result contract. With ncv = 28 requested the first cycle is not probed before its end.
+  using T = TypeParam;
+  std::vector<double> spectrum = {100.0, 90.0, 80.0, 70.0};
+  for (index_t i = 0; i < 496; ++i) spectrum.push_back(static_cast<double>(i) / 495.0);
+  auto op = operator_with_spectrum<T>(spectrum, 17);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.block_size = 2;
+  const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  EXPECT_TRUE(r.converged);
+  EXPECT_EQ(r.restarts, 0);
+  EXPECT_EQ(r.op_applies, 20);
+  EXPECT_EQ(r.ritz_all.size(), 20u);
+  ASSERT_EQ(r.history.size(), 1u);
+  EXPECT_EQ(r.history[0].op_applies, 20);
+  check_contract<T>(op, nullptr, r, Which::LargestAlgebraic, opt);
+  expect_values(r.theta, {100.0, 90.0, 80.0, 70.0}, 1e-10);
+  opt.ncv = 28;
+  const auto full = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  EXPECT_TRUE(full.converged);
+  EXPECT_EQ(full.op_applies, 28);
+  EXPECT_EQ(full.ritz_all.size(), 28u);
+  check_contract<T>(op, nullptr, full, Which::LargestAlgebraic, opt);
+  expect_values(full.theta, {100.0, 90.0, 80.0, 70.0}, 1e-10);
+}
+
+TYPED_TEST(LanczosBlockTyped, SmallFreeSpaceIsSolvedExactly) {
+  // n - d too small for a block basis plus its residual block: one exact single-vector cycle over
+  // the free space (as ncv >= n - d does for p = 1), also with deflation.
+  using T = TypeParam;
+  std::vector<double> spectrum;
+  for (index_t i = 0; i < 20; ++i) spectrum.push_back(std::pow(-1.0, i) * (1.0 + i));
+  auto op = operator_with_spectrum<T>(spectrum, 81);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.block_size = 4;
+  const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+  EXPECT_TRUE(r.converged);
+  EXPECT_EQ(r.restarts, 0);
+  EXPECT_EQ(r.op_applies, 20);
+  check_contract<T>(op, nullptr, r, Which::LargestMagnitude, opt);
+  expect_values(r.theta, wanted(spectrum, Which::LargestMagnitude, 4), 1e-12);
+  opt.deflation = &r.vectors;
+  opt.nev = 16;
+  const auto rest = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+  EXPECT_TRUE(rest.converged);
+  EXPECT_EQ(rest.op_applies, 16);
+  check_contract<T>(op, nullptr, rest, Which::LargestMagnitude, opt);
+  const auto all = wanted(spectrum, Which::LargestMagnitude, 20);
+  expect_values(rest.theta, std::vector<double>(all.begin() + 4, all.end()), 1e-12);
+}
+
+TYPED_TEST(LanczosBlockTyped, InitialBlock) {
+  using T = TypeParam;
+  const index_t n = 500;
+  std::vector<T> diag(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) diag[i] = T(static_cast<double>(i + 1));
+  hs::test::DiagonalOperator<T> op(diag);
+  // Two user columns inside the top-4 eigenspace: span{x0, x1, Op x0, Op x1} is that invariant
+  // subspace, so the first cycle is exact.
+  DenseMatrix<T> x0(n, 2);
+  x0(n - 1, 0) = T(1.0);
+  x0(n - 2, 0) = T(2.0);
+  x0(n - 3, 1) = T(3.0);
+  x0(n - 4, 1) = T(1.0);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 4;
+  opt.initial = &x0;
+  opt.block_size = 2;
+  const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  EXPECT_TRUE(r.converged);
+  EXPECT_EQ(r.restarts, 0);
+  check_contract<T>(op, nullptr, r, Which::LargestAlgebraic, opt);
+  expect_values(r.theta, {500.0, 499.0, 498.0, 497.0}, 1e-11);
+  // A user column dependent on the first is replaced by a random vector; the run still converges.
+  DenseMatrix<T> dup(n, 2);
+  for (index_t i = 0; i < n; ++i) dup(i, 0) = dup(i, 1) = T(1.0 + static_cast<double>(i % 7));
+  opt.initial = &dup;
+  opt.block_size = 3;
+  const auto r2 = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  EXPECT_TRUE(r2.converged);
+  check_contract<T>(op, nullptr, r2, Which::LargestAlgebraic, opt);
+  expect_values(r2.theta, {500.0, 499.0, 498.0, 497.0}, 1e-10);
+}
+
+TYPED_TEST(LanczosBlockTyped, ReproducibleForFixedSeed) {
+  using T = TypeParam;
+  auto op = operator_with_spectrum<T>(cubic_spectrum(250), 71);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 7;
+  opt.ncv = 18;
+  opt.block_size = 4;
+  const auto r1 = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+  const auto r2 = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r1.converged);
+  EXPECT_EQ(0, std::memcmp(r1.theta.data(), r2.theta.data(), r1.theta.size() * sizeof(double)));
+  EXPECT_EQ(
+      0, std::memcmp(r1.vectors.data(), r2.vectors.data(),
+                     static_cast<std::size_t>(r1.vectors.rows() * r1.vectors.cols()) * sizeof(T)));
+  EXPECT_EQ(r1.restarts, r2.restarts);
+  EXPECT_EQ(r1.op_applies, r2.op_applies);
+}
+
+TYPED_TEST(LanczosBlockTyped, BlockSizeOneIsTheSingleVectorSolver) {
+  // block_size = 1 is the default and takes the single-vector code path: bitwise identical.
+  using T = TypeParam;
+  const index_t n = 120;
+  const auto a = hs::test::random_hermitian<T>(n, 0.08, 61);
+  const auto b = hs::test::random_hpd<T>(n, 0.08, 62);
+  const auto bd = hs::test::to_dense(b);
+  hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), &bd, 0.05);
+  DenseOperator<T> bop(bd);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 5;
+  opt.ncv = 11;
+  const auto r0 = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+  opt.block_size = 1;
+  const auto r1 = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+  ASSERT_GT(r0.restarts, 0);
+  EXPECT_EQ(0, std::memcmp(r0.theta.data(), r1.theta.data(), r0.theta.size() * sizeof(double)));
+  EXPECT_EQ(0, std::memcmp(r0.vectors.data(), r1.vectors.data(),
+                           static_cast<std::size_t>(n * opt.nev) * sizeof(T)));
+  EXPECT_EQ(r0.op_applies, r1.op_applies);
+}
+
+TYPED_TEST(LanczosBlockTyped, InvalidAndMalformedInputsThrowInvalidInput) {
+  using T = TypeParam;
+  const index_t n = 40;
+  std::vector<double> spectrum(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) spectrum[i] = 1.0 + static_cast<double>(i);
+  auto op = diagonal_operator<T>(spectrum);
+  auto expect_invalid = [](LinearOperator<T>& o, LinearOperator<T>* b,
+                           const KrylovSchurOptions<T>& opt, const char* what, const char* topic) {
+    try {
+      hs::lanczos_krylov_schur<T>(o, b, Which::LargestAlgebraic, opt);
+      ADD_FAILURE() << "no exception for " << what;
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << what << ": " << e.what();
+      EXPECT_NE(std::string(e.what()).find(topic), std::string::npos) << what << ": " << e.what();
+    }
+  };
+  KrylovSchurOptions<T> base;
+  base.nev = 3;
+  base.block_size = 2;
+  auto opt = base;
+  for (index_t p : {0, -3}) {
+    opt.block_size = p;
+    expect_invalid(op, nullptr, opt, "block_size < 1", "block_size");
+  }
+  opt = base;
+  opt.ncv = 3;
+  expect_invalid(op, nullptr, opt, "ncv == nev < n", "ncv");
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  auto nan_op = diagonal_operator<T>([&] {
+    auto s = spectrum;
+    s[7] = nan;
+    return s;
+  }());
+  expect_invalid(nan_op, nullptr, base, "operator returning NaN", "non-finite");
+  DenseMatrix<T> x0(n, 2);
+  x0(3, 0) = T(nan);
+  opt = base;
+  opt.initial = &x0;
+  expect_invalid(op, nullptr, opt, "initial block with a NaN in column 0", "initial");
+  DenseMatrix<T> zero_first(n, 2);
+  zero_first(0, 1) = T(1.0);
+  opt.initial = &zero_first;
+  expect_invalid(op, nullptr, opt, "zero first initial column", "initial");
+  DenseMatrix<T> nan_second(n, 2);
+  nan_second(0, 0) = T(1.0);
+  nan_second(1, 1) = T(nan);
+  opt.initial = &nan_second;
+  expect_invalid(op, nullptr, opt, "NaN in initial column 1", "initial");
+  // Initial vector inside span(D).
+  DenseMatrix<T> d(n, 2);
+  d(0, 0) = T(1.0);
+  d(1, 1) = T(1.0);
+  DenseMatrix<T> in_span(n, 1);
+  in_span(1, 0) = T(2.0);
+  opt = base;
+  opt.deflation = &d;
+  opt.initial = &in_span;
+  expect_invalid(op, nullptr, opt, "initial vector inside span(D)", "span(deflation)");
+  // Not positive definite b_inner.
+  auto negative = diagonal_operator<T>(std::vector<double>(static_cast<std::size_t>(n), -1.0));
+  std::vector<double> signs(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) signs[i] = i % 2 ? -1.0 : 1.0;
+  auto indefinite = diagonal_operator<T>(signs);
+  for (bool store : {false, true}) {
+    SCOPED_TRACE(store ? "store_bv" : "recompute");
+    opt = base;
+    opt.store_bv = store;
+    expect_invalid(op, &negative, opt, "negative definite b_inner", "positive definite");
+    expect_invalid(op, &indefinite, opt, "indefinite b_inner", "positive definite");
+  }
+}
+
 }  // namespace

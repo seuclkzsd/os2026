@@ -1,5 +1,7 @@
-// Tests of the block orthonormalization kernel (src/eigen/block_ortho) of the block Krylov-Schur
-// solver.
+// Tests of the building blocks of the block Krylov-Schur mode of hs::lanczos_krylov_schur: the
+// block orthonormalization kernel (src/eigen/block_ortho), the block basis layout, and the
+// rejection of block_size by krylov_schur_general. The solver itself is tested next to the
+// single-vector solver in test_lanczos.cpp (suite LanczosBlockTyped).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -8,7 +10,9 @@
 #include <string>
 #include <vector>
 
+#include "eigen/block_lanczos.hpp"
 #include "eigen/block_ortho.hpp"
+#include "hsolve/eigen.hpp"
 #include "hsolve/error.hpp"
 #include "linalg/dense_ops.hpp"
 #include "support/fixtures.hpp"
@@ -273,6 +277,86 @@ TYPED_TEST(LanczosBlockOrthoTyped, NonFiniteOrIndefiniteInputThrowsInvalidInput)
     SCOPED_TRACE(store);
     expect_invalid(&mneg, store, random_block<T>(n, p, 52), "positive definite");
   }
+}
+
+TEST(LanczosBlockLayout, BasisSizesAreWholeBlocks) {
+  using hs::eigen_detail::block_dimensions;
+  using hs::eigen_detail::LanczosSetup;
+  auto setup = [](index_t n_free, index_t nev, index_t ncv) {
+    LanczosSetup s;
+    s.n = s.n_free = n_free;
+    s.nev = nev;
+    s.ncv = ncv;
+    return s;
+  };
+  // Driver-like sizes: single-vector auto ncv = max(2 nev + 1, nev + 16) = 28 for nev = 12.
+  // Requested ncv: whole blocks only. Auto: 4 more blocks.
+  struct Case {
+    index_t nev, ncv1, p;
+    bool automatic;
+    index_t ncv, keep, first_probe;
+  };
+  const Case cases[] = {
+      {12, 28, 2, false, 28, 20, 28},  // 12 + 16 / 2 = 20
+      {12, 28, 2, true, 36, 24, 28},   // 28 + 4 * 2; 12 + 24 / 2 = 24
+      {12, 28, 4, false, 28, 20, 28},  //
+      {12, 28, 4, true, 44, 28, 28},   // 28 + 4 * 4; 12 + 32 / 2 = 28
+      {12, 28, 8, false, 32, 16, 32},  // 28 -> 32; 12 + 20 / 2 = 22 -> 16
+      {12, 28, 8, true, 64, 32, 32},   // 32 + 4 * 8; 12 + 52 / 2 = 38 -> 32
+      {10, 26, 4, false, 28, 16, 28},  // 26 -> 28; 10 + 18 / 2 = 19 -> 16
+      {10, 26, 4, true, 44, 24, 28},   // 28 + 16; 10 + 34 / 2 = 27 -> 24
+      {5, 7, 4, false, 12, 8, 12},     // a small ncv grows to round_up(nev, p) + p
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE("nev " + std::to_string(c.nev) + " p " + std::to_string(c.p) +
+                 (c.automatic ? " auto" : " requested"));
+    const auto d = block_dimensions(setup(100000, c.nev, c.ncv1), c.p, c.automatic);
+    EXPECT_EQ(d.ncv, c.ncv);
+    EXPECT_EQ(d.keep, c.keep);
+    EXPECT_EQ(d.first_probe, c.first_probe);
+    EXPECT_TRUE(d.feasible);
+  }
+  for (bool automatic : {false, true}) {
+    for (index_t p : {2, 3, 4, 8}) {
+      for (index_t nev : {1, 3, 7, 12, 30}) {
+        const auto d =
+            block_dimensions(setup(5000, nev, std::max(2 * nev + 1, nev + 16)), p, automatic);
+        EXPECT_EQ(d.ncv % p, 0);
+        EXPECT_EQ(d.keep % p, 0);
+        EXPECT_GE(d.keep, nev);
+        EXPECT_LE(d.keep + p, d.ncv);
+        EXPECT_LE(d.first_probe, d.ncv);
+        EXPECT_GE(d.first_probe, nev + 1);
+      }
+    }
+  }
+  // Basis + residual block must fit into the free space; the auto extension shrinks to fit; a
+  // full-space ncv never takes blocks.
+  auto d = block_dimensions(setup(32, 4, 20), 4, false);
+  EXPECT_TRUE(d.feasible);  // 20 + 4 <= 32
+  EXPECT_EQ(d.ncv, 20);
+  d = block_dimensions(setup(32, 4, 20), 4, true);
+  EXPECT_TRUE(d.feasible);  // 20 + 16 shrinks to 28: 28 + 4 <= 32
+  EXPECT_EQ(d.ncv, 28);
+  EXPECT_FALSE(block_dimensions(setup(23, 4, 20), 4, true).feasible);   // 24 > 23
+  EXPECT_FALSE(block_dimensions(setup(20, 4, 20), 2, false).feasible);  // ncv == n_free
+}
+
+TEST(KrylovSchurGeneralBlock, BlockSizeOtherThanOneIsRejected) {
+  hs::test::DiagonalOperator<double> op(std::vector<double>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+  hs::KrylovSchurOptions<double> opt;
+  opt.nev = 2;
+  for (index_t p : {0, 2, 4}) {
+    opt.block_size = p;
+    try {
+      hs::krylov_schur_general<double>(op, hs::Which::LargestMagnitude, opt);
+      ADD_FAILURE() << "block_size " << p << " accepted";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+    }
+  }
+  opt.block_size = 1;
+  EXPECT_TRUE(hs::krylov_schur_general<double>(op, hs::Which::LargestMagnitude, opt).converged);
 }
 
 }  // namespace
