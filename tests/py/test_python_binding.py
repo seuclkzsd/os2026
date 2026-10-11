@@ -441,6 +441,15 @@ def test_error_mapping():
         hsolve.solve(good, k=2.5)
     with pytest.raises(TypeError):
         hsolve.solve(good, k="6")
+    # strings are not numbers anywhere (float('0.5') would accept them for the real arguments)
+    for kw in ({"sigma": "0.5"}, {"tol": "1e-8"}, {"lower": "0", "upper": 1.0}, {"verbose": "1"},
+               {"threads": "2"}, {"sigma": b"0.5"}, {"sigma": 1j}, {"sigma": True}):
+        with pytest.raises(TypeError, match="must be a real number|must be an integer"):
+            hsolve.solve(good, k=2, **kw)
+    with pytest.raises(TypeError, match="hermitian_tol must be a real number"):
+        hsolve.load_matrix("unused.npz", hermitian_tol="1e-10")
+    res = solve_quiet(good, sigma=np.array(0.7), k=2, tol=np.float32(1e-9))  # 0-d array, numpy scalar
+    assert res.config["target"]["sigma"] == 0.7 and res.config["tol"] == float(np.float32(1e-9))
     with pytest.raises(hsolve.InvalidInputError):
         hsolve.solve(good, mode="biggest")
     with pytest.raises(hsolve.InvalidInputError):

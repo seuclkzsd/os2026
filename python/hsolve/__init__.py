@@ -11,6 +11,7 @@ files (loaded exactly as the hsolve command line does). See docs/PYTHON.md.
 from __future__ import annotations
 
 import json
+import numbers
 import operator
 import os
 import sys
@@ -185,12 +186,13 @@ _VALUE_DTYPES = tuple(np.dtype(t) for t in (np.float32, np.float64, np.complex64
 
 
 def _real(x: Any, name: str) -> float:
-    if isinstance(x, (bool, np.bool_)) or isinstance(x, (complex, np.complexfloating)):
-        raise TypeError(f"{name} must be a real number, got {type(x).__name__}")
-    try:
+    """A real number: int, float, numpy integer/floating scalar or 0-d array. Strings, bools and
+    complex values are rejected (float() would parse '0.5'; k and threads reject '2' as well)."""
+    if isinstance(x, np.ndarray) and x.ndim == 0 and x.dtype.kind in "iuf":
         return float(x)
-    except (TypeError, ValueError) as e:
-        raise TypeError(f"{name} must be a real number, got {type(x).__name__}") from e
+    if isinstance(x, (bool, np.bool_)) or not isinstance(x, numbers.Real):
+        raise TypeError(f"{name} must be a real number, got {type(x).__name__}")
+    return float(x)
 
 
 def _integer(x: Any, name: str) -> int:
@@ -376,10 +378,11 @@ def solve(
     if storage not in _STORAGES:
         raise InvalidInputError(f"storage = {storage!r} is not one of {_STORAGES}")
     config_json = _merge_config(config, sigma, k, mode, lower, upper, tol, threads)
+    verbose = _integer(verbose, "verbose")
     a_arg = _matrix_arg(A, "A")
     b_arg = None if B is None else _matrix_arg(B, "B")
-    w, v, cw, cv, report_json, config_out, complex_dtype = _hsolve.solve(a_arg, b_arg, config_json,
-                                                                         int(verbose), storage)
+    w, v, cw, cv, report_json, config_out, complex_dtype = _hsolve.solve(a_arg, b_arg, config_json, verbose,
+                                                                         storage)
     if complex_dtype and v.dtype != np.complex128:
         # A complex dtype (array or file) whose imaginary parts are all zero is solved as real;
         # the eigenvectors still come back complex, whichever way the matrix was passed.
