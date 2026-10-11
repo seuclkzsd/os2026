@@ -538,9 +538,11 @@ void stream_payload(ByteSource& src, const NpyHeader& h, Dst&& dst, Done&& done)
 
 template <class T>
 std::vector<T> read_npy_payload_as(ByteSource& src, const NpyHeader& header) {
+  // Before allocating: a corrupt header may claim any size, and only the member's length says
+  // whether the payload backs it (Io instead of an allocation of the claimed size).
+  check_payload_length(src, header);
   std::vector<T> v(header.count);
   if (stores_native<T>(header.info)) {
-    check_payload_length(src, header);
     src.read(reinterpret_cast<std::byte*>(v.data()), header.data_bytes);
     src.finish();
     return v;
@@ -554,6 +556,7 @@ std::vector<T> read_npy_payload_as(ByteSource& src, const NpyHeader& header) {
 
 template <class T>
 void read_npy_payload_chunks(ByteSource& src, const NpyHeader& header, const ChunkSink<T>& sink) {
+  check_payload_length(src, header);  // also in stream_payload; here before the buffer exists
   std::vector<T> buf(std::min(chunk_elements(header), header.count));
   stream_payload<T>(
       src, header, [&](std::size_t, std::size_t) { return buf.data(); },

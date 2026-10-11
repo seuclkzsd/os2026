@@ -84,14 +84,20 @@ void put_le(std::vector<char>& out, U v) {
 }
 
 using Members = std::vector<std::pair<std::string, hs::NpyArray>>;
+using RawMembers = std::vector<std::pair<std::string, std::vector<char>>>;  ///< key, .npy bytes
+
+// The .npy bytes hs::write_npy writes for `array`.
+std::vector<char> npy_bytes(const hs::NpyArray& array, const std::filesystem::path& scratch) {
+  hs::write_npy(scratch, array);
+  std::vector<char> content = read_bytes(scratch);
+  std::filesystem::remove(scratch);
+  return content;
+}
 
 // np.savez(_compressed) layout: classic zip records, one ".npy" member per array.
-void write_npz(const std::filesystem::path& path, const Members& members, bool compressed) {
+void write_npz_raw(const std::filesystem::path& path, const RawMembers& members, bool compressed) {
   std::vector<char> zip, central;
-  const std::filesystem::path scratch = path.string() + ".member.npy";
-  for (const auto& [key, array] : members) {
-    hs::write_npy(scratch, array);
-    const std::vector<char> content = read_bytes(scratch);
+  for (const auto& [key, content] : members) {
     std::vector<char> packed = content;
     if (compressed) {
       z_stream z{};
@@ -135,7 +141,6 @@ void write_npz(const std::filesystem::path& path, const Members& members, bool c
     put_le(central, offset);
     central.insert(central.end(), name.begin(), name.end());
   }
-  std::filesystem::remove(scratch);
   const auto cd_offset = static_cast<std::uint32_t>(zip.size());
   zip.insert(zip.end(), central.begin(), central.end());
   put_le<std::uint32_t>(zip, 0x06054b50);
@@ -146,6 +151,32 @@ void write_npz(const std::filesystem::path& path, const Members& members, bool c
   put_le(zip, cd_offset);
   put_le<std::uint16_t>(zip, 0);
   write_bytes(path, zip);
+}
+
+void write_npz(const std::filesystem::path& path, const Members& members, bool compressed) {
+  RawMembers raw;
+  for (const auto& [key, array] : members) raw.emplace_back(key, npy_bytes(array, path.string() + ".member.npy"));
+  write_npz_raw(path, raw, compressed);
+}
+
+// The .npy bytes of `array` with the header's shape replaced by `shape` (e.g. "(1099511627776,)")
+// and the payload kept: a header that claims more (or other) elements than the payload holds.
+// The header keeps its length (numpy's growth-axis padding absorbs the longer shape).
+std::vector<char> with_claimed_shape(const hs::NpyArray& array, const std::string& shape,
+                                     const std::filesystem::path& scratch) {
+  std::vector<char> bytes = npy_bytes(array, scratch);
+  std::string text(bytes.begin(), bytes.end());
+  const std::size_t begin = text.find("'shape': ") + 9;
+  const std::size_t end = text.find(')', begin) + 1;
+  const std::size_t newline = text.find('\n');
+  std::size_t pad = 0;  // trailing spaces before the '\n'
+  while (text[newline - 1 - pad] == ' ') ++pad;
+  EXPECT_LE(shape.size(), end - begin + pad) << "no room for the claimed shape";
+  std::string header = text.substr(0, newline);
+  header.replace(begin, end - begin, shape);
+  header.resize(newline, ' ');  // shorter or longer shape: re-pad to the same length
+  std::copy(header.begin(), header.end(), bytes.begin());
+  return bytes;
 }
 
 // ---------------------------------------------------------------- matrices and entries
@@ -481,7 +512,71 @@ TYPED_TEST(IoLayouts, BrokenCooAndCscFilesAreRejected) {
   }
 }
 
+bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
+
 class IoChunks : public hs::io_test::TempDirTest {};
+
+TEST_F(IoChunks, HeaderClaimsBeyondThePayloadFailBeforeAnyAllocation) {
+  // A corrupt npy header may claim any number of elements; only the member's length tells whether
+  // the payload backs the claim, and it must be checked before anything is sized from the claim.
+  // 2^40 elements: an attempt to allocate them throws std::bad_alloc, which is not an hs::Error and
+  // fails the test, instead of the expected Io error.
+  const auto claim = [&](const hs::NpyArray& a, const std::string& shape = "(1099511627776,)") {
+    return with_claimed_shape(a, shape, tmp("member.npy"));
+  };
+  const auto raw = [&](const hs::NpyArray& a) { return npy_bytes(a, tmp("member.npy")); };
+  const std::vector<double> d{1.0, 2.0, 3.0};
+  const std::vector<float> f{1.0f, 2.0f, 3.0f};
+  for (const bool compressed : {false, true}) {
+    SCOPED_TRACE(compressed ? "deflate" : "stored");
+    write_npz_raw(tmp("claim.npz"), {{"d", claim(npy_of(d))}, {"f", claim(npy_of(f))}}, compressed);
+    const hs::io::NpzFile npz(tmp("claim.npz"));
+    for (const char* key : {"d", "f"}) {  // read in place, and converted float -> double
+      SCOPED_TRACE(key);
+      const auto whole = error_of([&] { npz.read_as<double>(key); });
+      EXPECT_EQ(whole.code, "io");
+      EXPECT_TRUE(contains(whole.message, "(truncated)")) << whole.message;
+      EXPECT_EQ(error_of([&] { npz.read_chunks<double>(key, [](const double*, std::size_t, std::size_t) {}); }).code,
+                "io");
+    }
+  }
+  // Every member load_matrix reads: csr/csc arrays, coo row/col/data and coords, shape.
+  const CsrMatrix<double> a = hs::test::random_hermitian<double>(6, 0.5, 1);
+  std::vector<std::int32_t> rows;
+  for (index_t i = 0; i < a.nrows; ++i)
+    for (index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p) rows.push_back(static_cast<std::int32_t>(i));
+  std::vector<std::int32_t> coords(rows);
+  coords.insert(coords.end(), a.colind.begin(), a.colind.end());
+  const std::vector<std::int32_t> indptr(a.rowptr.begin(), a.rowptr.end());
+  const hs::NpyArray shape = npy_of(std::vector<std::int64_t>{a.nrows, a.ncols});
+  const auto csr_like = [&](const char* fmt) {
+    return RawMembers{{"format", raw(format_array(fmt))}, {"shape", raw(shape)}, {"indptr", raw(npy_of(indptr))},
+                      {"indices", raw(npy_of(a.colind))}, {"data", raw(npy_of(a.values))}};
+  };
+  const RawMembers coo{{"format", raw(format_array("coo"))}, {"shape", raw(shape)}, {"row", raw(npy_of(rows))},
+                       {"col", raw(npy_of(a.colind))}, {"data", raw(npy_of(a.values))}};
+  std::vector<std::pair<std::string, RawMembers>> cases;
+  const auto with = [&](const std::string& name, RawMembers members, std::size_t k, std::vector<char> bytes) {
+    members[k].second = std::move(bytes);
+    cases.emplace_back(name, std::move(members));
+  };
+  with("csr shape", csr_like("csr"), 1, claim(shape));
+  with("csr indptr", csr_like("csr"), 2, claim(npy_of(indptr)));
+  with("csr indices", csr_like("csr"), 3, claim(npy_of(a.colind)));
+  with("csr data", csr_like("csr"), 4, claim(npy_of(a.values)));
+  with("csc indices", csr_like("csc"), 3, claim(npy_of(a.colind)));
+  with("coo row", coo, 2, claim(npy_of(rows)));
+  RawMembers by_coords{{"format", raw(format_array("coo"))}, {"shape", raw(shape)},
+                       {"coords", raw(npy_of(coords, {2, rows.size()}))}, {"data", raw(npy_of(a.values))}};
+  with("coo coords", by_coords, 2, claim(npy_of(coords, {2, rows.size()}), "(2, 1099511627776)"));
+  for (const auto& [name, members] : cases) {
+    SCOPED_TRACE(name);
+    write_npz_raw(tmp("m.npz"), members, true);
+    const auto err = error_of([&] { hs::load_matrix(tmp("m.npz")); });
+    EXPECT_EQ(err.code, "io") << err.message;
+    EXPECT_TRUE(contains(err.message, "(truncated)")) << err.message;
+  }
+}
 
 TEST_F(IoChunks, ConversionErrorsNameTheElementButYieldToCorruption) {
   // A complex member whose element big-2 is not real, read as double: the error comes from a

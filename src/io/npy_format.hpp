@@ -43,8 +43,10 @@ NpyArray read_npy_payload(ByteSource& src, NpyHeader header);
 
 /// Reads the payload converted to T (npy_to_vector rules). When the stored layout already is T's
 /// little-endian layout the bytes go straight into the result; otherwise they are converted in
-/// chunks of ~1 MiB straight into it. Either way the peak is the result plus one chunk.
-/// T in {double, cplx, float, int32_t, int64_t}. Calls src.finish().
+/// chunks of ~1 MiB straight into it. Either way the peak is the result plus one chunk. The
+/// payload length is checked (Io) before the result is allocated, so a header that claims more
+/// elements than the source holds costs no memory. T in {double, cplx, float, int32_t, int64_t}.
+/// Calls src.finish().
 template <class T>
 std::vector<T> read_npy_payload_as(ByteSource& src, const NpyHeader& header);
 
@@ -54,10 +56,11 @@ template <class T>
 using ChunkSink = std::function<void(const T* values, std::size_t first, std::size_t count)>;
 
 /// Streams the payload converted to T (npy_to_vector rules) through `sink`, ~1 MiB of payload per
-/// call, so callers can scatter an array without holding it. Conversion errors and hs::Error
-/// thrown by the sink are rethrown after the whole payload has been read and src.finish() has
-/// checked its integrity (an integrity failure, Io, takes precedence). T as for
-/// read_npy_payload_as.
+/// call, so callers can scatter an array without holding it. The payload length is checked (Io)
+/// before the first call, so a sink may size its destination from header.count on that call.
+/// Conversion errors and hs::Error thrown by the sink are rethrown after the whole payload has
+/// been read and src.finish() has checked its integrity (an integrity failure, Io, takes
+/// precedence). T as for read_npy_payload_as.
 template <class T>
 void read_npy_payload_chunks(ByteSource& src, const NpyHeader& header, const ChunkSink<T>& sink);
 

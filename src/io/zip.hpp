@@ -31,7 +31,9 @@ struct ZipEntry {
 /// into a zip64 extra field; streamed archives put them in data descriptors).
 class ZipArchive {
  public:
-  /// Reads and validates the central directory. Throws Io / Unsupported.
+  /// Reads and validates the central directory. Throws Io / Unsupported. A deflate member may
+  /// not declare more than 1032 uncompressed bytes per compressed byte (deflate's limit), so the
+  /// uncompressed sizes are bounded by ~1032x the file size and safe to size buffers from.
   explicit ZipArchive(const std::filesystem::path& path);
 
   const std::filesystem::path& path() const noexcept { return path_; }

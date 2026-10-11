@@ -36,8 +36,9 @@ class NpzFile {
   template <class T>
   std::vector<T> read_as(const std::string& key, NpyHeader* header = nullptr) const;
   /// Streams the array converted to T through `sink` (read_npy_payload_chunks: ~1 MiB per call,
-  /// errors surface after the member's CRC check), so a caller can scatter it into place without
-  /// holding it. T as for read_as.
+  /// the payload length is checked against the header before the first call, errors surface
+  /// after the member's CRC check), so a caller can scatter it into place without holding it.
+  /// T as for read_as.
   template <class T>
   void read_chunks(const std::string& key, const ChunkSink<T>& sink) const;
 

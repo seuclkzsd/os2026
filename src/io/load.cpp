@@ -135,13 +135,19 @@ CsrMatrix<T> read_scipy_coo(const io::NpzFile& npz, index_t n, bool drop_zeros,
     cols = npz.read_as<std::int32_t>("col");
   } else if (npz.contains("coords")) {  // n-D coo arrays (and future 2-D ones): shape (ndim, nnz)
     const io::NpyHeader h = npz.header("coords");
-    if (h.shape.size() != 2 || h.shape[0] != 2)
-      HS_THROW(InvalidInput, source << ": 'coords' must have shape (2, nnz)");
-    const std::size_t nnz = h.shape[1];
-    rows.resize(nnz);
-    cols.resize(nnz);
+    // Only shape (2, nnz) can be split, but the member is read through either way, so its own
+    // errors (dtype, length, CRC) come first, as when it was read whole. rows/cols are sized on
+    // the first chunk: read_chunks has then checked the payload against the header's shape, so
+    // a corrupt shape cannot make them allocate more than the member holds.
+    const bool two_rows = h.shape.size() == 2 && h.shape[0] == 2;
+    const std::size_t nnz = two_rows ? h.shape[1] : 0;
     // Element (d, k) is at d*nnz + k in C order and at 2k + d in Fortran order.
     npz.read_chunks<std::int32_t>("coords", [&](const std::int32_t* v, std::size_t first, std::size_t len) {
+      if (!two_rows) return;
+      if (first == 0) {
+        rows.resize(nnz);
+        cols.resize(nnz);
+      }
       for (std::size_t e = first; e < first + len; ++e) {
         const std::int32_t x = v[e - first];
         if (h.fortran_order) {
@@ -151,6 +157,7 @@ CsrMatrix<T> read_scipy_coo(const io::NpzFile& npz, index_t n, bool drop_zeros,
         }
       }
     });
+    if (!two_rows) HS_THROW(InvalidInput, source << ": 'coords' must have shape (2, nnz)");
   } else {
     HS_THROW(InvalidInput, source << ": coo npz has neither 'row'/'col' nor 'coords'");
   }
