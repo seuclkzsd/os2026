@@ -462,8 +462,8 @@ TYPED_TEST(SparseKernelPaths, NonFiniteResidualHasInfiniteBackwardError) {
                                r.data(), n, p, {path}, omega.data());
           for (index_t k = 0; k < p; ++k) {
             EXPECT_TRUE(std::isinf(std::abs(r[5 + k * n]))) << name(path) << " k=" << k;
-            EXPECT_EQ(omega[k], inf) << name(path) << " explicit_b=" << explicit_b << " p=" << p
-                                     << " k=" << k;
+            EXPECT_EQ(omega[k], inf)
+                << name(path) << " explicit_b=" << explicit_b << " p=" << p << " k=" << k;
           }
         }
       }
@@ -481,8 +481,7 @@ TYPED_TEST(SparseKernelPaths, ShiftedResidualTakesALiteralNullptrForTheIdentity)
   const auto y = random_block<T>(n, p, n, 8);
   std::vector<T> r1(static_cast<std::size_t>(n * p)), r2(r1.size());
   std::vector<double> o1(static_cast<std::size_t>(p)), o2(o1.size());
-  hs::shifted_residual(a, nullptr, 0.25, x.data(), n, y.data(), n, r1.data(), n, p, {},
-                       o1.data());
+  hs::shifted_residual(a, nullptr, 0.25, x.data(), n, y.data(), n, r1.data(), n, p, {}, o1.data());
   const CsrMatrix<T>* none = nullptr;
   hs::shifted_residual(a, none, 0.25, x.data(), n, y.data(), n, r2.data(), n, p, {}, o2.data());
   EXPECT_TRUE(r1 == r2);

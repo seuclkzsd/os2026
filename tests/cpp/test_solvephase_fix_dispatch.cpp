@@ -150,9 +150,8 @@ TYPED_TEST(OpsKernelFallback, OperatorsRefuseAvx512AndRunAuto) {
 
   EXPECT_EQ(error_code_of([&] { hs::CsrOperator<T> op(a, KernelPath::Avx512); }),
             hs::Error::Code::Unsupported);
-  EXPECT_EQ(error_code_of([&] {
-              hs::ShiftInvertOperator<T> op(*f, pencil, sigma, {}, KernelPath::Avx512);
-            }),
+  EXPECT_EQ(error_code_of(
+                [&] { hs::ShiftInvertOperator<T> op(*f, pencil, sigma, {}, KernelPath::Avx512); }),
             hs::Error::Code::Unsupported);
   EXPECT_EQ(error_code_of([&] {
               hs::ShiftInvertOperator<T> op(*f, pencil, sigma, refine, KernelPath::Avx512);

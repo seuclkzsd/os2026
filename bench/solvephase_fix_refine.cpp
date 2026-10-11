@@ -223,17 +223,17 @@ void run(const Args& args, const std::string& name, const CsrMatrix<T>& a, const
     if (r == 3) throw std::runtime_error("no regular shift near sigma");
     sigma = sigma0 + 1e-8 * std::max(1.0, std::abs(sigma0)) * std::pow(10.0, r);
   }
-  json setup = {{"kind", "setup"},
-                {"case", name},
-                {"n", n},
-                {"complex", hs::is_complex_v<T>},
-                {"threads", hs::max_threads()},
-                {"precision", args.single ? "single" : "double"},
-                {"ref_tol", args.ref_tol},
-                {"sigma", sigma},
-                {"kernel_path", hs::resolve_kernel_path(KernelPath::Auto) == KernelPath::Avx512
-                                    ? "avx512"
-                                    : "portable"}};
+  json setup = {
+      {"kind", "setup"},
+      {"case", name},
+      {"n", n},
+      {"complex", hs::is_complex_v<T>},
+      {"threads", hs::max_threads()},
+      {"precision", args.single ? "single" : "double"},
+      {"ref_tol", args.ref_tol},
+      {"sigma", sigma},
+      {"kernel_path",
+       hs::resolve_kernel_path(KernelPath::Auto) == KernelPath::Avx512 ? "avx512" : "portable"}};
   std::printf("%s\n", setup.dump().c_str());
   std::fflush(stdout);
 
@@ -301,8 +301,8 @@ void run(const Args& args, const std::string& name, const CsrMatrix<T>& a, const
           } else {
             std::copy(x.data() + k * n, x.data() + (k + 1) * n, bx.begin());
           }
-          rel = std::max(rel, hs::linalg::norm2(n, r.data() + k * n) /
-                                  hs::linalg::norm2(n, bx.data()));
+          rel = std::max(rel,
+                         hs::linalg::norm2(n, r.data() + k * n) / hs::linalg::norm2(n, bx.data()));
           double d = 0.0;
           for (index_t i = 0; i < n; ++i) d += hs::abs2(y[i + k * n] - y1[i + k * n]);
           dev = std::max(dev, std::sqrt(d) / hs::linalg::norm2(n, y1 + k * n));

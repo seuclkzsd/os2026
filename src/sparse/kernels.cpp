@@ -380,8 +380,8 @@ struct RowAcc {
 /// acc += sign * sum_t v[t] * Xp[ci[t], :] restricted to the accumulator vectors [C0, C1) (and the
 /// tail words when C1 == kV) over row i of m; with S also the magnitudes mag(v[t]) |Xp[ci[t], :]|.
 template <int C0, int C1, int Q, bool S, class T>
-inline void row_accumulate_vectors(const CsrMatrix<T>& m, index_t i, const double* xp,
-                                   double sign, RowAcc<Q, T>& acc) {
+inline void row_accumulate_vectors(const CsrMatrix<T>& m, index_t i, const double* xp, double sign,
+                                   RowAcc<Q, T>& acc) {
   using Acc = RowAcc<Q, T>;
   constexpr int kTail = C1 == Acc::kV ? Acc::kT : 0;
   const index_t* rp = m.rowptr.data();
@@ -417,8 +417,8 @@ inline void row_accumulate_vectors(const CsrMatrix<T>& m, index_t i, const doubl
 /// (at most 12 vector registers of accumulators per sweep; the row's indices and values are
 /// re-read from L1), so that no accumulator lives on the stack.
 template <int Q, bool S, class T, int C0 = 0>
-inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const double* xp,
-                                    double sign, RowAcc<Q, T>& acc) {
+inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const double* xp, double sign,
+                                    RowAcc<Q, T>& acc) {
   using Acc = RowAcc<Q, T>;
   constexpr int kArrays = 1 + (Acc::kComplex ? 1 : 0) + (S ? 1 : 0);
   constexpr int kGroup = 12 / kArrays;
@@ -720,9 +720,8 @@ void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_
   }
 #endif
   static_cast<void>(path);
-  with_width(q, [&](auto qc) {
-    spmm_chunk_portable<decltype(qc)::value>(a, xp, y, ldy, alpha, beta);
-  });
+  with_width(
+      q, [&](auto qc) { spmm_chunk_portable<decltype(qc)::value>(a, xp, y, ldy, alpha, beta); });
 }
 
 template <class T>
@@ -848,19 +847,18 @@ void shifted_residual(const CsrMatrix<T>& a, const non_deduced_t<CsrMatrix<T>>* 
     } else {
       interleave<T>(n, q, yk, ldy, 0.0, nullptr, 0, yp);
       interleave<T>(n, q, xk, ldx, sigma, yk, ldy, wp);
-      residual_chunk(a, b, wp, yp, q, r + k0 * ldr, ldr, chunk_path<T>(options.path, path, q),
-                     bm);
+      residual_chunk(a, b, wp, yp, q, r + k0 * ldr, ldr, chunk_path<T>(options.path, path, q), bm);
     }
     bm.finish();
   }
 }
 
-#define HS_INSTANTIATE_KERNELS(T)                                                               \
-  template void spmv<T>(const CsrMatrix<T>&, const T*, T*, T, T, const KernelOptions&);         \
-  template void spmm<T>(const CsrMatrix<T>&, const T*, index_t, T*, index_t, index_t, T, T,     \
-                        const KernelOptions&);                                                  \
-  template void shifted_residual<T>(const CsrMatrix<T>&, const non_deduced_t<CsrMatrix<T>>*,    \
-                                    double, const T*, index_t, const T*, index_t, T*, index_t,  \
+#define HS_INSTANTIATE_KERNELS(T)                                                              \
+  template void spmv<T>(const CsrMatrix<T>&, const T*, T*, T, T, const KernelOptions&);        \
+  template void spmm<T>(const CsrMatrix<T>&, const T*, index_t, T*, index_t, index_t, T, T,    \
+                        const KernelOptions&);                                                 \
+  template void shifted_residual<T>(const CsrMatrix<T>&, const non_deduced_t<CsrMatrix<T>>*,   \
+                                    double, const T*, index_t, const T*, index_t, T*, index_t, \
                                     index_t, const KernelOptions&, double*);
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_KERNELS)
