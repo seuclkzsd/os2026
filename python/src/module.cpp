@@ -197,6 +197,16 @@ bool complex_input(const MatrixArg& m) {
   return m.loaded ? m.loaded->is_complex() : pyconv::has_nonzero_imag(m.view);
 }
 
+/// The matrix was given with a complex dtype - in memory, or stored as complex in the file - even
+/// if every imaginary part is zero and it is solved as real. For "path" call after loading.
+bool complex_dtype(const MatrixArg& m) {
+  if (!m.loaded) return pyconv::is_complex_type(m.view.value_type);
+  if (m.loaded->is_complex()) return true;
+  // hs::load_matrix records demoting complex input to real as its note with tag "real" (io.hpp).
+  return std::any_of(m.loaded->notes.begin(), m.loaded->notes.end(),
+                     [](const std::string& note) { return note.rfind("real:", 0) == 0; });
+}
+
 /// The matrix as CsrMatrix<T> plus notes ("A: ..." in hs::load_matrix wording). GIL-free.
 template <class T>
 CsrMatrix<T> obtain(MatrixArg& m, Storage storage, std::vector<std::string>& notes) {
@@ -226,6 +236,11 @@ CsrMatrix<T> obtain(MatrixArg& m, Storage storage, std::vector<std::string>& not
 
 using AnySolution = std::variant<Solution<double>, Solution<cplx>>;
 
+struct SolveOutcome {
+  AnySolution solution;
+  bool complex_dtype = false;  ///< some input had a complex dtype: eigenvectors go back complex
+};
+
 template <class T>
 Solution<T> solve_as(MatrixArg& a, MatrixArg* b, const SolverConfig& cfg, int verbose, Storage storage) {
   std::vector<std::string> notes;
@@ -247,17 +262,23 @@ Solution<T> solve_as(MatrixArg& a, MatrixArg* b, const SolverConfig& cfg, int ve
 }
 
 /// GIL-free part of _solve: load/convert, dispatch real/complex, solve.
-AnySolution run_solve(MatrixArg& a, MatrixArg* b, const SolverConfig& cfg, int verbose, Storage storage) {
+SolveOutcome run_solve(MatrixArg& a, MatrixArg* b, const SolverConfig& cfg, int verbose, Storage storage) {
   LoadOptions lo;
   lo.storage = storage;
   lo.hermitian_tol = cfg.hermitian_tol;
   if (!a.path.empty()) a.loaded = load_matrix(a.path, lo);
   if (b && !b->path.empty()) b->loaded = load_matrix(b->path, lo);
+  SolveOutcome out;
+  out.complex_dtype = complex_dtype(a) || (b && complex_dtype(*b));
   // Complex A with real B promotes B (and vice versa); complex dtypes whose imaginary parts are
   // all zero are solved as real, exactly like hs::load_matrix does for files.
   const bool complex_problem = complex_input(a) || (b && complex_input(*b));
-  if (complex_problem) return solve_as<cplx>(a, b, cfg, verbose, storage);
-  return solve_as<double>(a, b, cfg, verbose, storage);
+  if (complex_problem) {
+    out.solution = solve_as<cplx>(a, b, cfg, verbose, storage);
+  } else {
+    out.solution = solve_as<double>(a, b, cfg, verbose, storage);
+  }
+  return out;
 }
 
 /// n x m column-major DenseMatrix -> numpy (n, m) Fortran-ordered array owning the buffer.
@@ -284,14 +305,14 @@ py::array copy_vector(const std::vector<T>& v) {
 }
 
 template <class T>
-py::tuple to_python(Solution<T>&& sol, const SolverConfig& cfg) {
+py::tuple to_python(Solution<T>&& sol, const SolverConfig& cfg, bool complex_dtype) {
   const std::string report = sol.report.to_json(-1);
   py::array w = copy_vector(sol.eigenvalues);
   const index_t n = sol.report.n;
   py::array v = take_matrix(std::move(sol.eigenvectors), n);
   py::array cw = copy_vector(sol.complex_eigenvalues);
   py::array cv = take_matrix(std::move(sol.complex_eigenvectors), n);
-  return py::make_tuple(w, v, cw, cv, report, config_to_json(cfg, -1));
+  return py::make_tuple(w, v, cw, cv, report, config_to_json(cfg, -1), complex_dtype);
 }
 
 py::tuple py_solve(const py::tuple& a_arg, const py::object& b_arg, const std::string& config_json, int verbose,
@@ -301,14 +322,15 @@ py::tuple py_solve(const py::tuple& a_arg, const py::object& b_arg, const std::s
   MatrixArg a = matrix_arg(a_arg, "A");
   std::optional<MatrixArg> b;
   if (!b_arg.is_none()) b = matrix_arg(b_arg.cast<py::tuple>(), "B");
-  std::optional<AnySolution> sol;
+  std::optional<SolveOutcome> out;
   {
     py::gil_scoped_release nogil;
     std::lock_guard<std::mutex> lock(solve_mutex());
     OmpThreadsScope threads(cfg.threads);
-    sol = run_solve(a, b ? &*b : nullptr, cfg, verbose, storage);
+    out = run_solve(a, b ? &*b : nullptr, cfg, verbose, storage);
   }
-  return std::visit([&](auto& s) { return to_python(std::move(s), cfg); }, *sol);
+  const bool complex_dtype = out->complex_dtype;
+  return std::visit([&](auto& s) { return to_python(std::move(s), cfg, complex_dtype); }, out->solution);
 }
 
 /// Owner of a loaded CSR matrix whose arrays are exposed to numpy without copies.
@@ -371,7 +393,8 @@ PYBIND11_MODULE(_hsolve, m) {
 
   m.def("solve", &hs::py_solve, py::arg("a"), py::arg("b"), py::arg("config_json"), py::arg("verbose"),
         py::arg("storage"),
-        "solve(a, b, config_json, verbose, storage) -> (w, v, complex_w, complex_v, report_json, config_json)");
+        "solve(a, b, config_json, verbose, storage) -> (w, v, complex_w, complex_v, report_json, config_json, "
+        "complex_dtype)");
   m.def("load_matrix", &hs::py_load_matrix, py::arg("path"), py::arg("storage"), py::arg("hermitian_tol"),
         "load_matrix(path, storage, hermitian_tol) -> (n, indptr, indices, data, info)");
   m.def("parse_config", [](const std::string& text) { return hs::config_to_json(hs::parse_config(text), -1); },

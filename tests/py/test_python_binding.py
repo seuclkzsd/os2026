@@ -524,6 +524,28 @@ def test_load_matrix_roundtrip_and_solve_from_path(tmp_path):
     assert any("storage: upper triangle mirrored" in w for w in r_path.report["warnings"])
 
 
+def test_complex_dtype_gives_complex_eigenvectors_for_paths_too(tmp_path):
+    """A complex dtype with all-zero imaginary parts is solved as real; the eigenvectors come back
+    complex128 whether the matrix is passed in memory or as a file (the loader demotes it too)."""
+    a = _base_matrix()
+    c = a.astype(np.complex128)
+    sp.save_npz(tmp_path / "C.npz", c)
+    sp.save_npz(tmp_path / "R.npz", a)
+    ref = solve_quiet(a, sigma=2.1, k=5, config=DETERMINISTIC)
+    for arg in (c, tmp_path / "C.npz"):
+        res = solve_quiet(arg, sigma=2.1, k=5, config=DETERMINISTIC)
+        assert res.eigenvectors.dtype == np.complex128 and res.eigenvectors.flags.f_contiguous
+        assert res.report["complex_scalars"] is False
+        np.testing.assert_array_equal(res.eigenvalues, ref.eigenvalues)
+        np.testing.assert_array_equal(res.eigenvectors.real, ref.eigenvectors)
+    assert solve_quiet(tmp_path / "R.npz", sigma=2.1, k=5).eigenvectors.dtype == np.float64
+    b = sp.identity(a.shape[0], format="csr")
+    sp.save_npz(tmp_path / "Bc.npz", b.astype(np.complex128))
+    res = solve_quiet(a, tmp_path / "Bc.npz", sigma=2.1, k=5, config=DETERMINISTIC)  # complex dtype in B only
+    assert res.eigenvectors.dtype == np.complex128
+    assert solve_quiet(a, b, sigma=2.1, k=5).eigenvectors.dtype == np.float64
+
+
 # ---------------------------------------------------------------------- GIL, threads, warnings
 
 

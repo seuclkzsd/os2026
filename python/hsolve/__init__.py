@@ -134,7 +134,8 @@ class SolveResult:
 
     eigenvalues          float64 (m,): real eigenvalues ordered by the target (nearest: by
                          distance to sigma; interval/smallest: ascending; largest: descending).
-    eigenvectors         (n, m), Fortran order; complex128 when A or B is complex, else float64.
+    eigenvectors         (n, m), Fortran order; complex128 when A or B has a complex dtype (the
+                         array's, or the value type stored in the file), else float64.
                          B-orthonormal for HEP/GHEP, unit 2-norm for indefinite B.
     complex_eigenvalues  complex128 (c,): genuinely complex eigenvalues (indefinite B only).
     complex_eigenvectors complex128 (n, c).
@@ -301,10 +302,10 @@ def _is_sparse(m: Any) -> bool:
     return sp is not None and sp.issparse(m)
 
 
-def _matrix_arg(m: Any, name: str):
+def _matrix_arg(m: Any, name: str) -> tuple:
     """Describe a matrix for the C++ side without copying it (see module.cpp: matrix_arg)."""
     if isinstance(m, (str, bytes, os.PathLike)):
-        return ("path", os.fsdecode(m)), False
+        return ("path", os.fsdecode(m))
     if _is_sparse(m):
         shape = tuple(int(s) for s in m.shape)
         if len(shape) != 2:
@@ -320,7 +321,7 @@ def _matrix_arg(m: Any, name: str):
         else:
             indptr, indices = _indices(m.indptr, m.indices)
             arg = (fmt, shape, indptr, indices, data)
-        return arg, data.dtype.kind == "c"
+        return arg
     if hasattr(m, "matvec") and not isinstance(m, np.ndarray):
         raise TypeError(f"{name}: hsolve factorizes the matrix and needs its entries, not a LinearOperator")
     arr = np.asarray(m)
@@ -329,7 +330,7 @@ def _matrix_arg(m: Any, name: str):
     if arr.ndim != 2:
         raise InvalidInputError(f"{name}: expected a 2-D array, got {arr.ndim}-D")
     arr = _values(arr, name)
-    return ("dense", tuple(int(s) for s in arr.shape), arr), arr.dtype.kind == "c"
+    return ("dense", tuple(int(s) for s in arr.shape), arr)
 
 
 # --------------------------------------------------------------------------------------- API
@@ -375,11 +376,14 @@ def solve(
     if storage not in _STORAGES:
         raise InvalidInputError(f"storage = {storage!r} is not one of {_STORAGES}")
     config_json = _merge_config(config, sigma, k, mode, lower, upper, tol, threads)
-    a_arg, a_complex = _matrix_arg(A, "A")
-    b_arg, b_complex = (None, False) if B is None else _matrix_arg(B, "B")
-    w, v, cw, cv, report_json, config_out = _hsolve.solve(a_arg, b_arg, config_json, int(verbose), storage)
-    if (a_complex or b_complex) and v.dtype != np.complex128:
-        v = v.astype(np.complex128, order="F")  # complex input with zero imaginary parts, solved as real
+    a_arg = _matrix_arg(A, "A")
+    b_arg = None if B is None else _matrix_arg(B, "B")
+    w, v, cw, cv, report_json, config_out, complex_dtype = _hsolve.solve(a_arg, b_arg, config_json,
+                                                                         int(verbose), storage)
+    if complex_dtype and v.dtype != np.complex128:
+        # A complex dtype (array or file) whose imaginary parts are all zero is solved as real;
+        # the eigenvectors still come back complex, whichever way the matrix was passed.
+        v = v.astype(np.complex128, order="F")
     result = SolveResult(w, v, cw, cv, json.loads(report_json), json.loads(config_out))
     if not result.success:
         warnings.warn(
