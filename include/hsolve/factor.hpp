@@ -445,8 +445,12 @@ struct OrderingOptions {
   int threads = 0;              ///< OpenMP threads; 0 = omp_get_max_threads(). The ordering does
                                 ///< NOT depend on it (bitwise the same for every thread count)
   index_t leaf_size = 120;      ///< subgraphs of at most this many vertices: minimum degree
-  double imbalance = 1.2;       ///< each half of a separator weighs at most imbalance * |V| / 2
-  index_t coarsen_to = 100;     ///< multilevel separators coarsen down to this many vertices
+                                ///< (1..2048: the largest subgraph minimum degree is run on)
+  double imbalance = 1.2;       ///< each half of a separator weighs at most imbalance * |V| / 2;
+                                ///< in [1, 1.5] (above, the halves may be so unequal that the
+                                ///< dissection degenerates: 1.6-5x the flops at 1.9, natural
+                                ///< order from 2 on; see kMaxImbalance in src/factor)
+  index_t coarsen_to = 100;     ///< multilevel separators coarsen down to this many vertices (>= 2)
   int init_tries = 7;           ///< greedy-growing attempts for the coarsest separator
   int refine_passes = 10;       ///< node-FM refinement passes per level (stop early without gain)
   std::uint64_t seed = 2026;    ///< seed of the (counter-based, thread-independent) random choices

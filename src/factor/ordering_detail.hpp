@@ -78,8 +78,24 @@ std::uint64_t child_seed(std::uint64_t parent, int side) noexcept;
 /// edge joins part 0 and part 1).
 inline constexpr std::uint8_t kSeparator = 2;
 
+/// Largest subgraph the dissection orders by minimum degree (bitset elimination graph: O(n^2/64)
+/// memory, up to O(n^3/64) time), hence the largest DissectionParams::leaf_size (and
+/// OrderingOptions::leaf_size). A larger subgraph that cannot be split (no separator leaves both
+/// halves smaller, e.g. a clique) keeps its numbering: it is dense, every order fills it.
+inline constexpr std::int32_t kMaxMinimumDegree = 2048;
+
+/// Largest OrderingOptions::imbalance compute_ordering accepts (nested_dissection itself takes
+/// [1, 2), for experiments). The bigger half then holds at most 3/4 of a subgraph, so the
+/// dissection is at most log_{4/3}(n) deep. Measured (bench/analysis_fix_imbalance.cpp: MUMPS
+/// flops of the order on 60^2, 300^2 and 20^3 grids, relative to 1.2): 1.3-1.5 0.67-1.0x;
+/// 1.7-1.8 0.75-1.7x; 1.9 1.6-5x; 1.999 170-250x (the halves peel a few vertices off a corner,
+/// thousands of separators deep); from 2 on a half may hold the whole graph: an empty separator,
+/// i.e. the natural order.
+inline constexpr double kMaxImbalance = 1.5;
+
 struct SeparatorParams {
-  double imbalance = 1.2;  ///< each half weighs at most imbalance * total / 2 (METIS ND: 1.2)
+  double imbalance = 1.2;  ///< each half weighs at most imbalance * total / 2 (METIS ND: 1.2);
+                           ///< vertex_separator takes any value >= 1 (>= 2: no bound at all)
   std::int32_t coarsen_to = 100;  ///< stop coarsening at this many vertices
   int init_tries = 7;             ///< greedy-growing attempts on the coarsest graph
   int refine_passes = 10;         ///< node-FM passes per level (stop early without gain)
@@ -123,8 +139,10 @@ Graph induced_subgraph(const Graph& g, const std::vector<std::uint8_t>& where, s
 std::vector<std::int32_t> minimum_degree(const Graph& g);
 
 struct DissectionParams {
-  SeparatorParams separator;
+  SeparatorParams separator;     ///< imbalance in [1, 2) (from 2 on a half may take the whole
+                                 ///< subgraph); compute_ordering admits [1, kMaxImbalance]
   std::int32_t leaf_size = 120;  ///< subgraphs with at most this many vertices: minimum degree
+                                 ///< (1..kMaxMinimumDegree)
   std::int32_t task_size = 512;  ///< subgraphs below this size are ordered inline, not as tasks
                                  ///< (syn-mem27-46, 2 threads: 0.76 s at 150..500, 0.79 at 1000,
                                  ///< 0.84 at 2000, 1.11 at 4096, 1.30 at 20000; serial 1.40 s)
@@ -150,6 +168,7 @@ struct DissectionStats {
 /// vertex eliminated k-th. The result does not depend on `threads`. Always opens a parallel
 /// region of its own (also for one thread), whose end waits for every dissection task: safe to
 /// call from inside a parallel region (without nested parallelism it then runs on one thread).
+/// Precondition (HS_ASSERT): params within the documented ranges.
 std::vector<std::int32_t> nested_dissection(Graph g, const DissectionParams& params, int threads,
                                             DissectionStats* stats = nullptr);
 

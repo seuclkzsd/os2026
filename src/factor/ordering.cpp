@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <atomic>
 #include <climits>
-#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -21,11 +20,6 @@ namespace hs {
 namespace ordering {
 
 namespace {
-
-// Largest leaf the bitset minimum degree takes (O(n^2/64) memory and up to O(n^3/64) time); a
-// subgraph that cannot be split (no separator leaves both halves smaller, e.g. a clique) and is
-// larger keeps its numbering: it is dense, every order fills it completely.
-constexpr std::int32_t kMaxMinimumDegree = 2048;
 
 // One subgraph of the dissection: local graph, the original vertex of each local vertex (empty:
 // identity), the first position of its range in the elimination order and its seed.
@@ -167,6 +161,10 @@ class Dissector {
 std::vector<std::int32_t> nested_dissection(Graph g, const DissectionParams& params, int threads,
                                             DissectionStats* stats) {
   HS_ASSERT(threads >= 1, "nested_dissection: threads = " << threads);
+  HS_ASSERT(params.leaf_size >= 1 && params.leaf_size <= kMaxMinimumDegree,
+            "nested_dissection: leaf_size = " << params.leaf_size);
+  HS_ASSERT(params.separator.imbalance >= 1.0 && params.separator.imbalance < 2.0,
+            "nested_dissection: imbalance = " << params.separator.imbalance);
   Dissector d(params, g.n);
   auto root = std::make_unique<Piece>();
   root->g = std::move(g);
@@ -291,11 +289,12 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
                                   OrderingStats* stats) {
   if (o.threads < 0)
     HS_THROW(InvalidInput, "OrderingOptions.threads must be >= 0, got " << o.threads);
-  if (o.leaf_size < 1 || o.leaf_size > INT_MAX)
-    HS_THROW(InvalidInput, "OrderingOptions.leaf_size must be >= 1, got " << o.leaf_size);
-  if (!(o.imbalance >= 1.0) || !std::isfinite(o.imbalance))
-    HS_THROW(InvalidInput,
-             "OrderingOptions.imbalance must be finite and >= 1, got " << o.imbalance);
+  if (o.leaf_size < 1 || o.leaf_size > ordering::kMaxMinimumDegree)
+    HS_THROW(InvalidInput, "OrderingOptions.leaf_size must lie in [1, "
+                               << ordering::kMaxMinimumDegree << "], got " << o.leaf_size);
+  if (!(o.imbalance >= 1.0 && o.imbalance <= ordering::kMaxImbalance))
+    HS_THROW(InvalidInput, "OrderingOptions.imbalance must lie in [1, "
+                               << ordering::kMaxImbalance << "], got " << o.imbalance);
   if (o.coarsen_to < 2 || o.coarsen_to > INT_MAX)
     HS_THROW(InvalidInput, "OrderingOptions.coarsen_to must be >= 2, got " << o.coarsen_to);
   if (o.init_tries < 1 || o.refine_passes < 0)

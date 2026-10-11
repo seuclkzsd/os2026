@@ -1,6 +1,6 @@
 // Regression tests for the review fixes of hsolve's nested-dissection ordering (src/factor/
 // ordering*.cpp, compute_ordering): coarsening with small targets on graphs with many components;
-// calls from inside an OpenMP parallel region (threads = 1 included).
+// calls from inside an OpenMP parallel region (threads = 1 included); the documented option ranges.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -100,6 +100,15 @@ bool is_pivot_order(const std::vector<int>& perm, index_t m) {
     seen[p - 1] = 1;
   }
   return true;
+}
+
+hs::Error::Code code_of(const std::function<void()>& fn) {
+  try {
+    fn();
+  } catch (const hs::Error& e) {
+    return e.code();
+  }
+  return hs::Error::Code::Internal;  // nothing thrown: no code to compare with
 }
 
 // ------------------------------------------------------------------- coarsening targets
@@ -206,6 +215,75 @@ TYPED_TEST(FactorOrderingThreadsPencil, FactorizationsInsideAParallelRegion) {
   for (int it = 0; it < 4; ++it) {
     EXPECT_EQ(ok[it], 1) << "iteration " << it;
     EXPECT_EQ(neg[it], k) << "iteration " << it;
+  }
+}
+
+// ------------------------------------------------------------------------ option ranges
+
+TEST(FactorOrderingOptions, RangesAreEnforced) {
+  const auto a = hs::test::laplacian_2d<double>(60, 60);
+  const ShiftedPencil<double> pencil(a, nullptr);
+  const auto bad = [&](auto mutate) {
+    hs::OrderingOptions o;
+    mutate(o);
+    return code_of([&] { static_cast<void>(hs::compute_ordering(pencil, o)); });
+  };
+  using O = hs::OrderingOptions;
+  const auto kInvalid = hs::Error::Code::InvalidInput;
+  constexpr double kInf = std::numeric_limits<double>::infinity();
+  constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+  // leaf_size: minimum degree orders subgraphs of up to kMaxMinimumDegree vertices; larger
+  // leaves used to keep the natural order (200x the flops on this grid).
+  EXPECT_EQ(bad([](O& o) { o.leaf_size = ord::kMaxMinimumDegree + 1; }), kInvalid);
+  EXPECT_EQ(bad([](O& o) { o.leaf_size = 100000; }), kInvalid);
+  // imbalance: from 2 on a half may take the whole graph (empty separator, natural order);
+  // between kMaxImbalance and 2 the dissection degenerates.
+  for (double imb :
+       {0.999, ord::kMaxImbalance + 1e-9, 1.9, 1.999, 2.0, 3.0, 1e15, 1e16, 1e300, kInf, kNaN})
+    EXPECT_EQ(bad([imb](O& o) { o.imbalance = imb; }), kInvalid) << "imbalance " << imb;
+  EXPECT_EQ(bad([](O& o) { o.coarsen_to = 1; }), kInvalid);
+  EXPECT_EQ(bad([](O& o) { o.refine_passes = -1; }), kInvalid);
+  EXPECT_EQ(bad([](O& o) { o.init_tries = 0; }), kInvalid);
+  // FactorOptions::block_analysis outside {-1, 0, 1}.
+  for (int blocks : {-2, 2}) {
+    hs::FactorOptions fo;
+    fo.block_analysis = blocks;
+    EXPECT_EQ(code_of([&] { hs::make_mumps_factorization<cplx>(fo); }), kInvalid)
+        << "block_analysis " << blocks;
+  }
+  // The limits themselves are accepted and dissect.
+  for (auto mutate : std::vector<std::function<void(O&)>>{
+           [](O& o) { o.leaf_size = ord::kMaxMinimumDegree; }, [](O& o) { o.leaf_size = 1; },
+           [](O& o) { o.imbalance = 1.0; }, [](O& o) { o.imbalance = ord::kMaxImbalance; },
+           [](O& o) { o.coarsen_to = 2; }, [](O& o) { o.refine_passes = 0; }}) {
+    O o;
+    mutate(o);
+    hs::OrderingStats st;
+    const std::vector<int> perm = hs::compute_ordering(pencil, o, &st);
+    EXPECT_TRUE(is_pivot_order(perm, pencil.order()));
+    EXPECT_GT(st.separators, 0) << "leaf " << o.leaf_size << " imbalance " << o.imbalance;
+  }
+  // The internal entry point asserts the same ranges.
+  ord::DissectionParams p;
+  p.leaf_size = ord::kMaxMinimumDegree + 1;
+  EXPECT_THROW(ord::nested_dissection(graph_from_edges(400, grid_edges(20, 20)), p, 1), hs::Error);
+  p = ord::DissectionParams{};
+  p.separator.imbalance = 2.0;
+  EXPECT_THROW(ord::nested_dissection(graph_from_edges(400, grid_edges(20, 20)), p, 1), hs::Error);
+}
+
+// vertex_separator itself takes any imbalance >= 1: from 2 on the half bound is the whole graph.
+// A huge value used to overflow the conversion to int64 (undefined; on x86 INT64_MIN, i.e. the
+// strictest bound): every value from 2 on must now behave alike.
+TEST(FactorOrderingSeparator, HugeImbalanceMeansNoBound) {
+  const ord::Graph g = graph_from_edges(3600, grid_edges(60, 60));
+  ord::SeparatorParams p;
+  p.imbalance = 2.0;
+  const auto ref = ord::vertex_separator(g, 1, p);
+  ASSERT_TRUE(ord::check_separator(g, ref).valid);
+  for (double imb : {1e6, 1e15, 1e16, 1e30, 1e300}) {
+    p.imbalance = imb;
+    EXPECT_EQ(ord::vertex_separator(g, 1, p), ref) << "imbalance " << imb;
   }
 }
 

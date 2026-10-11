@@ -538,11 +538,15 @@ std::int64_t separator_weight(const Graph& g, const std::vector<std::uint8_t>& w
 }
 
 // Bound on the weight of each half: imbalance * total / 2, but never below what a vertex-level
-// split can guarantee.
+// split can guarantee. Clamped to the total weight in floating point (imbalance >= 2 already
+// allows a half to hold everything; a huge value would overflow the conversion to int64).
 std::int64_t max_part_weight(const Graph& g, double imbalance) {
   std::int32_t heaviest = 1;
   for (const std::int32_t w : g.vwgt) heaviest = std::max(heaviest, w);
-  const auto bound = static_cast<std::int64_t>(imbalance * 0.5 * static_cast<double>(g.total_vwgt));
+  const double total = static_cast<double>(g.total_vwgt);
+  const double half = imbalance * 0.5 * total;
+  const std::int64_t bound =
+      half < total ? static_cast<std::int64_t>(std::max(0.0, half)) : g.total_vwgt;  // NaN: total
   return std::max(bound, (g.total_vwgt + 1) / 2 + heaviest);
 }
 
