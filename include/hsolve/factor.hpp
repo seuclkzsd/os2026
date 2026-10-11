@@ -8,8 +8,11 @@
 //                 (order 2n, SYM=2). Solves: E [Re x; Im x] = [Re b; Im b]. inertia(K) = inertia(E)/2.
 //                 Flops and memory match a complex LU of K; inertia comes for free. Real or
 //                 imaginary parts that are exactly zero in both A and B (hence for every real
-//                 alpha, beta) are left out of E's pattern, so a mostly-real K costs little more
-//                 than two real factorizations.
+//                 alpha, beta) are left out of E's pattern. That pays off only when Im K
+//                 vanishes on whole regions of the graph: with Im K == 0 E decouples into two
+//                 copies of Re K (2-D grid, n = 1e5: 0.9 GFlop, 134 MB vs 3.5 GFlop, 209 MB
+//                 with every coupling complex), while phases on every tenth grid row already
+//                 cost as much as a fully complex K.
 //
 // MUMPS facts this contract relies on (verified on 5.8.2 by the P0 design review):
 //   * Null-pivot detection needs ICNTL(24)=1 AND CNTL(3) > 0; with CNTL(3)=0 an exactly singular
@@ -20,24 +23,30 @@
 //   * INFOG values above 2^31 are reported negative in units of 1e6 ("-x means x*10^6").
 //   * MB in MUMPS means 1e6 bytes.
 //   * Workspace errors are cured by a larger ICNTL(14) without re-analysis (measured: a
-//     saddle-point matrix with ICNTL(14)=0 fails with -9 once, then succeeds); BLR enabled at
+//     saddle-point matrix with ICNTL(14)=0 fails once, then succeeds); BLR enabled at
 //     analysis can be switched off for the factorization; ICNTL(22) (out-of-core) can change
 //     between factorizations, and JOB=-2 deletes the factor files.
 //
 // Null-pivot threshold (null_pivot_tol = CNTL(3)), measured on 5.8.2 with ICNTL(8)=7 scaling.
-// At an exactly singular shift the last pivot is roughly c*eps*||K|| / |v_last|^2, v_last being
-// the null vector's component at the last eliminated variable, so for delocalized null vectors
-// it GROWS with n; at |sigma - lambda| = delta*||K|| it is about delta*||K|| / |v_last|^2.
+// MUMPS flags a pivot whose remaining row is below CNTL(3)*||A_pre||. At an exactly singular
+// shift the decisive (last root) pivot is roughly c*eps*||K|| / |v_r|^2, v_r being the null
+// vector restricted to the root separator, so for delocalized null vectors it GROWS with n and
+// depends on the elimination order; at |sigma - lambda| = delta*||K|| it is about
+// delta*||K|| / |v_r|^2 >= delta*||K||.
 //   * sigma exactly on an eigenvalue of 2-D Laplacians (24 shifts across the spectrum):
 //       CNTL(3) = 1e-12 flags 22/24 (n=2500), 18/24 (n=10^4), 7/24 (n=4*10^4);
-//       CNTL(3) = 1e-10 flags 24/24 for n = 2500 .. 4*10^4 and 12/12 for n = 9*10^4.
+//       CNTL(3) = 1e-10 flags 24/24 for n = 2500 .. 4*10^4 and 12/12 for n = 9*10^4 (analysis
+//       at a generic shift); with the analysis at a shift that zeroes the diagonal (different,
+//       2x2-compressed ordering) a 50x51 grid gave 22/24 and needed 3e-9 for 24/24.
 //   * |sigma - lambda| >= 1e-10 * ||K|| (delocalized Laplacian modes, n <= 9*10^4, and localized
 //     modes of prescribed-spectrum matrices, real and complex): never flagged for any CNTL(3)
 //     up to 1e-9; larger thresholds only flag shifts within ~1e-14*||K|| of an eigenvalue.
-// Hence the default 1e-10. Trade-off: for much larger n with delocalized null vectors an exact
-// singularity can escape detection; the factorization then has a huge but finite pivot (solves
-// stay backward stable, the zero eigenvalue is counted on an arbitrary side), which is why
-// inertia endpoints must lie in spectral gaps. The "near-singular but regular" guarantee is
+// Hence the default 1e-10: the largest value for which shifts at delta >= 1e-10 stay regular
+// even in the worst case |v_r| ~ 1, with exact singularities caught in all generic-order tests.
+// Trade-off: an exact singularity can escape detection (very large n, or a null vector that
+// nearly vanishes on the root separator); the factorization then has a tiny but finite pivot
+// (solves stay backward stable, the zero eigenvalue is counted on an arbitrary side), which is
+// why inertia endpoints must lie in spectral gaps. The "near-singular but regular" guarantee is
 // relative to ||K|| (the driver's scale), not to |lambda|.
 #pragma once
 

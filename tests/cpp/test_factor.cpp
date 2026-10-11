@@ -367,8 +367,8 @@ TEST(FactorSingularComplex, ShiftOnEigenvalueIsSingular) {
 
 // ------------------------------------------------------------------------------- solves
 
-// Measured backward errors: ~1e-14 .. 2e-13 in double, i.e. ~200 eps (element growth with
-// MUMPS' threshold pivoting), and the same constant times eps_single in single precision.
+// Measured backward errors: 1e-14 .. 2.3e-13 in double (up to ~1000 eps: element growth with
+// MUMPS' threshold pivoting on random indefinite matrices).
 TYPED_TEST(FactorSolve, MultiRhsIsBackwardStable) {
   using T = TypeParam;
   // Indefinite shifted Laplacian (standard problem) ...
@@ -391,20 +391,32 @@ TYPED_TEST(FactorSolve, MultiRhsIsBackwardStable) {
   EXPECT_EQ(g->stats().rhs_solved, 7);
 }
 
+// Measured: ~4e-6 for the shifted Laplacian, up to ~6e-5 for random indefinite pencils (more
+// element growth), i.e. 70 .. 1000 eps_single.
 TYPED_TEST(FactorSolve, SinglePrecisionHasSinglePrecisionAccuracy) {
   using T = TypeParam;
-  const auto a = hs::test::random_hermitian<T>(800, 0.01, 31);
-  const auto b = hs::test::random_hpd<T>(800, 0.005, 32);
-  ShiftedPencil<T> pencil(a, &b);
   FactorOptions opt;
   opt.precision = FactorPrecision::Single;
+
+  const auto lap = hs::test::laplacian_2d<T>(50, 50);
+  ShiftedPencil<T> std_pencil(lap, nullptr);
   auto f = hs::make_mumps_factorization<T>(opt);
-  f->analyze(pencil, 1.0, 0.2);
-  ASSERT_TRUE(f->factorize(1.0, 0.2));
-  const double eta = solve_backward_error(*f, pencil, 1.0, 0.2, 4, 3);
-  EXPECT_LE(eta, 1e-4) << "about 200 * eps_single expected";
-  EXPECT_GE(eta, 1e-9) << "a single-precision factor cannot be double-accurate";
+  f->analyze(std_pencil, 1.0, -3.3);
+  ASSERT_TRUE(f->factorize(1.0, -3.3));
+  const double eta_lap = solve_backward_error(*f, std_pencil, 1.0, -3.3, 3, 3);
+  EXPECT_LE(eta_lap, 2e-5);
+  EXPECT_GE(eta_lap, 1e-9) << "a single-precision factor cannot be double-accurate";
   EXPECT_EQ(f->options().precision, FactorPrecision::Single);
+
+  const auto a = hs::test::random_hermitian<T>(800, 0.01, 31);
+  const auto b = hs::test::random_hpd<T>(800, 0.005, 32);
+  ShiftedPencil<T> gen_pencil(a, &b);
+  auto g = hs::make_mumps_factorization<T>(opt);
+  g->analyze(gen_pencil, 1.0, 0.2);
+  ASSERT_TRUE(g->factorize(1.0, 0.2));
+  const double eta_gen = solve_backward_error(*g, gen_pencil, 1.0, 0.2, 4, 4);
+  EXPECT_LE(eta_gen, 2e-4);
+  EXPECT_GE(eta_gen, 1e-9);
 }
 
 TYPED_TEST(FactorSolve, BlockLowRankFactorizationSolvesAccurately) {

@@ -23,7 +23,7 @@ namespace hs::mumps {
 ///                Since alpha and beta are real, Re K = alpha Re A + beta Re B (likewise Im),
 ///                so a part that is exactly zero in both A and B is zero for EVERY shift and
 ///                is left out of the pattern (exact, shift-independent pruning; e.g. a complex
-///                K whose couplings are mostly real gets an almost block-diagonal E). The
+///                K with Im K == 0 gets a block-diagonal E, two decoupled copies of Re K). The
 ///                diagonal of Re K is always kept.
 /// The arrays stay valid (and must not move) while MUMPS uses them; the object keeps a
 /// pointer to the pencil, which must outlive it.
