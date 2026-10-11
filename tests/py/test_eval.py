@@ -106,7 +106,7 @@ def test_missing_eigenvalue_is_detected(tmp_path):
     comp = doc["completeness"]
     assert doc["verdict"] == "fail" and comp["status"] == "incomplete" and comp["found"] == 3
     assert [m["lambda_re"] for m in comp["missing"]] == pytest.approx([w[0]])
-    assert comp["beyond_target"] == [3]
+    assert comp["beyond_target"] == [3] and comp["extra"] == [3] and comp["unmatched"] == []
 
 
 def test_duplicated_eigenvector_is_detected(tmp_path):
@@ -159,6 +159,28 @@ def test_cluster_cut_by_k_accepts_any_subspace(tmp_path):
     V[:, 1] = ref.eigenvectors[:, np.argmin(np.abs(ref.eigenvalues - 0.7))]
     doc = evaluate.evaluate("c", _save(tmp_path / "res2", w[:2], V[:, :2]), root=tmp_path)
     assert doc["summary"]["max_subspace_angle"] > 1.0 and doc["verdict"] == "fail"
+
+
+def test_nearest_set_is_resolved_inside_a_dense_cluster(tmp_path):
+    # Four eigenvalues 1e-7 apart next to sigma = 0: one cluster for the subspace angles
+    # (cluster_rtol * scale ~ 1e-5), yet 10x apart from the resolution 10 * tol * scale ~ 1e-8 that
+    # an accepted pair guarantees, so "the 2 nearest" is decidable and checked.
+    eigs = np.concatenate([SPECTRUM, 1e-7 * np.arange(1, 5)])
+    _case(tmp_path, "z", _prescribed(eigs, np.random.default_rng(7)), problem="HEP", sigma=0.0, k=2)
+    reference.build_reference("z", tmp_path)
+    w, V = _nearest(cio.load_ref("z", tmp_path), 0.0, 3)
+    doc = evaluate.evaluate("z", _save(tmp_path / "ok", w[:2], V[:, :2]), root=tmp_path)
+    assert doc["verdict"] == "pass", doc["reasons"]
+    assert [c["multiplicity"] for c in doc["clusters"]] == [4] and doc["clusters"][0]["max_angle"] < 1e-8
+    wrong = _save(tmp_path / "wrong", w[[0, 2]], V[:, [0, 2]])     # skips the 2nd nearest
+    doc = evaluate.evaluate("z", wrong, root=tmp_path)
+    comp = doc["completeness"]
+    assert doc["verdict"] == "fail" and comp["status"] == "incomplete" and comp["boundary_deficit"] == 1
+    assert [m["lambda_re"] for m in comp["boundary_candidates"]] == pytest.approx([w[1]], abs=1e-12)
+    assert comp["extra"] == [1] and doc["tolerances"]["tie_rtol"] == pytest.approx(1e-9)
+    # a tie band wider than the cluster makes its members interchangeable
+    doc = evaluate.evaluate("z", wrong, root=tmp_path, tie_rtol=1e-6)
+    assert doc["verdict"] == "pass" and doc["completeness"]["status"] == "complete"
 
 
 # ------------------------------------------------------------------------------------- GHIEP

@@ -23,13 +23,22 @@ comparable=false and not used below; build a discrete one with tools/eval/refere
   * eigenvalue errors: eig_abs_error |lambda - mu|; eig_rel_error |lambda - mu|/|mu| (null for
     mu == 0); eig_scaled_error |lambda - mu|/(|mu| + scale), the one comparable with eta.
   * completeness: expected = the target's reference eigenvalues (nearest: the k nearest sigma;
-    smallest/largest: the k extreme ones; interval: all inside). Reference eigenvalues tied with the
-    k-th (within cluster_rtol) are interchangeable: any of them may complete the set, so a
-    multiplicity cluster cut by k accepts any subset of its eigenspace. Status:
+    smallest/largest: the k extreme ones; interval: all inside). Reference eigenvalues whose target
+    key (distance to sigma, value, interval end) ties with the k-th one within
+    tie_rtol * (|mu| + scale) are interchangeable: any of them may complete the set, so a
+    multiplicity cluster cut by k accepts any subset of its eigenspace. tie_rtol defaults to
+    TIE_FACTOR * tol, the resolution an accepted pair guarantees: for a Hermitian matrix
+    |lambda - mu| <= ||r||_2/||x||_2 = eta (||A||_2 + |lambda|), so eigenvalues closer than about
+    tol * (|mu| + scale) cannot be told apart by the acceptance test, while farther ones can (a
+    dense cluster such as a 1e-6-wide zero cluster is resolved, not waved through). For a definite
+    pencil the bound grows by up to cond(B): raise --tie-rtol for ill-conditioned B. Status:
         complete / incomplete      ref.complete and its window covers the needed range (certified)
         consistent / inconsistent  same test against an uncertified (solver) reference
         unknown                    no usable reference
-    Independently of any reference, fewer than k distinct vectors is 'incomplete'.
+    Independently of any reference, fewer than k distinct vectors is 'incomplete'. Computed pairs
+    outside the expected set are 'extra' = 'beyond_target' (matched to another reference
+    eigenvalue) + 'unmatched' (no reference eigenvalue within match_rtol); extra pairs are not an
+    error, but unmatched ones inside the window of a complete reference are 'spurious'.
   * clusters: reference eigenvalues chained by gaps <= cluster_rtol * (|mu| + scale) (consecutive in
     (Re, Im) order). With reference eigenvectors, the principal angles between the span of the
     computed vectors matched into a cluster and the cluster's reference eigenspace are reported
@@ -62,6 +71,7 @@ from tools.eval import common
 NORM_TOL = 1e-8        # ARPACK relative accuracy of the ||.||_2 estimate
 MATCH_RTOL = 1e-6
 CLUSTER_RTOL = 1e-6
+TIE_FACTOR = 10.0      # default tie_rtol = TIE_FACTOR * tol (module docstring, completeness)
 DUP_TOL = 1e-4
 EVAL_FILE = "evaluation.json"
 
@@ -221,8 +231,8 @@ class ExpectedSet:
 
 def expected_set(ref_vals: np.ndarray, tgt: dict[str, Any], scale: float, rtol: float) -> ExpectedSet:
     """Reference indices the target asks for. Values tied with the k-th one (or with an interval end)
-    within rtol * (|mu| + scale) are interchangeable `optional` ones; `window` is the real range a
-    reference must list completely for the set to be certain."""
+    within rtol * (|mu| + scale) are interchangeable `optional` ones (rtol is the evaluation's
+    tie_rtol); `window` is the real range a reference must list completely for the set to be certain."""
     ref = np.asarray(ref_vals, dtype=complex)
     if tgt["mode"] == "interval":
         lo, hi = float(tgt["lower"]), float(tgt["upper"])
@@ -266,7 +276,8 @@ def assess_completeness(tgt: dict[str, Any], lambdas: np.ndarray, ref: cio.Refer
     lam = np.asarray(lambdas, dtype=complex)
     out: dict[str, Any] = {"status": "unknown", "certified": False, "expected": None, "found": None,
                            "missing": [], "boundary_deficit": 0, "boundary_candidates": [],
-                           "beyond_target": [], "unmatched": [], "spurious": [], "distinct_returned": n_distinct}
+                           "extra": [], "beyond_target": [], "unmatched": [], "spurious": [],
+                           "distinct_returned": n_distinct}
     k_needed = min(int(tgt["k"]), n) if tgt["mode"] != "interval" else 0
     if ref is not None and exp is not None:
         vals = np.asarray(ref.eigenvalues, dtype=complex)
@@ -296,6 +307,7 @@ def assess_completeness(tgt: dict[str, Any], lambdas: np.ndarray, ref: cio.Refer
                 inside = rw is None or rw[0] <= lam[i].real <= rw[1]
                 if complete_ref and inside:
                     out["spurious"].append(i)
+        out["extra"] = sorted(out["beyond_target"] + out["unmatched"])
         if exp.window is None and vals.size < k_needed and rw is not None:
             out["status"] = "unknown"   # fewer reference values than requested and no full spectrum
         elif complete_ref and _covers(info, exp.window):
@@ -347,13 +359,15 @@ def _data_root(c: cio.Case, root: str | Path) -> Path:
 
 def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path = cio.DEFAULT_ROOT,
              solver: str | None = None, tol: float | None = None, match_rtol: float = MATCH_RTOL,
-             cluster_rtol: float = CLUSTER_RTOL, dup_tol: float = DUP_TOL,
+             cluster_rtol: float = CLUSTER_RTOL, tie_rtol: float | None = None, dup_tol: float = DUP_TOL,
              dense_max: int = common.DENSE_MAX) -> dict[str, Any]:
-    """Evaluation document (docs/FORMATS.md §4) for one (case, result directory)."""
+    """Evaluation document (docs/FORMATS.md §4) for one (case, result directory). tol defaults to the
+    case config's tol, tie_rtol to TIE_FACTOR * tol."""
     c = cio.load_case(case_ref, root=root)
     problem = common.problem_type(c)
     tgt = common.target(c)
     tol = common.tol(c) if tol is None else float(tol)
+    tie_rtol = TIE_FACTOR * tol if tie_rtol is None else float(tie_rtol)
     res = cio.load_result(result_dir)
     data_root = _data_root(c, root)
     stored_ref = cio.load_ref(c.name, root=data_root)
@@ -396,7 +410,7 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
                      eig_abs_error=err, eig_rel_error=err / abs(mu) if mu != 0 else None,
                      eig_scaled_error=err / (abs(mu) + scale) if abs(mu) + scale > 0 else None)
 
-    exp = expected_set(ref_vals, tgt, scale, cluster_rtol) if ref is not None and ref_vals.size else None
+    exp = expected_set(ref_vals, tgt, scale, tie_rtol) if ref is not None and ref_vals.size else None
     completeness = assess_completeness(tgt, lambdas, ref, exp, match, lambdas.size - len(dups), n)
     clusters = cluster_records(ref, match, exp, X, scale, cluster_rtol) if exp is not None else []
     b_orth = b_orthogonality(X, c.B) if problem != "GHIEP" and lambdas.size else None
@@ -438,7 +452,8 @@ def evaluate(case_ref: str | Path, result_dir: str | Path, *, root: str | Path =
         "problem": problem, "n": n, "nnz_a": int(c.A.nnz), "nnz_b": int(c.B.nnz) if c.B is not None else 0,
         "complex_scalars": common.is_complex(c),
         "config": c.config, "target": tgt, "tol": tol,
-        "tolerances": {"match_rtol": match_rtol, "cluster_rtol": cluster_rtol, "dup_tol": dup_tol},
+        "tolerances": {"match_rtol": match_rtol, "cluster_rtol": cluster_rtol, "tie_rtol": tie_rtol,
+                       "dup_tol": dup_tol},
         "time_total_s": report.get("time_total_s"), "peak_rss_bytes": report.get("peak_rss_bytes"),
         "solver_success": report.get("success"),
         "norms": {"norm2_a": norms.norm2_a, "norm2_b": norms.norm2_b, "scale": scale,
@@ -467,13 +482,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tol", type=float, help="acceptance threshold on eta (default: config tol)")
     ap.add_argument("--match-rtol", type=float, default=MATCH_RTOL)
     ap.add_argument("--cluster-rtol", type=float, default=CLUSTER_RTOL)
+    ap.add_argument("--tie-rtol", type=float, help=f"target-set tie band (default: {TIE_FACTOR:g} * tol)")
     ap.add_argument("--dup-tol", type=float, default=DUP_TOL)
     ap.add_argument("--dense-max", type=int, default=common.DENSE_MAX)
     args = ap.parse_args(argv)
     common.require_guard("evaluate")
     doc = evaluate(args.case, args.result, root=args.root, solver=args.solver, tol=args.tol,
-                   match_rtol=args.match_rtol, cluster_rtol=args.cluster_rtol, dup_tol=args.dup_tol,
-                   dense_max=args.dense_max)
+                   match_rtol=args.match_rtol, cluster_rtol=args.cluster_rtol, tie_rtol=args.tie_rtol,
+                   dup_tol=args.dup_tol, dense_max=args.dense_max)
     out = args.out or args.result / EVAL_FILE
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2) + "\n")

@@ -19,8 +19,9 @@ LEGEND = (
     "Metrics (tools/eval/evaluate.py): time = solver-reported `time_total_s`; peak memory = solver-reported "
     "`peak_rss_bytes`; backward error eta = ||Ax - lambda Bx||_2 / ((||A||_2 + |lambda| ||B||_2) ||x||_2) "
     "recomputed independently; eigenvalue error vs the reference as relative |lambda - mu|/|mu| and scaled "
-    "|lambda - mu|/(|mu| + ||A||_2/||B||_2); completeness found/expected (certified only against a complete "
-    "reference; consistent/inconsistent = against an uncertified solver reference)."
+    "|lambda - mu|/(|mu| + ||A||_2/||B||_2); completeness found/expected, + computed pairs outside the "
+    "target set (certified only against a complete reference; consistent/inconsistent = against an "
+    "uncertified solver reference)."
 )
 
 
@@ -44,7 +45,8 @@ def _completeness(c: dict[str, Any]) -> str:
     if exp is None:
         return c["status"]
     exp_s = f"{exp[0]}-{exp[1]}" if isinstance(exp, list) else str(exp)
-    return f"{c['status']} ({c['found']}/{exp_s})"
+    extra = f", +{len(c['extra'])} extra" if c.get("extra") else ""
+    return f"{c['status']} ({c['found']}/{exp_s}{extra})"
 
 
 def render(docs: list[dict[str, Any]], title: str) -> str:
