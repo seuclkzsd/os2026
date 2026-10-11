@@ -742,6 +742,49 @@ TYPED_TEST(LanczosTyped, ZeroEstimatesOfEarlyConvergedPairsAreHonest) {
   EXPECT_GE(decoupled, 1);
 }
 
+TYPED_TEST(LanczosTyped, LargestMagnitudeTiesRankThePositiveValueFirst) {
+  // Op = diag(1, -1) started from (1, 1): both Lanczos diagonal entries are exactly 0, so
+  // H = [[0, b], [b, 0]] has the Ritz values -b and b, an exact tie in |theta|.
+  using T = TypeParam;
+  hs::test::DiagonalOperator<T> op(std::vector<T>{T(1.0), T(-1.0)});
+  DenseMatrix<T> x0(2, 1);
+  x0(0, 0) = T(1.0);
+  x0(1, 0) = T(1.0);
+  KrylovSchurOptions<T> opt;
+  opt.initial = &x0;
+  for (index_t nev : {1, 2}) {
+    opt.nev = nev;
+    const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestMagnitude, opt);
+    ASSERT_EQ(r.ritz_all.size(), 2u);
+    ASSERT_EQ(r.ritz_all[0], -r.ritz_all[1]);  // the tie is exact
+    EXPECT_TRUE(r.converged);
+    check_contract<T>(op, nullptr, r, Which::LargestMagnitude, opt);
+    EXPECT_EQ(r.theta[0], r.ritz_all[1]) << "nev " << nev;
+    EXPECT_NEAR(r.theta[0], 1.0, 1e-15);
+  }
+}
+
+TYPED_TEST(LanczosTyped, ConvergedPairsPrecedeBetterRankedUnconvergedOnes) {
+  // The tight top pair {1, 1 - 1e-7} converges much more slowly than the isolated 0.7 below it;
+  // after a few restarts only 0.7 has converged and must come first although it ranks third.
+  using T = TypeParam;
+  std::vector<double> spectrum = {1.0, 1.0 - 1e-7, 0.7};
+  for (index_t i = 3; i < 200; ++i)
+    spectrum.push_back(-1.0 + 1.4 * static_cast<double>(i - 3) / 196.0);
+  auto op = diagonal_operator<T>(spectrum);
+  KrylovSchurOptions<T> opt;
+  opt.nev = 3;
+  opt.ncv = 8;
+  opt.tol = 1e-7;
+  opt.max_restarts = 8;
+  const auto r = hs::lanczos_krylov_schur<T>(op, nullptr, Which::LargestAlgebraic, opt);
+  ASSERT_EQ(r.nconv, 1);
+  EXPECT_NEAR(r.theta[0], 0.7, 1e-12);
+  EXPECT_GT(r.theta[1], 0.99);
+  EXPECT_GT(r.theta[2], 0.99);
+  check_contract<T>(op, nullptr, r, Which::LargestAlgebraic, opt);
+}
+
 TYPED_TEST(LanczosTyped, NonConvergenceIsReportedNotThrown) {
   using T = TypeParam;
   const index_t n = 400;
