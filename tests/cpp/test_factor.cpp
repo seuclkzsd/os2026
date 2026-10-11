@@ -1,15 +1,21 @@
-// Unit tests for src/factor (MUMPS backend): exact inertia, null-pivot (singular) detection,
-// multi-RHS solve accuracy, refactorization with one analysis, error paths, estimates,
-// out-of-core storage and compute_inertia. Analytic spectra wherever possible.
+// Unit tests for src/factor (MUMPS backend): exact inertia, null-pivot (singular) detection in
+// double and single precision, multi-RHS solve accuracy, refactorization with one analysis and
+// bitwise reproducibility, error paths (workspace retries and their exhaustion, memory cap,
+// argument validation), estimates and memory statistics, out-of-core storage and
+// compute_inertia. Analytic spectra wherever possible.
 #include <gtest/gtest.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <random>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "factor/mumps_api.hpp"
@@ -81,15 +87,15 @@ double solve_backward_error(hs::SparseFactorization<T>& f, const ShiftedPencil<T
   return backward_error(pencil.assemble_full(alpha, beta), x.data(), b.data(), nrhs, ld);
 }
 
-// Saddle-point matrix [[M, C], [C^H, 0]] with M the SPD 2-D Laplacian on an m x m grid and C a
-// random sparse m^2 x n2 block (full column rank with probability 1). Its inertia is exactly
-// (n2 negative, 0, m^2 positive), and the zero block forces 2x2 / delayed pivots.
-template <class T>
-CsrMatrix<T> saddle_point(index_t m, index_t n2, int per_column, std::uint64_t seed) {
-  const auto lap = hs::test::laplacian_2d<T>(m, m);
+// Saddle-point matrix [[M, C], [C^T, 0]] with M the SPD 2-D Laplacian on an m x m grid and C a
+// random sparse m^2 x n2 block with per_column entries per column. When C has full column rank
+// its inertia is exactly (n2 negative, 0, m^2 positive); the zero block forces 2x2 / delayed
+// pivots, i.e. workspace beyond the analysis estimate.
+CsrMatrix<double> saddle_point(index_t m, index_t n2, int per_column, std::uint64_t seed) {
+  const auto lap = hs::test::laplacian_2d<double>(m, m);
   const index_t n1 = lap.nrows;
   std::vector<index_t> r, c;
-  std::vector<T> v;
+  std::vector<double> v;
   for (index_t i = 0; i < n1; ++i)
     for (index_t p = lap.rowptr[i]; p < lap.rowptr[i + 1]; ++p) {
       r.push_back(i);
@@ -102,16 +108,22 @@ CsrMatrix<T> saddle_point(index_t m, index_t n2, int per_column, std::uint64_t s
   for (index_t j = 0; j < n2; ++j)
     for (int t = 0; t < per_column; ++t) {
       const index_t i = row(g);
-      T x;
-      if constexpr (hs::is_complex_v<T>) {
-        x = T(u(g), u(g));
-      } else {
-        x = u(g);
-      }
+      const double x = u(g);
       r.push_back(i), c.push_back(n1 + j), v.push_back(x);
-      r.push_back(n1 + j), c.push_back(i), v.push_back(hs::conj_if(x));
+      r.push_back(n1 + j), c.push_back(i), v.push_back(x);
     }
-  return hs::csr_from_coo<T>(n1 + n2, n1 + n2, r, c, v);
+  return hs::csr_from_coo<double>(n1 + n2, n1 + n2, r, c, v);
+}
+
+// A real matrix as a T matrix. For T = cplx the embedding of the (real-valued) result is two
+// decoupled copies of the real matrix, so the factorization behaves exactly like the real one.
+template <class T>
+CsrMatrix<T> as_scalar(const CsrMatrix<double>& a) {
+  if constexpr (hs::is_complex_v<T>) {
+    return hs::to_complex(a);
+  } else {
+    return a;
+  }
 }
 
 // 2-D Laplacian whose couplings carry a phase on every fifth grid row only (a "magnetic"
@@ -294,24 +306,29 @@ TEST(FactorEmbedding, PartiallyComplexPencilsHaveExactInertiaAndSolves) {
 
 // ------------------------------------------------------------------------------- singularity
 
+// `samples` eigenvalues w[(n-1) t / (samples-1)], t = 0 .. samples-1, spread over the spectrum.
+std::vector<double> spread_eigenvalues(const std::vector<double>& w, int samples) {
+  const index_t n = static_cast<index_t>(w.size());
+  std::vector<double> s;
+  for (int t = 0; t < samples; ++t) s.push_back(w[(n - 1) * t / (samples - 1)]);
+  return s;
+}
+
 // sigma exactly on a (double-rounded) eigenvalue of a 2-D Laplacian of order >= 2500: the null
 // pivot is detected, factorize() returns false, the inertia is invalid, solve() refuses, and the
 // object stays analysed so that a perturbed shift factorizes with the exact inertia.
-// Detection depends on the elimination order (see the null-pivot note in factor.hpp); the
-// analysis uses a generic first shift, as the driver does. Measured margin: every sample below is
-// still detected with CNTL(3) = 1e-11, a tenth of the default.
+// Detection gets harder as n grows (null-pivot measurements in factor.hpp): on the 101x100 grid
+// CNTL(3) = 1e-10 (the former default) misses 4 of these 24 shifts, 1e-9 none.
 TYPED_TEST(FactorSingular, ShiftOnLaplacianEigenvalueIsSingular) {
   using T = TypeParam;
-  for (auto [nx, ny] : {std::pair<index_t, index_t>{50, 50}, {50, 51}, {60, 60}}) {
+  for (auto [nx, ny] : {std::pair<index_t, index_t>{50, 50}, {50, 51}, {60, 60}, {101, 100}}) {
     const auto a = hs::test::laplacian_2d<T>(nx, ny);
     const auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
     const index_t n = a.nrows;
     ShiftedPencil<T> pencil(a, nullptr);
     auto f = hs::make_mumps_factorization<T>();
     f->analyze(pencil, 1.0, -3.0);
-    const int samples = 24;
-    for (int t = 0; t < samples; ++t) {
-      const double lambda = w[(n - 1) * t / (samples - 1)];
+    for (double lambda : spread_eigenvalues(w, 24)) {
       EXPECT_FALSE(f->factorize(1.0, -lambda)) << nx << "x" << ny << " lambda=" << lambda;
       EXPECT_FALSE(f->inertia().valid);
       std::vector<T> b(static_cast<std::size_t>(n), T(1));
@@ -324,37 +341,77 @@ TYPED_TEST(FactorSingular, ShiftOnLaplacianEigenvalueIsSingular) {
   }
 }
 
-// Shifts at relative distance 1e-10 .. 1e-8 from an eigenvalue (relative to |lambda| and to
-// ||K||_2 ~ 8) are NOT singular: factorization succeeds with the exact inertia.
-TYPED_TEST(FactorSingular, NearSingularShiftHasExactInertia) {
+// The driver analyses at the first shift it factorizes, which may be exactly singular; that
+// analysis sees different values (2x2 pivot preselection, ordering) than a generic one. On this
+// grid CNTL(3) = 1e-10 misses one of the 24 shifts (lambda = 0.5463), 3e-10 none.
+TYPED_TEST(FactorSingular, ShiftOnLaplacianEigenvalueIsSingularWithAnalysisAtThatShift) {
   using T = TypeParam;
-  const index_t nx = 50, ny = 51, n = nx * ny;
+  const index_t nx = 100, ny = 100;
   const auto a = hs::test::laplacian_2d<T>(nx, ny);
   const auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
   ShiftedPencil<T> pencil(a, nullptr);
   auto f = hs::make_mumps_factorization<T>();
-  f->analyze(pencil, 1.0, -4.0);
-  const int samples = 12;
-  for (int t = 1; t < samples; ++t) {
-    const double lambda = w[(n - 1) * t / samples];
-    for (double delta : {1e-10, 1e-9, 1e-8})
-      for (double sign : {-1.0, 1.0})
-        for (double sigma : {lambda * (1.0 + sign * delta), lambda + sign * delta * 8.0}) {
-          ASSERT_TRUE(f->factorize(1.0, -sigma)) << "lambda=" << lambda << " sigma=" << sigma;
+  const auto shifts = spread_eigenvalues(w, 24);
+  for (double lambda : shifts) {
+    f->analyze(pencil, 1.0, -lambda);
+    EXPECT_FALSE(f->factorize(1.0, -lambda)) << "lambda=" << lambda;
+    EXPECT_FALSE(f->inertia().valid);
+  }
+  EXPECT_EQ(f->stats().analyses, static_cast<index_t>(shifts.size()));
+}
+
+// Shifts at distance d * ||K|| from an eigenvalue, d = 1e-10 .. 1e-8 and ||K|| = ||A||_2 (the
+// driver's scale), are NOT singular: factorization succeeds with the exact inertia. Measured:
+// such shifts start being flagged at CNTL(3) ~ 1e3 * d, i.e. at 1e-7 (10x the default) for
+// d = 1e-10.
+TYPED_TEST(FactorSingular, NearSingularShiftHasExactInertia) {
+  using T = TypeParam;
+  for (auto [nx, ny, samples] : {std::tuple<index_t, index_t, int>{50, 51, 12}, {101, 100, 6}}) {
+    const auto a = hs::test::laplacian_2d<T>(nx, ny);
+    const auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
+    const double knorm = w.back();
+    ShiftedPencil<T> pencil(a, nullptr);
+    auto f = hs::make_mumps_factorization<T>();
+    f->analyze(pencil, 1.0, -4.0);
+    for (double lambda : spread_eigenvalues(w, samples))
+      for (double d : {1e-10, 1e-9, 1e-8})
+        for (double sign : {-1.0, 1.0}) {
+          const double sigma = lambda + sign * d * knorm;
+          ASSERT_TRUE(f->factorize(1.0, -sigma))
+              << nx << "x" << ny << " lambda=" << lambda << " sigma=" << sigma;
           EXPECT_EQ(f->inertia().neg, count_below(w, sigma))
-              << "lambda=" << lambda << " sigma=" << sigma;
+              << nx << "x" << ny << " lambda=" << lambda << " sigma=" << sigma;
           EXPECT_EQ(f->stats().null_pivots, 0);
         }
   }
 }
 
-// A genuinely complex Hermitian matrix shifted onto one of its prescribed eigenvalues.
-TEST(FactorSingularComplex, ShiftOnEigenvalueIsSingular) {
+// The guarantee above is relative to ||K||, not to |lambda|: next to the smallest eigenvalue
+// (|lambda| = 1.9e-3, ||K|| = 8) a shift at 1e-10 * |lambda| lies only ~2e-14 * ||K|| away,
+// within rounding of a singular matrix, and is reported singular (the safe verdict there).
+TYPED_TEST(FactorSingular, ShiftWithinRoundingOfASmallEigenvalueIsSingular) {
+  using T = TypeParam;
+  const index_t nx = 100, ny = 101;
+  const auto a = hs::test::laplacian_2d<T>(nx, ny);
+  const auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
+  f->analyze(pencil, 1.0, -3.0);
+  for (double sign : {-1.0, 1.0}) {
+    const double sigma = w.front() * (1.0 + sign * 1e-10);
+    EXPECT_FALSE(f->factorize(1.0, -sigma)) << "sigma=" << sigma;
+  }
+}
+
+// Localized eigenvectors (prescribed spectrum, random unitary 8x8 blocks; genuinely complex for
+// T = cplx, which exercises the full -Im K block of the embedding).
+TYPED_TEST(FactorSingular, ShiftOnPrescribedEigenvalueIsSingular) {
+  using T = TypeParam;
   const index_t n = 1200;
   const auto w = irregular_spectrum(n);
-  const auto a = hs::test::prescribed_spectrum<cplx>(w, 8, 99);
-  ShiftedPencil<cplx> pencil(a, nullptr);
-  auto f = hs::make_mumps_factorization<cplx>();
+  const auto a = hs::test::prescribed_spectrum<T>(w, 8, 99);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
   f->analyze(pencil, 1.0, 0.0);
   for (index_t k : {index_t(0), n / 4, n / 2, 3 * n / 4, n - 1}) {
     EXPECT_FALSE(f->factorize(1.0, -w[k])) << "lambda=" << w[k];
@@ -362,6 +419,32 @@ TEST(FactorSingularComplex, ShiftOnEigenvalueIsSingular) {
     const double sigma = w[k] + 1e-9;
     ASSERT_TRUE(f->factorize(1.0, -sigma));
     EXPECT_EQ(f->inertia().neg, count_below(w, sigma));
+  }
+}
+
+// Single precision (smumps) uses single_null_pivot_tol (calibration in factor.hpp): shifts exactly
+// on eigenvalues with localized eigenvectors are caught, while shifts at the smallest distance a
+// Single factor must accept (1e-6 * ||K||, DESIGN 3.4b) stay regular with the exact inertia.
+// Delocalized eigenvectors usually escape detection in single precision; OpsShiftInvert checks
+// that the refinement residual exposes those.
+TYPED_TEST(FactorSingular, SinglePrecisionThresholdMatchesSinglePrecisionAccuracy) {
+  using T = TypeParam;
+  const index_t n = 3000;
+  const auto w = irregular_spectrum(n);
+  const double knorm = std::max(-w.front(), w.back());
+  const auto a = hs::test::prescribed_spectrum<T>(w, 12, 2026);
+  ShiftedPencil<T> pencil(a, nullptr);
+  FactorOptions opt;
+  opt.precision = FactorPrecision::Single;
+  auto f = hs::make_mumps_factorization<T>(opt);
+  f->analyze(pencil, 1.0, 0.0);
+  for (double lambda : spread_eigenvalues(w, 16)) {
+    EXPECT_FALSE(f->factorize(1.0, -lambda)) << "lambda=" << lambda;
+    for (double sign : {-1.0, 1.0}) {
+      const double sigma = lambda + sign * 1e-6 * knorm;
+      ASSERT_TRUE(f->factorize(1.0, -sigma)) << "lambda=" << lambda << " sigma=" << sigma;
+      EXPECT_EQ(f->inertia().neg, count_below(w, sigma)) << "sigma=" << sigma;
+    }
   }
 }
 
@@ -442,14 +525,28 @@ TYPED_TEST(FactorSolve, ValidatesArguments) {
   ShiftedPencil<T> pencil(a, nullptr);
   auto f = hs::make_mumps_factorization<T>();
   f->analyze(pencil, 1.0, -1.0);
+  using Code = hs::Error::Code;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
   std::vector<T> b(100, T(1));
   // No factorization yet.
-  EXPECT_EQ(error_code_of([&] { f->solve(b.data(), 1, 50); }), hs::Error::Code::Internal);
+  EXPECT_EQ(error_code_of([&] { f->solve(b.data(), 1, 50); }), Code::Internal);
+  EXPECT_EQ(error_code_of([&] { (void)f->factorize(nan, -1.0); }), Code::InvalidInput);
+  EXPECT_EQ(error_code_of([&] { (void)f->factorize(1.0, inf); }), Code::InvalidInput);
   ASSERT_TRUE(f->factorize(1.0, -1.01));
-  EXPECT_EQ(error_code_of([&] { f->solve(b.data(), 1, 49); }), hs::Error::Code::InvalidInput);
+  EXPECT_EQ(error_code_of([&] { f->solve(b.data(), 1, 49); }), Code::InvalidInput);
+  EXPECT_EQ(error_code_of([&] { f->solve(b.data(), -1, 50); }), Code::InvalidInput);
   f->solve(b.data(), 0, 50);  // no right-hand side: no-op
   EXPECT_EQ(b[0], T(1));
   EXPECT_EQ(f->order(), 50);
+
+  // analyze() rejects non-finite coefficients and an empty pencil.
+  EXPECT_EQ(error_code_of([&] { f->analyze(pencil, inf, 0.0); }), Code::InvalidInput);
+  EXPECT_EQ(error_code_of([&] { f->analyze(pencil, 1.0, nan); }), Code::InvalidInput);
+  CsrMatrix<T> empty;
+  empty.rowptr.assign(1, 0);
+  ShiftedPencil<T> empty_pencil(empty, nullptr);
+  EXPECT_EQ(error_code_of([&] { f->analyze(empty_pencil, 1.0, 0.0); }), Code::InvalidInput);
 }
 
 // ------------------------------------------------------------------------------- refactorization
@@ -480,15 +577,50 @@ TYPED_TEST(FactorRefactorization, ManyShiftsReuseOneAnalysis) {
   EXPECT_EQ(s.last_info1, 0);
 }
 
+// FactorOptions::deterministic (the default) turns MUMPS' L0-OpenMP tree parallelism off: with
+// it, repeated solves and refactorizations of the same data differ in the last bits from call
+// to call whenever more than one thread runs (measured on this matrix with 2 threads: every
+// repetition differed); without it they are bitwise identical.
+TYPED_TEST(FactorRefactorization, RepeatedFactorizationsAndSolvesAreBitwiseReproducible) {
+  using T = TypeParam;
+  const index_t n = 2000, nrhs = 4;
+  const auto a = hs::test::random_hermitian<T>(n, 0.01, 11);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<T>();
+  ASSERT_TRUE(f->options().deterministic);
+  f->analyze(pencil, 1.0, 0.1);
+  std::vector<T> b(static_cast<std::size_t>(n * nrhs));
+  for (index_t j = 0; j < nrhs; ++j) hs::linalg::fill_random(b.data() + j * n, n, 3, j);
+  const auto solve = [&] {
+    std::vector<T> x = b;
+    f->solve(x.data(), nrhs, n);
+    return x;
+  };
+  const auto bitwise_equal = [](const std::vector<T>& x, const std::vector<T>& y) {
+    return std::memcmp(x.data(), y.data(), x.size() * sizeof(T)) == 0;
+  };
+  ASSERT_TRUE(f->factorize(1.0, 0.1));
+  const auto first = solve();
+  const index_t neg = f->inertia().neg;
+  for (int rep = 0; rep < 3; ++rep) EXPECT_TRUE(bitwise_equal(solve(), first)) << "solve " << rep;
+  for (int rep = 0; rep < 2; ++rep) {
+    ASSERT_TRUE(f->factorize(1.0, 0.1));
+    EXPECT_EQ(f->inertia().neg, neg);
+    EXPECT_TRUE(bitwise_equal(solve(), first)) << "refactorization " << rep;
+  }
+}
+
 // ------------------------------------------------------------------------------- error paths
 
 // mem_relax_pct = 0 under-estimates the workspace of a saddle-point matrix whose zero block
 // forces delayed pivots: MUMPS reports a workspace error, factorize() retries with a larger
-// ICNTL(14) and then succeeds with the exact inertia.
+// ICNTL(14) and then succeeds with the exact inertia. (Measured: one retry, for 1, 2 and 4
+// threads. A genuinely complex C spreads the delayed pivots over a coupled embedding that
+// happens to have enough slack, hence the real-valued matrix for both scalar types.)
 TYPED_TEST(FactorErrors, WorkspaceErrorIsRetriedWithMoreRelaxation) {
   using T = TypeParam;
-  const index_t m = 40, n2 = 400;
-  const auto k = saddle_point<T>(m, n2, 3, 61);
+  const index_t m = 40, n2 = 1400;
+  const auto k = as_scalar<T>(saddle_point(m, n2, 3, 61));
   ShiftedPencil<T> pencil(k, nullptr);
   FactorOptions opt;
   opt.mem_relax_pct = 0;
@@ -496,10 +628,30 @@ TYPED_TEST(FactorErrors, WorkspaceErrorIsRetriedWithMoreRelaxation) {
   f->analyze(pencil, 1.0, 0.0);
   ASSERT_TRUE(f->factorize(1.0, 0.0));
   EXPECT_GE(f->stats().workspace_retries, 1);
+  EXPECT_LE(f->stats().workspace_retries, 3);
   EXPECT_GT(f->stats().delayed_pivots, 0);
   EXPECT_EQ(f->inertia().neg, n2);
   EXPECT_EQ(f->inertia().pos, m * m);
   EXPECT_LE(solve_backward_error(*f, pencil, 1.0, 0.0, 2, 6), 1e-12);
+}
+
+// With 1500 multipliers of 2 entries each on 1600 grid rows (rank-deficient C, masses of delayed
+// pivots) no relaxation in 0 -> 10 -> 20 -> 40 % suffices (INFO -9 each time): after the third
+// retry factorize() gives up with FactorizationFailed.
+TYPED_TEST(FactorErrors, WorkspaceRetriesExhaustedThrowFactorizationFailed) {
+  using T = TypeParam;
+  const auto k = as_scalar<T>(saddle_point(40, 1500, 2, 61));
+  ShiftedPencil<T> pencil(k, nullptr);
+  FactorOptions opt;
+  opt.mem_relax_pct = 0;
+  auto f = hs::make_mumps_factorization<T>(opt);
+  f->analyze(pencil, 1.0, 0.0);
+  EXPECT_EQ(error_code_of([&] { (void)f->factorize(1.0, 0.0); }),
+            hs::Error::Code::FactorizationFailed);
+  EXPECT_EQ(f->stats().workspace_retries, 3);
+  EXPECT_TRUE(hs::mumps::is_workspace_error(f->stats().last_info1));
+  EXPECT_FALSE(f->inertia().valid);
+  EXPECT_EQ(f->stats().factorizations, 1);
 }
 
 TYPED_TEST(FactorErrors, MemoryCapTooSmallThrowsOutOfMemoryBudget) {
@@ -517,6 +669,30 @@ TYPED_TEST(FactorErrors, MemoryCapTooSmallThrowsOutOfMemoryBudget) {
   EXPECT_EQ(f->stats().last_info1, -19);
 }
 
+// With ICNTL(23) set MUMPS sizes its workspace from the cap rather than from the estimate:
+// factor_mb_allocated (INFOG(18)) grows towards cap/2 (a virtual reservation), while
+// factor_mb_used (INFOG(21)) still reports what the factorization needs.
+TYPED_TEST(FactorErrors, GenerousMemoryCapInflatesAllocationNotUse) {
+  using T = TypeParam;
+  const auto a = hs::test::laplacian_2d<T>(100, 100);
+  ShiftedPencil<T> pencil(a, nullptr);
+  auto uncapped = hs::make_mumps_factorization<T>();
+  uncapped->analyze(pencil, 1.0, -3.3);
+  ASSERT_TRUE(uncapped->factorize(1.0, -3.3));
+  const double used = uncapped->stats().factor_mb_used;
+  EXPECT_GT(used, 0.0);
+  EXPECT_LE(used, uncapped->stats().factor_mb_allocated);
+
+  FactorOptions opt;
+  opt.max_memory_mb = 400.0;
+  auto capped = hs::make_mumps_factorization<T>(opt);
+  capped->analyze(pencil, 1.0, -3.3);
+  ASSERT_TRUE(capped->factorize(1.0, -3.3));
+  EXPECT_NEAR(capped->stats().factor_mb_used, used, 1.0);
+  EXPECT_GT(capped->stats().factor_mb_allocated, 0.25 * opt.max_memory_mb);
+  EXPECT_LE(capped->stats().factor_mb_allocated, opt.max_memory_mb);
+}
+
 TYPED_TEST(FactorErrors, InvalidOptionsAndMisuseAreRejected) {
   using T = TypeParam;
   auto bad = [](auto edit) {
@@ -525,12 +701,27 @@ TYPED_TEST(FactorErrors, InvalidOptionsAndMisuseAreRejected) {
     return error_code_of([&] { hs::make_mumps_factorization<T>(o); });
   };
   using Code = hs::Error::Code;
+  const double nan = std::numeric_limits<double>::quiet_NaN();
   EXPECT_EQ(bad([](FactorOptions& o) { o.null_pivot_tol = 0.0; }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.null_pivot_tol = 1.0; }), Code::InvalidInput);
+  EXPECT_EQ(bad([&](FactorOptions& o) { o.null_pivot_tol = nan; }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.single_null_pivot_tol = 0.0; }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.single_null_pivot_tol = 2.0; }), Code::InvalidInput);
   EXPECT_EQ(bad([](FactorOptions& o) { o.ordering = 1; }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.ordering = 8; }), Code::InvalidInput);
   EXPECT_EQ(bad([](FactorOptions& o) { o.scaling = -1; }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.threads = -1; }), Code::InvalidInput);
   EXPECT_EQ(bad([](FactorOptions& o) { o.mem_relax_pct = -5; }), Code::InvalidInput);
   EXPECT_EQ(bad([](FactorOptions& o) { o.max_memory_mb = -1.0; }), Code::InvalidInput);
+  EXPECT_EQ(bad([&](FactorOptions& o) { o.max_memory_mb = nan; }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.blr = true, o.blr_tol = 0.0; }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.blr_estimates = true, o.blr_tol = 1.0; }),
+            Code::InvalidInput);
   EXPECT_EQ(bad([](FactorOptions& o) { o.ooc_dir = std::string(2000, 'x'); }), Code::InvalidInput);
+  EXPECT_EQ(bad([](FactorOptions& o) { o.verbosity = -1; }), Code::InvalidInput);
+  // Single factorizations are validated identically.
+  EXPECT_EQ(bad([](FactorOptions& o) { o.precision = FactorPrecision::Single, o.threads = -2; }),
+            Code::InvalidInput);
 
   auto f = hs::make_mumps_factorization<T>();
   EXPECT_EQ(error_code_of([&] { (void)f->factorize(1.0, 0.0); }), Code::Internal);
@@ -573,6 +764,8 @@ TYPED_TEST(FactorEstimate, FieldsArePlausible) {
   EXPECT_LE(s.factor_entries, 2 * e.factor_entries);
   EXPECT_GT(s.factor_mb_used, 0.0);
   EXPECT_LE(s.factor_mb_used, 2.0 * e.incore_mb);
+  EXPECT_GE(s.factor_mb_allocated, s.factor_mb_used);
+  EXPECT_LE(s.factor_mb_allocated, 2.0 * e.incore_mb);  // no cap: sized from the estimate
 
   // BLR at analysis only: estimates INFOG(36), INFOG(38) become available.
   FactorOptions opt;

@@ -42,6 +42,9 @@ const FactorOptions& validated(const FactorOptions& o) {
   if (!(o.null_pivot_tol > 0.0) || !(o.null_pivot_tol < 1.0))
     HS_THROW(InvalidInput,
              "FactorOptions.null_pivot_tol must lie in (0, 1), got " << o.null_pivot_tol);
+  if (!(o.single_null_pivot_tol > 0.0) || !(o.single_null_pivot_tol < 1.0))
+    HS_THROW(InvalidInput, "FactorOptions.single_null_pivot_tol must lie in (0, 1), got "
+                               << o.single_null_pivot_tol);
   if ((o.blr || o.blr_estimates) && !(o.blr_tol > 0.0 && o.blr_tol < 1.0))
     HS_THROW(InvalidInput, "FactorOptions.blr_tol must lie in (0, 1), got " << o.blr_tol);
   if (o.ooc_dir.size() >= sizeof(DMUMPS_STRUC_C::ooc_tmpdir))
@@ -138,10 +141,16 @@ void MumpsFactorization<T, U>::configure_static_controls() {
           ? static_cast<int>(std::clamp(std::floor(options_.max_memory_mb), 1.0, double(INT_MAX)))
           : 0;
   // Null-pivot detection: needs ICNTL(24)=1 AND CNTL(3) > 0 (threshold relative to the norm of
-  // the scaled/permuted matrix); with CNTL(3)=0 exactly singular matrices "factorize".
+  // the scaled/permuted matrix); with CNTL(3)=0 exactly singular matrices "factorize". The
+  // threshold depends on the arithmetic: float rounding alone moves eigenvalues by ~1e-7*||K||,
+  // so smumps needs a much larger one (calibration in factor.hpp).
   mumps_.icntl(24) = 1;
-  mumps_.cntl(3) = static_cast<U>(options_.null_pivot_tol);
+  mumps_.cntl(3) = static_cast<U>(std::is_same_v<U, float> ? options_.single_null_pivot_tol
+                                                           : options_.null_pivot_tol);
   mumps_.cntl(7) = static_cast<U>(options_.blr_tol);
+  // L0-OpenMP assembles subtrees in a thread-timing-dependent order, so results then differ in
+  // the last bits from run to run; ICNTL(48)=0 keeps only node-level parallelism (reproducible).
+  mumps_.icntl(48) = options_.deterministic ? 0 : 1;
   if (!options_.ooc_dir.empty()) {
     auto& dir = mumps_.raw().ooc_tmpdir;
     std::memset(dir, 0, sizeof(dir));
@@ -237,7 +246,8 @@ bool MumpsFactorization<T, U>::factorize(double alpha, double beta) {
 template <class T, class U>
 bool MumpsFactorization<T, U>::read_factorization_info(bool mumps_singular) {
   stats_.factor_entries = mumps::decode_count(mumps_.infog(9));
-  stats_.factor_mb_used = mumps_.infog(18);
+  stats_.factor_mb_used = mumps_.infog(21);
+  stats_.factor_mb_allocated = mumps_.infog(18);
   stats_.null_pivots = mumps_.infog(28);
   stats_.delayed_pivots = mumps_.infog(13);
 

@@ -22,32 +22,60 @@
 //     singular shift it is unreliable.
 //   * INFOG values above 2^31 are reported negative in units of 1e6 ("-x means x*10^6").
 //   * MB in MUMPS means 1e6 bytes.
-//   * Workspace errors are cured by a larger ICNTL(14) without re-analysis (measured: a
-//     saddle-point matrix with ICNTL(14)=0 fails once, then succeeds); BLR enabled at
+//   * Workspace errors are usually cured by a larger ICNTL(14) without re-analysis (a
+//     saddle-point matrix with ICNTL(14)=0 fails once, then succeeds), but not always: with 1500
+//     multipliers on a 40x40 grid and ICNTL(14)=0, 10, 20, 40 all fail (INFO -9). BLR enabled at
 //     analysis can be switched off for the factorization; ICNTL(22) (out-of-core) can change
 //     between factorizations, and JOB=-2 deletes the factor files.
+//   * ICNTL(23) > 0 makes MUMPS size its workspace from the cap, not from the estimate:
+//     INFOG(18) (allocated) then approaches cap/2. That is a virtual reservation; resident memory
+//     only grows by INFOG(21) (effectively used). 100x100 Laplacian, cap 3000 MB: INFOG(18) =
+//     1503, INFOG(21) = 6, VmPeak +1.37 GB. A cap equal to the INFOG(16) estimate can still fail
+//     with INFO -19: the smallest caps that worked were 0.96 .. 1.01 x INFOG(16) (+1..2 MB) for
+//     Laplacians, random and saddle-point matrices, and 1.29 x INFOG(16) when delayed pivots
+//     forced a workspace retry (which grows the workspace beyond the estimate). So
+//     "estimate <= cap" does not guarantee success: leave a margin.
+//   * With L0-OpenMP tree parallelism (ICNTL(48)=1, the MUMPS default) and more than one thread,
+//     repeated factorizations and solves of the same data differ in the last bits from call to
+//     call (dynamic assembly order). ICNTL(48)=0 makes them bitwise reproducible for a fixed
+//     thread count (FactorOptions::deterministic).
 //
-// Null-pivot threshold (null_pivot_tol = CNTL(3)), measured on 5.8.2 with ICNTL(8)=7 scaling.
-// MUMPS flags a pivot whose remaining row is below CNTL(3)*||A_pre||. At an exactly singular
-// shift the decisive (last root) pivot is roughly c*eps*||K|| / |v_r|^2, v_r being the null
-// vector restricted to the root separator, so for delocalized null vectors it GROWS with n and
-// depends on the elimination order; at |sigma - lambda| = delta*||K|| it is about
-// delta*||K|| / |v_r|^2 >= delta*||K||.
-//   * sigma exactly on an eigenvalue of 2-D Laplacians (24 shifts across the spectrum):
-//       CNTL(3) = 1e-12 flags 22/24 (n=2500), 18/24 (n=10^4), 7/24 (n=4*10^4);
-//       CNTL(3) = 1e-10 flags 24/24 for n = 2500 .. 4*10^4 and 12/12 for n = 9*10^4 (analysis
-//       at a generic shift); with the analysis at a shift that zeroes the diagonal (different,
-//       2x2-compressed ordering) a 50x51 grid gave 22/24 and needed 3e-9 for 24/24.
-//   * |sigma - lambda| >= 1e-10 * ||K|| (delocalized Laplacian modes, n <= 9*10^4, and localized
-//     modes of prescribed-spectrum matrices, real and complex): never flagged for any CNTL(3)
-//     up to 1e-9; larger thresholds only flag shifts within ~1e-14*||K|| of an eigenvalue.
-// Hence the default 1e-10: the largest value for which shifts at delta >= 1e-10 stay regular
-// even in the worst case |v_r| ~ 1, with exact singularities caught in all generic-order tests.
-// Trade-off: an exact singularity can escape detection (very large n, or a null vector that
-// nearly vanishes on the root separator); the factorization then has a tiny but finite pivot
-// (solves stay backward stable, the zero eigenvalue is counted on an arbitrary side), which is
-// why inertia endpoints must lie in spectral gaps. The "near-singular but regular" guarantee is
-// relative to ||K|| (the driver's scale), not to |lambda|.
+// Null-pivot threshold (CNTL(3)), measured on 5.8.2 with ICNTL(8)=7 scaling. MUMPS flags a pivot
+// whose remaining row is below CNTL(3)*||A_pre|| (A_pre: the scaled, permuted matrix). At an
+// exactly singular shift the decisive pivot is a rounding residue that grows with n for
+// delocalized null vectors (larger separators) and depends on the elimination order; at
+// |sigma - lambda| = d*||K|| the pivot is larger by a factor of about d / eps. Measured on 2-D
+// Laplacians (24 exact eigenvalues across the spectrum) and prescribed-spectrum matrices
+// (localized eigenvectors, 31 eigenvalues), real and complex, analysis at a generic shift:
+//   * CNTL(3) needed to flag every exact shift: 1e-11 at n = 2550; 1e-9 at n ~ 10^4 (1e-10
+//     misses up to 4/24, e.g. on 101x100); 3e-9 at n = 4*10^4 (200x201: 1e-9 misses 1/24);
+//     <= 1e-10 for the 12 shifts tried at n = 9*10^4 and for prescribed spectra (n = 3000,
+//     12000). Analysing at the singular shift itself, as the driver does for its first shift,
+//     gives the same picture (100x100: 1e-10 misses 1/24, 3e-10 none); an analysis at a shift
+//     that zeroes the diagonal (2x2-compressed ordering) needed 3e-9 on a 50x51 grid.
+//   * Shifts at d*||K|| from an eigenvalue start being (falsely) flagged at CNTL(3) ~ 1e3*d:
+//     at 1e-7 for d = 1e-10 (localized modes, smallest grid), at 1e-6 for d = 1e-9. Nothing at
+//     d = 1e-10 was flagged by CNTL(3) <= 3e-8, and the inertia of every unflagged near shift
+//     was exact.
+// Hence the double default 1e-8 (null_pivot_tol): about 3x above the largest value detection
+// needed and 10x below the onset of false flags at d = 1e-10. Trade-offs:
+//   * The detection margin shrinks as n grows. A missed exact singularity factorizes with a tiny
+//     but finite pivot: solves stay backward stable, but the zero eigenvalue is counted on an
+//     arbitrary side, which is why inertia endpoints must lie in spectral gaps.
+//   * The near-singular guarantee is relative to ||K|| (the driver's scale), not to |lambda|: a
+//     shift at 1e-10*|lambda| from an eigenvalue with |lambda| << ||K|| can lie within a few
+//     hundred eps*||K|| of it and is then flagged singular, the safe verdict at that distance
+//     (100x101 grid: lambda_min = 1.9e-3, sigma = lambda(1 +- 1e-10) is 2.4e-14*||K|| away).
+// Single precision (smumps, single_null_pivot_tol): rounding K to float moves every eigenvalue by
+// ~eps_s*||K|| (eps_s = 6e-8), so a shift exactly on an eigenvalue of K is, for the float matrix,
+// a shift ~eps_s*||K|| away, and its pivot is correspondingly large. The same rule, scaled to the
+// smallest distance a Single factor must accept (DESIGN 3.4b: 1e-6*||K||), gives the default 1e-4:
+// no shift at d >= 1e-6 was flagged by any CNTL(3) <= 3e-4, and exact shifts on localized
+// eigenvectors are caught (prescribed spectra: 31/31). Delocalized ones mostly are not, for any
+// threshold (Laplacians at 1e-4: 16/24 for n = 2550, 3/24 for n = 10^4, 2/12 for n = 4*10^4), so
+// factorize() cannot certify a Single factor. Whether it is usable (eps_s * cond(K) < 1) shows in
+// the refinement residual ShiftInvertOperator::last_relative_residual(), which callers of Single
+// (and BLR) factors must check.
 #pragma once
 
 #include <cstdint>
@@ -68,15 +96,24 @@ struct FactorOptions {
   int threads = 0;            ///< ICNTL(16) OpenMP threads; 0 = omp_get_max_threads()
   int mem_relax_pct = 35;     ///< ICNTL(14) initial value; on a workspace error it is doubled (at
                               ///< least +10 points, so 0 still grows) and kept for later calls
-  double max_memory_mb = 0;   ///< ICNTL(23) working-memory cap (MB = 1e6 B); 0 = no cap
+  double max_memory_mb = 0;   ///< ICNTL(23) working-memory cap (MB = 1e6 B); 0 = no cap. Needs a
+                              ///< margin above estimate().incore_mb, and MUMPS reserves (virtual)
+                              ///< memory up to about half of it (see header comment)
   bool blr = false;           ///< block low-rank factorization (ICNTL(35)); pair with SolveRefinement
   double blr_tol = 1e-10;     ///< CNTL(7)
   bool blr_estimates = false; ///< enable BLR at analysis only to obtain INFOG(36..39) estimates
   bool out_of_core = false;   ///< ICNTL(22); can be changed later with set_out_of_core()
   std::string ooc_dir;        ///< out-of-core directory (empty: MUMPS default / TMPDIR)
-  double null_pivot_tol = 1e-10;  ///< CNTL(3) in (0, 1) (with ICNTL(24)=1): pivot rows below this,
-                                  ///< relative to the preprocessed matrix norm, are null =>
-                                  ///< factorize() returns false (default: see header comment)
+  double null_pivot_tol = 1e-8;  ///< CNTL(3) in (0, 1) of Double factorizations (ICNTL(24)=1):
+                                 ///< pivot rows below this, relative to the preprocessed matrix
+                                 ///< norm, are null => factorize() returns false (default: see
+                                 ///< the measurements in the header comment)
+  double single_null_pivot_tol = 1e-4;  ///< the same for Single factorizations (smumps)
+  bool deterministic = true;  ///< ICNTL(48)=0: no L0-OpenMP tree parallelism, so factorizations and
+                              ///< solves are bitwise reproducible for a fixed thread count. false
+                              ///< (ICNTL(48)=1) took 12% less time to factorize and 14% less to
+                              ///< solve on a 2-D Laplacian, n = 2.5e5, 2 threads (likely more with
+                              ///< many threads and small fronts); results then vary in the last bits
   int verbosity = 0;          ///< 0 silent; > 0 MUMPS diagnostics (ICNTL(4) = min(verbosity, 4)) on
                               ///< stdout: MUMPS treats Fortran unit 0 (stderr) as "off"
 };
@@ -109,7 +146,9 @@ struct FactorStats {
   index_t rhs_solved = 0;        ///< total right-hand sides
   FactorEstimate estimate;
   std::int64_t factor_entries = 0;  ///< INFOG(9) after the last factorization
-  double factor_mb_used = 0.0;      ///< INFOG(18) after the last factorization
+  double factor_mb_used = 0.0;      ///< INFOG(21): memory effectively used by the last factorization
+  double factor_mb_allocated = 0.0; ///< INFOG(18): memory allocated for it (approaches cap/2 when
+                                    ///< max_memory_mb > 0, see header comment)
   index_t null_pivots = 0;          ///< INFOG(28) after the last factorization (of E for complex T)
   index_t delayed_pivots = 0;       ///< INFOG(13) after the last factorization (of E for complex T)
   index_t workspace_retries = 0;    ///< automatic ICNTL(14) increases (all calls)
@@ -141,6 +180,9 @@ class SparseFactorization {
   /// shift got opposite signs, i.e. K is singular to working precision although no pivot fell
   /// below CNTL(3). Then stats().null_pivots is set, inertia().valid is false, solve() throws,
   /// and the object stays analysed so the caller can refactorize at a perturbed shift.
+  /// Detection is reliable in double precision (see the header comment for its limits) but
+  /// only partial for Single: a Single factor that returns true may still be unusable at this
+  /// shift, which the refinement residual of ShiftInvertOperator reveals.
   /// Other failures throw hs::Error:
   ///   workspace errors (INFO -8,-9,-14,-15,-17,-20) are retried internally up to 3 times with
   ///   ICNTL(14) doubled (stats().workspace_retries), then FactorizationFailed;
