@@ -87,6 +87,9 @@ constexpr double kStripConfirm = 1e-2;
 /// so spmm streams A and B once per batch (real T: 2 * kBatch real columns, the width spmm
 /// streams at once). Batch memory: 6 kBatch n-vectors of T.
 constexpr index_t kBatch = 4;
+/// Basis columns per block when the projected pencil W^H A W, W^H B W is formed (the width spmm
+/// streams A and B for at once); memory: n x kProjectBatch of T.
+constexpr index_t kProjectBatch = 8;
 /// Block-size rule of the GHIEP runs (ghiep_block_size): p = kAutoBlock for orders from
 /// kBlockMinOrder on (below, the solves are cheap next to the basis work: gains <= 7% at n = 1e4)
 /// and runs with at least kBlockMinNev wanted pairs (a block needs pairs to fill it; the probes,
@@ -242,8 +245,8 @@ void small_eig(const DenseMatrix<T>& a, std::vector<cplx>& w, DenseMatrix<cplx>&
 /// Rayleigh-Ritz for the indefinite pencil on span(W), W (n x m) Euclidean orthonormal: the
 /// eigenpairs (mu, y) of the small pencil (W^H A W, W^H B W), computed as eig(H^{-1} G) via LU and
 /// a complex Schur form (projection.cpp's rayleigh_ritz_indefinite), with G and H formed in column
-/// blocks of kBatch: no n x m image A W or B W is materialized (DESIGN §3.6-3). Ritz vectors are
-/// W y. Returns false when H is numerically singular (pivot ratio < 1e-12).
+/// blocks of kProjectBatch: no n x m image A W or B W is materialized (DESIGN §3.6-3). Ritz vectors
+/// are W y. Returns false when H is numerically singular (pivot ratio < 1e-12).
 template <class T>
 bool projected_pairs(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const DenseMatrix<T>& w,
                      std::vector<cplx>& mu, DenseMatrix<cplx>& y) {
@@ -252,9 +255,9 @@ bool projected_pairs(const CsrMatrix<T>& a, const CsrMatrix<T>* b, const DenseMa
   y.resize(m, m);
   if (m == 0) return true;
   const auto fn = static_cast<lapack::fint>(n), fm = static_cast<lapack::fint>(m);
-  DenseMatrix<T> g(m, m), h(m, m), img(n, std::min(kBatch, m));
-  for (index_t c0 = 0; c0 < m; c0 += kBatch) {
-    const index_t nb = std::min(kBatch, m - c0);
+  DenseMatrix<T> g(m, m), h(m, m), img(n, std::min(kProjectBatch, m));
+  for (index_t c0 = 0; c0 < m; c0 += kProjectBatch) {
+    const index_t nb = std::min(kProjectBatch, m - c0);
     const auto fb = static_cast<lapack::fint>(nb);
     spmm(a, w.col(c0), n, img.data(), n, nb);
     lapack::gemm('C', 'N', fm, fb, fn, T(1), w.data(), fn, img.data(), fn, T(0), g.col(c0), fm);
@@ -366,28 +369,37 @@ Refined<T> refine_union(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil
     for (index_t q = 0; q < nb; ++q) {
       const index_t j = j0 + q;
       if (!std::isfinite(std::abs(mu[j]))) continue;
-      // The candidate vector x = basis y_j (and its images), scaled to unit 2-norm.
+      // The candidate vector x = basis y_j (and its images), scaled to unit 2-norm. (The loops
+      // over n are element-wise, so OpenMP keeps the results independent of the thread count;
+      // the norms are linalg's deterministic reductions.)
+      double xn = linalg::norm2(n, xs.col(q));
+      if constexpr (!is_complex_v<T>) xn = std::hypot(xn, linalg::norm2(n, xs.col(nb + q)));
+      if (!(xn > 0.0)) continue;
+      const double inv_xn = 1.0 / xn;
+#pragma omp parallel for schedule(static)
       for (index_t i = 0; i < n; ++i) {
         if constexpr (is_complex_v<T>) {
-          x[i] = xs(i, q), ax[i] = axs(i, q), bx[i] = bxs(i, q);
+          x[i] = xs(i, q) * inv_xn, ax[i] = axs(i, q) * inv_xn, bx[i] = bxs(i, q) * inv_xn;
         } else {
-          x[i] = cplx(xs(i, q), xs(i, nb + q));
-          ax[i] = cplx(axs(i, q), axs(i, nb + q));
-          bx[i] = cplx(bxs(i, q), bxs(i, nb + q));
+          x[i] = cplx(xs(i, q), xs(i, nb + q)) * inv_xn;
+          ax[i] = cplx(axs(i, q), axs(i, nb + q)) * inv_xn;
+          bx[i] = cplx(bxs(i, q), bxs(i, nb + q)) * inv_xn;
         }
       }
-      const double xn = linalg::norm2(n, x.data());
-      if (!(xn > 0.0)) continue;
-      for (index_t i = 0; i < n; ++i) x[i] /= xn, ax[i] /= xn, bx[i] /= xn;
       const auto pm_c = driver::pair_metrics(ax.data(), bx.data(), x.data(), n, mu[j], n2a, n2b);
       const bool small_imag = std::abs(mu[j].imag()) <= cfg.complex_tol * std::max(std::abs(mu[j]), scale);
       Cand cd{mu[j], false, pm_c, j};
       // Real candidate: the phase-normalised vector's real part (real T; complex T: the vector
       // itself) and lambda = Re(mu). A and B are applied linearly: A Re(phase x) = Re(phase A x).
+      // The phase comes from the largest entry (first one of equal magnitude).
       index_t imax = 0;
-      for (index_t i = 1; i < n; ++i)
-        if (std::abs(x[i]) > std::abs(x[imax])) imax = i;
-      const cplx phase = std::abs(x[imax]) > 0 ? std::conj(x[imax]) / std::abs(x[imax]) : cplx(1);
+      double vmax = std::norm(x[0]);
+      for (index_t i = 1; i < n; ++i) {
+        const double v = std::norm(x[i]);
+        if (v > vmax) vmax = v, imax = i;
+      }
+      const cplx phase = vmax > 0 ? std::conj(x[imax]) / std::abs(x[imax]) : cplx(1);
+#pragma omp parallel for schedule(static)
       for (index_t i = 0; i < n; ++i) {
         if constexpr (is_complex_v<T>) {
           xr[i] = phase * x[i], axr[i] = phase * ax[i], bxr[i] = phase * bx[i];
@@ -400,7 +412,9 @@ Refined<T> refine_union(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil
       PairMetrics pm_r;
       pm_r.backward_error = kInf;
       if (rn > 0.0) {
-        for (index_t i = 0; i < n; ++i) xr[i] /= rn, axr[i] /= rn, bxr[i] /= rn;
+        const double inv_rn = 1.0 / rn;
+#pragma omp parallel for schedule(static)
+        for (index_t i = 0; i < n; ++i) xr[i] *= inv_rn, axr[i] *= inv_rn, bxr[i] *= inv_rn;
         pm_r = driver::pair_metrics(axr.data(), bxr.data(), xr.data(), n, lam_r, n2a, n2b);
       }
       // Real unless the imaginary part is significant AND the real projection fails while the complex pair passes.
