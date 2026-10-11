@@ -110,7 +110,7 @@ TYPED_TEST(KrylovSchurGeneralPerf, DiagonalPlusLowRankTimingSplit) {
       hs::eigen_detail::krylov_schur_general_timed(op, hs::Which::LargestMagnitude, opt, &t);
   ASSERT_TRUE(r.converged);
   const index_t m = static_cast<index_t>(r.theta.size());
-  const index_t ncv = std::min(n, std::max(2 * opt.nev + 1, opt.nev + 16));
+  const auto ncv = static_cast<index_t>(r.ritz_all.size());  // one Ritz value per basis vector
   // The leading values are the ones of D moved by at most ||U W^T||.
   EXPECT_NEAR(std::abs(r.theta[0]), 1.0, 0.1);
   // True residuals of the returned vectors agree with the estimates.

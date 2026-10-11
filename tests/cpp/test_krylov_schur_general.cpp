@@ -3,6 +3,7 @@
 // matrices with known spectra and generalized pencils with indefinite B (via shift-invert), so
 // every check is against an analytic or dense LAPACK reference.
 #include <gtest/gtest.h>
+#include <omp.h>
 
 #include <algorithm>
 #include <cmath>
@@ -55,9 +56,9 @@ DenseMatrix<T> solve(DenseMatrix<T> a, DenseMatrix<T> b) {
   return b;
 }
 
-/// All eigenvalues of a dense square matrix (LAPACK gees on a copy).
+/// All eigenvalues of a dense square (general, non-Hermitian) matrix: LAPACK gees on a copy.
 template <class T>
-std::vector<cplx> dense_eigenvalues(DenseMatrix<T> a) {
+std::vector<cplx> general_eigenvalues(DenseMatrix<T> a) {
   const auto n = static_cast<fint>(a.rows());
   DenseMatrix<T> q(n, n);
   std::vector<cplx> w(static_cast<std::size_t>(n));
@@ -163,6 +164,21 @@ std::vector<cplx> apply_complex(hs::LinearOperator<T>& op, const cplx* x) {
   return y;
 }
 
+/// Runs the enclosing scope with one OpenMP thread. linalg::dot/norm2 use an OpenMP reduction
+/// whose partial sums libgomp combines in thread-arrival order, which is bitwise reproducible
+/// only for up to two threads (interface request to the linalg owner). Tests comparing whole
+/// solver runs bit for bit therefore run single-threaded.
+class SingleThreadedOpenMP {
+ public:
+  SingleThreadedOpenMP() : saved_(omp_get_max_threads()) { omp_set_num_threads(1); }
+  ~SingleThreadedOpenMP() { omp_set_num_threads(saved_); }
+  SingleThreadedOpenMP(const SingleThreadedOpenMP&) = delete;
+  SingleThreadedOpenMP& operator=(const SingleThreadedOpenMP&) = delete;
+
+ private:
+  int saved_;
+};
+
 /// Checks every structural promise of the GeneralEigResult contract and the accuracy of the
 /// estimates against true residuals. op_norm is an upper bound of ||Op||_2.
 template <class T>
@@ -235,12 +251,12 @@ void check_contract(hs::LinearOperator<T>& op, const hs::GeneralEigResult<T>& r,
     EXPECT_EQ(s(r.nconv, r.nconv - 1), T(0)) << "2x2 block cut at nconv";
   }
   // spec(S) = theta, spec(S(0:nconv, 0:nconv)) = theta[0:nconv).
-  expect_same_values(dense_eigenvalues(s), r.theta, 1e-10 * largest);
+  expect_same_values(general_eigenvalues(s), r.theta, 1e-10 * largest);
   if (r.nconv > 0) {
     DenseMatrix<T> lead(r.nconv, r.nconv);
     for (index_t j = 0; j < r.nconv; ++j)
       for (index_t i = 0; i < r.nconv; ++i) lead(i, j) = s(i, j);
-    expect_same_values(dense_eigenvalues(lead),
+    expect_same_values(general_eigenvalues(lead),
                        std::vector<cplx>(r.theta.begin(), r.theta.begin() + r.nconv),
                        1e-10 * largest);
     // Leading nconv Schur vectors span an approximately invariant subspace.
@@ -356,16 +372,6 @@ TEST(KrylovSchurGeneral, ConjugatePairAtNevBoundaryGivesNevPlusOne) {
 
 // ------------------------------------------------------------- generalized indefinite pencils
 
-/// Random dense Hermitian matrix.
-template <class T>
-DenseMatrix<T> random_hermitian(index_t n, std::uint64_t seed) {
-  DenseMatrix<T> r = random_matrix<T>(n, n, seed), h(n, n);
-  for (index_t j = 0; j < n; ++j)
-    for (index_t i = 0; i < n; ++i) h(i, j) = 0.5 * (r(i, j) + hs::conj_if(r(j, i)));
-  for (index_t i = 0; i < n; ++i) h(i, i) = T(std::real(h(i, i)));
-  return h;
-}
-
 /// ||Op||_F for Op = (A - sigma B)^{-1} B, an upper bound of ||Op||_2.
 template <class T>
 double shift_invert_norm(const DenseMatrix<T>& a, const DenseMatrix<T>& b, double sigma) {
@@ -406,15 +412,15 @@ void expect_nearest(const std::vector<cplx>& lambda, std::vector<cplx> ref, doub
 TYPED_TEST(KrylovSchurGeneralTyped, GhiepShiftInvertMatchesDenseReference) {
   using T = TypeParam;
   const index_t n = 90;
-  const DenseMatrix<T> a = random_hermitian<T>(n, 21);
+  const DenseMatrix<T> a = hs::test::to_dense(hs::test::random_hermitian<T>(n, 1.0, 21));
   // B Hermitian and indefinite: diagonal of both signs plus a Hermitian perturbation.
-  DenseMatrix<T> b = random_hermitian<T>(n, 22);
+  DenseMatrix<T> b = hs::test::to_dense(hs::test::random_hermitian<T>(n, 1.0, 22));
   for (index_t j = 0; j < n; ++j) {
     for (index_t i = 0; i < n; ++i) b(i, j) *= 0.15;
     b(j, j) += T((j % 3 == 0 ? -1.0 : 1.0) * (1.0 + 0.01 * j));
   }
   const double sigma = 0.137;
-  const std::vector<cplx> ref = dense_eigenvalues(solve(b, a));  // eig(B^{-1} A)
+  const std::vector<cplx> ref = general_eigenvalues(solve(b, a));  // eig(B^{-1} A)
   index_t ncomplex = 0;
   for (const cplx& l : ref) ncomplex += std::abs(l.imag()) > 1e-8 * std::abs(l) ? 1 : 0;
   EXPECT_GT(ncomplex, 0) << "pencil should have complex eigenvalues";
@@ -492,7 +498,7 @@ struct WaveguideReference {
 
 WaveguideReference waveguide_reference(const Waveguide& w) {
   WaveguideReference ref;
-  const std::vector<cplx> all = dense_eigenvalues(solve(w.b, w.a));
+  const std::vector<cplx> all = general_eigenvalues(solve(w.b, w.a));
   for (const cplx& l : all) ref.scale = std::max(ref.scale, std::abs(l));
   for (const cplx& l : all) {
     if (std::abs(l) > 1e-10 * ref.scale) ref.nonzero.push_back(l);
@@ -592,29 +598,40 @@ TYPED_TEST(KrylovSchurGeneralTyped, DeterministicForFixedSeed) {
   hs::KrylovSchurOptions<T> opt;
   opt.nev = 6;
   opt.ncv = 16;
-  hs::test::DenseOperator<T> op1(a), op2(a), op3(a);
-  const auto r1 = hs::krylov_schur_general(op1, Which::LargestMagnitude, opt);
-  const auto r2 = hs::krylov_schur_general(op2, Which::LargestMagnitude, opt);
-  ASSERT_TRUE(r1.converged);
-  EXPECT_EQ(r1.theta, r2.theta);
-  EXPECT_EQ(r1.estimate, r2.estimate);
-  EXPECT_EQ(r1.restarts, r2.restarts);
-  EXPECT_EQ(r1.op_applies, r2.op_applies);
-  for (index_t j = 0; j < r1.vectors.cols(); ++j)
-    for (index_t i = 0; i < r1.vectors.rows(); ++i) ASSERT_EQ(r1.vectors(i, j), r2.vectors(i, j));
-  // Another seed takes another path to the same eigenvalues.
-  opt.seed = 7;
+  hs::test::DenseOperator<T> op1(a), op2(a), op3(a), op4(a);
+  std::vector<cplx> theta;
+  {
+    // Bit for bit only where linalg's reductions are (see SingleThreadedOpenMP).
+    SingleThreadedOpenMP serial;
+    const auto r1 = hs::krylov_schur_general(op1, Which::LargestMagnitude, opt);
+    const auto r2 = hs::krylov_schur_general(op2, Which::LargestMagnitude, opt);
+    ASSERT_TRUE(r1.converged);
+    EXPECT_EQ(r1.theta, r2.theta);
+    EXPECT_EQ(r1.estimate, r2.estimate);
+    EXPECT_EQ(r1.restarts, r2.restarts);
+    EXPECT_EQ(r1.op_applies, r2.op_applies);
+    for (index_t j = 0; j < r1.vectors.cols(); ++j)
+      for (index_t i = 0; i < r1.vectors.rows(); ++i) ASSERT_EQ(r1.vectors(i, j), r2.vectors(i, j));
+    theta = r1.theta;
+  }
+  // With the ambient thread count (any order of the partial sums) the rounding differs, and the
+  // run agrees within the accuracy of the converged values.
   const auto r3 = hs::krylov_schur_general(op3, Which::LargestMagnitude, opt);
   ASSERT_TRUE(r3.converged);
-  expect_same_values(r3.theta, r1.theta, 1e-10);
+  expect_same_values(r3.theta, theta, 1e-10);
+  // Another seed takes another path to the same eigenvalues.
+  opt.seed = 7;
+  const auto r4 = hs::krylov_schur_general(op4, Which::LargestMagnitude, opt);
+  ASSERT_TRUE(r4.converged);
+  expect_same_values(r4.theta, theta, 1e-10);
 }
 
 TYPED_TEST(KrylovSchurGeneralTyped, InvalidOptionsThrow) {
   using T = TypeParam;
   hs::test::DiagonalOperator<T> op(std::vector<T>(20, T(1)));
-  auto expect_invalid = [&op](const hs::KrylovSchurOptions<T>& o) {
+  auto expect_invalid = [](hs::LinearOperator<T>& target, const hs::KrylovSchurOptions<T>& o) {
     try {
-      hs::krylov_schur_general(op, Which::LargestMagnitude, o);
+      hs::krylov_schur_general(target, Which::LargestMagnitude, o);
       ADD_FAILURE() << "expected InvalidInput";
     } catch (const hs::Error& e) {
       EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
@@ -626,28 +643,34 @@ TYPED_TEST(KrylovSchurGeneralTyped, InvalidOptionsThrow) {
   d(0, 0) = T(1);
   auto bad = o;
   bad.deflation = &d;
-  expect_invalid(bad);
+  expect_invalid(op, bad);
   bad = o, bad.nev = 0;
-  expect_invalid(bad);
+  expect_invalid(op, bad);
   bad = o, bad.nev = 21;
-  expect_invalid(bad);
+  expect_invalid(op, bad);
   bad = o, bad.ncv = 3;  // < nev + 2 (real) / nev + 1 (complex)
-  expect_invalid(bad);
+  expect_invalid(op, bad);
   if (!hs::is_complex_v<T>) {
     bad = o, bad.ncv = 4;
-    expect_invalid(bad);
+    expect_invalid(op, bad);
   }
   bad = o, bad.max_restarts = -1;
-  expect_invalid(bad);
-  bad = o, bad.tol = -1e-3;
-  expect_invalid(bad);
-  DenseMatrix<T> wrong(19, 1), zero(20, 1);
+  expect_invalid(op, bad);
+  for (const double tol : {-1e-3, std::nan(""), std::numeric_limits<double>::infinity()}) {
+    bad = o, bad.tol = tol;
+    expect_invalid(op, bad);
+  }
+  DenseMatrix<T> wrong(19, 1), zero(20, 1), no_column(20, 0), nan(20, 1), inf(20, 1);
   wrong(0, 0) = T(1);
-  bad = o, bad.initial = &wrong;
-  expect_invalid(bad);
-  bad = o, bad.initial = &zero;
-  expect_invalid(bad);
+  nan(0, 0) = T(1), nan(5, 0) = T(std::nan(""));
+  inf(0, 0) = T(1), inf(7, 0) = T(std::numeric_limits<double>::infinity());
+  for (const DenseMatrix<T>* initial : {&wrong, &zero, &no_column, &nan, &inf}) {
+    bad = o, bad.initial = initial;
+    expect_invalid(op, bad);
+  }
   EXPECT_EQ(op.applications(), 0);
+  hs::test::DiagonalOperator<T> empty(std::vector<T>{});
+  expect_invalid(empty, o);
   // ncv larger than n is clamped, not rejected.
   hs::KrylovSchurOptions<T> big = o;
   big.ncv = 100;
@@ -791,6 +814,7 @@ TYPED_TEST(KrylovSchurGeneralTyped, PhaseTimesAccountForTheRun) {
   hs::KrylovSchurOptions<T> opt;
   opt.nev = 4;
   opt.ncv = 12;
+  SingleThreadedOpenMP serial;  // the timed and plain runs are compared bit for bit
   hs::eigen_detail::GeneralPhaseTimes times;
   const auto r =
       hs::eigen_detail::krylov_schur_general_timed(op, Which::LargestMagnitude, opt, &times);
