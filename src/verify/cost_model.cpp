@@ -40,10 +40,14 @@ CertificateCostEstimate certificate_cost(const CertificateCostInputs& in) {
   if (in.max_krylov_vectors < 0 || !(in.max_memory_bytes >= 0.0) || !std::isfinite(in.max_memory_bytes))
     HS_THROW(InvalidInput, "certificate_cost: need max_krylov_vectors >= 0 and a finite max_memory_bytes >= 0");
 
+  if (!std::isfinite(in.single_analysis_s))
+    HS_THROW(InvalidInput, "certificate_cost: single_analysis_s must be finite (< 0: counter_analysis_s)");
+
   CertificateCostEstimate est;
   const double count_s = in.count_ratio * in.factorize_s;
   est.exact_s = std::min(2.0 * in.factorize_s, in.counter_analysis_s + 2.0 * count_s);
-  est.exact_single_s = in.single_valid ? in.counter_analysis_s + 2.0 * in.single_ratio * count_s : kInf;
+  const double single_analysis = in.single_analysis_s >= 0.0 ? in.single_analysis_s : in.counter_analysis_s;
+  est.exact_single_s = in.single_valid ? single_analysis + 2.0 * in.single_ratio * count_s : kInf;
 
   est.randomized_s = kInf;
   const index_t m = in.deflated, big_n = in.n - m;
