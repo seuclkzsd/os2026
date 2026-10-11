@@ -17,6 +17,25 @@
 
 namespace hs::driver {
 
+Phase PhaseClock::switch_to(Phase p) {
+  const double now = timer_.seconds();
+  acc_[static_cast<int>(current_)] += now - last_;
+  last_ = now;
+  const Phase prev = current_;
+  current_ = p;
+  return prev;
+}
+
+double PhaseClock::seconds(Phase p) const {
+  double s = acc_[static_cast<int>(p)];
+  if (p == current_) s += timer_.seconds() - last_;
+  return s;
+}
+
+double PhaseClock::total() const {
+  return seconds(Phase::Setup) + seconds(Phase::Factor) + seconds(Phase::Iterate) + seconds(Phase::Verify);
+}
+
 void warn(Ctx& c, const std::string& msg) {
   c.rep.warnings.push_back(msg);
   if (c.log) c.log->warn(msg);
@@ -86,6 +105,7 @@ FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
 // near-null directions). `detection_off` tells later refactorizations at this shift to do the same.
 template <class T>
 double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off) {
+  PhaseScope phase(c.clock, Phase::Factor);
   detection_off = false;
   fac.set_null_pivot_detection(true);
   double s = sigma0;
@@ -114,7 +134,8 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
 
 // Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
 template <class T>
-void refactorize_at(SparseFactorization<T>& fac, double sigma, bool detection_off) {
+void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off) {
+  PhaseScope phase(c.clock, Phase::Factor);
   fac.set_null_pivot_detection(!detection_off);
   if (!fac.factorize(1.0, -sigma)) HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
 }
@@ -130,6 +151,7 @@ void refactorize_at(SparseFactorization<T>& fac, double sigma, bool detection_of
 template <class T>
 index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
                     double step) {
+  PhaseScope phase(c.clock, Phase::Factor);
   const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
   for (int tries = 0; tries < 8; ++tries) {
     // At each position: detection on (certified), then - exact factor only - detection off at
@@ -165,7 +187,10 @@ index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>&
 template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed) {
-  if (!already_analyzed) fac.analyze(pencil, 1.0, -sigma0);
+  if (!already_analyzed) {
+    PhaseScope phase(c.clock, Phase::Factor);
+    fac.analyze(pencil, 1.0, -sigma0);
+  }
   const FactorEstimate est = fac.estimate();
   event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
                         {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
@@ -194,6 +219,7 @@ template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
                                                           index_t expected_factorizations, index_t expected_solves) {
+  PhaseScope phase(c.clock, Phase::Factor);
   FactorOptions amd = fopts;
   amd.ordering = 0;
   auto fac = make_mumps_factorization<T>(amd);
@@ -228,7 +254,7 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   template Block<T> take_columns<T>(const Block<T>&, const std::vector<index_t>&);                          \
   template void append_columns<T>(DenseMatrix<T>&, const DenseMatrix<T>&);                                  \
   template double factorize_near<T>(Ctx&, SparseFactorization<T>&, double, double, bool&);                  \
-  template void refactorize_at<T>(SparseFactorization<T>&, double, bool);                                   \
+  template void refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                             \
   template index_t count_below<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double&, double,  \
                                   double);                                                                  \
   template void analyze_within_budget<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double, bool); \

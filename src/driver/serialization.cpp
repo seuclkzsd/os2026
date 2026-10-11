@@ -240,6 +240,7 @@ std::string SolveReport::to_json(int indent) const {
             {"restarts", restarts},
             {"op_applies", op_applies},
             {"time_total_s", time_total_s},
+            {"time_setup_s", time_setup_s},
             {"time_factor_s", time_factor_s},
             {"time_iterate_s", time_iterate_s},
             {"time_verify_s", time_verify_s},

@@ -28,6 +28,7 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     HS_THROW(Unsupported, "indefinite-B problems support target mode 'nearest' only (roadmap P3)");
   if (t.k > n) HS_THROW(InvalidInput, "target.k = " << t.k << " exceeds the matrix order " << n);
   rep.sigma_requested = t.sigma;
+  PhaseScope phase(c.clock, Phase::Verify);  // default for work outside Factor / Iterate scopes
   rep.certificate.note = "not available for indefinite B (Sylvester inertia does not count eigenvalues)";
 
   bool detection_off = false;
@@ -46,16 +47,17 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
   ko.max_restarts = cfg.max_restarts;
   ko.tol = cfg.tol * cfg.inner_tol_factor;
   ko.seed = cfg.seed;
-  Timer it_timer;
-  auto res = krylov_schur_general<T>(op, Which::LargestMagnitude, ko);
-  rep.time_iterate_s = it_timer.seconds();
+  GeneralEigResult<T> res;
+  {
+    PhaseScope phase(c.clock, Phase::Iterate);
+    res = krylov_schur_general<T>(op, Which::LargestMagnitude, ko);
+  }
   rep.restarts = res.restarts;
   rep.op_applies = res.op_applies;
   event(c, "krylov_schur", {{"nev", static_cast<std::int64_t>(ko.nev)}, {"nconv", static_cast<std::int64_t>(res.nconv)},
                             {"restarts", static_cast<std::int64_t>(res.restarts)}});
   if (!res.converged) warn(c, "Krylov-Schur did not converge all requested pairs within max_restarts");
 
-  Timer verify_timer;
   // Real basis of the computed invariant subspace: Re/Im parts of every vector (for real T a real
   // eigenvalue's vector is real up to a phase; a near-real conjugate pair - e.g. the zero cluster -
   // spans the same space as its real and imaginary parts). Dependent columns are dropped.
@@ -207,7 +209,6 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
   if (!all_ok && static_cast<index_t>(cands.size()) < t.k)
     warn(c, "only " + std::to_string(cands.size()) + " of " + std::to_string(t.k) + " pairs found");
   rep.success = all_ok;
-  rep.time_verify_s = verify_timer.seconds();
   return sol;
 }
 

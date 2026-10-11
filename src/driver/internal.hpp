@@ -16,10 +16,52 @@
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
+#include "hsolve/util.hpp"
 
 namespace hs::driver {
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
+
+// ------------------------------------------------------------------------------ time accounting
+
+/// Phases of a solve. Every instant of hs::solve is charged to exactly one phase (exclusive
+/// time), so the report's time_setup_s + time_factor_s + time_iterate_s + time_verify_s equals
+/// time_total_s:
+///   Setup   input checks, norm estimates, problem-type decision, planning (the default);
+///   Factor  symbolic analyses and numeric factorizations (shifts, inertia counts, B, A);
+///   Iterate the Krylov solvers (operator applications = solves, orthogonalization, restarts);
+///   Verify  Rayleigh-Ritz refinement, residuals, rescue, selection, certificate bookkeeping.
+enum class Phase { Setup = 0, Factor = 1, Iterate = 2, Verify = 3 };
+
+class PhaseClock {
+ public:
+  /// Makes p the running phase; the time since the last switch goes to the previous phase,
+  /// which is returned.
+  Phase switch_to(Phase p);
+  /// Accumulated seconds of phase p, including the running interval if p is running.
+  double seconds(Phase p) const;
+  double total() const;
+
+ private:
+  Timer timer_;
+  double last_ = 0.0;
+  Phase current_ = Phase::Setup;
+  double acc_[4] = {0.0, 0.0, 0.0, 0.0};
+};
+
+/// Charges its lifetime to phase p (nested scopes: the innermost wins; the enclosing phase
+/// resumes on destruction).
+class PhaseScope {
+ public:
+  PhaseScope(PhaseClock& clock, Phase p) : clock_(clock), prev_(clock.switch_to(p)) {}
+  ~PhaseScope() { clock_.switch_to(prev_); }
+  PhaseScope(const PhaseScope&) = delete;
+  PhaseScope& operator=(const PhaseScope&) = delete;
+
+ private:
+  PhaseClock& clock_;
+  Phase prev_;
+};
 
 // ------------------------------------------------------------------------------ context
 
@@ -27,6 +69,7 @@ struct Ctx {
   const SolverConfig& cfg;
   Logger* log;
   SolveReport& rep;
+  PhaseClock& clock;
 };
 
 void warn(Ctx& c, const std::string& msg);
@@ -64,7 +107,7 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
 
 /// Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
 template <class T>
-void refactorize_at(SparseFactorization<T>& fac, double sigma, bool detection_off);
+void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off);
 
 /// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2), moving s outward (direction
 /// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`.

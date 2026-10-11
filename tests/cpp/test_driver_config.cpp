@@ -84,7 +84,7 @@ TEST(DriverReport, JsonHasDocumentedKeysAndNullForInfiniteBounds) {
   const auto j = nlohmann::json::parse(r.to_json());
   for (const char* key : {"schema_version", "n", "nnz_a", "nnz_b", "complex_scalars", "problem", "norm2_a", "norm2_b",
                           "scale", "method", "sigma_requested", "sigma_used", "shift_retries", "factor_options",
-                          "factor_stats", "restarts", "op_applies", "time_total_s", "time_factor_s",
+                          "factor_stats", "restarts", "op_applies", "time_total_s", "time_setup_s", "time_factor_s",
                           "time_iterate_s", "time_verify_s", "peak_rss_bytes", "pairs", "certificate", "success",
                           "warnings"})
     EXPECT_TRUE(j.contains(key)) << key;

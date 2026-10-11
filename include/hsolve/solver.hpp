@@ -130,10 +130,13 @@ struct SolveReport {
   FactorStats factor_stats;
   index_t restarts = 0;
   index_t op_applies = 0;
+  // Wall time of hs::solve split into exclusive phases (each instant counted once), so
+  // time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s:
   double time_total_s = 0.0;
-  double time_factor_s = 0.0;
-  double time_iterate_s = 0.0;
-  double time_verify_s = 0.0;
+  double time_setup_s = 0.0;    ///< input checks, norm estimates, problem type, planning
+  double time_factor_s = 0.0;   ///< symbolic analyses + numeric factorizations (incl. inertia counts)
+  double time_iterate_s = 0.0;  ///< Krylov solvers (operator applications = solves, orthogonalization)
+  double time_verify_s = 0.0;   ///< Rayleigh-Ritz refinement, residuals, rescue, selection, certificate
   std::int64_t peak_rss_bytes = 0;
   // results
   std::vector<PairReport> pairs;

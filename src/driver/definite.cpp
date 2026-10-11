@@ -88,7 +88,11 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   ko.tol = c.cfg.tol * c.cfg.inner_tol_factor;
   ko.seed = c.cfg.seed + static_cast<std::uint64_t>(out.restarts);  // fresh start for reruns
   ko.deflation = deflation;
-  auto res = lanczos_krylov_schur<T>(op, b_op.get(), Which::LargestMagnitude, ko);
+  HermitianEigResult<T> res;
+  {
+    PhaseScope phase(c.clock, Phase::Iterate);
+    res = lanczos_krylov_schur<T>(op, b_op.get(), Which::LargestMagnitude, ko);
+  }
   out.restarts += res.restarts;
   out.applies += res.op_applies;
   out.converged = res.converged;
@@ -169,6 +173,9 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   const index_t n = pencil.order();
   Target t = cfg.target;
   rep.sigma_requested = sigma0;
+  // Work not inside a Factor / Iterate scope (refinement, residuals, rescue, certificate
+  // bookkeeping) is verification.
+  PhaseScope phase(c.clock, Phase::Verify);
 
   // Interval: count the eigenvalues first (Sylvester inertia) to size the Krylov run.
   index_t k = t.k;
@@ -206,12 +213,9 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
   const index_t nev = std::min<index_t>(n, k);
   DefiniteRun<T> run;
-  Timer it_timer;
   lanczos_run(c, fac, pencil, sigma, nev, static_cast<const DenseMatrix<T>*>(nullptr), run);
-  double t_iter = it_timer.seconds();
   if (!run.converged) warn(c, "Krylov-Schur did not converge all requested pairs within max_restarts");
 
-  Timer verify_timer;
   const double zero_tol = cfg.zero_filter_tol >= 0 ? cfg.zero_filter_tol * scale : -1.0;
   Target sel_target = t;
   sel_target.sigma = t.mode == TargetMode::Interval ? sigma0 : t.sigma;
@@ -315,11 +319,9 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
     run.all = take_columns(run.all, conv);
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
     if (nev_rerun < 1) break;
-    refactorize_at(fac, sigma, detection_off);
+    refactorize_at(c, fac, sigma, detection_off);
     DenseMatrix<T> defl = run.all.x;
-    it_timer.reset();
     lanczos_run(c, fac, pencil, sigma, nev_rerun, &defl, run);
-    t_iter += it_timer.seconds();
     select_and_verify();
   }
   if (cert.performed && !cert.passed) {
@@ -351,8 +353,6 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   rep.success = all_ok && (!cert.performed || cert.passed);
   rep.restarts = run.restarts;
   rep.op_applies = run.applies;
-  rep.time_iterate_s = t_iter;
-  rep.time_verify_s = verify_timer.seconds() - t_iter;
   return sol;
 }
 

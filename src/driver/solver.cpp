@@ -65,9 +65,9 @@ double initial_shift(const Target& t, const driver::NormEstimate& na, double sca
 template <class T>
 Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b_in, const SolverConfig& cfg,
                   Logger* log) {
-  Timer total;
+  driver::PhaseClock clock;  // starts in Phase::Setup
   SolveReport rep;
-  Ctx c{cfg, log, rep};
+  Ctx c{cfg, log, rep, clock};
 #ifdef _OPENMP
   if (cfg.threads > 0) omp_set_num_threads(cfg.threads);
 #endif
@@ -146,8 +146,10 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
       }
       ib.valid = true;
     } else if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
+      driver::PhaseScope phase(clock, driver::Phase::Factor);
       if (fac->factorize(0.0, 1.0)) ib = fac->inertia();  // false: B singular -> not HPD
     } else {
+      driver::PhaseScope phase(clock, driver::Phase::Factor);
       ib = compute_inertia(pencil, 0.0, 1.0, fopts);  // forces an exact double factorization
     }
     type = (ib.valid && ib.neg == 0 && ib.zero == 0) ? ProblemType::GeneralizedDefinite
@@ -168,8 +170,12 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
                         ? driver::solve_indefinite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale)
                         : driver::solve_definite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale, sigma0);
   rep.factor_stats = fac->stats();
-  rep.time_factor_s += rep.factor_stats.analyze_s + rep.factor_stats.factorize_s;
-  rep.time_total_s = total.seconds();
+  // Exclusive phase times: they add up to the total by construction (driver::PhaseClock).
+  rep.time_setup_s = clock.seconds(driver::Phase::Setup);
+  rep.time_factor_s = clock.seconds(driver::Phase::Factor);
+  rep.time_iterate_s = clock.seconds(driver::Phase::Iterate);
+  rep.time_verify_s = clock.seconds(driver::Phase::Verify);
+  rep.time_total_s = rep.time_setup_s + rep.time_factor_s + rep.time_iterate_s + rep.time_verify_s;
   rep.peak_rss_bytes = peak_rss_bytes();
   event(c, "done", {{"success", rep.success}, {"pairs", static_cast<std::int64_t>(rep.pairs.size())},
                     {"seconds", rep.time_total_s}});

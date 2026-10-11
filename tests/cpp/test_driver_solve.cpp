@@ -41,8 +41,20 @@ hs::SolverConfig nearest_cfg(double sigma, index_t k) {
   return cfg;
 }
 
+// The phase times are exclusive: non-negative and summing to the total (report contract).
+void expect_times_add_up(const hs::SolveReport& r) {
+  EXPECT_GE(r.time_setup_s, 0.0);
+  EXPECT_GE(r.time_factor_s, 0.0);
+  EXPECT_GE(r.time_iterate_s, 0.0);
+  EXPECT_GE(r.time_verify_s, 0.0);
+  EXPECT_GT(r.time_total_s, 0.0);
+  EXPECT_NEAR(r.time_setup_s + r.time_factor_s + r.time_iterate_s + r.time_verify_s, r.time_total_s,
+              1e-12 * r.time_total_s);
+}
+
 template <class T>
 void expect_report_ok(const hs::Solution<T>& sol, bool expect_certificate) {
+  expect_times_add_up(sol.report);
   EXPECT_TRUE(sol.report.success);
   for (const auto& p : sol.report.pairs) {
     EXPECT_TRUE(p.accepted);
