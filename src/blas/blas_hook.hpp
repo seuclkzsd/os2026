@@ -128,8 +128,13 @@ RouteConfig parse_route_config(const std::string& spec, std::string* unknown = n
 /// Canonical text of a configuration (parse_route_config(to_string(c)) == c up to isa).
 std::string to_string(const RouteConfig& c);
 
-/// The process-wide configuration: parse_route_config(getenv("HS_BLAS_ROUTE")), read once. An
-/// unknown token aborts the process with a message (a misspelt route must not run silently).
+/// The specification used when HS_BLAS_ROUTE is unset: the build's HSOLVE_BLAS_ROUTE_DEFAULT
+/// (CMake cache variable; "" = off).
+const char* default_route_spec() noexcept;
+
+/// The process-wide configuration: parse_route_config(getenv("HS_BLAS_ROUTE") or
+/// default_route_spec()), read once. An unknown token aborts the process with a message (a
+/// misspelt route must not run silently).
 const RouteConfig& active_route_config() noexcept;
 
 /// How a call was executed (profiler key).

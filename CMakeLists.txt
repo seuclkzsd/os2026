@@ -121,9 +121,11 @@ endif()
 # AVX-512 kernels are selected at run time) and libhsolve_blashook.so for LD_PRELOAD. The option
 # links the hook into the hsolve executable instead; HS_BLAS_ROUTE then configures it at run time.
 option(HSOLVE_BLAS_HOOK "Link the BLAS hook (src/blas) into the hsolve executable" OFF)
+set(HSOLVE_BLAS_ROUTE_DEFAULT "" CACHE STRING "BLAS hook routes when HS_BLAS_ROUTE is unset (\"\" = off)")
 add_library(hsolve_blas STATIC src/blas/route.cpp src/blas/narrow_kernels.cpp src/blas/blas_profile.cpp)
 target_include_directories(hsolve_blas PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_options(hsolve_blas PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
+target_compile_definitions(hsolve_blas PRIVATE HSOLVE_BLAS_ROUTE_DEFAULT="${HSOLVE_BLAS_ROUTE_DEFAULT}")
 target_link_libraries(hsolve_blas PUBLIC OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
 add_library(hsolve_blashook SHARED src/blas/hook_symbols.cpp)
 target_include_directories(hsolve_blashook PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)

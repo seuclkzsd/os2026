@@ -12,6 +12,11 @@
 
 #include "blas/blas_hook.hpp"
 
+// Route specification used when HS_BLAS_ROUTE is unset (CMake cache HSOLVE_BLAS_ROUTE_DEFAULT).
+#ifndef HSOLVE_BLAS_ROUTE_DEFAULT
+#define HSOLVE_BLAS_ROUTE_DEFAULT ""
+#endif
+
 namespace hs::blas {
 namespace {
 
@@ -243,11 +248,15 @@ std::string to_string(const RouteConfig& c) {
   return s;
 }
 
+const char* default_route_spec() noexcept {
+  return HSOLVE_BLAS_ROUTE_DEFAULT;
+}
+
 const RouteConfig& active_route_config() noexcept {
   static const RouteConfig cfg = [] {
     const char* v = std::getenv("HS_BLAS_ROUTE");
     std::string unknown;
-    RouteConfig c = parse_route_config(v != nullptr ? v : "", &unknown);
+    RouteConfig c = parse_route_config(v != nullptr ? v : default_route_spec(), &unknown);
     if (!unknown.empty()) fatal("unknown HS_BLAS_ROUTE token(s) '" + unknown + "'");
     return c;
   }();

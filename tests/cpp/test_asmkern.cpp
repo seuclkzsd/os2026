@@ -158,6 +158,12 @@ TEST(BlasHookConfig, ParsesTokensAndReportsUnknownOnes) {
   EXPECT_FALSE(c.gemm_n1_gemv || c.trsv_max_n > 0 || c.narrow || c.parallel);
 }
 
+TEST(BlasHookConfig, BuildDefaultParses) {
+  std::string unknown;
+  hs::blas::parse_route_config(hs::blas::default_route_spec(), &unknown);
+  EXPECT_TRUE(unknown.empty()) << "HSOLVE_BLAS_ROUTE_DEFAULT has unknown tokens: " << unknown;
+}
+
 TEST(BlasHookConfig, ToStringRoundTrips) {
   for (const char* spec : {"off", "gemv1", "all,maxn=4,minkb=16,threads=2", "narrow,portable",
                            "trsv1,par,minkb=0", "trsv=7"}) {
