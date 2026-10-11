@@ -279,21 +279,26 @@ void read_entries(LineReader& lr, const Banner& b, index_t n, std::uint64_t expe
 }
 
 // Pass 1 over a coordinate file: row pointers from the row tokens of the first `expected` entry
-// lines alone. A line whose row token cannot be read is not counted; pass 2 meets it in file order
-// and reports it exactly as a single pass would.
+// lines alone. A line whose row token cannot be read is not counted, and an error of the line
+// reader (a line too long for its buffer) ends the counting: pass 2 meets either in file order,
+// after every earlier line has been checked, and reports the first error exactly as a single pass
+// would.
 std::vector<index_t> count_rows(LineReader& lr, index_t n, std::uint64_t expected) {
   std::vector<index_t> rowptr(static_cast<std::size_t>(n) + 1, 0);
   std::uint64_t count = 0;
   std::string_view line;
-  while (count < expected && lr.next(line)) {
-    if (blank_or_comment(line)) continue;
-    ++count;
-    std::string_view tok = Tokens(line).next();
-    if (!tok.empty() && tok.front() == '+') tok.remove_prefix(1);
-    std::int64_t i = 0;
-    const char* last = tok.data() + tok.size();
-    const auto [end, ec] = std::from_chars(tok.data(), last, i);
-    if (ec == std::errc() && end == last && i >= 1 && i <= n) ++rowptr[i];  // row i - 1
+  try {
+    while (count < expected && lr.next(line)) {
+      if (blank_or_comment(line)) continue;
+      ++count;
+      std::string_view tok = Tokens(line).next();
+      if (!tok.empty() && tok.front() == '+') tok.remove_prefix(1);
+      std::int64_t i = 0;
+      const char* last = tok.data() + tok.size();
+      const auto [end, ec] = std::from_chars(tok.data(), last, i);
+      if (ec == std::errc() && end == last && i >= 1 && i <= n) ++rowptr[i];  // row i - 1
+    }
+  } catch (const Error&) {  // reported by pass 2 (see above)
   }
   std::partial_sum(rowptr.begin(), rowptr.end(), rowptr.begin());
   return rowptr;

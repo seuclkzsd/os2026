@@ -125,6 +125,20 @@ void scatter_values(const io::NpzFile& npz, const std::string& key, const std::v
   });
 }
 
+// Error precedence. The entries are checked before the 'data' member is streamed, whereas every
+// member used to be read whole (dtype, length and CRC checked) before any entry was looked at. So
+// that the same error is reported as before, a failed entry check first reads 'data' through and
+// reports its error, if it has one. Only the error path pays for that extra read.
+template <class T, class F>
+auto data_errors_first(const io::NpzFile& npz, F&& check) -> decltype(check()) {
+  try {
+    return check();
+  } catch (const Error&) {
+    npz.read_chunks<T>("data", [](const T*, std::size_t, std::size_t) {});
+    throw;
+  }
+}
+
 template <class T>
 CsrMatrix<T> read_scipy_coo(const io::NpzFile& npz, index_t n, bool drop_zeros,
                             io::AssemblyStats& stats) {
@@ -162,10 +176,12 @@ CsrMatrix<T> read_scipy_coo(const io::NpzFile& npz, index_t n, bool drop_zeros,
     HS_THROW(InvalidInput, source << ": coo npz has neither 'row'/'col' nor 'coords'");
   }
   const std::size_t nnz = npz.header("data").count;
-  if (rows.size() != nnz || cols.size() != nnz)
-    HS_THROW(InvalidInput, source << ": coo arrays differ in length (row " << rows.size()
-                                  << ", col " << cols.size() << ", data " << nnz << ")");
-  naming_source(source, [&] { io::check_coordinates(n, n, rows.data(), cols.data(), nnz); });
+  data_errors_first<T>(npz, [&] {
+    if (rows.size() != nnz || cols.size() != nnz)
+      HS_THROW(InvalidInput, source << ": coo arrays differ in length (row " << rows.size()
+                                    << ", col " << cols.size() << ", data " << nnz << ")");
+    naming_source(source, [&] { io::check_coordinates(n, n, rows.data(), cols.data(), nnz); });
+  });
 
   CsrMatrix<T> m;
   m.nrows = m.ncols = n;
@@ -191,8 +207,10 @@ CsrMatrix<T> read_scipy_csc(const io::NpzFile& npz, index_t n, bool drop_zeros,
   std::vector<index_t> colptr = npz.read_as<index_t>("indptr");
   std::vector<std::int32_t> rows = npz.read_as<std::int32_t>("indices");
   const std::size_t nvals = npz.header("data").count;
-  const auto nz = static_cast<std::size_t>(naming_source(
-      source, [&] { return io::check_compressed(colptr, n, rows, nvals, n, /*csc=*/true); }));
+  const auto nz = static_cast<std::size_t>(data_errors_first<T>(npz, [&] {
+    return naming_source(
+        source, [&] { return io::check_compressed(colptr, n, rows, nvals, n, /*csc=*/true); });
+  }));
 
   CsrMatrix<T> m;
   m.nrows = m.ncols = n;

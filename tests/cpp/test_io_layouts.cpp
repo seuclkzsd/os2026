@@ -512,7 +512,105 @@ TYPED_TEST(IoLayouts, BrokenCooAndCscFilesAreRejected) {
   }
 }
 
+// "<code> | <message>" of the error a load of `path` throws.
+std::string load_error(const std::filesystem::path& path) {
+  const auto err = error_of([&] { hs::load_matrix(path, unchecked()); });
+  return err.code + " | " + err.message;
+}
+
 bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
+
+class IoPrecedence : public hs::io_test::TempDirTest {
+ protected:
+  // 'data' that load_matrix cannot convert: float16 (no safe cast to float64).
+  static hs::NpyArray half_data(std::size_t count) {
+    hs::NpyArray a;
+    a.dtype = "<f2";
+    a.shape = {count};
+    a.data.assign(2 * count, std::byte{0x3c});
+    return a;
+  }
+  // A stored archive of `members` whose 'data' payload no longer matches its CRC-32.
+  void write_with_corrupt_data(const std::filesystem::path& path, const Members& members) {
+    write_npz(path, members, false);
+    std::vector<char> bytes = read_bytes(path);
+    const std::string text(bytes.begin(), bytes.end());
+    const std::size_t name = text.find(std::string("data.npy\x93NUMPY"));  // the local record
+    ASSERT_NE(name, std::string::npos);
+    const std::size_t npy = name + 8;
+    const std::size_t hlen = static_cast<unsigned char>(bytes[npy + 8]) |
+                             static_cast<std::size_t>(static_cast<unsigned char>(bytes[npy + 9])) << 8;
+    bytes[npy + 10 + hlen] ^= 0x41;  // first payload byte
+    write_bytes(path, bytes);
+  }
+};
+
+TEST_F(IoPrecedence, DataMemberErrorsComeBeforeIndexChecks) {
+  // csc/coo files are checked entry by entry before 'data' is streamed. The error reported must
+  // still be the one of reading every member whole first (as before the streaming readers): an
+  // unconvertible or corrupt 'data' wins over bad indices and lengths.
+  Entries<double> e;
+  e.n = 3;
+  e.add(0, 0, 1.0);
+  e.add(2, 1, 2.0);
+  e.add(1, 2, 2.0);
+  const std::string f2 = "invalid_input | ";
+  const std::string f2_message = "data.npy: cannot convert numpy dtype '<f2' to float64 (not a safe numpy cast)";
+  const std::string crc_message = "data.npy: CRC-32 mismatch";
+  {  // coo: row index outside the matrix
+    Members m = coo_members(e);
+    m[2].second = npy_of(std::vector<std::int32_t>{0, 7, 1});
+    write_npz(tmp("a.npz"), m, true);
+    std::string s = load_error(tmp("a.npz"));
+    EXPECT_TRUE(contains(s, "entry 1 at (7, 1) lies outside the 3 x 3 matrix")) << s;
+    m[4].second = half_data(3);
+    write_npz(tmp("a.npz"), m, true);
+    s = load_error(tmp("a.npz"));
+    EXPECT_TRUE(contains(s, f2) && contains(s, f2_message)) << s;
+    m[4].second = npy_of(e.vals);
+    write_with_corrupt_data(tmp("a.npz"), m);
+    s = load_error(tmp("a.npz"));
+    EXPECT_TRUE(contains(s, "io | ") && contains(s, crc_message)) << s;
+  }
+  {  // coo: arrays of different lengths
+    Members m = coo_members(e);
+    m[3].second = npy_of(std::vector<std::int32_t>{0, 2});
+    m[4].second = half_data(3);
+    write_npz(tmp("b.npz"), m, true);
+    const std::string s = load_error(tmp("b.npz"));
+    EXPECT_TRUE(contains(s, f2_message)) << s;
+  }
+  {  // csc: row index outside the matrix, or index and value counts that differ
+    Members m = csc_members(e);
+    m[3].second = npy_of(std::vector<std::int32_t>{0, 9, 1});
+    m[4].second = half_data(3);
+    write_npz(tmp("c.npz"), m, true);
+    std::string s = load_error(tmp("c.npz"));
+    EXPECT_TRUE(contains(s, f2_message)) << s;
+    m[4].second = npy_of(e.vals);
+    write_with_corrupt_data(tmp("c.npz"), m);
+    s = load_error(tmp("c.npz"));
+    EXPECT_TRUE(contains(s, "io | ") && contains(s, crc_message)) << s;
+    m = csc_members(e);
+    m[4].second = half_data(2);
+    write_npz(tmp("c.npz"), m, true);
+    s = load_error(tmp("c.npz"));
+    EXPECT_TRUE(contains(s, f2_message)) << s;
+  }
+  {  // coo 'coords': a member that cannot be converted wins over its wrong shape
+    Members m{{"format", format_array("coo")},
+              {"shape", npy_of(std::vector<std::int64_t>{3, 3})},
+              {"coords", npy_of(std::vector<double>{0, 1, 2, 0, 1, 2}, {3, 2})},
+              {"data", npy_of(e.vals)}};
+    write_npz(tmp("d.npz"), m, true);
+    std::string s = load_error(tmp("d.npz"));
+    EXPECT_TRUE(contains(s, "coords.npy: cannot convert numpy dtype '<f8' to int32")) << s;
+    m[2].second = npy_of(std::vector<std::int32_t>{0, 1, 2, 0, 1, 2}, {3, 2});
+    write_npz(tmp("d.npz"), m, true);
+    s = load_error(tmp("d.npz"));
+    EXPECT_TRUE(contains(s, "'coords' must have shape (2, nnz)")) << s;
+  }
+}
 
 class IoChunks : public hs::io_test::TempDirTest {};
 
@@ -565,7 +663,9 @@ TEST_F(IoChunks, HeaderClaimsBeyondThePayloadFailBeforeAnyAllocation) {
   with("csr indices", csr_like("csr"), 3, claim(npy_of(a.colind)));
   with("csr data", csr_like("csr"), 4, claim(npy_of(a.values)));
   with("csc indices", csr_like("csc"), 3, claim(npy_of(a.colind)));
+  with("csc data", csr_like("csc"), 4, claim(npy_of(a.values)));
   with("coo row", coo, 2, claim(npy_of(rows)));
+  with("coo data", coo, 4, claim(npy_of(a.values)));
   RawMembers by_coords{{"format", raw(format_array("coo"))}, {"shape", raw(shape)},
                        {"coords", raw(npy_of(coords, {2, rows.size()}))}, {"data", raw(npy_of(a.values))}};
   with("coo coords", by_coords, 2, claim(npy_of(coords, {2, rows.size()}), "(2, 1099511627776)"));
@@ -706,6 +806,24 @@ TEST_F(IoMtxTwoPass, ErrorsAreReportedInFileOrder) {
   EXPECT_NE(s.find("e.mtx:6: more entries than the 3 declared"), std::string::npos) << s;
   s = error_for("1 1 1\n2 2 1\n", 3);
   EXPECT_NE(s.find("file ends after 2 of 3 entries"), std::string::npos) << s;
+}
+
+TEST_F(IoMtxTwoPass, AnOverlongLineDoesNotHideAnEarlierError) {
+  // The counting pass reads the lines too. A line the reader rejects (5 MiB: longer than its
+  // whole buffer, so rejected wherever it starts) behind a malformed value must not be reported
+  // first; on its own it is reported with its line number.
+  const std::string banner = "%%MatrixMarket matrix coordinate real general\n3 3 3\n";
+  const std::string long_line = "%" + std::string(std::size_t{5} << 20, 'x') + "\n";
+  const auto error_for = [&](const std::string& body) {
+    write_text(tmp("l.mtx"), banner + body);
+    const auto e = error_of([&] { hs::load_matrix(tmp("l.mtx")); });
+    return e.code + " | " + e.message;
+  };
+  std::string s = error_for("1 1 1\n2 2 x\n" + long_line + "3 3 1\n");
+  EXPECT_NE(s.find("io | "), std::string::npos) << s;
+  EXPECT_NE(s.find("l.mtx:4: expected a value, got 'x'"), std::string::npos) << s;
+  s = error_for("1 1 1\n2 2 1\n" + long_line + "3 3 1\n");
+  EXPECT_NE(s.find("l.mtx:5: line longer than 1048576 bytes"), std::string::npos) << s;
 }
 
 }  // namespace
