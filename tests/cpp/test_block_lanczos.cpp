@@ -430,7 +430,9 @@ TEST(LanczosBlockLayout, BasisSizesAreWholeBlocks) {
       // A free space of INT64_MAX: feasible up to p = n_free / 8, no arithmetic overflows.
       const auto huge = block_dimensions(setup(big, 4, 20), p, automatic);
       EXPECT_EQ(huge.feasible, p <= big / 8);
-      if (huge.feasible) EXPECT_EQ(huge.ncv % p, 0);
+      if (huge.feasible) {
+        EXPECT_EQ(huge.ncv % p, 0);
+      }
     }
   }
 }

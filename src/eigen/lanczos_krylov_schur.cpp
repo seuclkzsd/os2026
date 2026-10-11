@@ -198,19 +198,25 @@ std::pair<double, double> ThickRestartLanczos<T>::orthogonalize(index_t j) {
   T* w = vcol(j);
   const index_t k = d_ + j;
   double after = 0.0;
+  // A deflation block is M-orthonormal only to kDeflationOrthoTol, so with one present every
+  // vector takes both CGS2 passes (one DGKS pass would leave V^H M w = O(delta), see
+  // linalg::Reorth). Without one the default (Reorth::Auto) applies: DGKS outside stored mode,
+  // two passes in stored mode, whose bw below is not M*w.
+  const linalg::OrthoOptions ortho{d_ > 0 ? linalg::Reorth::Always : linalg::Reorth::Auto};
   if (store_bv_) {
     // The coefficients (M V)^H w need only the stored columns and w. orthogonalize_cgs2 also
     // updates bw -= (M V) c and derives the norm from it; both are discarded (see "store_bv"
     // above): the column slot of M*w only serves as scratch until M w_perp is stored in it.
     T* bw = bvcol(j);
-    linalg::orthogonalize_cgs2(n_, k, basis_.data(), n_, bbasis_.data(), n_, w, bw, coef_.data());
+    linalg::orthogonalize_cgs2<T>(n_, k, basis_.data(), n_, bbasis_.data(), n_, w, bw, coef_.data(),
+                                  nullptr, ortho);
     b_inner_->apply(w, n_, bw, n_, 1);
     // std::max keeps a NaN (first argument) so that the finiteness check below sees it.
     after = std::sqrt(std::max(std::real(linalg::dot(n_, w, bw)), 0.0));
   } else {
     after = linalg::orthogonalize_cgs2<T>(n_, k, basis_.data(), n_, nullptr, n_, w,
                                           mw_.empty() ? nullptr : mw_.data(), coef_.data(),
-                                          apply_m_ ? &apply_m_ : nullptr);
+                                          apply_m_ ? &apply_m_ : nullptr, ortho);
   }
   double c2 = after * after;
   for (index_t i = 0; i < k; ++i) c2 += abs2(coef_[i]);

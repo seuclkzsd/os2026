@@ -97,19 +97,25 @@ std::pair<double, double> BlockOrthonormalizer<T>::orthogonalize_column(T* basis
                                                                         index_t kk, T* h) {
   T* w = basis + kk * n_;
   double after = 0.0;
+  // Always two passes: this fallback must also clean columns against a V that is M-orthonormal
+  // only to delta (a deflation block accepted at kDeflationOrthoTol), where one DGKS pass would
+  // leave V^H M w = O(delta) (see linalg::Reorth). The path is rare, so the extra pass is free.
+  const linalg::OrthoOptions two_pass{linalg::Reorth::Always};
   if (store_m_) {
     // Coefficients from the stored M*V; the recurrence-updated M*w is discarded and M is applied
     // to the orthogonalized vector instead (see "store_bv" in lanczos_krylov_schur.cpp).
     T* bw = mbasis + kk * n_;
-    linalg::orthogonalize_cgs2(n_, kk, basis, n_, mbasis, n_, w, bw, h);
+    linalg::orthogonalize_cgs2<T>(n_, kk, basis, n_, mbasis, n_, w, bw, h, nullptr, two_pass);
     m_->apply(w, n_, bw, n_, 1);
     // std::max keeps a NaN (first argument) for the finiteness check below.
     after = std::sqrt(std::max(std::real(linalg::dot(n_, w, bw)), 0.0));
   } else if (m_) {
     const linalg::ApplyFn<T> apply = [this](const T* x, T* y) { m_->apply(x, n_, y, n_, 1); };
-    after = linalg::orthogonalize_cgs2<T>(n_, kk, basis, n_, nullptr, n_, w, mw_.data(), h, &apply);
+    after = linalg::orthogonalize_cgs2<T>(n_, kk, basis, n_, nullptr, n_, w, mw_.data(), h, &apply,
+                                          two_pass);
   } else {
-    after = linalg::orthogonalize_cgs2<T>(n_, kk, basis, n_, nullptr, n_, w, nullptr, h);
+    after = linalg::orthogonalize_cgs2<T>(n_, kk, basis, n_, nullptr, n_, w, nullptr, h, nullptr,
+                                          two_pass);
   }
   double c2 = after * after;
   for (index_t i = 0; i < kk; ++i) c2 += abs2(h[i]);

@@ -89,8 +89,9 @@ struct HermitianEigResult {
 /// Pass a D accurate to the wanted tolerance, or Rayleigh-Ritz over [D X] / verify the true
 /// residuals when the full residual matters.
 /// LargestMagnitude ranks equal |theta| with the positive value first.
-/// Cost per restart: O(ncv) operator applications + O(n ncv^2) flops (+ 3 M applications per
-/// step without store_bv, 1 with it). Memory (scalars): n*(d + ncv + 1) for the basis [D V]
+/// Cost per restart: O(ncv) operator applications + O(n ncv^2) flops (+ 2 or 3 M applications
+/// per step without store_bv - 3 when the DGKS test of linalg::orthogonalize_cgs2 needs a second
+/// pass, always with a deflation block - and 1 with it). Memory (scalars): n*(d + ncv + 1) for the basis [D V]
 /// (twice that with store_bv, which also keeps M*[D V]) + n (M*w workspace without store_bv)
 /// + O(d^2 + ncv*(ncv + 4096)); the returned vectors add n*nev.
 ///
