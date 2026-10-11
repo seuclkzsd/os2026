@@ -213,10 +213,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   - 给新实例以前一次分析的主元顺序（SYM_PERM → PERM_IN，ICNTL(7)=1）：SCOTCH（n ≈ 1e5）分析从
     0.9–1.3 s 降到 0.03–0.05 s；对 AMD 几乎无益（读入输入占主导）。消去不完全复现（MUMPS 重建消去树）：
     1e5 测例因子条目 +0.4..3.4%，随机稀疏矩阵 +1..7%（AMD、SCOTCH）、最多 +15%（METIS）。
-  - **SCOTCH 排序不可复现**：同一进程内两次分析得到不同排序（flops 差 10%；factor.hpp 称新进程
-    能复现）；memio 在不同进程间也观察到差异（wg-square-1e6 固定 ordering=3，4 次运行因子条目
-    7.202e7–7.275e7；ss-ge87h76 两个进程的估计 5.80e8 与 5.91e8）。`deterministic` 只覆盖分解与回代，
-    不覆盖排序。
+  - **SCOTCH 排序不可复现**：同一进程内两次分析得到不同排序（flops 差 10%），不同进程间也不同
+    （wg-square-1e6 固定 ordering=3，4 次运行因子条目 7.202e7–7.275e7）；42 个数据测例上同一进程的
+    3 次 SCOTCH 分析估计在每个测例上都有变化，METIS（固定种子）在任何测例上都没有（1888a72，
+    `bench_drvint_fix_ordering`）。`FactorOptions::deterministic` 只覆盖分解与回代；driver 的
+    `deterministic = true` 因此在自适应排序中改用 METIS（§3.6-3b）。
 - 错误约定：工作区不足（−8,−9,−14,−15,−17,−20）由 `factorize` 内部重试 ≤3 次（ICNTL(14) 翻倍，
   计入 `workspace_retries`）后抛 FactorizationFailed；−13/−19（分配失败 / 超 ICNTL(23) 上限）抛
   OutOfMemoryBudget；其它负 INFO 抛 FactorizationFailed（消息含 INFO(1)/INFO(2)）。
@@ -224,10 +225,10 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 - `FactorEstimate`：INFOG(20)（因子条目估计）、INFOG(16/17) 内存、INFOG(26/27) 外存、
   INFOG(36/38) BLR 估计（仅当分析时启用 BLR，否则 −1）、RINFOG(1) flops。
 - 单精度 / BLR 分解的 inertia() 是舍入/压缩后矩阵的惯性，**证书不得使用**：driver 在主分解为
-  单精度或 BLR 时改用 `compute_inertia`（双精度）计数。
-- `compute_inertia(pencil, α, β)`：自建对象、强制双精度且无 BLR、丢弃因子（ICNTL(31)，只占工作
-  内存）、奇异时返回 valid=false 不抛；用于主分解为单精度/BLR 时的计数、B 正定性检测与测试。
-  B 为 HPD 当且仅当 `valid && neg==0 && zero==0`。
+  单精度或 BLR 时一律在 InertiaCounter（双精度）上计数（§3.6-8）。
+- `compute_inertia(pencil, α, β)`：自建对象（自做一次分析）、强制双精度且无 BLR、丢弃因子
+  （ICNTL(31)，只占工作内存）、奇异时返回 valid=false 不抛；driver 只在主分解为单精度/BLR 时用于
+  B 正定性检测与 GHIEP 的 A 零主元计数，另用于测试。B 为 HPD 当且仅当 `valid && neg==0 && zero==0`。
 - `release_factors()`（非纯虚，默认返回 false；MUMPS：JOB=−4）：释放数值因子与工作区、保留分析。
   之后 `solve` 抛 Internal、`inertia().valid = false`（valid ⇔ solve 可用，ShiftInvertOperator 与
   driver 都以它判断），计数与 `stats()` 仍描述被释放的那次分解——需要时先拷贝 `inertia()`。
@@ -246,8 +247,36 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   valid == true 只在位移位于谱隙时才是证书——端点仍须放在谱隙中点。单精度计数（smumps；3-D 测例快
   45–53%）是被 O(eps_s·‖K‖) 扰动矩阵的精确计数：距最近特征值 δ·(scale + |s|) 内会数错（实测到
   δ ≈ 1.6e-6，稠密复谱 5e-6；δ ≥ 1e-5 从未出错），只能作筛查值。
-- **driver 的证书目前仍复用主分解对象**（§3.6-8：端点处重分解主对象读惯性，需要时再回到 σ 重分解；
-  主分解为单精度/BLR 时用 `compute_inertia`）。InertiaCounter 的接入在 P4 进行中，计划规则见 §3.6-8。
+- **driver 的用法**（P4，§3.6-8 `CountSource`）：nearest 证书在模型判定计数器划算时
+  （`counter_pays`）、以及主分解为单精度/BLR 时在 InertiaCounter 上计数，每次计数前释放主因子；
+  窗口/切片默认在主对象上计数（计数点兼作单边位移），只在主因子 INFOG(21) + 计数器估计超过上限时
+  释放。4 线程端到端实测：证书时间比主对象计数少 0.05–0.14 s（5–13%），峰值 RSS 低 2–7%
+  （667d8e9）。单精度筛查计数 driver 不用（规则见 §3.5b）。
+- **自研嵌套剖分**（P4，`compute_ordering`、`OrderingOptions`、`src/factor/ordering*.cpp`，无新依赖）：
+  - 动机：MUMPS 内的排序是串行的（METIS/SCOTCH 占其分析的 90–97%；SCOTCH_PTHREAD_NUMBER 无效）；
+    METIS/SCOTCH 不能直接链接（只是 libdmumps 的间接依赖，ld 拒绝间接 DSO，dlopen 需要 glibc 2.28
+    sysroot 链接行上没有的 libdl）；METIS 5.1 用 libc rand()，并发调用不可复现。
+  - 算法：METIS_NodeND 式多级顶点分隔子（有序重边匹配、贪心生长、单侧节点 FM + 随机打破平局），
+    大图取 4 倍粗化图上 5 次试分的最优，叶子（≤ `leaf_size`，默认 120，上限 2048）用精确最小度；
+    每个分隔子的两半与 5 次试分都是 OpenMP 任务（粒度 512 顶点）。随机数为按子图播种的计数器式
+    生成器 ⇒ **排列与线程数无关，逐位相同**。`imbalance` ∈ [1, 1.5]（默认 1.2；1.5 在三维实例上
+    flops +14..+70%，更大时退化），越界抛 InvalidInput。总是开自己的并行区并等待全部任务，可在
+    并行区内调用（无嵌套并行时单线程、结果相同）。
+  - 复数铅笔：至少一半的非对角耦合为复数时排 K 的 n 顶点图并把每个顶点的两个嵌入变量相继消去
+    （Compressed），否则排 2n 顶点的嵌入图（Full；`OrderingOptions::embedding` 可强制）。
+  - 接入 MUMPS：`FactorOptions::ordering = kOrderingNestedDissection`（10）时 analyze 先算排列，以
+    PERM_IN（ICNTL(7)=1）交给 MUMPS；`ordering_threads`（0 = `threads`）为排序线程数；
+    `FactorStats::ordering_s` 是 analyze_s 中排序所占部分。同一分析给定排列的部分只需 0.03–0.08 s
+    （n ≈ 1e5）、0.5–0.6 s（n = 1e6）。
+  - `FactorOptions::block_analysis`（1 开、0 关（默认）、−1 自动：至少一半耦合为复数时开）：复数时
+    以 ICNTL(15)=1 把嵌入的 {i, n+i} 声明为块，MUMPS 自己的排序便排 n 顶点图（全复数测例 SCOTCH
+    分析 3.0 → 0.30 s；Bloch Yee（3% 复耦合）METIS flops 2.24e12 → 2.69e12，故默认关）；
+    `FactorStats::block_analysis` 记录是否生效。
+  - 实测（2 线程，`results/p4_measurements.md` §2）：分析比 MUMPS 串行 METIS 快 1.3–1.6×（串行时
+    慢 1.2–1.35×），flops 在 METIS 的 −7..+12% 内；16 线程只有 Brent 估计（W/16 + C），未实测。
+    按 driver 实付（分析 + 3 次分解 + 回代）计，yee-pec-box-1e5 上 2 线程打平，二维测例 AMD 最好。
+    **driver 尚未使用**：config 的 `ordering` 只接受 −1..7，自适应排序的嵌套剖分分支是 SCOTCH /
+    METIS（§3.6-3b）；是否作默认须在评测线程数下测量。
 
 ### 3.4b ops（`include/hsolve/operator.hpp`）
 - 稀疏乘积走 §3.2 的内核，构造参数 `KernelPath kernels`（默认 Auto；Reference 只换稀疏乘积，修正
