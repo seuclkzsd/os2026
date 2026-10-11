@@ -402,8 +402,11 @@ def load_matrix(path: str | os.PathLike, *, storage: str = "auto", hermitian_tol
     (storage), Hermitian check (NotHermitianError above hermitian_tol; below it A is replaced by
     its Hermitian part), complex input with zero imaginary parts returned as real.
 
-    Returns a scipy.sparse.csr_array sharing the loaded buffers (no copy), and with
-    return_info=True also a dict {source_format, storage, hermitian_defect, notes}.
+    Returns a scipy.sparse.csr_array whose data and indices are the loaded C++ buffers (no copy;
+    indptr is a fresh int32 array of n + 1 entries, since scipy wants one index dtype - int64
+    indptr would make it copy all indices), and with return_info=True also a dict
+    {source_format, storage, hermitian_defect, notes}. Only when n or nnz exceeds the int32 range
+    are the indices an int64 copy (indptr then the C++ buffer).
     """
     import scipy.sparse as sp
 
@@ -411,7 +414,7 @@ def load_matrix(path: str | os.PathLike, *, storage: str = "auto", hermitian_tol
         raise InvalidInputError(f"storage = {storage!r} is not one of {_STORAGES}")
     n, indptr, indices, data, info = _hsolve.load_matrix(os.fsdecode(path), storage,
                                                          _real(hermitian_tol, "hermitian_tol"))
-    mat = sp.csr_array((data, indices, indptr), shape=(n, n))
+    mat = sp.csr_array((data, indices, indptr), shape=(n, n))  # same index dtypes: kept as they are
     mat.has_canonical_format = True  # rows sorted, no duplicates (hs::CsrMatrix invariant)
     return (mat, info) if return_info else mat
 

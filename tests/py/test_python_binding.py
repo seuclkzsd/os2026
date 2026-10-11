@@ -540,6 +540,46 @@ def test_load_matrix_roundtrip_and_solve_from_path(tmp_path):
     assert any("storage: upper triangle mirrored" in w for w in r_path.report["warnings"])
 
 
+def _buffer_owner(arr: np.ndarray):
+    """What owns the memory behind `arr` (scipy may hand out views): a PyCapsule for the C++
+    buffers, the numpy array itself when numpy allocated it."""
+    while isinstance(arr.base, np.ndarray):
+        arr = arr.base
+    return arr if arr.flags.owndata else arr.base
+
+
+def _from_cpp(arr: np.ndarray) -> bool:
+    return type(_buffer_owner(arr)).__name__ == "PyCapsule"
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.complex128])
+def test_load_matrix_shares_the_cpp_buffers(tmp_path, dtype):
+    """scipy's csr_array keeps one index dtype for indptr and indices (int64 if either is): the
+    int32 column indices are only kept without a copy when indptr is int32 as well."""
+    a = (random_hermitian(300, 0.03, seed=8, complex_=dtype == np.complex128) + 3.0 * sp.identity(300)).tocsr()
+    sp.save_npz(tmp_path / "A.npz", a)
+    m = hsolve.load_matrix(tmp_path / "A.npz")
+    assert m.dtype == dtype and m.indptr.dtype == np.int32 and m.indices.dtype == np.int32
+    assert _from_cpp(m.indices) and _from_cpp(m.data)  # the C++ CsrMatrix arrays, no copy
+    assert _buffer_owner(m.indices) is _buffer_owner(m.data)
+    assert not _from_cpp(m.indptr)  # the only copy: n + 1 row pointers narrowed to int32
+    assert (abs(m - a)).max() == 0 and m.has_canonical_format
+    # The int64 layout (used when n or nnz exceeds int32): indptr shares, indices are widened once.
+    n, indptr, indices, data, _ = _hsolve.load_matrix(str(tmp_path / "A.npz"), "auto", 1e-10, wide_indices=True)
+    assert indptr.dtype == np.int64 and indices.dtype == np.int64
+    assert _from_cpp(indptr) and _from_cpp(data) and not _from_cpp(indices)
+    w = sp.csr_array((data, indices, indptr), shape=(n, n))
+    for mine, scipys in ((indptr, w.indptr), (indices, w.indices), (data, w.data)):
+        assert np.shares_memory(mine, scipys)  # scipy made no copy
+    assert (abs(w - a)).max() == 0
+    del m, w, indptr, indices, data  # the capsule frees the CsrMatrix (ASan builds check this)
+    sp.save_npz(tmp_path / "Z.npz", sp.csr_matrix((5, 5), dtype=dtype))  # no stored entries
+    for wide in (False, True):
+        n, indptr, indices, data, _ = _hsolve.load_matrix(str(tmp_path / "Z.npz"), "auto", 1e-10, wide_indices=wide)
+        z = sp.csr_array((data, indices, indptr), shape=(n, n))
+        assert z.shape == (5, 5) and z.nnz == 0 and np.all(z.indptr == 0)
+
+
 def test_complex_dtype_gives_complex_eigenvectors_for_paths_too(tmp_path):
     """A complex dtype with all-zero imaginary parts is solved as real; the eigenvectors come back
     complex128 whether the matrix is passed in memory or as a file (the loader demotes it too)."""

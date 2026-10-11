@@ -17,6 +17,8 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -340,24 +342,57 @@ py::tuple py_solve(const py::tuple& a_arg, const py::object& b_arg, const std::s
   return std::visit([&](auto& s) { return to_python(std::move(s), cfg, complex_dtype); }, out->solution);
 }
 
-/// Owner of a loaded CSR matrix whose arrays are exposed to numpy without copies.
+/// A loaded CSR matrix as the arrays of a scipy csr_array (indptr, indices, data), with the
+/// fewest copies. scipy keeps ONE index dtype for indptr and indices - int64 as soon as either
+/// is int64 (sparray never downcasts by content) - while CsrMatrix has an int64 rowptr and int32
+/// colind. Handing both over as they are made scipy copy colind to int64 while the capsule kept
+/// the int32 original alive (12 instead of 4 bytes per nonzero). Therefore:
+///  * n, nnz <= INT32_MAX (every practical case): indptr is an int32 copy of rowptr (n + 1
+///    entries; rowptr is then freed), indices and data are views of colind and values;
+///  * otherwise, or wide_indices (tests): indptr is a view of rowptr and indices an int64 copy of
+///    colind (the copy scipy would make; colind is then freed); data is a view of values.
+/// The views own the CsrMatrix through one capsule. The copies run without the GIL.
 template <class T>
-py::tuple csr_to_python(CsrMatrix<T>&& m) {
+py::tuple csr_to_python(CsrMatrix<T>&& m, bool wide_indices) {
   auto owner = std::make_unique<CsrMatrix<T>>(std::move(m));
   CsrMatrix<T>* p = owner.get();
   py::capsule base(owner.get(), [](void* q) { delete static_cast<CsrMatrix<T>*>(q); });
   owner.release();
-  auto view = [&](auto* data, std::size_t size) {
-    using V = std::remove_cv_t<std::remove_pointer_t<decltype(data)>>;
-    return py::array_t<V>(static_cast<py::ssize_t>(size), data, base);
+  auto view = [&](auto& vec) -> py::array {
+    using V = typename std::remove_reference_t<decltype(vec)>::value_type;
+    if (vec.empty()) return py::array_t<V>(0);  // numpy would treat a null data pointer as "allocate"
+    return py::array_t<V>(static_cast<py::ssize_t>(vec.size()), vec.data(), base);
   };
-  py::array indptr = view(p->rowptr.data(), p->rowptr.size());
-  py::array indices = p->colind.empty() ? py::array(py::array_t<std::int32_t>(0)) : py::array(view(p->colind.data(), p->colind.size()));
-  py::array data = p->values.empty() ? py::array(py::array_t<T>(0)) : py::array(view(p->values.data(), p->values.size()));
-  return py::make_tuple(p->nrows, indptr, indices, data);
+  constexpr index_t kInt32Max = std::numeric_limits<std::int32_t>::max();
+  const index_t n = p->nrows, nnz = p->nnz();
+  py::array indptr, indices;
+  if (!wide_indices && n <= kInt32Max && nnz <= kInt32Max) {
+    py::array_t<std::int32_t> narrow(static_cast<py::ssize_t>(n) + 1);
+    std::int32_t* dst = narrow.mutable_data();
+    {
+      py::gil_scoped_release nogil;
+      std::transform(p->rowptr.begin(), p->rowptr.end(), dst, [](index_t x) { return static_cast<std::int32_t>(x); });
+      std::vector<index_t>().swap(p->rowptr);
+    }
+    indptr = std::move(narrow);
+    indices = view(p->colind);
+  } else {
+    py::array_t<std::int64_t> wide(static_cast<py::ssize_t>(nnz));
+    std::int64_t* dst = wide.mutable_data();
+    {
+      py::gil_scoped_release nogil;
+      std::copy(p->colind.begin(), p->colind.end(), dst);
+      std::vector<std::int32_t>().swap(p->colind);
+    }
+    indptr = view(p->rowptr);
+    indices = std::move(wide);
+  }
+  py::array data = view(p->values);
+  return py::make_tuple(n, indptr, indices, data);
 }
 
-py::tuple py_load_matrix(const std::string& path, const std::string& storage_text, double hermitian_tol) {
+py::tuple py_load_matrix(const std::string& path, const std::string& storage_text, double hermitian_tol,
+                         bool wide_indices) {
   LoadOptions lo;
   lo.storage = parse_storage(storage_text);
   lo.hermitian_tol = hermitian_tol;
@@ -371,7 +406,7 @@ py::tuple py_load_matrix(const std::string& path, const std::string& storage_tex
   info["storage"] = storage_name(lm->detected_storage);
   info["hermitian_defect"] = lm->hermitian_defect;
   info["notes"] = lm->notes;
-  py::tuple arrays = std::visit([](auto& m) { return csr_to_python(std::move(m)); }, lm->matrix);
+  py::tuple arrays = std::visit([&](auto& m) { return csr_to_python(std::move(m), wide_indices); }, lm->matrix);
   return py::make_tuple(arrays[0], arrays[1], arrays[2], arrays[3], info);
 }
 
@@ -403,7 +438,9 @@ PYBIND11_MODULE(_hsolve, m) {
         "solve(a, b, config_json, verbose, storage) -> (w, v, complex_w, complex_v, report_json, config_json, "
         "complex_dtype)");
   m.def("load_matrix", &hs::py_load_matrix, py::arg("path"), py::arg("storage"), py::arg("hermitian_tol"),
-        "load_matrix(path, storage, hermitian_tol) -> (n, indptr, indices, data, info)");
+        py::arg("wide_indices") = false,
+        "load_matrix(path, storage, hermitian_tol, wide_indices=False) -> (n, indptr, indices, data, info); "
+        "int64 indices only when n or nnz exceeds int32 (or wide_indices), else int32 indptr and indices");
   m.def("parse_config", [](const std::string& text) { return hs::config_to_json(hs::parse_config(text), -1); },
         py::arg("config_json"), "Validate a config JSON document; returns the complete normalised document.");
   m.def("version", [] { return std::string(hs::version()); });
