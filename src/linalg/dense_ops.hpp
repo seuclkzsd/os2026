@@ -16,6 +16,7 @@
 // be accessed concurrently. Called from inside an active OpenMP region they run on one thread.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 
@@ -156,7 +157,11 @@ double orthogonalize_cgs2(index_t n, index_t k, const T* v, index_t ldv, const T
 /// OrthoInfo. Returns the number of passes: 0 when k == 0 or p == 0, else 1 or 2.
 /// Preconditions: V M-orthonormal (as for orthogonalize_cgs2); W, BW do not alias V, BV. Cost: the sweeps of
 /// orthogonalize_cgs2 with p columns each (the reads of V are shared by the p columns; 4nkp flops
-/// per pass). Workspace: O(k p) scalars per reduction slot, at most ~2 MB of slots.
+/// per pass). Workspace (independent of n): a reduction sweep keeps per slot the partial k x p
+/// projection and p norms, s = 8 (k p d + p) bytes (d = 1 real, 2 complex), in at most
+/// max(32, min(256, 2 MB / s)) slots, i.e. max(2 MB, 32 s) in all: wide blocks exceed 2 MB, e.g.
+/// 16.8 MB for complex k = 512, p = 64 (32 slots keep the reduction parallel). With the
+/// coefficient blocks (2 k p scalars) the exact bound is orthogonalize_block_cgs2_workspace_bytes.
 /// Deterministic for any thread count as long as the single-threaded BLAS gemm is (it is called on
 /// fixed row blocks from inside an OpenMP region, where an OpenMP BLAS does not spawn threads).
 template <class T>
@@ -165,6 +170,11 @@ int orthogonalize_block_cgs2(index_t n, index_t k, index_t p, const T* v, index_
                              double* norms_before, double* norms_after,
                              const ApplyBlockFn<T>* apply_m = nullptr,
                              const OrthoOptions& options = OrthoOptions{});
+
+/// Upper bound in bytes of the scratch memory one orthogonalize_block_cgs2 call with these k, p
+/// allocates (any n, mode and policy; for memory budgets). Throws InvalidInput for negative sizes.
+template <class T>
+std::size_t orthogonalize_block_cgs2_workspace_bytes(index_t k, index_t p);
 
 /// C (k x k) = V^H * W for V (n x k, ld ldv), W (n x k, ld ldw). Used for Gram matrices and
 /// Rayleigh quotients. BLAS3.

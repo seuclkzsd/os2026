@@ -439,8 +439,17 @@ inline bool dgks_enabled(const OrthoOptions& options, bool stored) {
 
 /// Bytes of the n x (k + p) operands per row block of the block sweeps (L2-resident when fused).
 constexpr index_t kBlockTileBytes = 256 * 1024;
-/// Bound on the reduction slots' memory: wide k x p partial products get fewer slots.
+/// Target for the reduction slots' memory: wide k x p partial products get fewer slots, but
+/// never fewer than kMinBlockSlots (the slots are the parallel units of a reduction sweep). A slot
+/// wider than kBlockSlotBytes / kMinBlockSlots = 64 KB therefore exceeds the target: the slots
+/// take max(kBlockSlotBytes, kMinBlockSlots * slot bytes) in all (documented in the header).
 constexpr index_t kBlockSlotBytes = 2 * 1024 * 1024;
+constexpr index_t kMinBlockSlots = 32;
+
+/// Maximal reduction slots of a block sweep whose partial results take `width` doubles.
+inline index_t block_max_slots(index_t width) {
+  return std::clamp<index_t>(kBlockSlotBytes / (8 * std::max<index_t>(width, 1)), kMinBlockSlots, kMaxSlots);
+}
 
 /// One sweep of the block routine: per row block, optionally (in this order)
 ///   update:     W -= V C and, when bv != nullptr, BW -= BV C      (c != nullptr, k x p, ld k)
@@ -476,8 +485,7 @@ void run_block_sweep(index_t n, index_t k, index_t p, const BlockSweep<T>& s, T*
   const index_t mats = s.c ? (s.bv ? 2 : 1) : (s.pm ? 1 : 0);
   const index_t row_bytes = (std::max<index_t>(k, 1) * mats + p * (s.bw ? 2 : 1)) * static_cast<index_t>(sizeof(T));
   const index_t rows = std::clamp<index_t>(kBlockTileBytes / row_bytes / 32 * 32, 128, 4096);
-  const index_t max_slots = std::clamp<index_t>(kBlockSlotBytes / (8 * std::max<index_t>(width, 1)), 32, kMaxSlots);
-  const Partition part(n, rows, max_slots);
+  const Partition part(n, rows, block_max_slots(width));
   auto block = [&](index_t r0, index_t len, double* acc) {
     const auto m = static_cast<fint>(len);
     if (s.c) {
@@ -821,6 +829,22 @@ int orthogonalize_block_cgs2(index_t n, index_t k, index_t p, const T* v, index_
 }
 
 template <class T>
+std::size_t orthogonalize_block_cgs2_workspace_bytes(index_t k, index_t p) {
+  if (k < 0 || p < 0)
+    HS_THROW(InvalidInput, "orthogonalize_block_cgs2_workspace_bytes: negative size k=" << k << " p=" << p);
+  const auto kp = static_cast<std::size_t>(k) * static_cast<std::size_t>(p);
+  const auto pp = static_cast<std::size_t>(p);
+  // A sweep keeps its partial results (the k x p projection and p norms, or the p norms alone)
+  // per slot, plus the result vector.
+  auto sweep = [](std::size_t width) {
+    return (static_cast<std::size_t>(block_max_slots(static_cast<index_t>(width))) + 1) * width;
+  };
+  const std::size_t widest = std::max(sweep(kp * static_cast<std::size_t>(kDoubles<T>) + pp), sweep(pp));
+  // + the coefficient blocks c1, c2 (k x p) and three norm vectors (p).
+  return sizeof(double) * widest + 2 * kp * sizeof(T) + 3 * pp * sizeof(double);
+}
+
+template <class T>
 void gram(index_t n, index_t k, const T* v, index_t ldv, const T* w, index_t ldw, T* c, index_t ldc) {
   lapack::gemm('C', 'N', static_cast<lapack::fint>(k), static_cast<lapack::fint>(k),
                static_cast<lapack::fint>(n), T(1), v, static_cast<lapack::fint>(ldv), w,
@@ -847,6 +871,7 @@ void multiply(index_t n, index_t k, index_t m, const T* v, index_t ldv, const T*
   template int orthogonalize_block_cgs2<T>(index_t, index_t, index_t, const T*, index_t, const T*,  \
                                            index_t, T*, index_t, T*, index_t, T*, index_t, double*, \
                                            double*, const ApplyBlockFn<T>*, const OrthoOptions&);  \
+  template std::size_t orthogonalize_block_cgs2_workspace_bytes<T>(index_t, index_t);               \
   template void gram<T>(index_t, index_t, const T*, index_t, const T*, index_t, T*, index_t);       \
   template void multiply<T>(index_t, index_t, index_t, const T*, index_t, const T*, index_t, T*,    \
                             index_t);
