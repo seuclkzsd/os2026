@@ -433,9 +433,13 @@ TEST(IoNpz, ReadsNumpyArchivesAndSkipsNonArrayMembers) {
   }
 }
 
-TEST(IoNpz, Zip64AndCommentedArchivesHoldTheSameArrays) {
+TEST(IoNpz, ArchiveVariantsHoldTheSameArrays) {
+  // zip64 records, comments, bytes appended after the archive (also after a comment, and holding
+  // a stray end-record signature) and the hand-built writer of make_io_fixtures.py.
   const auto ref = hs::read_npz(fixture("csr_matrix_f8.npz"));
-  for (const char* file : {"zip64_deflate.npz", "zip64_saturated_eocd.npz", "comment_with_signature.npz"}) {
+  for (const char* file : {"zip64_deflate.npz", "zip64_saturated_eocd.npz", "comment_with_signature.npz",
+                           "trailing_bytes.npz", "comment_then_bytes.npz", "trailing_signature.npz",
+                           "crafted_ok.npz"}) {
     SCOPED_TRACE(file);
     const auto got = hs::read_npz(fixture(file));
     ASSERT_EQ(got.size(), ref.size());

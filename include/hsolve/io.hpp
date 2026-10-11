@@ -51,10 +51,11 @@ NpyArray read_npy(const std::filesystem::path& path);
 NpyArray parse_npy(const std::byte* bytes, std::size_t nbytes);
 /// Read every member of an .npz archive (stored or deflated). Member sizes/offsets are taken from
 /// the central directory and its zip64 extra field (numpy writes members with force_zip64, so
-/// the local headers carry 0xFFFFFFFF); the zip64 end-of-central-directory record is honoured and
-/// an archive comment may follow the end record. CRC-32 is verified. Keys drop ".npy"; members
-/// whose names do not end in ".npy" are not numpy arrays (np.load returns them as raw bytes) and
-/// are skipped. Members are inflated straight into their arrays (no whole-archive buffer).
+/// the local headers carry 0xFFFFFFFF); the zip64 end-of-central-directory record is honoured;
+/// an archive comment, and bytes appended after it, may follow the end record (np.load accepts
+/// both). CRC-32 is verified. Keys drop ".npy"; members whose names do not end in ".npy" are not
+/// numpy arrays (np.load returns them as raw bytes) and are skipped. Members are inflated
+/// straight into their arrays (no whole-archive buffer).
 std::map<std::string, NpyArray> read_npz(const std::filesystem::path& path);
 
 /// Write a .npy byte-identical to np.save of the same array: format 1.0 (2.0 if the header does

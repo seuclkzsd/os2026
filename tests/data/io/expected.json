@@ -2086,6 +2086,156 @@
    "im": null
   },
   {
+   "name": "trailing_bytes.npz",
+   "file": "trailing_bytes.npz",
+   "options": {},
+   "source_format": "npz-csr",
+   "storage": "full",
+   "notes": [],
+   "n": 5,
+   "nnz": 14,
+   "defect": 0.0,
+   "dtype": "float64",
+   "re": [
+    [
+     4.0,
+     -1.0,
+     0.0,
+     0.5,
+     0.0
+    ],
+    [
+     -1.0,
+     -3.0,
+     2.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     2.0,
+     0.0,
+     -1.5,
+     0.25
+    ],
+    [
+     0.5,
+     0.0,
+     -1.5,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.25,
+     0.0,
+     -2.0
+    ]
+   ],
+   "im": null
+  },
+  {
+   "name": "comment_then_bytes.npz",
+   "file": "comment_then_bytes.npz",
+   "options": {},
+   "source_format": "npz-csr",
+   "storage": "full",
+   "notes": [],
+   "n": 5,
+   "nnz": 14,
+   "defect": 0.0,
+   "dtype": "float64",
+   "re": [
+    [
+     4.0,
+     -1.0,
+     0.0,
+     0.5,
+     0.0
+    ],
+    [
+     -1.0,
+     -3.0,
+     2.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     2.0,
+     0.0,
+     -1.5,
+     0.25
+    ],
+    [
+     0.5,
+     0.0,
+     -1.5,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.25,
+     0.0,
+     -2.0
+    ]
+   ],
+   "im": null
+  },
+  {
+   "name": "trailing_signature.npz",
+   "file": "trailing_signature.npz",
+   "options": {},
+   "source_format": "npz-csr",
+   "storage": "full",
+   "notes": [],
+   "n": 5,
+   "nnz": 14,
+   "defect": 0.0,
+   "dtype": "float64",
+   "re": [
+    [
+     4.0,
+     -1.0,
+     0.0,
+     0.5,
+     0.0
+    ],
+    [
+     -1.0,
+     -3.0,
+     2.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     2.0,
+     0.0,
+     -1.5,
+     0.25
+    ],
+    [
+     0.5,
+     0.0,
+     -1.5,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.25,
+     0.0,
+     -2.0
+    ]
+   ],
+   "im": null
+  },
+  {
    "name": "bad_crc.npz:io",
    "file": "bad_crc.npz",
    "options": {},

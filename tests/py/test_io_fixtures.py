@@ -44,8 +44,9 @@ def test_regeneration_reproduces_committed_fixtures(regenerated):
 # load cases whose expected matrix is exactly what scipy reads: no triangle restored, no
 # Hermitian part taken (duplicates are summed by scipy as well; "real" only drops zero imag).
 _PLAIN_NOTES = {"real", "ignored", "unchecked", "duplicates", "zeros"}
-# Python's zipfile cannot parse an archive comment containing the end-record signature.
-_PYTHON_UNREADABLE = {"comment_with_signature.npz"}
+# Python's zipfile takes the last end-record signature it finds, so it cannot parse an archive
+# comment, or bytes appended after the archive, that contain one.
+_PYTHON_UNREADABLE = {"comment_with_signature.npz", "trailing_signature.npz"}
 
 
 @pytest.mark.parametrize("case", [c for c in EXPECTED["load"]

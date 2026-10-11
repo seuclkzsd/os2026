@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <ios>
+#include <limits>
 #include <sstream>
 #include <string_view>
 
@@ -232,21 +233,36 @@ ZipArchive::ZipArchive(const std::filesystem::path& path) : path_(path) {
   std::ifstream in = open_binary(path);
   if (file_size < kEndSize) HS_THROW(Io, name << ": not a zip archive (too short)");
 
-  // The end record sits at the end, followed only by a comment of at most 64 KiB. Scan backwards
-  // and accept the first signature whose comment length accounts exactly for the bytes after it,
-  // so signature bytes inside a comment are not mistaken for the record.
+  // The end record sits at the end, followed by a comment of at most 64 KiB. Candidates (the
+  // signature, with a central directory that lies before the record unless zip64 holds its
+  // location) are scanned backwards from the end. Preferred: the last one whose comment length
+  // accounts exactly for the bytes after it, so signature bytes inside a comment are not mistaken
+  // for the record. Failing that, like Python's zipfile (hence np.load and sp.load_npz), the last
+  // one whose comment fits: tools that pad files append bytes after the archive.
   const auto tail_len = static_cast<std::size_t>(std::min<std::uint64_t>(file_size, kEndSize + kMaxComment));
   const std::uint64_t tail_offset = file_size - tail_len;
   const std::vector<std::byte> tail = read_range(in, tail_offset, tail_len, name);
-  std::size_t end_pos = tail_len;  // tail_len: not found
+  constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
+  std::size_t exact_pos = kNone, fitting_pos = kNone;
   for (std::size_t pos = tail_len - kEndSize + 1; pos-- > 0;) {
-    if (load_le<std::uint32_t>(tail.data() + pos) == kEndSig &&
-        load_le<std::uint16_t>(tail.data() + pos + 20) == tail_len - pos - kEndSize) {
-      end_pos = pos;
+    const std::byte* rec = tail.data() + pos;
+    if (load_le<std::uint32_t>(rec) != kEndSig) continue;
+    const auto cd_size32 = load_le<std::uint32_t>(rec + 12);
+    const auto cd_offset32 = load_le<std::uint32_t>(rec + 16);
+    const std::uint64_t at = tail_offset + pos;
+    if (cd_size32 != kSat32 && cd_offset32 != kSat32 &&
+        (cd_offset32 > at || cd_size32 > at - cd_offset32))
+      continue;
+    const std::size_t after = tail_len - pos - kEndSize;
+    const std::size_t comment_len = load_le<std::uint16_t>(rec + 20);
+    if (comment_len == after) {
+      exact_pos = pos;
       break;
     }
+    if (comment_len < after && fitting_pos == kNone) fitting_pos = pos;
   }
-  if (end_pos == tail_len)
+  const std::size_t end_pos = exact_pos != kNone ? exact_pos : fitting_pos;
+  if (end_pos == kNone)
     HS_THROW(Io, name << ": not a zip archive (no end-of-central-directory record)");
   const std::uint64_t end_offset = tail_offset + end_pos;
 

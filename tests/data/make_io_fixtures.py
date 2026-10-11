@@ -394,6 +394,20 @@ class Fixtures:
         self.path("comment_with_signature.npz").write_bytes(raw[:end] + bytes(rec) + comment)
         self.load_ok("comment_with_signature.npz", H_REAL, fmt="npz-csr")
 
+        # Bytes appended after the archive (padding by transfer/storage tools): Python's zipfile,
+        # hence sp.load_npz, reads these. After the comment as well, and junk holding an end-record
+        # signature whose central directory would lie beyond it (Python's reader trips on that).
+        plain = self.path("csr_matrix_f8.npz").read_bytes()
+        self.path("trailing_bytes.npz").write_bytes(plain + bytes(7))
+        self.load_ok("trailing_bytes.npz", H_REAL, fmt="npz-csr")
+        rec = bytearray(raw[end:end + 22])
+        struct.pack_into("<H", rec, 20, 5)
+        self.path("comment_then_bytes.npz").write_bytes(raw[:end] + bytes(rec) + b"hello" + b"junk")
+        self.load_ok("comment_then_bytes.npz", H_REAL, fmt="npz-csr")
+        stray = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 5, 5, 0, len(plain) + 1000, 0)
+        self.path("trailing_signature.npz").write_bytes(plain + b"xx" + stray + b"yy")
+        self.load_ok("trailing_signature.npz", H_REAL, fmt="npz-csr")
+
         # Corruption: a flipped payload byte in a stored member (CRC) and in a deflated one.
         def flip_member_byte(src: str, dst: str, member: str, at_end: bool) -> None:
             data = bytearray(self.path(src).read_bytes())
