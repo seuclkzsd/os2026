@@ -140,10 +140,13 @@ struct JdOptions {
   index_t nev = 6;               ///< wanted pairs nearest tau, 1 <= nev <= n
   double tol = 1e-10;            ///< backward-error tolerance (see the convergence test)
   index_t max_iterations = 1000; ///< outer iterations (search-space expansions)
-  /// Search-space size kept after a thick restart; 0 = auto: min(n, max(nev, 10)).
+  /// Search-space size kept after a thick restart; 0 = auto: max(nev, 10). Always clamped to
+  /// max_basis - 1 (after the clamping of max_basis), so an automatic value adapts to a given
+  /// small max_basis.
   index_t min_basis = 0;
-  /// Search-space size that triggers a thick restart; 0 = auto: min(n, max(2 min_basis, min_basis
-  /// + 10)). Must exceed min_basis (unless it reaches the available dimension).
+  /// Search-space size that triggers a thick restart; 0 = auto: max(2 min_basis, min_basis + 10).
+  /// Clamped to n - d (d = deflation columns). When both are given it must exceed min_basis, and
+  /// it must be >= 2 unless n - d == 1 (InvalidInput otherwise).
   index_t max_basis = 0;
   /// Maximum inner iterations per correction equation (Krylov steps). 0: no inner solve,
   /// t = -M~ r (preconditioned Davidson / Olsen step). Inner stopping (see jacobi_davidson):
@@ -155,8 +158,8 @@ struct JdOptions {
   /// extraction (only with a preconditioner M and without `initial`; costs start_iterations * p
   /// preconditioner applications, p = start block size); 0 = none. See jacobi_davidson.
   index_t start_iterations = 2;
-  /// Optional start block (n x p, p >= 1), B-orthonormalized and used as the initial search
-  /// space instead of the random start block.
+  /// Optional start block (n x p, 1 <= p <= max_basis after its automatic choice and clamping),
+  /// B-orthonormalized and used as the initial search space instead of the random start block.
   const DenseMatrix<T>* initial = nullptr;
   /// Optional block Y (n x d) of known eigenvectors, B-orthonormal (|Y^H B Y - I| <= 1e-8): they
   /// are treated as already locked (the search space and every correction stay B-orthogonal to

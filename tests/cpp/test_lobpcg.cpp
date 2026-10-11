@@ -430,4 +430,52 @@ TYPED_TEST(LobpcgTyped, NonFiniteOperatorOutputThrows) {
   }
 }
 
+TYPED_TEST(LobpcgTyped, NonFinitePreconditionerOrBOutputThrows) {
+  using T = TypeParam;
+  const index_t n = 60;
+  const auto a = hs::test::laplacian_1d<T>(n);
+  const auto b = hs::test::random_hpd<T>(n, 0.1, 41);
+  hs::CsrOperator<T> aop(a), binner(b);
+  DenseOperator<T> tinner(dense_inverse(shifted<T>(a, nullptr, -0.2)));
+  LobpcgOptions<T> opt;
+  opt.nev = 2;
+  opt.norm_a = 4.0;
+  opt.norm_b = 3.0;
+  for (index_t good : {0, 6}) {
+    SCOPED_TRACE(::testing::Message() << "good " << good);
+    PoisonedOperator<T> t(tinner, good), bop(binner, good);
+    try {
+      hs::lobpcg<T>(aop, nullptr, &t, Which::SmallestAlgebraic, opt);
+      ADD_FAILURE() << "preconditioner: no exception";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+    }
+    try {
+      hs::lobpcg<T>(aop, &bop, nullptr, Which::SmallestAlgebraic, opt);
+      ADD_FAILURE() << "B: no exception";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+    }
+  }
+}
+
+TYPED_TEST(LobpcgTyped, NegativeDefiniteBThrowsInvalidInput) {
+  // B must be HPD; with a negative definite B every B-norm is negative.
+  using T = TypeParam;
+  const index_t n = 60;
+  const auto a = hs::test::laplacian_1d<T>(n);
+  hs::CsrOperator<T> aop(a);
+  std::vector<T> d;
+  for (index_t i = 0; i < n; ++i) d.push_back(T(-1.0 - static_cast<double>(i) / n));
+  hs::test::DiagonalOperator<T> bop(d);
+  LobpcgOptions<T> opt;
+  opt.nev = 3;
+  try {
+    hs::lobpcg<T>(aop, &bop, nullptr, Which::SmallestAlgebraic, opt);
+    ADD_FAILURE() << "no exception";
+  } catch (const hs::Error& e) {
+    EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+  }
+}
+
 }  // namespace

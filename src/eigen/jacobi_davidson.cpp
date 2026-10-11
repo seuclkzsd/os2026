@@ -286,6 +286,10 @@ JacobiDavidson<T>::JacobiDavidson(LinearOperator<T>& a, LinearOperator<T>* b, Li
   if (options.min_basis > 0 && options.max_basis > 0 && options.max_basis <= options.min_basis)
     HS_THROW(InvalidInput, "jacobi_davidson: max_basis " << options.max_basis << " must exceed min_basis "
                                                          << options.min_basis);
+  // A restart must leave room for one expansion (kmin < kmax), so the basis needs two vectors
+  // unless the whole available space has dimension 1.
+  if (options.max_basis == 1 && n_ - d_ > 1)
+    HS_THROW(InvalidInput, "jacobi_davidson: max_basis must be >= 2 (or 0 = auto), got 1");
   kmax_ = std::min(kmax_, n_ - d_);
   kmin_ = kmax_ > 1 ? std::min(kmin_, kmax_ - 1) : 1;
   if (options.initial) {
@@ -874,6 +878,8 @@ void JacobiDavidson<T>::minres(double rtol, index_t max_steps) {
   project_left(r1);
   apply_minres_preconditioner(r1, y);
   const double b1sq = std::real(linalg::dot(n_, r1, y));
+  if (!std::isfinite(b1sq))
+    HS_THROW(InvalidInput, "jacobi_davidson: non-finite inner iterate (operator or preconditioner returned Inf/NaN)");
   if (!(b1sq > 0.0)) {
     // Zero right-hand side, or a preconditioner that is not positive definite: fall back to the
     // preconditioned residual (Davidson step).
@@ -950,6 +956,7 @@ void JacobiDavidson<T>::correction(index_t j) {
     } else {
       apply_minres_preconditioner(w2_.data(), t_.data());
     }
+    eigen_detail::require_finite(n_, t_.data(), 1, "jacobi_davidson: preconditioner output");
     project_right(t_.data());
     return;
   }

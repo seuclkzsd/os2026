@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -184,6 +185,26 @@ class FactorSolveOperator final : public LinearOperator<T> {
 
  private:
   hs::SparseFactorization<T>& f_;
+};
+
+/// Operator that returns NaN after `good` single-vector applications (malformed input test).
+template <class T>
+class PoisonedOperator final : public LinearOperator<T> {
+ public:
+  PoisonedOperator(LinearOperator<T>& inner, index_t good) : inner_(inner), good_(good) {}
+  index_t size() const override { return inner_.size(); }
+
+ protected:
+  void do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) override {
+    inner_.apply(x, ldx, y, ldy, p);
+    seen_ += p;
+    if (seen_ > good_) y[0] = T(std::numeric_limits<double>::quiet_NaN());
+  }
+
+ private:
+  LinearOperator<T>& inner_;
+  index_t good_;
+  index_t seen_ = 0;
 };
 
 /// Number of values within tol of x.
@@ -633,6 +654,108 @@ TYPED_TEST(JacobiDavidsonTyped, MultiplicityWithoutPreconditionerIsCompletedByDe
   EXPECT_EQ(found.cols(), opt.nev);
 }
 
+TYPED_TEST(JacobiDavidsonTyped, NonFiniteOperatorOutputThrows) {
+  // A, B or the preconditioner returning NaN, from the first application or later, with both
+  // inner solvers, with and without inner iterations and in the start block iteration: always
+  // InvalidInput (regression: MINRES silently replaced a NaN preconditioner output by a zero
+  // correction).
+  using T = TypeParam;
+  const index_t n = 60;
+  const auto a = hs::test::laplacian_1d<T>(n);
+  const auto b = hs::test::random_hpd<T>(n, 0.1, 33);
+  hs::CsrOperator<T> aop(a), bop(b);
+  DenseOperator<T> prec(dense_inverse(shifted<T>(a, nullptr, -0.2)));  // HPD: A is positive definite
+  auto expect_invalid = [](const char* what, const std::function<void()>& call) {
+    SCOPED_TRACE(what);
+    try {
+      call();
+      ADD_FAILURE() << "no exception";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+    }
+  };
+  for (JdInnerSolver solver : {JdInnerSolver::Gmres, JdInnerSolver::Minres}) {
+    for (const index_t inner : {0, 20}) {
+      for (const index_t good : {0, 4}) {
+        SCOPED_TRACE(::testing::Message() << (solver == JdInnerSolver::Gmres ? "gmres" : "minres") << " inner "
+                                          << inner << " good " << good);
+        JdOptions<T> opt;
+        opt.nev = 2;
+        opt.inner_solver = solver;
+        opt.inner_iterations = inner;
+        opt.start_iterations = 0;
+        opt.norm_a = 4.0;
+        opt.norm_b = 3.0;
+        PoisonedOperator<T> pa(aop, good), pb(bop, good), pm(prec, good);
+        expect_invalid("A", [&] { hs::jacobi_davidson<T>(pa, nullptr, &prec, 0.1, opt); });
+        expect_invalid("B", [&] { hs::jacobi_davidson<T>(aop, &pb, &prec, 0.1, opt); });
+        expect_invalid("preconditioner", [&] { hs::jacobi_davidson<T>(aop, nullptr, &pm, 0.1, opt); });
+      }
+    }
+  }
+  JdOptions<T> opt;
+  opt.nev = 2;
+  opt.start_iterations = 2;
+  PoisonedOperator<T> pm(prec, 2);  // the first block application (2 columns) is fine
+  expect_invalid("start block iteration", [&] { hs::jacobi_davidson<T>(aop, nullptr, &pm, 0.1, opt); });
+}
+
+TYPED_TEST(JacobiDavidsonTyped, NegativeDefiniteBThrowsInvalidInput) {
+  // B must be HPD; with a negative definite B every B-norm is negative.
+  using T = TypeParam;
+  const index_t n = 60;
+  const auto a = hs::test::laplacian_1d<T>(n);
+  hs::CsrOperator<T> aop(a);
+  std::vector<T> d;
+  for (index_t i = 0; i < n; ++i) d.push_back(T(-1.0 - static_cast<double>(i) / n));
+  hs::test::DiagonalOperator<T> bop(d);
+  for (JdInnerSolver solver : {JdInnerSolver::Gmres, JdInnerSolver::Minres}) {
+    JdOptions<T> opt;
+    opt.nev = 3;
+    opt.inner_solver = solver;
+    try {
+      hs::jacobi_davidson<T>(aop, &bop, nullptr, 0.5, opt);
+      ADD_FAILURE() << "no exception";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << e.what();
+    }
+  }
+}
+
+TYPED_TEST(JacobiDavidsonTyped, BasisSizeLimits) {
+  // max_basis below the automatic min_basis clamps it to max_basis - 1; max_basis = 1 is valid
+  // only when the available space has dimension 1.
+  using T = TypeParam;
+  const auto a = hs::test::laplacian_1d<T>(40);
+  const auto spectrum = hs::test::laplacian_1d_eigenvalues(40);
+  hs::CsrOperator<T> op(a);
+  JdOptions<T> opt;
+  opt.nev = 2;
+  opt.tol = 1e-10;
+  opt.max_basis = 5;  // auto min_basis would be 10
+  const auto r = hs::jacobi_davidson<T>(op, nullptr, nullptr, 0.3, opt);
+  EXPECT_TRUE(r.converged);
+  check_contract<T>(op, nullptr, r, 0.3, opt.nev, opt.tol);
+  expect_same_values(r.theta, nearest(spectrum, 0.3, opt.nev), 1e-9);
+  // Deflating 39 eigenvectors (sin(i k pi / 41), k = 1..39) leaves a one-dimensional space:
+  // max_basis = 1 is then accepted.
+  const index_t n = 40;
+  DenseMatrix<T> y(n, n - 1);
+  const double pi = std::acos(-1.0);
+  for (index_t k = 1; k < n; ++k)
+    for (index_t i = 0; i < n; ++i)
+      y(i, k - 1) = T(std::sqrt(2.0 / (n + 1)) * std::sin(static_cast<double>((i + 1) * k) * pi / (n + 1)));
+  JdOptions<T> last;
+  last.nev = 1;
+  last.tol = 1e-12;
+  last.max_basis = 1;
+  last.deflation = &y;
+  const auto one = hs::jacobi_davidson<T>(op, nullptr, nullptr, 0.0, last);
+  EXPECT_TRUE(one.converged);
+  check_contract<T>(op, nullptr, one, 0.0, last.nev, last.tol);
+  EXPECT_NEAR(one.theta[0], spectrum.back(), 1e-10);
+}
+
 TYPED_TEST(JacobiDavidsonTyped, InvalidOptionsThrowInvalidInput) {
   using T = TypeParam;
   const auto a = hs::test::laplacian_1d<T>(20);
@@ -666,7 +789,19 @@ TYPED_TEST(JacobiDavidsonTyped, InvalidOptionsThrowInvalidInput) {
   o.max_basis = 8;
   expect_invalid(o);
   o = {};
+  o.nev = 1;
+  o.max_basis = 1;  // regression: hit an internal assertion ("no room to expand")
+  expect_invalid(o);
+  o.nev = 2;
+  expect_invalid(o);
+  o = {};
   o.start_iterations = -1;
+  expect_invalid(o);
+  o = {};
+  DenseMatrix<T> too_wide(20, 6);  // more columns than max_basis
+  for (index_t j = 0; j < 6; ++j) too_wide(j, j) = T(1);
+  o.max_basis = 5;
+  o.initial = &too_wide;
   expect_invalid(o);
   o = {};
   expect_invalid(o, &small);
