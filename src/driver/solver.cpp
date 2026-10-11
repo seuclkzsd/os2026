@@ -169,6 +169,43 @@ index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>&
   HS_THROW(Singular, "cannot find a nonsingular certificate endpoint near " << s);
 }
 
+// Shift used for the analysis and the main factorization (Smallest/Largest: just beyond the
+// estimated end of the spectrum; standard problems only).
+double initial_shift(const Target& t, const driver::NormEstimate& na, double scale, bool has_b) {
+  switch (t.mode) {
+    case TargetMode::Nearest: return t.sigma;
+    case TargetMode::Interval: return 0.5 * (t.lower + t.upper);
+    case TargetMode::Smallest:
+    case TargetMode::Largest: {
+      if (has_b) HS_THROW(Unsupported, "smallest/largest targets are implemented for standard problems only (roadmap P3)");
+      const double spread = std::max(na.ritz_max - na.ritz_min, 1e-12 * std::max(scale, 1.0));
+      return t.mode == TargetMode::Smallest ? na.ritz_min - 0.05 * spread : na.ritz_max + 0.05 * spread;
+    }
+  }
+  return t.sigma;
+}
+
+// Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3): in-core if the
+// estimate fits the cap, else out-of-core if allowed and fitting, else OutOfMemoryBudget.
+template <class T>
+void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0) {
+  fac.analyze(pencil, 1.0, -sigma0);
+  const FactorEstimate est = fac.estimate();
+  event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
+                        {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
+  const double cap_mb = fac.options().max_memory_mb;
+  if (cap_mb > 0 && est.incore_mb > cap_mb) {
+    if (c.cfg.out_of_core != Toggle::Off && est.ooc_mb <= cap_mb) {
+      fac.set_out_of_core(true);
+      warn(c, "factor estimate " + fmt(est.incore_mb) + " MB exceeds the budget; using out-of-core factors");
+    } else {
+      HS_THROW(OutOfMemoryBudget, "predicted factorization memory " << est.incore_mb << " MB (out-of-core "
+                                                                    << est.ooc_mb << " MB) exceeds the budget of "
+                                                                    << cap_mb << " MB");
+    }
+  }
+}
+
 // --------------------------------------------------------------------------- definite path
 
 // Residual correction x <- x - K^{-1}(A x - rho B x), rho = Rayleigh quotient, for the columns whose
@@ -310,40 +347,14 @@ double nearest_beyond(const std::vector<double>& hints, double edge, double dir,
 
 template <class T>
 Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double n2a,
-                           double n2b, double scale, const driver::NormEstimate& na) {
+                           double n2b, double scale, double sigma0) {
   const SolverConfig& cfg = c.cfg;
   SolveReport& rep = c.rep;
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
   const index_t n = pencil.order();
   Target t = cfg.target;
-  Timer timer;
-
-  // Shift for the target (Smallest/Largest: beyond the estimated end of the spectrum, HEP only).
-  double sigma0 = t.sigma;
-  if (t.mode == TargetMode::Interval) sigma0 = 0.5 * (t.lower + t.upper);
-  if (t.mode == TargetMode::Smallest || t.mode == TargetMode::Largest) {
-    if (b) HS_THROW(Unsupported, "smallest/largest targets are implemented for standard problems only (roadmap P3)");
-    const double spread = std::max(na.ritz_max - na.ritz_min, 1e-12 * std::max(scale, 1.0));
-    sigma0 = t.mode == TargetMode::Smallest ? na.ritz_min - 0.05 * spread : na.ritz_max + 0.05 * spread;
-  }
   rep.sigma_requested = sigma0;
-
-  fac.analyze(pencil, 1.0, -sigma0);
-  const FactorEstimate est = fac.estimate();
-  event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
-                        {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
-  const double cap_mb = fac.options().max_memory_mb;
-  if (cap_mb > 0 && est.incore_mb > cap_mb) {
-    if (cfg.out_of_core != Toggle::Off && est.ooc_mb <= cap_mb) {
-      fac.set_out_of_core(true);
-      warn(c, "factor estimate " + fmt(est.incore_mb) + " MB exceeds the budget; using out-of-core factors");
-    } else {
-      HS_THROW(OutOfMemoryBudget, "predicted factorization memory " << est.incore_mb << " MB (out-of-core "
-                                                                    << est.ooc_mb << " MB) exceeds the budget of "
-                                                                    << cap_mb << " MB");
-    }
-  }
 
   // Interval: count the eigenvalues first (Sylvester inertia) to size the Krylov run.
   index_t k = t.k;
@@ -546,18 +557,6 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
   rep.sigma_requested = t.sigma;
   rep.certificate.note = "not available for indefinite B (Sylvester inertia does not count eigenvalues)";
 
-  fac.analyze(pencil, 1.0, -t.sigma);
-  const FactorEstimate est = fac.estimate();
-  const double cap_mb = fac.options().max_memory_mb;
-  if (cap_mb > 0 && est.incore_mb > cap_mb) {
-    if (cfg.out_of_core != Toggle::Off && est.ooc_mb <= cap_mb) {
-      fac.set_out_of_core(true);
-      warn(c, "factor estimate exceeds the budget; using out-of-core factors");
-    } else {
-      HS_THROW(OutOfMemoryBudget, "predicted factorization memory " << est.incore_mb << " MB exceeds the budget of "
-                                                                    << cap_mb << " MB");
-    }
-  }
   const double sigma = factorize_near(c, fac, t.sigma, scale);
   rep.sigma_used = sigma;
 
@@ -777,34 +776,12 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
                        {"norm2_a", rep.norm2_a}, {"norm2_b", rep.norm2_b}});
 
   ShiftedPencil<T> pencil(*a, b);
+  if (b && cfg.problem == ProblemType::Standard) HS_THROW(InvalidInput, "problem 'standard' requested but B was given");
+  if (!b && (cfg.problem == ProblemType::GeneralizedDefinite || cfg.problem == ProblemType::GeneralizedIndefinite))
+    HS_THROW(InvalidInput, "a generalized problem type was requested but no B was given");
+  if (cfg.method == Method::Lanczos) HS_THROW(Unsupported, "factorization-free Lanczos is roadmap P3");
 
-  // 2. Problem type (B definiteness by inertia) and method.
-  ProblemType type = cfg.problem;
-  if (!b) {
-    if (type == ProblemType::GeneralizedDefinite || type == ProblemType::GeneralizedIndefinite)
-      HS_THROW(InvalidInput, "a generalized problem type was requested but no B was given");
-    type = ProblemType::Standard;
-  } else if (type == ProblemType::Standard) {
-    HS_THROW(InvalidInput, "problem 'standard' requested but B was given");
-  } else if (type == ProblemType::Auto) {
-    Timer tb;
-    const Inertia ib = compute_inertia(pencil, 0.0, 1.0, factor_options_from(cfg, 0.0));
-    type = (ib.valid && ib.neg == 0 && ib.zero == 0) ? ProblemType::GeneralizedDefinite
-                                                     : ProblemType::GeneralizedIndefinite;
-    event(c, "b_inertia", {{"neg", static_cast<std::int64_t>(ib.neg)}, {"zero", static_cast<std::int64_t>(ib.zero)},
-                           {"pos", static_cast<std::int64_t>(ib.pos)}, {"valid", ib.valid}, {"seconds", tb.seconds()}});
-    rep.time_factor_s += tb.seconds();
-  }
-  rep.problem = type;
-  Method method = cfg.method;
-  if (method == Method::Auto)
-    method = type == ProblemType::GeneralizedIndefinite ? Method::ShiftInvertKrylovSchur : Method::ShiftInvertLanczos;
-  if (method == Method::ShiftInvertLanczos && type == ProblemType::GeneralizedIndefinite)
-    HS_THROW(InvalidInput, "shift_invert_lanczos needs B positive definite; B is indefinite");
-  if (method == Method::Lanczos) HS_THROW(Unsupported, "factorization-free Lanczos is roadmap P3");
-  rep.method = method;
-
-  // 3. Memory budget for the factorization (DESIGN §3.6-3).
+  // 2. Memory budget for the factorization (DESIGN §3.6-3).
   const double budget = cfg.memory_budget_gb * 1073741824.0;
   const index_t k_guess = cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
   const index_t ncv_guess = cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32);
@@ -816,10 +793,40 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   rep.factor_options = fopts;
   auto fac = make_mumps_factorization<T>(fopts);
 
-  // 4-10. Solve along the chosen path.
+  // 3. One analysis serves every factorization on the pencil's pattern: the B-definiteness test,
+  //    K(sigma), certificate endpoints and reruns.
+  const double sigma0 = initial_shift(cfg.target, na, scale, b != nullptr);
+  analyze_within_budget(c, *fac, pencil, sigma0);
+
+  // 4. Problem type: B is HPD iff its exact LDL^T has no negative or zero pivots (Sylvester).
+  ProblemType type = cfg.problem;
+  if (!b) {
+    type = ProblemType::Standard;
+  } else if (type == ProblemType::Auto) {
+    Timer tb;
+    Inertia ib;
+    if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
+      if (fac->factorize(0.0, 1.0)) ib = fac->inertia();  // false: B singular -> not HPD
+    } else {
+      ib = compute_inertia(pencil, 0.0, 1.0, fopts);  // forces an exact double factorization
+    }
+    type = (ib.valid && ib.neg == 0 && ib.zero == 0) ? ProblemType::GeneralizedDefinite
+                                                     : ProblemType::GeneralizedIndefinite;
+    event(c, "b_inertia", {{"neg", static_cast<std::int64_t>(ib.neg)}, {"zero", static_cast<std::int64_t>(ib.zero)},
+                           {"pos", static_cast<std::int64_t>(ib.pos)}, {"valid", ib.valid}, {"seconds", tb.seconds()}});
+  }
+  rep.problem = type;
+  Method method = cfg.method;
+  if (method == Method::Auto)
+    method = type == ProblemType::GeneralizedIndefinite ? Method::ShiftInvertKrylovSchur : Method::ShiftInvertLanczos;
+  if (method == Method::ShiftInvertLanczos && type == ProblemType::GeneralizedIndefinite)
+    HS_THROW(InvalidInput, "shift_invert_lanczos needs B positive definite; B is indefinite");
+  rep.method = method;
+
+  // 5-11. Solve along the chosen path.
   Solution<T> sol = (method == Method::ShiftInvertKrylovSchur)
                         ? solve_indefinite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale)
-                        : solve_definite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale, na);
+                        : solve_definite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, scale, sigma0);
   rep.factor_stats = fac->stats();
   rep.time_factor_s += rep.factor_stats.analyze_s + rep.factor_stats.factorize_s;
   rep.time_total_s = total.seconds();
