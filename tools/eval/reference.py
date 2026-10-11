@@ -10,7 +10,11 @@ Kinds written here:
           in the note.
   solver  n > DENSE_MAX: ARPACK shift-invert (tools/eval/shift_invert.py) with tol=1e-14 for the
           k + extra eigenvalues nearest the config target sigma, so the k requested ones are interior
-          to what was computed. complete=False (ARPACK offers no completeness guarantee); window =
+          to what was computed. The margin can run into a huge eigenvalue cluster (an EM null space
+          right after the k-th value) that ARPACK cannot resolve, so that attempt gets a bounded
+          number of restarts and the reference falls back to exactly k pairs. complete=False:
+          single-vector ARPACK offers no completeness guarantee and can silently return only some
+          copies of a multiple eigenvalue (seen: 9 of 300), which the note flags. window =
           [sigma - r, sigma + r], r the largest distance found. Every pair must pass a backward-error
           check before anything is written.
 Replacement policy: exact references (analytic, discrete-exact, or an unlabelled one) are never replaced
@@ -36,6 +40,7 @@ from tools.eval import common, evaluate, shift_invert
 
 SOLVER_TOL = 1e-14          # ARPACK accuracy for solver references
 VERIFY_TOL = 1e-11          # max backward error accepted for a solver reference pair
+EXTRA_MAXITER = 100         # ARPACK restarts allowed for the k + extra attempt
 INFINITE_FACTOR = 1e12
 # Usefulness for judging a solver; kinds not listed (analytic, discrete-exact, unlabelled) are exact.
 KIND_RANK = {**{k: -1 for k in common.CONTINUUM_KINDS}, "solver": 0, "dense": 1}
@@ -90,10 +95,17 @@ def solver_reference(c: cio.Case, problem: str, tgt: dict, *, ctol: float, seed:
     if tgt["mode"] != "nearest":
         raise ValueError(f"solver references support 'nearest' targets only (got {tgt['mode']!r})")
     sigma, k = float(tgt["sigma"]), int(tgt["k"])
-    k_ref = min(k + (extra if extra is not None else max(k, 10)), c.n - 2)
-    run = shift_invert.shift_invert_eigs(c.A, c.B, problem, sigma, k_ref, tol=SOLVER_TOL, seed=seed)
-    if not run.converged:
-        raise RuntimeError(f"ARPACK did not converge ({run.eigenvalues.size} of {k_ref} pairs)")
+    extra = max(k, 10) if extra is None else extra
+    attempts = ([(min(k + extra, c.n - 2), EXTRA_MAXITER)] if extra > 0 else []) + [(k, None)]
+    notes = []
+    for k_ref, maxiter in attempts:
+        run = shift_invert.shift_invert_eigs(c.A, c.B, problem, sigma, k_ref, tol=SOLVER_TOL, maxiter=maxiter,
+                                             seed=seed)
+        if run.converged:
+            break
+        notes.append(f"{k_ref} pairs did not converge within {maxiter} restarts; fell back to k={k}")
+    else:
+        raise RuntimeError(f"ARPACK did not converge ({run.eigenvalues.size} of {k} pairs)")
     norms = evaluate.estimate_norms(c.A, c.B)
     w, V = np.asarray(run.eigenvalues), run.eigenvectors
     w, V = _real_if_possible(w.astype(complex), V, common.near_real(w, norms.scale, ctol)
@@ -103,8 +115,11 @@ def solver_reference(c: cio.Case, problem: str, tgt: dict, *, ctol: float, seed:
     if eta > VERIFY_TOL:
         raise RuntimeError(f"solver reference failed verification: max backward error {eta:.2e} > {VERIFY_TOL:g}")
     r = float(np.max(np.abs(w - sigma)))
-    note = (f"ARPACK shift-invert ({run.method}) sigma={sigma:g}, {k_ref} pairs, tol={SOLVER_TOL:g}, "
-            f"max backward error {eta:.2e} (norms: {norms.method_a}/{norms.method_b})")
+    multiplicity = int(np.bincount(evaluate.reference_clusters(w, norms.scale, evaluate.CLUSTER_RTOL)).max())
+    if multiplicity > 1:
+        notes.append(f"contains an eigenvalue of multiplicity >= {multiplicity}: ARPACK may have missed copies")
+    note = "; ".join([f"ARPACK shift-invert ({run.method}) sigma={sigma:g}, {k_ref} pairs, tol={SOLVER_TOL:g}, "
+                      f"max backward error {eta:.2e} (norms: {norms.method_a}/{norms.method_b})"] + notes)
     return RefData(w, V, "solver", False, (sigma - r, sigma + r), note)
 
 

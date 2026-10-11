@@ -48,13 +48,14 @@ class ArpackRun:
 
 
 def shift_invert_eigs(A: sp.csr_matrix, B: sp.csr_matrix | None, problem: str, sigma: float, k: int, *,
-                      tol: float = 0.0, ncv: int | None = None, seed: int = common.DEFAULT_SEED,
-                      ghiep_variant: str = "operator") -> ArpackRun:
+                      tol: float = 0.0, ncv: int | None = None, maxiter: int | None = None,
+                      seed: int = common.DEFAULT_SEED, ghiep_variant: str = "operator") -> ArpackRun:
     """The k eigenpairs of A x = lambda B x nearest sigma (largest |theta|) via ARPACK.
 
-    tol is ARPACK's relative Ritz-value accuracy (0 = machine precision, scipy's default). Raises
-    FactorizationError when K cannot be factorized and ValueError for unsupported arguments;
-    non-convergence returns the converged subset with converged=False."""
+    tol is ARPACK's relative Ritz-value accuracy (0 = machine precision, scipy's default); maxiter
+    bounds the implicit restarts (None = scipy's n*10). Raises FactorizationError when K cannot be
+    factorized and ValueError for unsupported arguments; non-convergence returns the converged
+    subset with converged=False."""
     n = A.shape[0]
     if problem not in common.PROBLEM_ENUM:
         raise ValueError(f"unknown problem {problem!r}")
@@ -92,12 +93,14 @@ def shift_invert_eigs(A: sp.csr_matrix, B: sp.csr_matrix | None, problem: str, s
     t1 = time.perf_counter()
     try:
         if problem != "GHIEP":
-            w, v = sla.eigsh(A, k=k, M=B, sigma=sigma, which="LM", OPinv=opinv, v0=v0, ncv=ncv, tol=tol)
+            w, v = sla.eigsh(A, k=k, M=B, sigma=sigma, which="LM", OPinv=opinv, v0=v0, ncv=ncv, tol=tol,
+                             maxiter=maxiter)
         elif explicit_op:
             w, v = sla.eigs(sla.LinearOperator((n, n), matvec=op, dtype=dtype), k=k, which="LM", v0=v0,
-                            ncv=ncv, tol=tol)
+                            ncv=ncv, tol=tol, maxiter=maxiter)
         else:
-            w, v = sla.eigs(A, k=k, M=B, sigma=sigma, which="LM", OPinv=opinv, v0=v0, ncv=ncv, tol=tol)
+            w, v = sla.eigs(A, k=k, M=B, sigma=sigma, which="LM", OPinv=opinv, v0=v0, ncv=ncv, tol=tol,
+                            maxiter=maxiter)
         converged = True
     except sla.ArpackNoConvergence as err:
         w, v = err.eigenvalues, err.eigenvectors

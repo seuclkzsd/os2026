@@ -297,6 +297,21 @@ def test_solver_reference_then_dense_upgrade(tmp_path):
     assert cio.load_ref("lap", tmp_path).info["kind"] == "dense"
 
 
+def test_solver_reference_falls_back_to_k_pairs(tmp_path, monkeypatch):
+    _laplacian_case(tmp_path, "lap", n=200, sigma=0.3, k=5, analytic=False)
+    monkeypatch.setattr(reference, "EXTRA_MAXITER", 1)    # the k + extra attempt cannot converge
+    msg = reference.build_reference("lap", tmp_path, dense_max=50)
+    ref = cio.load_ref("lap", tmp_path)
+    assert "fell back to k=5" in msg and ref.eigenvalues.size == 5
+    assert ref.eigenvalues == pytest.approx(np.sort(_nearest(ref, 0.3, 5)[0]))
+
+
+def test_solver_reference_flags_multiplicity(tmp_path):
+    _hermitian_case(tmp_path, "c", sigma=1.05, k=3)
+    msg = reference.build_reference("c", tmp_path, force=True, dense_max=10, extra=2)
+    assert "wrote solver" in msg and "multiplicity >= 3" in msg
+
+
 def test_continuum_reference_is_not_compared_and_gets_replaced(tmp_path):
     ref = _hermitian_case(tmp_path, "c")
     w, V = _nearest(ref, SIGMA, 4)
