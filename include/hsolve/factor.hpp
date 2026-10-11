@@ -130,6 +130,26 @@
 //     <= 0.38, 0.30, 0.24, 0.17, 2.0 s plus the PERM_IN analysis, vs METIS' serial 1.11, 1.22,
 //     0.72, 0.70, 8.5 s. The critical path is the chain of top-level separators (the first one:
 //     0.12-0.14 s on syn-mem27-46, 0.6-0.8 s on wg-square-1e6, 70-90% of it coarsening).
+//   * End to end an order is paid once, its fill many times: the driver pays A + F*f + S*s
+//     (analysis, F factorizations with the order - the main one and the two certificate endpoint
+//     counts, which refactorize the analysed object or reuse its order in an InertiaCounter, so
+//     F >= 3 - and S solves). bench/analysis_fix_pipeline.cpp, 2 threads, medians of 3
+//     interleaved one-process runs; A+f / A+3f / A+f+InertiaCounter pair [s] / 1-RHS solve [ms]:
+//       case                 METIS               SCOTCH              hsolve ND (2 thr)
+//       syn-mem27-46         2.80/6.39/5.73/61   3.62/7.92/7.00/78   2.52/5.82/5.71/64
+//       yee-pec-box-1e5      3.15/6.94/6.26/75   3.34/7.05/6.52/71   2.75/6.59/6.47/76
+//       ss-qa8fk-qa8fm       1.52/2.90/2.79/38   1.81/3.36/3.18/44   1.26/2.65/2.54/37
+//       wg-square-1e5        0.86/1.14/1.14/21   0.85/1.11/1.13/19   0.63/0.94/0.92/22
+//       cav2d-rect-pert-1e5  0.58/0.80/0.81/21   0.46/0.63/0.65/16   0.44/0.66/0.68/24
+//       wg-square-1e6        11.1/15.5/15.2/260  9.46/13.2/13.5/298  8.32/12.2/12.4/292
+//     (AMD on the 2-D cases: 0.23/0.57/0.56/22, 0.12/0.28/0.29/16, 3.82/9.87/9.11/275.) ND's
+//     analysis gain over METIS (0.14-0.47 s at n ~ 1e5, 2.9 s at 1e6) shrinks by its extra fill
+//     where it has any: on yee-pec-box-1e5 (+12% flops, +6% entries) it is 0.40 s for A+f,
+//     0.35 s for A+3f, and ND loses 0.22 s with the InertiaCounter counts - break-even at 2
+//     threads; syn-mem27-46: gains 0.28, 0.57, 0.02 s. A solve costs ND 0.95-1.16x METIS' time
+//     (1.12x on wg-square-1e6: about 100 solves eat its A+3f gain). On 2-D cases AMD wins
+//     outright. Only the analysis gains from more threads (METIS/SCOTCH stay serial), so whether
+//     ND pays as a default must be measured at the judged thread count.
 //   * ICNTL(58) (symbolic factorization): the default 2 (column counts) is the fast one; 1 made
 //     the given-order analysis 1.7x (n = 1e6) to 4x (syn-mem27-46) slower. ICNTL(6) = 0 changed
 //     nothing (no maximum transversal at analysis with ICNTL(12) = 1, the effective value in
