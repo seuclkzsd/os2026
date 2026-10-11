@@ -1,16 +1,130 @@
-// Sparse matrix-vector kernels.
-// Reference (portable, OpenMP) implementations; SIMD-specialised versions come in P3 and must
-// match these to 1e-14 relative accuracy.
+// Sparse matrix times dense vectors / blocks (docs/DESIGN.md §3.2; P4 "solvephase").
+//
+// Three paths (KernelPath), dispatched at run time:
+//   Reference  the P1 loops: spmm walks every row once per 8 vectors and reads X column-strided
+//              (p loads from p cache lines per nonzero); std::complex arithmetic.
+//   Portable   interleaved kernels in plain C++: X is first copied into a row-major block Xp
+//              (row j holds the q <= 16 entries x[j, k0 .. k0+q)), so a nonzero a_ij costs q
+//              contiguous multiply-adds; one pass over A per 16 vectors; explicit complex
+//              arithmetic (no NaN-recovery calls).
+//   Avx512     the same formulation with AVX-512F intrinsics: one broadcast + ceil(q/8) loads and
+//              FMAs per nonzero (complex: 2 broadcasts, ceil(2q/8) loads, 2 FMAs per load; the
+//              swap of the imaginary products is done once per row), two nonzeros in flight per
+//              row.
+// A single vector (spmv, spmm with p = 1) runs the Reference row loop on every path: it is bound by
+// the matrix stream and the x gathers, and neither AVX-512 gathers nor split sums beat it; the
+// single-column residual is one fused sweep straight from x and y (no interleaved copies).
+// Every output row is computed by one thread in a fixed order, so each path is deterministic and
+// independent of the thread count. Compiled for x86-64 with GCC/Clang, the AVX-512 code is built
+// with function target attributes (no -mavx512f needed) and selected only when
+// __builtin_cpu_supports("avx512f") (CPUID and OS register state) says it can run.
 #include <algorithm>
+#include <cstring>
+#include <memory>
+#include <type_traits>
 #include <vector>
 
 #include "hsolve/error.hpp"
 #include "hsolve/sparse.hpp"
 
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define HS_KERNELS_AVX512 1
+#include <immintrin.h>
+#define HS_TARGET_AVX512 __attribute__((target("avx512f")))
+#else
+#define HS_KERNELS_AVX512 0
+#endif
+
 namespace hs {
 
+namespace {
+
+constexpr index_t kChunk = 16;     // vectors per pass of the interleaved kernels
+constexpr index_t kRowBlock = 256;  // rows per scheduling unit of the fast kernels
+
+bool cpu_has_avx512f() noexcept {
+#if HS_KERNELS_AVX512
+  static const bool ok = [] {
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx512f") != 0;
+  }();
+  return ok;
+#else
+  return false;
+#endif
+}
+
+// ------------------------------------------------------------------------- scalar helpers
+
+/// a * b with the plain formula (std::complex's operator* adds NaN/Inf recovery calls).
+inline double mul(double a, double b) { return a * b; }
+inline cplx mul(cplx a, cplx b) {
+  return cplx(a.real() * b.real() - a.imag() * b.imag(), a.real() * b.imag() + a.imag() * b.real());
+}
+
+/// alpha * s + beta * y, with beta == 0 never reading y.
 template <class T>
-void spmv(const CsrMatrix<T>& a, const T* x, T* y, T alpha, T beta) {
+inline T combine(T alpha, T s, T beta, const T& y) {
+  return beta == T(0) ? mul(alpha, s) : mul(alpha, s) + mul(beta, y);
+}
+
+/// Scalars per vector entry in the double-precision scratch.
+template <class T>
+constexpr index_t kWords = is_complex_v<T> ? 2 : 1;
+
+/// Scratch of `doubles` doubles: the caller's workspace (grown if needed) or a per-call buffer.
+class Scratch {
+ public:
+  Scratch(std::vector<double>* workspace, index_t doubles) {
+    const std::size_t len = static_cast<std::size_t>(std::max<index_t>(doubles, 1));
+    if (workspace) {
+      if (workspace->size() < len) workspace->resize(len);
+      data_ = workspace->data();
+    } else {
+      own_.reset(new double[len]);  // default-initialised: no zeroing pass
+      data_ = own_.get();
+    }
+  }
+  double* data() const noexcept { return data_; }
+
+ private:
+  std::unique_ptr<double[]> own_;
+  double* data_ = nullptr;
+};
+
+/// xp[(j * q + k) * w + c] = component c of (x[j + k * ldx] + s * z[j + k * ldz]) for j < m,
+/// k < q (w = 1 real, 2 complex); z == nullptr means s * z = 0.
+template <class T>
+void interleave(index_t m, index_t q, const T* x, index_t ldx, double s, const T* z, index_t ldz,
+                double* xp) {
+#pragma omp parallel for schedule(static)
+  for (index_t j = 0; j < m; ++j) {
+    double* row = xp + j * q * kWords<T>;
+    for (index_t k = 0; k < q; ++k) {
+      T v = x[j + k * ldx];
+      if (z) v += s * z[j + k * ldz];
+      if constexpr (is_complex_v<T>) {
+        row[2 * k] = v.real();
+        row[2 * k + 1] = v.imag();
+      } else {
+        row[k] = v;
+      }
+    }
+  }
+}
+
+/// Runs body(row_begin, row_end) over [0, n) in blocks of kRowBlock rows (OpenMP, static).
+template <class F>
+void for_row_blocks(index_t n, F&& body) {
+  const index_t blocks = (n + kRowBlock - 1) / kRowBlock;
+#pragma omp parallel for schedule(static)
+  for (index_t blk = 0; blk < blocks; ++blk) body(blk * kRowBlock, std::min(n, (blk + 1) * kRowBlock));
+}
+
+// ----------------------------------------------------------------------------- Reference
+
+template <class T>
+void spmv_reference(const CsrMatrix<T>& a, const T* x, T* y, T alpha, T beta) {
   const index_t n = a.nrows;
   const index_t* rp = a.rowptr.data();
   const std::int32_t* ci = a.colind.data();
@@ -25,10 +139,10 @@ void spmv(const CsrMatrix<T>& a, const T* x, T* y, T alpha, T beta) {
 }
 
 template <class T>
-void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, index_t p, T alpha,
-          T beta) {
+void spmm_reference(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, index_t p,
+                    T alpha, T beta) {
   if (p == 1) {
-    spmv(a, x, y, alpha, beta);
+    spmv_reference(a, x, y, alpha, beta);
     return;
   }
   const index_t n = a.nrows;
@@ -58,9 +172,396 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
   }
 }
 
-#define HS_INSTANTIATE_KERNELS(T)                         \
-  template void spmv<T>(const CsrMatrix<T>&, const T*, T*, T, T); \
-  template void spmm<T>(const CsrMatrix<T>&, const T*, index_t, T*, index_t, index_t, T, T);
+template <class T>
+void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
+                                const T* x, index_t ldx, const T* y, index_t ldy, T* r,
+                                index_t ldr, index_t p) {
+  const index_t n = a.nrows;
+  if (b) {
+    spmm_reference(*b, x, ldx, r, ldr, p, T(1), T(0));
+  } else {
+    for (index_t k = 0; k < p; ++k) std::copy(x + k * ldx, x + k * ldx + n, r + k * ldr);
+  }
+  spmm_reference(a, y, ldy, r, ldr, p, T(-1), T(1));
+  if (b) {
+    spmm_reference(*b, y, ldy, r, ldr, p, T(sigma), T(1));
+  } else {
+    for (index_t k = 0; k < p; ++k)
+      for (index_t i = 0; i < n; ++i) r[i + k * ldr] += T(sigma) * y[i + k * ldy];
+  }
+}
+
+// ------------------------------------------------------------------------------ Portable
+
+/// out[k] (k < q) += sign * sum_t v[t] * Xp[ci[t], k] over row i of m (Xp interleaved, q wide).
+template <class T>
+inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const double* xp, index_t q,
+                                    double sign, double* acc) {
+  const index_t* rp = m.rowptr.data();
+  const std::int32_t* ci = m.colind.data();
+  const T* v = m.values.data();
+  for (index_t t = rp[i]; t < rp[i + 1]; ++t) {
+    const double* xr = xp + static_cast<index_t>(ci[t]) * q * kWords<T>;
+    if constexpr (is_complex_v<T>) {
+      const double vr = sign * v[t].real(), vi = sign * v[t].imag();
+      for (index_t k = 0; k < q; ++k) {
+        const double xre = xr[2 * k], xim = xr[2 * k + 1];
+        acc[2 * k] += vr * xre - vi * xim;
+        acc[2 * k + 1] += vr * xim + vi * xre;
+      }
+    } else {
+      const double vv = sign * v[t];
+      for (index_t k = 0; k < q; ++k) acc[k] += vv * xr[k];
+    }
+  }
+}
+
+template <class T>
+inline T acc_value(const double* acc, index_t k) {
+  if constexpr (is_complex_v<T>) {
+    return T(acc[2 * k], acc[2 * k + 1]);
+  } else {
+    return acc[k];
+  }
+}
+
+/// Y[:, 0..q) = alpha * A * Xp + beta * Y for one interleaved chunk of q <= 16 vectors.
+template <class T>
+void spmm_chunk_portable(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_t ldy,
+                         T alpha, T beta) {
+  for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
+    double acc[2 * kChunk];
+    for (index_t i = i0; i < i1; ++i) {
+      std::fill(acc, acc + q * kWords<T>, 0.0);
+      row_accumulate_portable(a, i, xp, q, 1.0, acc);
+      for (index_t k = 0; k < q; ++k) {
+        T& yk = y[i + k * ldy];
+        yk = combine(alpha, acc_value<T>(acc, k), beta, yk);
+      }
+    }
+  });
+}
+
+/// R[:, 0..q) = B Wp - A Yp (Wp = X + sigma Y interleaved), or (B = I) X + sigma Y - A Yp.
+template <class T>
+void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
+                             const T* x, index_t ldx, const T* y, index_t ldy, const double* wp,
+                             const double* yp, index_t q, T* r, index_t ldr) {
+  for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
+    double acc[2 * kChunk];
+    for (index_t i = i0; i < i1; ++i) {
+      std::fill(acc, acc + q * kWords<T>, 0.0);
+      if (b) row_accumulate_portable(*b, i, wp, q, 1.0, acc);
+      row_accumulate_portable(a, i, yp, q, -1.0, acc);
+      for (index_t k = 0; k < q; ++k) {
+        T v = acc_value<T>(acc, k);
+        if (!b) v = (x[i + k * ldx] + sigma * y[i + k * ldy]) + v;
+        r[i + k * ldr] = v;
+      }
+    }
+  });
+}
+
+/// One column (q = 1) of the residual straight from x and y, without interleaved copies (for a
+/// single vector they would only add two passes): r_i = sum_B b_ij (x_j + sigma y_j) - sum_A a_ij
+/// y_j, or (B = I) x_i + sigma y_i - sum_A a_ij y_j.
+template <class T>
+void residual_column(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, const T* y,
+                     T* r) {
+  const index_t* ra = a.rowptr.data();
+  const std::int32_t* ca = a.colind.data();
+  const T* va = a.values.data();
+  for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
+    for (index_t i = i0; i < i1; ++i) {
+      T s = T(0);
+      if (b) {
+        for (index_t t = b->rowptr[i]; t < b->rowptr[i + 1]; ++t) {
+          const index_t j = b->colind[t];
+          s += mul(b->values[t], x[j] + sigma * y[j]);
+        }
+      } else {
+        s = x[i] + sigma * y[i];
+      }
+      T acc = T(0);
+      for (index_t t = ra[i]; t < ra[i + 1]; ++t) acc += mul(va[t], y[ca[t]]);
+      r[i] = s - acc;
+    }
+  });
+}
+
+// -------------------------------------------------------------------------------- AVX-512
+
+#if HS_KERNELS_AVX512
+
+/// Mask of the valid lanes of chunk c (8 doubles) of a row holding `words` doubles.
+inline __mmask8 lane_mask(index_t words, int c) {
+  const index_t left = words - 8 * static_cast<index_t>(c);
+  return left >= 8 ? static_cast<__mmask8>(0xFF) : static_cast<__mmask8>((1u << left) - 1u);
+}
+
+/// Real: acc[c] += sign * a_it * Xp[j, 8c .. 8c+8) over row i of m, two nonzeros in flight.
+template <int NC>
+HS_TARGET_AVX512 inline void row_real_avx512(const CsrMatrix<double>& m, index_t i, const double* xp,
+                                             index_t q, const __mmask8* mask, double sign,
+                                             __m512d* acc) {
+  const index_t* rp = m.rowptr.data();
+  const std::int32_t* ci = m.colind.data();
+  const double* v = m.values.data();
+  __m512d acc2[NC];
+  for (int c = 0; c < NC; ++c) acc2[c] = _mm512_setzero_pd();
+  index_t t = rp[i];
+  const index_t e = rp[i + 1];
+  for (; t + 1 < e; t += 2) {
+    const double* x0 = xp + static_cast<index_t>(ci[t]) * q;
+    const double* x1 = xp + static_cast<index_t>(ci[t + 1]) * q;
+    const __m512d a0 = _mm512_set1_pd(sign * v[t]);
+    const __m512d a1 = _mm512_set1_pd(sign * v[t + 1]);
+    for (int c = 0; c < NC; ++c) {
+      acc[c] = _mm512_fmadd_pd(a0, _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c), acc[c]);
+      acc2[c] = _mm512_fmadd_pd(a1, _mm512_maskz_loadu_pd(mask[c], x1 + 8 * c), acc2[c]);
+    }
+  }
+  if (t < e) {
+    const double* x0 = xp + static_cast<index_t>(ci[t]) * q;
+    const __m512d a0 = _mm512_set1_pd(sign * v[t]);
+    for (int c = 0; c < NC; ++c)
+      acc[c] = _mm512_fmadd_pd(a0, _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c), acc[c]);
+  }
+  for (int c = 0; c < NC; ++c) acc[c] = _mm512_add_pd(acc[c], acc2[c]);
+}
+
+/// Complex: (accr[c], acci[c]) += sign * (Re a, Im a) * Xp[j, chunk c] over row i of m; the
+/// product is assembled by finish_complex().
+template <int NC>
+HS_TARGET_AVX512 inline void row_complex_avx512(const CsrMatrix<cplx>& m, index_t i, const double* xp,
+                                                index_t q, const __mmask8* mask, double sign,
+                                                __m512d* accr, __m512d* acci) {
+  const index_t* rp = m.rowptr.data();
+  const std::int32_t* ci = m.colind.data();
+  const double* v = reinterpret_cast<const double*>(m.values.data());
+  const index_t w = 2 * q;
+  for (index_t t = rp[i]; t < rp[i + 1]; ++t) {
+    const double* x0 = xp + static_cast<index_t>(ci[t]) * w;
+    const __m512d ar = _mm512_set1_pd(sign * v[2 * t]);
+    const __m512d ai = _mm512_set1_pd(sign * v[2 * t + 1]);
+    for (int c = 0; c < NC; ++c) {
+      const __m512d xv = _mm512_maskz_loadu_pd(mask[c], x0 + 8 * c);
+      accr[c] = _mm512_fmadd_pd(ar, xv, accr[c]);
+      acci[c] = _mm512_fmadd_pd(ai, xv, acci[c]);
+    }
+  }
+}
+
+/// [re, im] pairs of sum_t a_t x_t from accr = sum Re(a) [xr, xi], acci = sum Im(a) [xr, xi]:
+/// re = accr_even - acci_odd, im = accr_odd + acci_even.
+HS_TARGET_AVX512 inline __m512d finish_complex(__m512d accr, __m512d acci) {
+  return _mm512_fmaddsub_pd(accr, _mm512_set1_pd(1.0), _mm512_permute_pd(acci, 0x55));
+}
+
+template <class T, int NC>
+HS_TARGET_AVX512 void spmm_rows_avx512(const CsrMatrix<T>& a, const double* xp, index_t q, T* y,
+                                       index_t ldy, T alpha, T beta, index_t i0, index_t i1) {
+  const index_t words = q * kWords<T>;
+  __mmask8 mask[NC];
+  for (int c = 0; c < NC; ++c) mask[c] = lane_mask(words, c);
+  alignas(64) double out[2 * kChunk];
+  for (index_t i = i0; i < i1; ++i) {
+    if constexpr (is_complex_v<T>) {
+      __m512d accr[NC], acci[NC];
+      for (int c = 0; c < NC; ++c) accr[c] = acci[c] = _mm512_setzero_pd();
+      row_complex_avx512<NC>(a, i, xp, q, mask, 1.0, accr, acci);
+      for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, finish_complex(accr[c], acci[c]));
+    } else {
+      __m512d acc[NC];
+      for (int c = 0; c < NC; ++c) acc[c] = _mm512_setzero_pd();
+      row_real_avx512<NC>(a, i, xp, q, mask, 1.0, acc);
+      for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, acc[c]);
+    }
+    for (index_t k = 0; k < q; ++k) {
+      T& yk = y[i + k * ldy];
+      yk = combine(alpha, acc_value<T>(out, k), beta, yk);
+    }
+  }
+}
+
+template <class T, int NC>
+HS_TARGET_AVX512 void residual_rows_avx512(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
+                                           const T* x, index_t ldx, const T* y, index_t ldy,
+                                           const double* wp, const double* yp, index_t q, T* r,
+                                           index_t ldr, index_t i0, index_t i1) {
+  const index_t words = q * kWords<T>;
+  __mmask8 mask[NC];
+  for (int c = 0; c < NC; ++c) mask[c] = lane_mask(words, c);
+  alignas(64) double out[2 * kChunk];
+  for (index_t i = i0; i < i1; ++i) {
+    if constexpr (is_complex_v<T>) {
+      __m512d accr[NC], acci[NC];
+      for (int c = 0; c < NC; ++c) accr[c] = acci[c] = _mm512_setzero_pd();
+      if (b) row_complex_avx512<NC>(*b, i, wp, q, mask, 1.0, accr, acci);
+      row_complex_avx512<NC>(a, i, yp, q, mask, -1.0, accr, acci);
+      for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, finish_complex(accr[c], acci[c]));
+    } else {
+      __m512d acc[NC];
+      for (int c = 0; c < NC; ++c) acc[c] = _mm512_setzero_pd();
+      if (b) row_real_avx512<NC>(*b, i, wp, q, mask, 1.0, acc);
+      row_real_avx512<NC>(a, i, yp, q, mask, -1.0, acc);
+      for (int c = 0; c < NC; ++c) _mm512_store_pd(out + 8 * c, acc[c]);
+    }
+    for (index_t k = 0; k < q; ++k) {
+      T v = acc_value<T>(out, k);
+      if (!b) v = (x[i + k * ldx] + sigma * y[i + k * ldy]) + v;
+      r[i + k * ldr] = v;
+    }
+  }
+}
+
+template <class T, class F>
+void with_chunk_width(index_t q, F&& f) {
+  // NC = number of 8-double chunks of an interleaved row of q vectors.
+  const index_t words = q * kWords<T>;
+  if (words <= 8) {
+    f(std::integral_constant<int, 1>{});
+  } else if (words <= 16) {
+    f(std::integral_constant<int, 2>{});
+  } else if (words <= 24) {
+    f(std::integral_constant<int, 3>{});
+  } else {
+    f(std::integral_constant<int, 4>{});
+  }
+}
+
+#endif  // HS_KERNELS_AVX512
+
+// --------------------------------------------------------------------------- dispatchers
+
+template <class T>
+void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_t ldy, T alpha, T beta,
+                KernelPath path) {
+#if HS_KERNELS_AVX512
+  if (path == KernelPath::Avx512) {
+    with_chunk_width<T>(q, [&](auto nc) {
+      for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
+        spmm_rows_avx512<T, decltype(nc)::value>(a, xp, q, y, ldy, alpha, beta, i0, i1);
+      });
+    });
+    return;
+  }
+#endif
+  static_cast<void>(path);
+  spmm_chunk_portable(a, xp, q, y, ldy, alpha, beta);
+}
+
+template <class T>
+void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, index_t ldx,
+                    const T* y, index_t ldy, const double* wp, const double* yp, index_t q, T* r, index_t ldr,
+                    KernelPath path) {
+#if HS_KERNELS_AVX512
+  if (path == KernelPath::Avx512) {
+    with_chunk_width<T>(q, [&](auto nc) {
+      for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
+        residual_rows_avx512<T, decltype(nc)::value>(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, i0, i1);
+      });
+    });
+    return;
+  }
+#endif
+  static_cast<void>(path);
+  residual_chunk_portable(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr);
+}
+
+}  // namespace
+
+bool kernel_path_available(KernelPath path) noexcept {
+  return path != KernelPath::Avx512 || cpu_has_avx512f();
+}
+
+KernelPath resolve_kernel_path(KernelPath path) {
+  switch (path) {
+    case KernelPath::Auto:
+      return cpu_has_avx512f() ? KernelPath::Avx512 : KernelPath::Portable;
+    case KernelPath::Avx512:
+      if (!cpu_has_avx512f())
+        HS_THROW(Unsupported, "sparse kernels: KernelPath::Avx512 requested, but this CPU / OS does not "
+                              "support AVX-512F (or the library was built without it)");
+      return path;
+    case KernelPath::Reference:
+    case KernelPath::Portable:
+      return path;
+  }
+  HS_THROW(InvalidInput, "sparse kernels: unknown KernelPath " << static_cast<int>(path));
+}
+
+template <class T>
+void spmv(const CsrMatrix<T>& a, const T* x, T* y, T alpha, T beta, const KernelOptions& options) {
+  // One vector: every path runs the plain row loop. It is bound by the matrix stream and the x
+  // gathers; AVX-512 gathers (8 nonzeros + a horizontal sum per row) measured 1.7-3x slower on
+  // Ice Lake, two partial sums no faster (bench/solvephase_kernels.cpp, p = 1).
+  resolve_kernel_path(options.path);  // validates the request
+  spmv_reference(a, x, y, alpha, beta);
+}
+
+template <class T>
+void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, index_t p, T alpha, T beta,
+          const KernelOptions& options) {
+  const KernelPath path = resolve_kernel_path(options.path);
+  if (p <= 0) return;
+  if (path == KernelPath::Reference) {
+    spmm_reference(a, x, ldx, y, ldy, p, alpha, beta);
+    return;
+  }
+  if (p == 1) {
+    spmv_reference(a, x, y, alpha, beta);
+    return;
+  }
+  const index_t m = a.ncols;
+  Scratch xp(options.workspace, m * std::min(p, kChunk) * kWords<T>);
+  for (index_t k0 = 0; k0 < p; k0 += kChunk) {
+    const index_t q = std::min(kChunk, p - k0);
+    interleave<T>(m, q, x + k0 * ldx, ldx, 0.0, nullptr, 0, xp.data());
+    spmm_chunk(a, xp.data(), q, y + k0 * ldy, ldy, alpha, beta, path);
+  }
+}
+
+template <class T>
+void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, index_t ldx,
+                      const T* y, index_t ldy, T* r, index_t ldr, index_t p, const KernelOptions& options) {
+  if (!a.square() || (b && (b->nrows != a.nrows || !b->square())))
+    HS_THROW(InvalidInput, "shifted_residual: A (" << a.nrows << "x" << a.ncols << ") and B must be square "
+                                                   << "of equal order");
+  const KernelPath path = resolve_kernel_path(options.path);
+  if (p <= 0) return;
+  if (path == KernelPath::Reference) {
+    shifted_residual_reference(a, b, sigma, x, ldx, y, ldy, r, ldr, p);
+    return;
+  }
+  const index_t n = a.nrows;
+  const index_t q_max = p == 1 ? 0 : std::min(p, kChunk);
+  // [Yp | Wp]: Y interleaved (for A), X + sigma Y interleaved (for B; B = I reads X, Y directly).
+  const index_t block = n * q_max * kWords<T>;
+  Scratch buf(options.workspace, (b ? 2 : 1) * block);
+  double* yp = buf.data();
+  double* wp = b ? buf.data() + block : nullptr;
+  for (index_t k0 = 0; k0 < p; k0 += kChunk) {
+    const index_t q = std::min(kChunk, p - k0);
+    const T* xk = x + k0 * ldx;
+    const T* yk = y + k0 * ldy;
+    if (q == 1) {
+      residual_column(a, b, sigma, xk, yk, r + k0 * ldr);
+      continue;
+    }
+    interleave<T>(n, q, yk, ldy, 0.0, nullptr, 0, yp);
+    if (b) interleave<T>(n, q, xk, ldx, sigma, yk, ldy, wp);
+    residual_chunk(a, b, sigma, xk, ldx, yk, ldy, wp, yp, q, r + k0 * ldr, ldr, path);
+  }
+}
+
+#define HS_INSTANTIATE_KERNELS(T)                                                                  \
+  template void spmv<T>(const CsrMatrix<T>&, const T*, T*, T, T, const KernelOptions&);            \
+  template void spmm<T>(const CsrMatrix<T>&, const T*, index_t, T*, index_t, index_t, T, T,        \
+                        const KernelOptions&);                                                     \
+  template void shifted_residual<T>(const CsrMatrix<T>&, const CsrMatrix<T>*, double, const T*,    \
+                                    index_t, const T*, index_t, T*, index_t, index_t,              \
+                                    const KernelOptions&);
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_KERNELS)
 #undef HS_INSTANTIATE_KERNELS

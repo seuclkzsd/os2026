@@ -93,16 +93,63 @@ double norm_one(const CsrMatrix<T>& a);
 template <class T>
 double hermitian_defect(const CsrMatrix<T>& a);
 
+// ---- sparse matrix times dense vectors / blocks (src/sparse/kernels.cpp) ----------------------
+//
+// Every kernel is OpenMP-parallel over rows and computes each output row on one thread in a fixed
+// order, so for a given KernelPath its results are bitwise independent of the thread count and
+// reproducible from run to run. Different paths round differently (summation order, FMA): they
+// agree to ~1e-15 relative per row sum, not bitwise.
+// Multi-vector kernels (p >= 2) first copy X into an interleaved (row-major) block, so that one
+// pass over A serves 16 real or 16 complex vectors with contiguous loads instead of p strided
+// gathers per nonzero; A is streamed once per 16 vectors. That copy is n*min(p, 16) scalars of
+// scratch (KernelOptions::workspace, else allocated per call).
+
+/// Instruction-set path of the sparse kernels.
+enum class KernelPath {
+  Auto,       ///< Avx512 when the CPU and OS support AVX-512F (checked at run time), else Portable
+  Reference,  ///< the P1 loops (strided spmm, 8 vectors per pass): for tests and benchmarks
+  Portable,   ///< interleaved kernels in plain C++ (compiler-vectorized; any x86-64 / other ISA)
+  Avx512,     ///< AVX-512F intrinsics; Unsupported (hs::Error) where AVX-512F is unavailable
+};
+
+/// Options of the sparse kernels. The workspace pointer is used during the call only.
+struct KernelOptions {
+  KernelPath path = KernelPath::Auto;
+  /// Scratch for the interleaved copies (grown on demand, contents irrelevant): pass the same
+  /// vector to repeated calls to avoid an allocation (and its page faults) per call. nullptr:
+  /// allocate per call.
+  std::vector<double>* workspace = nullptr;
+};
+
+/// Whether `path` can run on this machine (Auto, Reference and Portable always can).
+bool kernel_path_available(KernelPath path) noexcept;
+/// The path `path` runs as: Auto resolves to Avx512 or Portable; an unavailable Avx512 throws
+/// Unsupported. Cheap (the CPU check is done once).
+KernelPath resolve_kernel_path(KernelPath path);
+
 /// y = alpha * A * x + beta * y. x has ncols entries, y has nrows entries; y must not alias x.
 /// beta == 0 never reads y. OpenMP-parallel over rows.
 template <class T>
-void spmv(const CsrMatrix<T>& a, const T* x, T* y, T alpha = T(1), T beta = T(0));
+void spmv(const CsrMatrix<T>& a, const T* x, T* y, T alpha = T(1), T beta = T(0),
+          const KernelOptions& options = {});
 
-/// Y = alpha * A * X + beta * Y for p column-major vectors (X: ncols x p, ld ldx;
-/// Y: nrows x p, ld ldy). Equivalent to p spmv calls but streams A once per 8 vectors.
+/// Y = alpha * A * X + beta * Y for p column-major vectors (X: ncols x p, ld ldx >= ncols;
+/// Y: nrows x p, ld ldy >= nrows); Y must not overlap X. Equivalent to p spmv calls (p = 1 is
+/// one). beta == 0 never reads Y. Rows of Y beyond nrows (ld padding) are never touched.
 template <class T>
 void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, index_t p,
-          T alpha = T(1), T beta = T(0));
+          T alpha = T(1), T beta = T(0), const KernelOptions& options = {});
+
+/// Refinement residual of a shift-invert solve: R = B X - (A Y - sigma B Y) for p columns, with
+/// B = I when b == nullptr (A, B square of equal order n; X, Y, R column-major with leading
+/// dimensions >= n; R must not overlap X or Y). The fast paths compute it as B (X + sigma Y) - A Y
+/// in one sweep over the rows of A and B (Reference: three spmm passes, as before P4): A and B
+/// are read once per 16 vectors and R written once, with 2*n*min(p, 16) scalars of scratch for
+/// p >= 2 (a single column is computed straight from x and y).
+template <class T>
+void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
+                      index_t ldx, const T* y, index_t ldy, T* r, index_t ldr, index_t p,
+                      const KernelOptions& options = {});
 
 /// The pencil K(alpha, beta) = alpha*A + beta*B (B = I when b == nullptr) for REAL alpha, beta,
 /// stored as the index-only UPPER-triangle pattern of the union of A and B (the only part a
