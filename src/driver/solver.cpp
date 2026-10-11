@@ -18,6 +18,7 @@
 #include "hsolve/factor.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/util.hpp"
+#include "io/csr_assembly.hpp"
 
 namespace hs {
 
@@ -26,16 +27,77 @@ namespace {
 using driver::Ctx;
 using driver::event;
 
-// Exactly Hermitian working copy of an input matrix (DESIGN §3.6-1).
+/// hs::solve sets the calling thread's OpenMP thread count when cfg.threads > 0 (MUMPS and every
+/// parallel loop of the solve follow it). A library call must not leave its host process changed:
+/// the previous value is restored when the solve returns or throws.
+class OmpThreadsScope {
+ public:
+  explicit OmpThreadsScope(int threads) {
+#ifdef _OPENMP
+    if (threads > 0) {
+      previous_ = omp_get_max_threads();
+      omp_set_num_threads(threads);
+    }
+#else
+    (void)threads;
+#endif
+  }
+  ~OmpThreadsScope() {
+#ifdef _OPENMP
+    if (previous_ > 0) omp_set_num_threads(previous_);
+#endif
+  }
+  OmpThreadsScope(const OmpThreadsScope&) = delete;
+  OmpThreadsScope& operator=(const OmpThreadsScope&) = delete;
+
+ private:
+  int previous_ = 0;  ///< 0: nothing to restore
+};
+
+// Every stored value finite (hs::load_matrix rejects non-finite values too; the scaled defect
+// below requires it), and at least one nonzero: the zero matrix has no eigenproblem to solve
+// (A = 0: every eigenvalue is 0; B = 0: no finite eigenvalue) and would otherwise fail deep in
+// the solve (zero norm estimates, a singular K(sigma) at every shift).
+template <class T>
+void check_values(const CsrMatrix<T>& m, const char* name) {
+  bool finite = true, nonzero = false;
+  const index_t nnz = m.nnz();
+#pragma omp parallel for reduction(&& : finite) reduction(|| : nonzero) schedule(static)
+  for (index_t p = 0; p < nnz; ++p) {
+    const T v = m.values[p];
+    finite = finite && std::isfinite(std::real(v)) && std::isfinite(std::imag(v));
+    nonzero = nonzero || v != T(0);
+  }
+  if (!finite) {
+    for (index_t i = 0; i < m.nrows; ++i)
+      for (index_t p = m.rowptr[i]; p < m.rowptr[i + 1]; ++p)
+        if (!std::isfinite(std::real(m.values[p])) || !std::isfinite(std::imag(m.values[p])))
+          HS_THROW(InvalidInput, name << " has a non-finite entry at (" << i << ", " << m.colind[p] << ")");
+  }
+  if (!nonzero)
+    HS_THROW(InvalidInput, name << " is the zero matrix (no nonzero entry): "
+                                << (name[0] == 'B' ? "the pencil (A, 0) has no finite eigenvalues"
+                                                   : "every eigenvalue is 0, there is nothing to compute"));
+}
+
+// Exactly Hermitian working copy of an input matrix (DESIGN §3.6-1), by the rules of hs::load_matrix
+// (src/io/load.cpp), so that in-memory input (Python) and file input are treated alike at any
+// magnitude: the relative defect ||M - M^H||_F / ||M||_F comes from scaled sums of squares
+// (io::hermitian_defect_scaled; the unscaled hs::hermitian_defect reports 0 for entries below
+// ~1e-154 and NaN above ~1e154, which let a non-Hermitian matrix through), and the Hermitian part
+// is taken exactly when some m_ij != conj(m_ji) - decided by comparing values, not by the norm.
 template <class T>
 const CsrMatrix<T>* hermitian_input(const CsrMatrix<T>& m, double tol, const char* name, double& defect,
                                     CsrMatrix<T>& store) {
   m.validate();
   if (!m.square()) HS_THROW(InvalidInput, name << " is not square (" << m.nrows << "x" << m.ncols << ")");
-  defect = hermitian_defect(m);
-  if (defect > tol)
-    HS_THROW(NotHermitian, name << " is not Hermitian: ||M-M^H||_F/||M||_F = " << defect << " > hermitian_tol " << tol);
-  if (defect > 0.0) {
+  if (m.nrows == 0) HS_THROW(InvalidInput, "empty matrix");
+  check_values(m, name);
+  const io::HermitianDefect d = io::hermitian_defect_scaled(m);
+  defect = d.relative;
+  if (!(d.relative <= tol))
+    HS_THROW(NotHermitian, name << " is not Hermitian: ||M-M^H||_F/||M||_F = " << d.relative << " > hermitian_tol " << tol);
+  if (!d.exact) {
     store = hermitian_part(m);
     return &store;
   }
@@ -101,12 +163,10 @@ Definiteness screen_definiteness(const CsrMatrix<T>& b) {
 template <class T>
 Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b_in, const SolverConfig& cfg,
                   Logger* log) {
+  const OmpThreadsScope omp_threads(cfg.threads);
   driver::PhaseClock clock;  // starts in Phase::Setup
   SolveReport rep;
   Ctx c{cfg, log, rep, clock};
-#ifdef _OPENMP
-  if (cfg.threads > 0) omp_set_num_threads(cfg.threads);
-#endif
 
   // 1. Diagnosis: exact Hermitian inputs, norms, scale.
   CsrMatrix<T> a_store, b_store;
@@ -117,7 +177,6 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     b = hermitian_input(*b_in, cfg.hermitian_tol, "B", rep.hermitian_defect_b, b_store);
   }
   const index_t n = a->nrows;
-  if (n == 0) HS_THROW(InvalidInput, "empty matrix");
   rep.n = n;
   rep.nnz_a = a->nnz();
   rep.nnz_b = b ? b->nnz() : 0;
