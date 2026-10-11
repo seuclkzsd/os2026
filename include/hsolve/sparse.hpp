@@ -147,8 +147,9 @@ class ShiftedPencil {
   std::vector<index_t> rowptr_;
   std::vector<std::int32_t> colind_;
   /// Per row: bit 0 (1) if the upper part of A's row is the whole pattern row, bit 1 (2) the same
-  /// for B. Such rows are assembled by a plain copy; the others by merging the sorted rows (no
-  /// scatter maps: they cost 8 bytes per upper entry of A and B, 3.5x this pattern).
+  /// for B. Such rows are assembled by a plain copy; the others by merging the sorted rows. (The
+  /// former int64 scatter maps took 8 bytes per upper entry of A and of B: with them the pencil
+  /// of the n = 1e6 waveguide case held 112 MB instead of 33 MB; bench/memio_pencil.cpp.)
   std::vector<std::uint8_t> whole_rows_;
 };
 
