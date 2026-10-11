@@ -1,4 +1,5 @@
-// ShiftedPencil: index-only upper-triangle union pattern of A and B with scatter maps.
+// ShiftedPencil: index-only upper-triangle union pattern of A and B plus one flag byte per row;
+// assemble() merges the sorted upper rows of A and B into the pattern rows (no scatter maps).
 #include <algorithm>
 #include <vector>
 
