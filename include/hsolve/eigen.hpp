@@ -93,18 +93,22 @@ HermitianEigResult<T> lanczos_krylov_schur(LinearOperator<T>& op, LinearOperator
 
 template <class T>
 struct GeneralEigResult {
-  /// m Ritz values, m in {nev, nev + 1}: nev + 1 only for real T when a complex-conjugate pair
-  /// straddles the cut. Conjugate pairs are adjacent, positive imaginary part first.
+  /// m Ritz values in `which` ranking order, m in {nev, nev + 1}: nev + 1 only for real T when a
+  /// complex-conjugate pair straddles the cut. Conjugate pairs are adjacent, positive imaginary
+  /// part first.
   std::vector<cplx> theta;
-  DenseMatrix<cplx> vectors;     ///< n x m unit-2-norm eigenvector approximations (one per theta)
-  DenseMatrix<T> schur_basis;    ///< n x m orthonormal Q with Op*Q ~= Q*S; leading nconv columns
-                                 ///< span an (approximately) Op-invariant subspace
-  DenseMatrix<T> schur_form;     ///< m x m S, quasi-upper-triangular for real T, no split 2x2 block;
-                                 ///< spec(S(0:nconv, 0:nconv)) = theta[0, nconv) as a set (the
-                                 ///< diagonal order need not follow theta)
-  std::vector<double> estimate;  ///< eigenvector residual estimates ||Op x - theta x||_2
-  std::vector<cplx> ritz_all;    ///< all Ritz values of the final basis, in `which` ranking order
-  index_t nconv = 0;             ///< never splits a conjugate pair
+  DenseMatrix<cplx> vectors;   ///< n x m unit-2-norm eigenvector approximations (one per theta)
+  DenseMatrix<T> schur_basis;  ///< n x m orthonormal Q with Op*Q ~= Q*S; leading nconv columns
+                               ///< span an approximately Op-invariant subspace (bound below)
+  DenseMatrix<T> schur_form;   ///< m x m S, quasi-upper-triangular for real T, no split 2x2 block;
+                               ///< spec(S(0:nconv, 0:nconv)) = theta[0, nconv) as a set (the
+                               ///< diagonal order need not follow theta)
+  /// Eigenvector residual estimates: ||Op x - theta x||_2 of the Krylov-Schur relation, equal to
+  /// the true residual up to the rounding drift described at krylov_schur_general.
+  std::vector<double> estimate;
+  std::vector<cplx> ritz_all;  ///< all ncv Ritz values of the final basis, in `which` ranking
+                               ///< order (real T: conjugate partners adjacent, as in theta)
+  index_t nconv = 0;           ///< certified converged prefix of theta; never splits a pair
   index_t restarts = 0;
   index_t op_applies = 0;
   bool converged = false;
@@ -116,13 +120,43 @@ struct GeneralEigResult {
 /// Ritz pairs are never split. Used for GHIEP (indefinite B). `deflation` is not supported.
 /// Options: ncv must be >= min(n, nev + 2) for real T (room for a straddling pair plus one new
 /// vector), >= min(n, nev + 1) for complex T; larger than n is clamped to n (exact basis).
-/// tol >= 0 and max_restarts >= 0; violations throw InvalidInput. A Ritz value with
-/// |theta| <= eps * max|Ritz value| counts as theta == 0 in the convergence test. history holds
-/// one record per Rayleigh-Ritz step (restarts + 1 records). Locking is soft (no deflation of b).
+/// tol >= 0 and max_restarts >= 0, initial (if given) nonzero and finite; violations throw
+/// InvalidInput, and so does an operator output with NaN or infinite entries.
+///
+/// Convergence (refines the shared result contract above). A pair passes when
+/// estimate <= tol * scale(theta), scale(theta) = |theta|, or the largest |Ritz value| when
+/// |theta| <= ncv * eps * ||H||_F (theta == 0 up to the rounding level of the projected matrix H;
+/// the Ritz value of an exact zero eigenvalue falls below it as its pair converges).
+/// nconv is the longest prefix of theta (ranking order) whose pairs all pass AND whose leading
+/// Schur block passes ||Op Q1 - Q1 S11||_2 <= tol * ||scale(theta[0, nconv))||_2 (estimated by
+/// the Krylov relation as for the pairs): span(Q1) is an invariant subspace of Op + E with ||E||_2
+/// within that bound. For a non-normal operator this second test is the stricter one. A pair
+/// ranked behind an unconverged one stays in [nconv, m) even when it passes on its own, so
+/// converged == (nconv >= nev) holds exactly when every wanted value converged. Real T only: if
+/// LAPACK refuses to reorder the Schur form (an ill-conditioned swap of nearly equal eigenvalues),
+/// that Rayleigh-Ritz step certifies nothing (nconv = 0) and the iteration goes on.
+/// history holds one record per Rayleigh-Ritz step (restarts + 1 records) with the same nconv
+/// (history.back().nconv == nconv); max_estimate is the largest relative estimate among the
+/// wanted values in [nconv, m) and the relative Schur couplings of rejected prefixes (0 when
+/// nconv == m). Locking is soft (b is never deflated).
+/// Estimates: each restart adds O(eps ||Op||) rounding drift between the estimate and the true
+/// residual (measured ~0.1 eps ||Op||_2 per restart, growing linearly: negligible at the default
+/// max_restarts for |theta| near ||Op||, visible after 1e4+ restarts or for |theta| << ||Op||)
+/// and O(eps) loss of orthogonality to the basis; near the rounding floor eps ||Op|| the estimate
+/// can be optimistic. Callers needing certified residuals compute ||Op x - theta x|| themselves
+/// (the driver does, DESIGN §3.6-7).
+/// Magnitude: the iteration runs on Op / 2^e, with 2^e fixed by the largest entry of the first
+/// nonzero operator output (exact scaling), so ||Op|| may lie anywhere in the double range:
+/// 2^k * Op gives bitwise the vectors of Op and 2^k times its theta, estimate, schur_form and
+/// ritz_all. Later outputs must stay within ~1e150 of that first one (an overflowing norm is
+/// reported as non-finite output).
 /// A single-vector Krylov space sees further copies of an exactly multiple eigenvalue only through
 /// rounding, so the result may converge before all copies of such a cluster are found.
+/// For a fixed seed the result is bitwise reproducible whenever linalg::dot/norm2 are.
 /// Cost per restart: about ncv/2 operator applications, O(n ncv^2) flops for CGS2 and the basis
-/// update, O(ncv^3) dense work. Memory: n (ncv + 1) scalars plus the n x m outputs.
+/// update, O(ncv^3) dense work (Schur form, a few reorderings and eigenvector sets).
+/// Memory: the basis, n (ncv + 1) scalars of T, plus the outputs (vectors: n x m complex,
+/// schur_basis: n x m of T) and O(ncv^2 + 2048 ncv) workspace; no other n-sized buffers.
 /// Not thread-safe for a shared `op`; otherwise reentrant.
 template <class T>
 GeneralEigResult<T> krylov_schur_general(LinearOperator<T>& op, Which which,
