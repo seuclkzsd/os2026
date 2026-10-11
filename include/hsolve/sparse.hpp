@@ -103,8 +103,9 @@ double hermitian_defect(const CsrMatrix<T>& a);
 // pass over A serves 16 real or 16 complex vectors with contiguous loads instead of p strided
 // gathers per nonzero; A is streamed once per 16 vectors. That copy is n*min(p, 16) scalars of
 // scratch (KernelOptions::workspace, else allocated per call). spmm keeps the Reference loop when
-// A has fewer than 2 entries per column on average (e.g. a diagonal B: the copy would cost more
-// than it saves), and every path computes a single vector with the Reference row loop.
+// rows of X are reused too rarely for the copy to pay off (fewer than 2 entries per column of A on
+// average for p <= 4, fewer than 8 for wider blocks: e.g. a diagonal B), and every path computes
+// a single vector with the Reference row loop.
 
 /// Instruction-set path of the sparse kernels.
 enum class KernelPath {

@@ -41,9 +41,15 @@ namespace hs {
 
 namespace {
 
-constexpr index_t kChunk = 16;     // vectors per pass of the interleaved kernels
+constexpr index_t kChunk = 16;      // vectors per pass of the interleaved kernels
 constexpr index_t kRowBlock = 256;  // rows per scheduling unit of the fast kernels
-constexpr index_t kMinReuse = 2;    // spmm interleaves X only when nnz(A) >= kMinReuse * ncols
+// spmm interleaves X only when every row of X is used often enough to pay for the copy:
+// nnz(A) >= reuse * ncols with reuse 2 for p <= 4 and 8 for wider blocks (measured with
+// bench/solvephase_kernels.cpp: a diagonal B lost 1.5x at p = 8, 16; cav2d-rect-pert-1e5, 5
+// entries per column, broke even at p = 8 and lost up to 1.25x at p = 16, while 10-26 entries per
+// column gained 1.2-3.3x).
+constexpr index_t kMinReuseNarrow = 2;
+constexpr index_t kMinReuseWide = 8;
 
 bool cpu_has_avx512f() noexcept {
 #if HS_KERNELS_AVX512
@@ -60,7 +66,9 @@ bool cpu_has_avx512f() noexcept {
 // ------------------------------------------------------------------------- scalar helpers
 
 /// a * b with the plain formula (std::complex's operator* adds NaN/Inf recovery calls).
-inline double mul(double a, double b) { return a * b; }
+inline double mul(double a, double b) {
+  return a * b;
+}
 inline cplx mul(cplx a, cplx b) {
   return cplx(a.real() * b.real() - a.imag() * b.imag(), a.real() * b.imag() + a.imag() * b.real());
 }
@@ -73,13 +81,19 @@ inline T combine(T alpha, T s, T beta, const T& y) {
 
 /// |z| in the 1-norm of the components (|Re z| + |Im z| for complex: within sqrt(2) of |z|), the
 /// magnitude used by the componentwise backward error of shifted_residual.
-inline double mag(double v) { return std::abs(v); }
-inline double mag(cplx v) { return std::abs(v.real()) + std::abs(v.imag()); }
+inline double mag(double v) {
+  return std::abs(v);
+}
+inline double mag(cplx v) {
+  return std::abs(v.real()) + std::abs(v.imag());
+}
 
-/// |r| / s, the componentwise backward error of one entry (0 / 0 = 0, r / 0 = inf).
+/// |r| / s, the componentwise backward error of one entry (0 / 0 = 0, r / 0 = inf, NaN = inf so
+/// that a NaN residual never looks converged).
 inline double ratio(double r, double s) {
   if (r == 0.0) return 0.0;
-  return s > 0.0 ? r / s : std::numeric_limits<double>::infinity();
+  if (std::isnan(r) || std::isnan(s) || !(s > 0.0)) return std::numeric_limits<double>::infinity();
+  return r / s;
 }
 
 /// Per-column maxima of the row blocks of a residual (blocks x q), reduced in any order: max is
@@ -87,7 +101,9 @@ inline double ratio(double r, double s) {
 class BlockMax {
  public:
   BlockMax(double* out, index_t n, index_t q)
-      : out_(out), q_(q), v_(out ? static_cast<std::size_t>(((n + kRowBlock - 1) / kRowBlock) * q) : 0, 0.0) {}
+      : out_(out),
+        q_(q),
+        v_(out ? static_cast<std::size_t>(((n + kRowBlock - 1) / kRowBlock) * q) : 0, 0.0) {}
   bool on() const noexcept { return out_ != nullptr; }
   double* row(index_t i0) noexcept { return v_.data() + (i0 / kRowBlock) * q_; }
   void finish() {
@@ -155,7 +171,8 @@ template <class F>
 void for_row_blocks(index_t n, F&& body) {
   const index_t blocks = (n + kRowBlock - 1) / kRowBlock;
 #pragma omp parallel for schedule(static)
-  for (index_t blk = 0; blk < blocks; ++blk) body(blk * kRowBlock, std::min(n, (blk + 1) * kRowBlock));
+  for (index_t blk = 0; blk < blocks; ++blk)
+    body(blk * kRowBlock, std::min(n, (blk + 1) * kRowBlock));
 }
 
 // ----------------------------------------------------------------------------- Reference
@@ -211,8 +228,8 @@ void spmm_reference(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_
 
 template <class T>
 void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
-                                const T* x, index_t ldx, const T* y, index_t ldy, T* r,
-                                index_t ldr, index_t p, double* omega) {
+                                const T* x, index_t ldx, const T* y, index_t ldy, T* r, index_t ldr,
+                                index_t p, double* omega) {
   const index_t n = a.nrows;
   if (b) {
     spmm_reference(*b, x, ldx, r, ldr, p, T(1), T(0));
@@ -227,11 +244,13 @@ void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, do
       for (index_t i = 0; i < n; ++i) r[i + k * ldr] += T(sigma) * y[i + k * ldy];
   }
   if (!omega) return;
-  // Componentwise backward error with the scale s = |B| |w| + |A| |y|, w = x + sigma y (B = I: |w|).
+  // Componentwise backward error with the scale s = |B| |w| + |A| |y|, w = x + sigma y (B = I:
+  // |w|).
   for (index_t k = 0; k < p; ++k) {
     const T* xk = x + k * ldx;
     const T* yk = y + k * ldy;
     double w = 0.0;
+#pragma omp parallel for schedule(static) reduction(max : w)  // max is exact: deterministic
     for (index_t i = 0; i < n; ++i) {
       double sc = 0.0;
       if (b) {
@@ -242,7 +261,8 @@ void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, do
       } else {
         sc = mag(xk[i] + sigma * yk[i]);
       }
-      for (index_t t = a.rowptr[i]; t < a.rowptr[i + 1]; ++t) sc += mag(a.values[t]) * mag(yk[a.colind[t]]);
+      for (index_t t = a.rowptr[i]; t < a.rowptr[i + 1]; ++t)
+        sc += mag(a.values[t]) * mag(yk[a.colind[t]]);
       w = std::max(w, ratio(mag(r[i + k * ldr]), sc));
     }
     omega[k] = w;
@@ -252,7 +272,8 @@ void shifted_residual_reference(const CsrMatrix<T>& a, const CsrMatrix<T>* b, do
 // ------------------------------------------------------------------------------ Portable
 
 /// out[k] (k < q) += sign * sum_t v[t] * Xp[ci[t], k] over row i of m (Xp interleaved, q wide);
-/// with sacc != nullptr also sacc[k] += sum_t mag(v[t]) * mag(Xp[ci[t], k]) (magnitudes, see mag()).
+/// with sacc != nullptr also sacc[k] += sum_t mag(v[t]) * mag(Xp[ci[t], k]) (magnitudes, see
+/// mag()).
 template <class T>
 inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const double* xp, index_t q,
                                     double sign, double* acc, double* sacc = nullptr) {
@@ -270,7 +291,8 @@ inline void row_accumulate_portable(const CsrMatrix<T>& m, index_t i, const doub
       }
       if (sacc) {
         const double mv = mag(v[t]);
-        for (index_t k = 0; k < q; ++k) sacc[k] += mv * (std::abs(xr[2 * k]) + std::abs(xr[2 * k + 1]));
+        for (index_t k = 0; k < q; ++k)
+          sacc[k] += mv * (std::abs(xr[2 * k]) + std::abs(xr[2 * k + 1]));
       }
     } else {
       const double vv = sign * v[t];
@@ -312,8 +334,8 @@ void spmm_chunk_portable(const CsrMatrix<T>& a, const double* xp, index_t q, T* 
 /// R[:, 0..q) = B Wp - A Yp (Wp = X + sigma Y interleaved), or (B = I) X + sigma Y - A Yp. With
 /// bm.on(), also the row-block maxima of |r| / s (s = |B| |Wp| + |A| |Yp|, B = I: |w| + |A| |Yp|).
 template <class T>
-void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
-                             const T* x, index_t ldx, const T* y, index_t ldy, const double* wp,
+void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
+                             index_t ldx, const T* y, index_t ldy, const double* wp,
                              const double* yp, index_t q, T* r, index_t ldr, BlockMax& bm) {
   for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
     double acc[2 * kChunk], sacc[kChunk];
@@ -342,8 +364,8 @@ void residual_chunk_portable(const CsrMatrix<T>& a, const CsrMatrix<T>* b, doubl
 /// single vector they would only add two passes): r_i = sum_B b_ij (x_j + sigma y_j) - sum_A a_ij
 /// y_j, or (B = I) x_i + sigma y_i - sum_A a_ij y_j.
 template <class T>
-void residual_column(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, const T* y,
-                     T* r, BlockMax& bm) {
+void residual_column(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
+                     const T* y, T* r, BlockMax& bm) {
   const index_t* ra = a.rowptr.data();
   const std::int32_t* ca = a.colind.data();
   const T* va = a.values.data();
@@ -387,9 +409,9 @@ inline __mmask8 lane_mask(index_t words, int c) {
 /// Real: acc[c] += sign * a_it * Xp[j, 8c .. 8c+8) over row i of m, two nonzeros in flight;
 /// with S also sacc[c] += |a_it| |Xp[j, chunk c]|.
 template <int NC, bool S>
-HS_TARGET_AVX512 inline void row_real_avx512(const CsrMatrix<double>& m, index_t i, const double* xp,
-                                             index_t q, const __mmask8* mask, double sign,
-                                             __m512d* acc, __m512d* sacc) {
+HS_TARGET_AVX512 inline void row_real_avx512(const CsrMatrix<double>& m, index_t i,
+                                             const double* xp, index_t q, const __mmask8* mask,
+                                             double sign, __m512d* acc, __m512d* sacc) {
   const index_t* rp = m.rowptr.data();
   const std::int32_t* ci = m.colind.data();
   const double* v = m.values.data();
@@ -429,9 +451,10 @@ HS_TARGET_AVX512 inline void row_real_avx512(const CsrMatrix<double>& m, index_t
 /// product is assembled by finish_complex(). With S also sacc[c] += mag(a) [|xr|, |xi|] (the two
 /// lanes of a vector entry are added by the caller).
 template <int NC, bool S>
-HS_TARGET_AVX512 inline void row_complex_avx512(const CsrMatrix<cplx>& m, index_t i, const double* xp,
-                                                index_t q, const __mmask8* mask, double sign,
-                                                __m512d* accr, __m512d* acci, __m512d* sacc) {
+HS_TARGET_AVX512 inline void row_complex_avx512(const CsrMatrix<cplx>& m, index_t i,
+                                                const double* xp, index_t q, const __mmask8* mask,
+                                                double sign, __m512d* accr, __m512d* acci,
+                                                __m512d* sacc) {
   const index_t* rp = m.rowptr.data();
   const std::int32_t* ci = m.colind.data();
   const double* v = reinterpret_cast<const double*>(m.values.data());
@@ -484,10 +507,11 @@ HS_TARGET_AVX512 void spmm_rows_avx512(const CsrMatrix<T>& a, const double* xp, 
 }
 
 template <class T, int NC, bool S>
-HS_TARGET_AVX512 void residual_rows_avx512(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma,
-                                           const T* x, index_t ldx, const T* y, index_t ldy,
-                                           const double* wp, const double* yp, index_t q, T* r,
-                                           index_t ldr, index_t i0, index_t i1, double* wmax) {
+HS_TARGET_AVX512 void residual_rows_avx512(const CsrMatrix<T>& a, const CsrMatrix<T>* b,
+                                           double sigma, const T* x, index_t ldx, const T* y,
+                                           index_t ldy, const double* wp, const double* yp,
+                                           index_t q, T* r, index_t ldr, index_t i0, index_t i1,
+                                           double* wmax) {
   const index_t words = q * kWords<T>;
   __mmask8 mask[NC];
   for (int c = 0; c < NC; ++c) mask[c] = lane_mask(words, c);
@@ -545,8 +569,8 @@ void with_chunk_width(index_t q, F&& f) {
 // --------------------------------------------------------------------------- dispatchers
 
 template <class T>
-void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_t ldy, T alpha, T beta,
-                KernelPath path) {
+void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_t ldy, T alpha,
+                T beta, KernelPath path) {
 #if HS_KERNELS_AVX512
   if (path == KernelPath::Avx512) {
     with_chunk_width<T>(q, [&](auto nc) {
@@ -562,19 +586,19 @@ void spmm_chunk(const CsrMatrix<T>& a, const double* xp, index_t q, T* y, index_
 }
 
 template <class T>
-void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, index_t ldx,
-                    const T* y, index_t ldy, const double* wp, const double* yp, index_t q, T* r, index_t ldr,
-                    KernelPath path, BlockMax& bm) {
+void residual_chunk(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
+                    index_t ldx, const T* y, index_t ldy, const double* wp, const double* yp,
+                    index_t q, T* r, index_t ldr, KernelPath path, BlockMax& bm) {
 #if HS_KERNELS_AVX512
   if (path == KernelPath::Avx512) {
     with_chunk_width<T>(q, [&](auto nc) {
       for_row_blocks(a.nrows, [&](index_t i0, index_t i1) {
         if (bm.on()) {
-          residual_rows_avx512<T, decltype(nc)::value, true>(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, i0,
-                                                             i1, bm.row(i0));
+          residual_rows_avx512<T, decltype(nc)::value, true>(a, b, sigma, x, ldx, y, ldy, wp, yp, q,
+                                                             r, ldr, i0, i1, bm.row(i0));
         } else {
-          residual_rows_avx512<T, decltype(nc)::value, false>(a, b, sigma, x, ldx, y, ldy, wp, yp, q, r, ldr, i0,
-                                                              i1, nullptr);
+          residual_rows_avx512<T, decltype(nc)::value, false>(a, b, sigma, x, ldx, y, ldy, wp, yp,
+                                                              q, r, ldr, i0, i1, nullptr);
         }
       });
     });
@@ -597,8 +621,9 @@ KernelPath resolve_kernel_path(KernelPath path) {
       return cpu_has_avx512f() ? KernelPath::Avx512 : KernelPath::Portable;
     case KernelPath::Avx512:
       if (!cpu_has_avx512f())
-        HS_THROW(Unsupported, "sparse kernels: KernelPath::Avx512 requested, but this CPU / OS does not "
-                              "support AVX-512F (or the library was built without it)");
+        HS_THROW(Unsupported,
+                 "sparse kernels: KernelPath::Avx512 requested, but this CPU / OS does not "
+                 "support AVX-512F (or the library was built without it)");
       return path;
     case KernelPath::Reference:
     case KernelPath::Portable:
@@ -617,8 +642,8 @@ void spmv(const CsrMatrix<T>& a, const T* x, T* y, T alpha, T beta, const Kernel
 }
 
 template <class T>
-void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, index_t p, T alpha, T beta,
-          const KernelOptions& options) {
+void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, index_t p, T alpha,
+          T beta, const KernelOptions& options) {
   const KernelPath path = resolve_kernel_path(options.path);
   if (p <= 0) return;
   if (path == KernelPath::Reference) {
@@ -630,10 +655,9 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
     return;
   }
   const index_t m = a.ncols;
-  if (a.nnz() < kMinReuse * m) {
-    // Each row of X is used fewer than kMinReuse times (e.g. a diagonal mass matrix): the
-    // interleaved copy (one read and one write of X) costs more than the strided reads it saves
-    // (yee-pec-box-1e5, diagonal B: p = 8, 16 were 1.5x slower with it).
+  if (a.nnz() < (p <= 4 ? kMinReuseNarrow : kMinReuseWide) * m) {
+    // Rows of X are used too rarely: the interleaved copy (one read and one write of X) costs
+    // more than the strided reads it saves (see kMinReuseNarrow / kMinReuseWide).
     spmm_reference(a, x, ldx, y, ldy, p, alpha, beta);
     return;
   }
@@ -646,11 +670,12 @@ void spmm(const CsrMatrix<T>& a, const T* x, index_t ldx, T* y, index_t ldy, ind
 }
 
 template <class T>
-void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x, index_t ldx,
-                      const T* y, index_t ldy, T* r, index_t ldr, index_t p, const KernelOptions& options,
-                      double* backward_error) {
+void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma, const T* x,
+                      index_t ldx, const T* y, index_t ldy, T* r, index_t ldr, index_t p,
+                      const KernelOptions& options, double* backward_error) {
   if (!a.square() || (b && (b->nrows != a.nrows || !b->square())))
-    HS_THROW(InvalidInput, "shifted_residual: A (" << a.nrows << "x" << a.ncols << ") and B must be square "
+    HS_THROW(InvalidInput, "shifted_residual: A (" << a.nrows << "x" << a.ncols
+                                                   << ") and B must be square "
                                                    << "of equal order");
   const KernelPath path = resolve_kernel_path(options.path);
   if (p <= 0) return;
@@ -681,12 +706,12 @@ void shifted_residual(const CsrMatrix<T>& a, const CsrMatrix<T>* b, double sigma
   }
 }
 
-#define HS_INSTANTIATE_KERNELS(T)                                                                  \
-  template void spmv<T>(const CsrMatrix<T>&, const T*, T*, T, T, const KernelOptions&);            \
-  template void spmm<T>(const CsrMatrix<T>&, const T*, index_t, T*, index_t, index_t, T, T,        \
-                        const KernelOptions&);                                                     \
-  template void shifted_residual<T>(const CsrMatrix<T>&, const CsrMatrix<T>*, double, const T*,    \
-                                    index_t, const T*, index_t, T*, index_t, index_t,              \
+#define HS_INSTANTIATE_KERNELS(T)                                                               \
+  template void spmv<T>(const CsrMatrix<T>&, const T*, T*, T, T, const KernelOptions&);         \
+  template void spmm<T>(const CsrMatrix<T>&, const T*, index_t, T*, index_t, index_t, T, T,     \
+                        const KernelOptions&);                                                  \
+  template void shifted_residual<T>(const CsrMatrix<T>&, const CsrMatrix<T>*, double, const T*, \
+                                    index_t, const T*, index_t, T*, index_t, index_t,           \
                                     const KernelOptions&, double*);
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_KERNELS)
