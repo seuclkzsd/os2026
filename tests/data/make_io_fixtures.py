@@ -4,16 +4,19 @@
     python tests/data/make_io_fixtures.py [--out tests/data/io]
 
 Every file is produced by the real producers (numpy.save / numpy.savez / scipy.sparse.save_npz /
-Python zipfile) or, for MatrixMarket, written as plain text. expected.json records what the C++
-readers must return:
+Python zipfile), by byte-patching their output, or, for MatrixMarket, written as plain text. Zip
+archives no producer emits (deflate streams that disagree with the declared sizes) come from a
+minimal writer, _raw_zip, whose well-formed output Python's zipfile is checked to accept.
+expected.json records what the C++ readers must return:
 
-  load    load_matrix cases: file, options, and either "error" (hs::to_string of the error code)
-          or dtype, n, nnz, source_format, storage, the exact set of note tags, the dense matrix
-          (re / im, row-major lists) and the expected Hermitian defect.
+  load    load_matrix cases: file, options, and either "error" (hs::to_string of the error code;
+          optional "message", a substring of the error message) or dtype, n, nnz, source_format,
+          storage, the exact set of note tags, the dense matrix (re / im, row-major lists) and the
+          expected Hermitian defect.
   npy     read_npy cases: raw dtype/shape/fortran_order and, if "convert" is set, the values in
           payload order after npy_to_vector<convert>.
   npz     read_npz cases: the member keys and per-key arrays (same fields as npy).
-  errors  files that read_npz must reject, with the error code.
+  errors  files that read_npz must reject, with the error code (and optional "message").
   golden  numpy-written .npy files that write_npy_vector / write_npy_matrix must reproduce
           byte for byte from the listed values (matrices: column-major values).
   generator  numpy / scipy / zlib versions used (deflate output depends on the zlib build).
@@ -94,6 +97,37 @@ def _pinned_zip_time():
         zipfile.time = saved
 
 
+def _npy_bytes(a: np.ndarray) -> bytes:
+    buf = io.BytesIO()
+    np.save(buf, a)
+    return buf.getvalue()
+
+
+def _raw_deflate(data: bytes) -> bytes:
+    """Raw deflate stream (no zlib header), as zip members store it."""
+    c = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    return c.compress(data) + c.flush()
+
+
+_ZIP_DATE = 0x5C21  # MS-DOS date 2026-01-01
+
+
+def _raw_zip(members: list[tuple[str, bytes, int, int, int]]) -> bytearray:
+    """Minimal zip writer for archives no real producer emits. Each member is (name, stored,
+    method, crc, size): `stored` goes into the archive as is (already deflated for method 8);
+    crc and size are the CRC-32 and uncompressed size the headers declare. Classic records only."""
+    out, central = bytearray(), bytearray()
+    for name, stored, method, crc, size in members:
+        nm = name.encode()
+        offset = len(out)
+        out += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, method, 0, _ZIP_DATE, crc, len(stored),
+                           size, len(nm), 0) + nm + stored
+        central += struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0, method, 0, _ZIP_DATE, crc,
+                               len(stored), size, len(nm), 0, 0, 0, 0, 0, offset) + nm
+    end = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(members), len(members), len(central), len(out), 0)
+    return out + central + end
+
+
 def _hermitian_defect(a: np.ndarray) -> float:
     nrm = np.linalg.norm(a)
     return 0.0 if nrm == 0 else float(np.linalg.norm(a - a.conj().T) / nrm)
@@ -154,9 +188,17 @@ class Fixtures:
         self.expected["load"].append(entry)
 
     def load_error(self, file: str, error: str, *, options: dict | None = None,
-                   name: str | None = None) -> None:
-        self.expected["load"].append({"name": name or f"{file}:{error}", "file": file,
-                                      "options": options or {}, "error": error})
+                   name: str | None = None, message: str | None = None) -> None:
+        """message: a substring the error message must contain (pins which check fired)."""
+        entry = {"name": name or f"{file}:{error}", "file": file, "options": options or {}, "error": error}
+        if message is not None:
+            entry["message"] = message
+        self.expected["load"].append(entry)
+
+    def npz_error(self, file: str, error: str, message: str) -> None:
+        """A file read_npz must reject with `error` and a message containing `message`."""
+        self.expected["errors"].append({"file": file, "reader": "read_npz", "error": error,
+                                        "message": message})
 
     def save_npz(self, name: str, m, compressed: bool = True) -> str:
         with _pinned_zip_time():
@@ -305,6 +347,10 @@ class Fixtures:
         self.load_error(self.savez("csr_bad_column.npz", format=b"csr", shape=np.array([5, 5]),
                                    data=c.data, indices=np.where(c.indices == 4, 7, c.indices).astype(np.int32),
                                    indptr=c.indptr), "invalid_input")
+        # Order 2^31 + 1: column indices would not fit int32 (rejected before indptr is read).
+        self.load_error(self.savez("csr_huge_order.npz", format=b"csr", shape=np.array([2**31 + 1] * 2),
+                                   data=c.data, indices=c.indices, indptr=c.indptr), "invalid_input",
+                        message="exceeds the int32 index range")
 
     # ---------------------------------------------------------------- zip container edge cases
 
@@ -365,6 +411,55 @@ class Fixtures:
         flip_member_byte("csr_matrix_f8.npz", "bad_deflate.npz", "data.npy", at_end=False)
         self.expected["errors"].append({"file": "bad_deflate.npz", "reader": "read_npz", "error": "io"})
         self.load_error("bad_deflate.npz", "io")
+
+    def zip_integrity(self) -> None:
+        """Hand-built archives (_raw_zip) whose npy headers agree with the declared member sizes, so
+        that only the zip layer's own checks can catch the defect; each error pins its message."""
+        c = sp.csr_matrix(H_REAL)
+        npy = {"format": _npy_bytes(np.array(b"csr")), "shape": _npy_bytes(np.array(c.shape)),
+               "indices": _npy_bytes(c.indices), "indptr": _npy_bytes(c.indptr)}
+        data = _npy_bytes(c.data)
+
+        def archive(name: str, data_stored: bytes, *, first=(), patch=None) -> str:
+            """Stored csr members plus data.npy as `data_stored` (deflate), declared as `data`."""
+            members = list(first) + [(k + ".npy", v, 0, zlib.crc32(v), len(v)) for k, v in npy.items()]
+            members.append(("data.npy", data_stored, 8, zlib.crc32(data), len(data)))
+            raw = _raw_zip(members)
+            if patch is not None:
+                patch(raw)
+            self.path(name).write_bytes(bytes(raw))
+            return name
+
+        full = _raw_deflate(data)
+        name = archive("crafted_ok.npz", full)
+        with zipfile.ZipFile(self.path(name)) as z:  # the writer is right: Python's reader agrees
+            assert z.testzip() is None
+        self.load_ok(name, H_REAL, fmt="npz-csr")
+
+        # The deflate stream holds 16 bytes beyond the declared size (the CRC covers the declared
+        # bytes, so nothing else notices), ends 8 bytes early, or is cut in the middle.
+        for name, stored, message in (
+                ("deflate_longer.npz", _raw_deflate(data + bytes(16)), "more data than its declared size"),
+                ("deflate_shorter.npz", _raw_deflate(data[:-8]), "deflate stream ends before the declared size"),
+                ("deflate_cut.npz", full[:len(full) // 2], "deflate data is truncated")):
+            archive(name, stored)
+            self.npz_error(name, "io", message)
+            self.load_error(name, "io", message=message)
+
+        decoy = _npy_bytes(np.zeros(3))
+        name = archive("duplicate_member.npz", full, first=[("data.npy", decoy, 0, zlib.crc32(decoy), len(decoy))])
+        self.npz_error(name, "io", "duplicate npz member")
+
+        def second_disk(raw: bytearray) -> None:  # end record (last 22 bytes): "number of this disk"
+            struct.pack_into("<H", raw, len(raw) - 22 + 4, 1)
+
+        self.npz_error(archive("multi_volume.npz", full, patch=second_disk), "unsupported", "multi-volume")
+
+        def saturated_size(raw: bytearray) -> None:  # first central record: compressed size
+            struct.pack_into("<I", raw, raw.find(b"PK\x01\x02") + 20, 0xFFFFFFFF)
+
+        self.npz_error(archive("zip64_extra_missing.npz", full, patch=saturated_size), "io",
+                       "lacks its zip64 extra field")
 
     # ------------------------------------------------------------------------------ dense npy
 
@@ -528,6 +623,7 @@ class Fixtures:
                 old.unlink()
         self.scipy_npz()
         self.zip_variants()
+        self.zip_integrity()
         self.dense_npy()
         self.npz_archives()
         self.mtx()

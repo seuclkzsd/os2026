@@ -118,7 +118,7 @@ void run_fixture_cases(const std::string& ext) {
     const auto path = fixture(file);
     const hs::LoadOptions opt = options_from(c["options"]);
     if (c.contains("error")) {
-      EXPECT_EQ(error_code_of([&] { hs::load_matrix(path, opt); }), c["error"].get<std::string>());
+      hs::io_test::expect_error(c, [&] { hs::load_matrix(path, opt); });
     } else {
       check_loaded(hs::load_matrix(path, opt), c);
     }

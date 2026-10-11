@@ -1929,6 +1929,13 @@
    "error": "invalid_input"
   },
   {
+   "name": "csr_huge_order.npz:invalid_input",
+   "file": "csr_huge_order.npz",
+   "options": {},
+   "error": "invalid_input",
+   "message": "exceeds the int32 index range"
+  },
+  {
    "name": "zip64_deflate.npz",
    "file": "zip64_deflate.npz",
    "options": {},
@@ -2089,6 +2096,77 @@
    "file": "bad_deflate.npz",
    "options": {},
    "error": "io"
+  },
+  {
+   "name": "crafted_ok.npz",
+   "file": "crafted_ok.npz",
+   "options": {},
+   "source_format": "npz-csr",
+   "storage": "full",
+   "notes": [],
+   "n": 5,
+   "nnz": 14,
+   "defect": 0.0,
+   "dtype": "float64",
+   "re": [
+    [
+     4.0,
+     -1.0,
+     0.0,
+     0.5,
+     0.0
+    ],
+    [
+     -1.0,
+     -3.0,
+     2.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     2.0,
+     0.0,
+     -1.5,
+     0.25
+    ],
+    [
+     0.5,
+     0.0,
+     -1.5,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     0.25,
+     0.0,
+     -2.0
+    ]
+   ],
+   "im": null
+  },
+  {
+   "name": "deflate_longer.npz:io",
+   "file": "deflate_longer.npz",
+   "options": {},
+   "error": "io",
+   "message": "more data than its declared size"
+  },
+  {
+   "name": "deflate_shorter.npz:io",
+   "file": "deflate_shorter.npz",
+   "options": {},
+   "error": "io",
+   "message": "deflate stream ends before the declared size"
+  },
+  {
+   "name": "deflate_cut.npz:io",
+   "file": "deflate_cut.npz",
+   "options": {},
+   "error": "io",
+   "message": "deflate data is truncated"
   },
   {
    "name": "dense_c_f8.npy",
@@ -3686,6 +3764,42 @@
    "file": "bad_deflate.npz",
    "reader": "read_npz",
    "error": "io"
+  },
+  {
+   "file": "deflate_longer.npz",
+   "reader": "read_npz",
+   "error": "io",
+   "message": "more data than its declared size"
+  },
+  {
+   "file": "deflate_shorter.npz",
+   "reader": "read_npz",
+   "error": "io",
+   "message": "deflate stream ends before the declared size"
+  },
+  {
+   "file": "deflate_cut.npz",
+   "reader": "read_npz",
+   "error": "io",
+   "message": "deflate data is truncated"
+  },
+  {
+   "file": "duplicate_member.npz",
+   "reader": "read_npz",
+   "error": "io",
+   "message": "duplicate npz member"
+  },
+  {
+   "file": "multi_volume.npz",
+   "reader": "read_npz",
+   "error": "unsupported",
+   "message": "multi-volume"
+  },
+  {
+   "file": "zip64_extra_missing.npz",
+   "reader": "read_npz",
+   "error": "io",
+   "message": "lacks its zip64 extra field"
   }
  ],
  "golden": [

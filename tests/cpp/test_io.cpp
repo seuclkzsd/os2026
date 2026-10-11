@@ -1,6 +1,7 @@
 // Unit tests for src/io, part 1: .npy parsing / conversion / writing and zip / .npz reading.
 // File fixtures come from tests/data/make_io_fixtures.py (expected values in expected.json).
 #include <gtest/gtest.h>
+#include <zlib.h>
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include "hsolve/error.hpp"
 #include "hsolve/io.hpp"
 #include "io/npz.hpp"
+#include "linalg/dense_ops.hpp"
 #include "test_io_util.hpp"
 
 namespace {
@@ -447,10 +449,13 @@ TEST(IoNpz, Zip64AndCommentedArchivesHoldTheSameArrays) {
 }
 
 TEST(IoNpz, DetectsCorruptMembers) {
+  // CRC, deflate streams longer / shorter than declared or cut, duplicate members, multi-volume
+  // archives, saturated sizes without a zip64 extra field: each error pins its message.
   ASSERT_FALSE(expected()["errors"].empty());
   for (const auto& c : expected()["errors"]) {
     const std::string file = c["file"];
-    EXPECT_EQ(error_code_of([&] { hs::read_npz(fixture(file)); }), c["error"].get<std::string>()) << file;
+    SCOPED_TRACE(file);
+    hs::io_test::expect_error(c, [&] { hs::read_npz(fixture(file)); });
   }
 }
 
@@ -529,14 +534,93 @@ TEST_F(IoZip, ValidatesSizesAndOffsetsFromTheCentralDirectory) {
   // Uncompressed size of a stored member no longer equal to its compressed size.
   EXPECT_EQ(error_code_of([&] { hs::read_npz(patch_central("csr_matrix_f8_stored.npz", 20, 7, 4)); }),
             "io");
-  // Deflated member declared one byte shorter / longer than its content: the npy payload then
-  // disagrees with its header.
+  // Deflated member declared one byte shorter / longer than its content: the npy layer rejects it
+  // (payload length vs header) before the zip layer's own stream-length checks run; those are
+  // pinned by IoNpz.DetectsCorruptMembers (deflate_longer / deflate_shorter / deflate_cut).
   const auto info = hs::read_npz(fixture("csr_matrix_f8.npz"));
   const std::uint32_t real = 128 + static_cast<std::uint32_t>(info.at("indices").data.size());
   EXPECT_EQ(error_code_of([&] { hs::read_npz(patch_central("csr_matrix_f8.npz", 20, real - 1, 4)); }),
             "io");
   EXPECT_EQ(error_code_of([&] { hs::read_npz(patch_central("csr_matrix_f8.npz", 20, real + 1, 4)); }),
             "io");
+}
+
+// Little-endian field of a hand-built zip record.
+template <class U>
+void put_le(std::vector<char>& out, U v) {
+  for (std::size_t b = 0; b < sizeof(U); ++b) out.push_back(static_cast<char>((v >> (8 * b)) & 0xFF));
+}
+
+// One-member archive with a raw-deflated member (classic records), for archives too large to
+// commit; make_io_fixtures.py builds the small hand-made ones.
+std::vector<char> deflated_zip(const std::string& name, const std::vector<char>& content) {
+  z_stream z{};
+  EXPECT_EQ(deflateInit2(&z, Z_BEST_SPEED, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY), Z_OK);
+  std::vector<char> packed(deflateBound(&z, static_cast<uLong>(content.size())));
+  z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(content.data()));
+  z.avail_in = static_cast<uInt>(content.size());
+  z.next_out = reinterpret_cast<Bytef*>(packed.data());
+  z.avail_out = static_cast<uInt>(packed.size());
+  EXPECT_EQ(deflate(&z, Z_FINISH), Z_STREAM_END);
+  packed.resize(z.total_out);
+  deflateEnd(&z);
+  const auto crc = static_cast<std::uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(content.data()), static_cast<uInt>(content.size())));
+  const auto name_len = static_cast<std::uint16_t>(name.size());
+  // Fields from the flags to the extra length, identical in the local and the central header.
+  const auto common = [&](std::vector<char>& out) {
+    put_le<std::uint16_t>(out, 0);  // flags
+    put_le<std::uint16_t>(out, 8);  // deflate
+    put_le<std::uint32_t>(out, 0);  // time, date
+    put_le(out, crc);
+    put_le(out, static_cast<std::uint32_t>(packed.size()));
+    put_le(out, static_cast<std::uint32_t>(content.size()));
+    put_le(out, name_len);
+    put_le<std::uint16_t>(out, 0);  // extra field length
+  };
+  std::vector<char> zip;
+  put_le<std::uint32_t>(zip, 0x04034b50);
+  put_le<std::uint16_t>(zip, 20);  // version needed
+  common(zip);
+  zip.insert(zip.end(), name.begin(), name.end());
+  zip.insert(zip.end(), packed.begin(), packed.end());
+  const auto cd_offset = static_cast<std::uint32_t>(zip.size());
+  put_le<std::uint32_t>(zip, 0x02014b50);
+  put_le<std::uint16_t>(zip, 20);  // version made by
+  put_le<std::uint16_t>(zip, 20);  // version needed
+  common(zip);
+  put_le<std::uint16_t>(zip, 0);  // comment length
+  put_le<std::uint16_t>(zip, 0);  // disk
+  put_le<std::uint16_t>(zip, 0);  // internal attributes
+  put_le<std::uint32_t>(zip, 0);  // external attributes
+  put_le<std::uint32_t>(zip, 0);  // local header offset
+  zip.insert(zip.end(), name.begin(), name.end());
+  const auto cd_size = static_cast<std::uint32_t>(zip.size()) - cd_offset;
+  put_le<std::uint32_t>(zip, 0x06054b50);
+  put_le<std::uint32_t>(zip, 0);  // this disk, central directory disk
+  put_le<std::uint16_t>(zip, 1);  // entries on this disk
+  put_le<std::uint16_t>(zip, 1);  // entries
+  put_le(zip, cd_size);
+  put_le(zip, cd_offset);
+  put_le<std::uint16_t>(zip, 0);  // comment length
+  return zip;
+}
+
+TEST_F(IoZip, InflatesMembersLargerThanTheInputChunk) {
+  // Random doubles barely compress: the member's deflate data exceeds the reader's 1 MiB input
+  // buffer, which is refilled mid-member (and mid-array for the typed read).
+  std::vector<double> v(200000);
+  hs::linalg::fill_random(v.data(), static_cast<hs::index_t>(v.size()), 2026);
+  hs::write_npy_vector(tmp("v.npy"), v);
+  std::vector<char> zip = deflated_zip("v.npy", read_bytes(tmp("v.npy")));
+  ASSERT_GT(zip.size(), (std::size_t{1} << 20) + 4096);
+  write_bytes(tmp("big.npz"), zip);
+  EXPECT_EQ(hs::npy_to_vector<double>(hs::read_npz(tmp("big.npz")).at("v")), v);
+  EXPECT_EQ(hs::io::NpzFile(tmp("big.npz")).read_as<double>("v"), v);
+  // Corruption behind the first input chunk is still detected.
+  zip[(std::size_t{1} << 20) + 1000] ^= 0x55;
+  write_bytes(tmp("bad.npz"), zip);
+  EXPECT_EQ(error_code_of([&] { hs::read_npz(tmp("bad.npz")); }), "io");
 }
 
 }  // namespace
