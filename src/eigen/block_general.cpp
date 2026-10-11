@@ -8,12 +8,13 @@
 //   * Fast path: linalg::orthogonalize_block_cgs2 (block classical Gram-Schmidt with the DGKS
 //     test - a second pass only after cancellation - in the fused, thread-count independent row
 //     block kernel) followed by Cholesky-QR twice inside the block (CholQR2). Accepted when no
-//     column lost more than its breakdown share (kBreakdownRatio), the first Cholesky factor has
-//     a column-scaled condition number <= kMaxFastCond and the second Gram matrix is close to I.
-//     The projection leaves each column orthogonal to V up to O(eps / eta) of its norm (DGKS), and
-//     R1^{-1} amplifies that by at most kMaxFastCond; no second projection against V follows.
-//     Measured (scratch kernel benchmark, n = 1e5, k = 24..72, p = 1..8, 2 threads): 2.3-2.7x
-//     faster than the two-pass kernel below.
+//     column lost more than its breakdown share (kBreakdownRatio), the projected block W1 has a
+//     column-scaled 2-norm condition number <= kMaxFastCond and the second Gram matrix is close
+//     to I. The projection leaves each column orthogonal to V up to O(eps / eta) of its norm
+//     (DGKS), and R1^{-1} amplifies that by at most the condition number (whatever the block
+//     width: the test uses the 2-norm, not a Frobenius estimate, which is >= p for every p x p
+//     factor); no second projection against V follows. Measured with bench/ghiep_fix_ortho.cpp
+//     (see there).
 //   * Otherwise the block is restored (W = W1 + V C1) and handed to BlockOrthonormalizer (two
 //     passes of block CGS, each followed by Cholesky-QR, column-wise fallback; block_ortho.hpp).
 //     A column of W that is dependent on [V U] and the block's earlier columns to working
@@ -29,8 +30,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
+#include "eigen/lobpcg_jd_common.hpp"
 #include "hsolve/error.hpp"
 #include "linalg/blas_lapack.hpp"
 #include "linalg/dense_ops.hpp"
@@ -46,49 +49,36 @@ using lapack::fint;
 constexpr double kStartRatio = 1e-12;
 /// Rows per block of the in-place basis compression V(:, 0:k) = V(:, 0:m) Q(:, 0:k).
 constexpr index_t kRowBlock = 2048;
-/// Fast path (file comment): largest column-scaled condition number of the first Cholesky factor
-/// of the projected block, i.e. the largest amplification of its rounding-level components in
-/// span(V) by R1^{-1}.
+/// Fast path (file comment): largest 2-norm condition number of the column-scaled projected block
+/// W1 D^{-1} (= that of R1 D^{-1}, R1 its Cholesky factor), i.e. the largest amplification of its
+/// rounding-level components in span(V) by R1^{-1}.
 constexpr double kMaxFastCond = 64.0;
 /// Fast path: largest ||G2 - I||_F of the second Cholesky-QR (BlockOrthonormalizer's bound).
 constexpr double kMaxFastDeviation = 0.5;
 
-/// a <- (a + a^H) / 2 for a square matrix (real diagonal for complex T).
+/// 2-norm condition number of the column-scaled block W1 D^{-1}, D = diag(||W1(:, i)||), from its
+/// Gram matrix g = W1^H W1 (Hermitian): sqrt(mu_max / mu_min) with mu the eigenvalues of
+/// D^{-1} g D^{-1} (unit diagonal). A test at kappa <= kMaxFastCond needs mu_min / mu_max >=
+/// kMaxFastCond^-2 = 2.4e-4, far above the absolute rounding of the eigenvalues (~p eps mu_max), so
+/// the estimate is accurate wherever it decides. +infinity when that matrix is not numerically
+/// positive definite or not finite. O(p^3).
 template <class T>
-void hermitize(DenseMatrix<T>& a) {
-  const index_t p = a.rows();
+double scaled_condition(const DenseMatrix<T>& g) {
+  const index_t p = g.rows();
+  std::vector<double> inv_d(static_cast<std::size_t>(p));
+  for (index_t j = 0; j < p; ++j) inv_d[j] = 1.0 / std::sqrt(std::real(g(j, j)));
+  DenseMatrix<T> gs(p, p);
   for (index_t j = 0; j < p; ++j) {
-    a(j, j) = T(std::real(a(j, j)));
-    for (index_t i = 0; i < j; ++i) {
-      const T v = T(0.5) * (a(i, j) + conj_if(a(j, i)));
-      a(i, j) = v;
-      a(j, i) = conj_if(v);
+    for (index_t i = 0; i < p; ++i) {
+      gs(i, j) = g(i, j) * T(inv_d[i] * inv_d[j]);
+      if (!std::isfinite(std::abs(gs(i, j)))) return std::numeric_limits<double>::infinity();
     }
   }
-}
-
-/// Column-scaled Frobenius condition estimate ||R D^-1||_F ||D R^-1||_F of the upper triangular
-/// Cholesky factor R of G, D = diag(sqrt(G(i, i))) (>= the 2-norm condition number of the
-/// column-scaled block). NaN for non-finite input.
-template <class T>
-double scaled_condition(const DenseMatrix<T>& r, const DenseMatrix<T>& g) {
-  const index_t p = r.rows();
-  DenseMatrix<T> rs(p, p), inv(p, p);
-  double fro = 0.0;
-  for (index_t j = 0; j < p; ++j) {
-    const double s = 1.0 / std::sqrt(std::real(g(j, j)));
-    for (index_t i = 0; i <= j; ++i) {
-      rs(i, j) = r(i, j) * T(s);
-      fro += abs2(rs(i, j));
-    }
-    inv(j, j) = T(1);
-  }
+  std::vector<double> mu(static_cast<std::size_t>(p));
   const auto pp = static_cast<fint>(p);
-  lapack::trsm('L', 'U', 'N', 'N', pp, pp, T(1), rs.data(), pp, inv.data(), pp);
-  double fro_inv = 0.0;
-  for (index_t j = 0; j < p; ++j)
-    for (index_t i = 0; i <= j; ++i) fro_inv += abs2(inv(i, j));
-  return std::sqrt(fro) * std::sqrt(fro_inv);
+  lapack::heev('N', 'U', pp, gs.data(), pp, mu.data());  // ascending
+  if (!(mu.front() > 0.0)) return std::numeric_limits<double>::infinity();
+  return std::sqrt(mu.back() / mu.front());
 }
 
 /// In place: g <- its upper Cholesky factor (Hermitian part of g, strictly lower part zeroed).
@@ -245,10 +235,10 @@ bool BlockKrylovSchurBasis<T>::fast_orthonormalize(index_t j) {
   const auto nn = static_cast<fint>(n), pp = static_cast<fint>(p);
   DenseMatrix<T> g1(p, p);
   linalg::gram(n, p, w, n, w, n, g1.data(), p);
+  hermitize(g1);
   DenseMatrix<T> r1 = g1;
   if (!cholesky(r1)) return false;
-  hermitize(g1);
-  if (!(scaled_condition(r1, g1) <= kMaxFastCond)) return false;
+  if (!(scaled_condition(g1) <= kMaxFastCond)) return false;
   lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), r1.data(), pp, w, nn);  // Q1 = W1 R1^{-1}
   DenseMatrix<T> r2(p, p);
   linalg::gram(n, p, w, n, w, n, r2.data(), p);

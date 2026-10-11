@@ -10,6 +10,7 @@
 #include <complex>
 #include <functional>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "eigen/block_general.hpp"
@@ -1579,6 +1580,28 @@ TYPED_TEST(KrylovSchurGeneralTyped, BlockBasisStepsKeepTheRelation) {
   EXPECT_GE(inv.fallback_steps(), 1);
   EXPECT_GE(inv.replacements(), 4);  // the three invariant directions are exhausted at once
   check_block_relation(dop, inv, 1e-12);
+}
+
+TYPED_TEST(KrylovSchurGeneralTyped, BlockBasisFastPathDoesNotDependOnTheBlockWidth) {
+  // Regression: the fast path's conditioning test used ||R D^-1||_F ||D R^-1||_F, which is >= p
+  // for every p x p factor (Cauchy-Schwarz), so with its fixed bound 64 no block of p >= 64 (and
+  // few from p ~ 50 on) could take the fast path. The test is now on the 2-norm condition number
+  // of the column-scaled block: a well-conditioned operator takes the fast path at every width.
+  using T = TypeParam;
+  const index_t n = 3000;
+  std::vector<T> diag(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) diag[i] = T(1.0 + static_cast<double>(i) / static_cast<double>(n));
+  hs::test::DiagonalOperator<T> op(diag);
+  for (const index_t p : {index_t{4}, index_t{16}, index_t{48}, index_t{64}, index_t{96}}) {
+    SCOPED_TRACE("p " + std::to_string(p));
+    hs::eigen_detail::BlockKrylovSchurBasis<T> basis(n, 4 * p, p, 2026);
+    basis.start(nullptr);
+    for (index_t step = 0; step < 4; ++step) basis.add_block(op, nullptr);
+    EXPECT_EQ(basis.fast_steps(), 4);
+    EXPECT_EQ(basis.fallback_steps(), 0);
+    EXPECT_EQ(basis.replacements(), 0);
+    check_block_relation(op, basis, 1e-12);
+  }
 }
 
 TEST(KrylovSchurGeneral, BlockLayoutRules) {
