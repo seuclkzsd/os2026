@@ -353,6 +353,22 @@ def test_float32_input_is_converted_exactly():
     np.testing.assert_array_equal(res.eigenvectors, ref.eigenvectors)
 
 
+def test_csc_triangle_with_declared_storage():
+    """CSC arrays read as CSR are A^H, so a declared triangle is flipped internally; the user's
+    triangle is what is accepted, rejected and named in notes and errors."""
+    a = _base_matrix()
+    ref = solve_quiet(a, sigma=2.1, k=5, config=DETERMINISTIC)
+    for tri, ok, bad in ((sp.tril, "lower", "upper"), (sp.triu, "upper", "lower")):
+        m = tri(a, format="csc")
+        res = solve_quiet(m, sigma=2.1, k=5, config=DETERMINISTIC, storage=ok)
+        np.testing.assert_array_equal(res.eigenvalues, ref.eigenvalues)
+        np.testing.assert_array_equal(res.eigenvectors, ref.eigenvectors)
+        assert any(f"storage: {ok} triangle mirrored to full Hermitian storage (declared by storage='{ok}')" in w
+                   for w in res.report["warnings"])
+        with pytest.raises(hsolve.InvalidInputError, match=f"storage='{bad}' but the matrix has entries"):
+            hsolve.solve(m, sigma=2.1, k=5, storage=bad)
+
+
 def test_complex_csc_is_not_conjugated_by_mistake():
     """CSC arrays are A^T; the conversion conjugates them back (A^H = A). A wrong sign would
     flip the eigenvectors to their conjugates: check A v = lambda v on the original A."""
@@ -519,6 +535,29 @@ def test_unsupported_maps_to_not_implemented():
     with pytest.raises(hsolve.UnsupportedError) as ei:
         hsolve.solve(a, b, lower=-1.0, upper=1.0)  # interval targets need definite B (roadmap)
     assert ei.value.code == "unsupported" and isinstance(ei.value, NotImplementedError)
+
+
+def test_every_error_code_has_its_class():
+    """The Python classes repeat the hs::Error code names: a rename or typo on either side would
+    turn that error into a plain RuntimeError. _error_codes() is derived from the C++ enum."""
+    codes = _hsolve._error_codes()
+    assert len(codes) == 9 and set(codes) == set(_hsolve._error_classes)
+    assert set(codes) == {cls.code for cls in hsolve._ERROR_CLASSES}
+    for index, code in enumerate(codes):
+        with pytest.raises(hsolve.HsolveError, match=f"^message {code}$") as ei:
+            _hsolve._raise_error(index, f"message {code}")
+        assert type(ei.value) is _hsolve._error_classes[code] and ei.value.code == code
+    with pytest.raises(hsolve.InvalidInputError):
+        _hsolve._raise_error(len(codes), "past the last code")
+
+
+def test_budget_and_singular_errors():
+    with pytest.raises(hsolve.OutOfMemoryBudgetError, match="memory_budget_gb") as ei:
+        hsolve.solve(lap1d(50), sigma=0.0, k=2, config={"memory_budget_gb": 1e-6})
+    assert ei.value.code == "out_of_memory_budget" and isinstance(ei.value, MemoryError)
+    with pytest.raises(hsolve.SingularError) as ei:  # exactly singular at sigma, no shift retries
+        hsolve.solve(sp.diags([0.0, 0.0, 1.0, 2.0], format="csr"), sigma=0.0, k=1, config={"max_shift_retries": 0})
+    assert ei.value.code == "singular" and isinstance(ei.value, ArithmeticError)
 
 
 # ----------------------------------------------------------------------------- load_matrix

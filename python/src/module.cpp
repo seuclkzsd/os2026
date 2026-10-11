@@ -416,6 +416,26 @@ void translate_error(const Error& e) {
   PyErr_SetString(cls ? cls : PyExc_RuntimeError, e.what());
 }
 
+/// Every hs::Error code name in enum order, derived from the enum itself (Error::Code is
+/// contiguous from 0 and to_string returns "unknown" past the last code), so the tests can check
+/// the Python classes against the C++ codes.
+std::vector<std::string> error_codes() {
+  std::vector<std::string> codes;
+  for (int c = 0;; ++c) {
+    std::string name = to_string(static_cast<Error::Code>(c));
+    if (name == "unknown") break;
+    codes.push_back(std::move(name));
+  }
+  return codes;
+}
+
+/// Throws hs::Error with code number `index` (tests of the exception translation).
+void raise_error(int index, const std::string& message) {
+  if (index < 0 || index >= static_cast<int>(error_codes().size()))
+    HS_THROW(InvalidInput, "_raise_error: no error code with index " << index);
+  throw Error(static_cast<Error::Code>(index), message);
+}
+
 }  // namespace
 }  // namespace hs
 
@@ -446,4 +466,7 @@ PYBIND11_MODULE(_hsolve, m) {
   m.def("version", [] { return std::string(hs::version()); });
   m.def("build_info", [] { return hs::build_info(); });
   m.def("max_threads", [] { return hs::max_threads(); });
+  m.def("_error_codes", &hs::error_codes, "Every hs::Error code name, in enum order.");
+  m.def("_raise_error", &hs::raise_error, py::arg("index"), py::arg("message"),
+        "Throw hs::Error with code _error_codes()[index] (tests of the exception translation).");
 }
