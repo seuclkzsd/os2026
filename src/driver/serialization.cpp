@@ -163,6 +163,7 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "blr") c.blr = enum_parse<Toggle>(v, k);
     else if (key == "out_of_core") c.out_of_core = enum_parse<Toggle>(v, k);
     else if (key == "inertia_check") c.inertia_check = enum_parse<Toggle>(v, k);
+    else if (key == "inertia_counter") c.inertia_counter = enum_parse<Toggle>(v, k);
     else if (key == "zero_filter_tol") c.zero_filter_tol = get_number(v, k);
     else if (key == "complex_tol") c.complex_tol = get_number(v, k);
     else if (key == "max_shift_retries") c.max_shift_retries = get_integer<index_t>(v, k);
@@ -206,6 +207,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"blr", enum_name(c.blr)},
             {"out_of_core", enum_name(c.out_of_core)},
             {"inertia_check", enum_name(c.inertia_check)},
+            {"inertia_counter", enum_name(c.inertia_counter)},
             {"zero_filter_tol", c.zero_filter_tol},
             {"complex_tol", c.complex_tol},
             {"max_shift_retries", c.max_shift_retries}};
@@ -260,6 +262,7 @@ std::string SolveReport::to_json(int indent) const {
             {"time_factor_s", time_factor_s},
             {"time_iterate_s", time_iterate_s},
             {"time_verify_s", time_verify_s},
+            {"time_certificate_s", time_certificate_s},
             {"peak_rss_bytes", peak_rss_bytes},
             {"pairs", pairs_j},
             {"certificate",

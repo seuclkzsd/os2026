@@ -33,7 +33,9 @@ double PhaseClock::seconds(Phase p) const {
 }
 
 double PhaseClock::total() const {
-  return seconds(Phase::Setup) + seconds(Phase::Factor) + seconds(Phase::Iterate) + seconds(Phase::Verify);
+  double t = 0.0;
+  for (int p = 0; p < kPhases; ++p) t += seconds(static_cast<Phase>(p));
+  return t;
 }
 
 void warn(Ctx& c, const std::string& msg) {
@@ -200,12 +202,60 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
     HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
 }
 
+// ------------------------------------------------------------------------------ inertia counts
+
+template <class T>
+CountSource<T>::CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter)
+    : fac_(fac), pencil_(pencil) {
+  const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
+  use_counter_ = prefer_counter || !exact;
+}
+
+template <class T>
+CountSource<T>::~CountSource() = default;
+
+template <class T>
+Inertia CountSource<T>::count(Ctx& c, double s, bool detection) {
+  PhaseScope phase(c.clock, Phase::Certificate);
+  if (!use_counter_) {
+    c.held = FactorHeld{};
+    fac_.set_null_pivot_detection(detection);
+    Inertia in;
+    if (fac_.factorize(1.0, -s)) in = fac_.inertia();
+    fac_.set_null_pivot_detection(true);
+    if (in.valid) c.held = FactorHeld{s, !detection};
+    return in;
+  }
+  if (!counter_) {
+    // Inertia-only instance on the main analysis' pivot order. Its working memory comes on top of
+    // the main factors unless they are released (cap: the factorization budget, DESIGN §3.6-3).
+    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
+    const double cap = fac_.options().max_memory_mb;
+    const double main_mb = fac_.inertia().valid ? fac_.stats().factor_mb_used : 0.0;
+    const bool release = cap > 0 && main_mb + counter_->estimate().incore_mb > cap;
+    if (release && fac_.release_factors()) c.held = FactorHeld{};
+    event(c, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s},
+                                 {"incore_mb", counter_->estimate().incore_mb}, {"main_mb", main_mb},
+                                 {"cap_mb", cap}, {"main_released", release}});
+  }
+  return counter_->count(1.0, -s, detection);
+}
+
+template <class T>
+bool counter_pays(const Ctx& c, const SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, index_t counts) {
+  if (c.cfg.inertia_counter != Toggle::Auto) return c.cfg.inertia_counter == Toggle::On;
+  const MumpsInputSize in = mumps_input_size(pencil);
+  const double saving =
+      static_cast<double>(counts) * kCounterSaving * model_factor_s(fac.estimate(), in.order, fac.options().threads);
+  return saving > model_analysis_s(in.order, in.entries, static_cast<double>(fac.estimate().factor_entries));
+}
+
 // nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2). The count must come from an exact
 // (double, full-rank) factorization: the inertia of a single-precision or BLR factor is that of the
-// rounded/compressed matrix, so then compute_inertia builds a separate double factorization. Each
+// rounded/compressed matrix, so then the counts come from an InertiaCounter (CountSource). Each
 // position is tried with null-pivot detection first (certified). A null pivot means an eigenvalue
-// at s, or a cluster denser than the detection threshold around s; then (exact factor only) the
-// count is taken WITHOUT detection: a backward-stable LDL^T gives the exact inertia of K + E with
+// at s, or a cluster denser than the detection threshold around s; then the count is taken
+// WITHOUT detection: a backward-stable LDL^T gives the exact inertia of K + E with
 // ||E|| ~ eps*growth*||K||, i.e. it counts correctly every eigenvalue farther than that from s.
 //   * s_is_gap (certificate endpoints placed at gap midpoints of computed eigenvalues): that count
 //     is taken at s itself - in a dense cluster any move would cross eigenvalues;
@@ -216,31 +266,16 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 // Positions where even that fails (exactly singular K) move outward by step * 4^i. Returns the
 // final s via `s`.
 template <class T>
-index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step, bool* detection_off, bool s_is_gap, bool* near_eigenvalue) {
-  PhaseScope phase(c.clock, Phase::Factor);
-  const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
-  if (exact) c.held = FactorHeld{};
+index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, double step, bool* detection_off,
+                    bool s_is_gap, bool* near_eigenvalue) {
   if (near_eigenvalue) *near_eigenvalue = false;
   for (int tries = 0; tries < 8; ++tries) {
     for (const bool detection : {true, false}) {
-      if (!detection && !exact) break;
       if (!detection && tries == 0 && !s_is_gap) s += outward * 0.1 * step;
-      Inertia in;
-      if (exact) {
-        fac.set_null_pivot_detection(detection);
-        if (fac.factorize(1.0, -s)) in = fac.inertia();
-      } else {
-        FactorOptions o = fac.options();
-        o.precision = FactorPrecision::Double;
-        o.blr = false;
-        in = compute_inertia(pencil, 1.0, -s, o);
-      }
+      const Inertia in = src.count(c, s, detection);
       if (in.valid) {
         if (!detection && c.rep.certificate.note.empty())
           c.rep.certificate.note = "endpoint inertia counted without null-pivot detection (dense cluster)";
-        fac.set_null_pivot_detection(true);
-        if (exact) c.held = FactorHeld{s, !detection};
         if (detection_off) *detection_off = !detection;
         return in.neg;
       }
@@ -249,7 +284,6 @@ index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>&
     s += outward * step * std::pow(4.0, tries);
     ++c.rep.certificate.endpoint_moves;
   }
-  fac.set_null_pivot_detection(true);
   HS_THROW(Singular, "cannot find a nonsingular certificate endpoint near " << s);
 }
 
@@ -399,9 +433,11 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   template double factorize_near<T>(Ctx&, SparseFactorization<T>&, double, double, bool&, bool);            \
   template void refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                             \
   template bool try_refactorize_at<T>(Ctx&, SparseFactorization<T>&, double, bool);                         \
-  template index_t count_below<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double&, double,  \
-                                  double, bool*, bool, bool*);                                              \
+  template class CountSource<T>;                                                                            \
+  template bool counter_pays<T>(const Ctx&, const SparseFactorization<T>&, const ShiftedPencil<T>&, index_t); \
+  template index_t count_below<T>(Ctx&, CountSource<T>&, double&, double, double, bool*, bool, bool*);      \
   template void analyze_within_budget<T>(Ctx&, SparseFactorization<T>&, const ShiftedPencil<T>&, double, bool); \
+  template MumpsInputSize mumps_input_size<T>(const ShiftedPencil<T>&);                                     \
   template std::unique_ptr<SparseFactorization<T>> adaptive_analysis<T>(                                    \
       Ctx&, const FactorOptions&, const ShiftedPencil<T>&, double, index_t, index_t);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_STEPS)

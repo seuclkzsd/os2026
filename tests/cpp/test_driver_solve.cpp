@@ -48,9 +48,10 @@ void expect_times_add_up(const hs::SolveReport& r) {
   EXPECT_GE(r.time_factor_s, 0.0);
   EXPECT_GE(r.time_iterate_s, 0.0);
   EXPECT_GE(r.time_verify_s, 0.0);
+  EXPECT_GE(r.time_certificate_s, 0.0);
   EXPECT_GT(r.time_total_s, 0.0);
-  EXPECT_NEAR(r.time_setup_s + r.time_factor_s + r.time_iterate_s + r.time_verify_s, r.time_total_s,
-              1e-12 * r.time_total_s);
+  EXPECT_NEAR(r.time_setup_s + r.time_factor_s + r.time_iterate_s + r.time_verify_s + r.time_certificate_s,
+              r.time_total_s, 1e-12 * r.time_total_s);
 }
 
 template <class T>

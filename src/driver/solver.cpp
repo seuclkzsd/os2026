@@ -217,7 +217,9 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   rep.time_factor_s = clock.seconds(driver::Phase::Factor);
   rep.time_iterate_s = clock.seconds(driver::Phase::Iterate);
   rep.time_verify_s = clock.seconds(driver::Phase::Verify);
-  rep.time_total_s = rep.time_setup_s + rep.time_factor_s + rep.time_iterate_s + rep.time_verify_s;
+  rep.time_certificate_s = clock.seconds(driver::Phase::Certificate);
+  rep.time_total_s =
+      rep.time_setup_s + rep.time_factor_s + rep.time_iterate_s + rep.time_verify_s + rep.time_certificate_s;
   rep.peak_rss_bytes = peak_rss_bytes();
   event(c, "done", {{"success", rep.success}, {"pairs", static_cast<std::int64_t>(rep.pairs.size())},
                     {"seconds", rep.time_total_s}});

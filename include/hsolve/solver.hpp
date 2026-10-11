@@ -78,6 +78,11 @@ struct SolverConfig {
   Toggle blr = Toggle::Auto;
   Toggle out_of_core = Toggle::Auto;
   Toggle inertia_check = Toggle::Auto;  ///< Auto = On for HEP/GHEP when affordable
+  Toggle inertia_counter = Toggle::Auto;  ///< Sylvester counts of the certificate on an
+                                          ///< InertiaCounter (inertia-only factorizations on the
+                                          ///< main analysis' pivot order) instead of the main
+                                          ///< object; Auto: nearest certificates when the model
+                                          ///< says it pays, and always for single / BLR factors
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
   double complex_tol = 1e-8;      ///< GHIEP: a pair is complex only if |Im lambda| >
@@ -159,12 +164,17 @@ struct SolveReport {
   index_t restarts = 0;
   index_t op_applies = 0;
   // Wall time of hs::solve split into exclusive phases (each instant counted once), so
-  // time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s:
+  // time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s
+  //                 + time_certificate_s:
   double time_total_s = 0.0;
   double time_setup_s = 0.0;    ///< input checks, norm estimates, problem type, planning
-  double time_factor_s = 0.0;   ///< symbolic analyses + numeric factorizations (incl. inertia counts)
+  double time_factor_s = 0.0;   ///< symbolic analyses + numeric factorizations of shifts (Krylov
+                                ///< runs, rescue), of B (definiteness test) and of A (GHIEP)
   double time_iterate_s = 0.0;  ///< Krylov solvers (operator applications = solves, orthogonalization)
-  double time_verify_s = 0.0;   ///< Rayleigh-Ritz refinement, residuals, rescue, selection, certificate
+  double time_verify_s = 0.0;   ///< Rayleigh-Ritz refinement, residuals, rescue, selection
+  double time_certificate_s = 0.0;  ///< HEP/GHEP Sylvester inertia counts: certificate endpoints,
+                                    ///< window ends, slice cuts (main-object factorizations or
+                                    ///< InertiaCounter counts incl. its analysis)
   std::int64_t peak_rss_bytes = 0;
   // results
   std::vector<PairReport> pairs;

@@ -25,13 +25,18 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 // ------------------------------------------------------------------------------ time accounting
 
 /// Phases of a solve. Every instant of hs::solve is charged to exactly one phase (exclusive
-/// time), so the report's time_setup_s + time_factor_s + time_iterate_s + time_verify_s equals
-/// time_total_s:
-///   Setup   input checks, norm estimates, problem-type decision, planning (the default);
-///   Factor  symbolic analyses and numeric factorizations (shifts, inertia counts, B, A);
-///   Iterate the Krylov solvers (operator applications = solves, orthogonalization, restarts);
-///   Verify  Rayleigh-Ritz refinement, residuals, rescue, selection, certificate bookkeeping.
-enum class Phase { Setup = 0, Factor = 1, Iterate = 2, Verify = 3 };
+/// time), so the report's time_setup_s + time_factor_s + time_iterate_s + time_verify_s +
+/// time_certificate_s equals time_total_s:
+///   Setup       input checks, norm estimates, problem-type decision, planning (the default);
+///   Factor      symbolic analyses and numeric factorizations of shifts, of B (definiteness
+///               test) and of A (GHIEP zero cluster);
+///   Iterate     the Krylov solvers (operator applications = solves, orthogonalization, restarts);
+///   Verify      Rayleigh-Ritz refinement, residuals, rescue, selection, certificate bookkeeping;
+///   Certificate Sylvester inertia counts of the HEP/GHEP path (count_below: certificate
+///               endpoints, window ends, slice cuts, cluster checks), including the
+///               InertiaCounter's analysis.
+enum class Phase { Setup = 0, Factor = 1, Iterate = 2, Verify = 3, Certificate = 4 };
+constexpr int kPhases = 5;
 
 class PhaseClock {
  public:
@@ -46,7 +51,7 @@ class PhaseClock {
   Timer timer_;
   double last_ = 0.0;
   Phase current_ = Phase::Setup;
-  double acc_[4] = {0.0, 0.0, 0.0, 0.0};
+  double acc_[kPhases] = {0.0, 0.0, 0.0, 0.0, 0.0};
 };
 
 /// Charges its lifetime to phase p (nested scopes: the innermost wins; the enclosing phase
@@ -150,18 +155,60 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 template <class T>
 bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off);
 
+/// Where the Sylvester counts of a solve path come from (DESIGN §3.6-8):
+///   * the main factorization object, refactorized at each count point: it then holds K(s)
+///     (Ctx::held), which a Krylov run at s reuses (one-sided slice anchors);
+///   * an InertiaCounter, built at the first count from the main analysis' pivot order
+///     (factor.hpp): inertia-only factorizations (measured 10-23% cheaper) that leave the main
+///     factors intact, so reruns and rescue at the working shift need no refactorization. When
+///     the main factors' working memory (INFOG(21)) plus the counter's estimate exceed the
+///     factorization cap, the main factors are released first (then they are refactorized when
+///     needed again, as with main-object counts).
+/// Inexact main factors (single precision, BLR) always count on the counter: their own inertia is
+/// that of the rounded / compressed matrix. Not thread-safe; the pencil and the main object must
+/// outlive it.
+template <class T>
+class CountSource {
+ public:
+  /// prefer_counter: count on the counter even with an exact main factor (see counter_pays()).
+  CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter);
+  ~CountSource();
+  CountSource(const CountSource&) = delete;
+  CountSource& operator=(const CountSource&) = delete;
+
+  SparseFactorization<T>& fac() { return fac_; }
+  const ShiftedPencil<T>& pencil() const { return pencil_; }
+  bool uses_counter() const { return use_counter_; }
+  /// Inertia of K(s) = A - s B (valid == false: K(s) numerically singular). Main object: Ctx::held
+  /// describes the factorization it now holds. Charged to Phase::Certificate.
+  Inertia count(Ctx& c, double s, bool detection);
+
+ private:
+  SparseFactorization<T>& fac_;
+  const ShiftedPencil<T>& pencil_;
+  bool use_counter_ = false;
+  std::unique_ptr<InertiaCounter<T>> counter_;
+};
+
+/// Rule for the nearest target's certificate (two counts, exact main factor): an InertiaCounter
+/// pays when the two counts' saving, kCounterSaving of a factorization each (model of DESIGN
+/// §3.6-3b), exceeds its analysis (model_analysis_s: about what an AMD analysis of the input
+/// costs). Reruns after a failed certificate save a refactorization on top (not counted).
+/// cfg.inertia_counter On / Off override it.
+template <class T>
+bool counter_pays(const Ctx& c, const SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, index_t counts);
+
 /// nu_-(A - s B): number of eigenvalues below s (DESIGN §4.2), moving s outward (direction
-/// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`. With an
-/// exact (double, non-BLR) factor the object then holds K(s) (Ctx::held), counted with null-pivot
-/// detection unless *detection_off (optional) reports otherwise. s_is_gap: s lies mid-way between
+/// `outward`, steps step * 4^i) while K(s) is singular. Returns the final s via `s`. Counting on
+/// the main object, that object then holds K(s) (Ctx::held), counted with null-pivot detection
+/// unless *detection_off (optional) reports otherwise. s_is_gap: s lies mid-way between
 /// computed eigenvalues (count there without detection if flagged); otherwise a flagged s is first
 /// moved by step / 10 (it may sit on an eigenvalue) - see steps.cpp. *near_eigenvalue (optional)
 /// is set when the requested s was flagged singular: an eigenvalue (or a cluster) lies within the
 /// null-pivot threshold of the returned s, which then is no place for a shift.
 template <class T>
-index_t count_below(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double& s, double outward,
-                    double step, bool* detection_off = nullptr, bool s_is_gap = false,
-                    bool* near_eigenvalue = nullptr);
+index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, double step,
+                    bool* detection_off = nullptr, bool s_is_gap = false, bool* near_eigenvalue = nullptr);
 
 /// Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3).
 template <class T>

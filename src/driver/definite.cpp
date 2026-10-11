@@ -344,9 +344,12 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     if (rep.zero_modes_filtered > 0 || sel.size() < k || std::abs(t.sigma) - r <= zero_tol) return hand_over();
   }
 
-  // Inertia certificate (DESIGN §3.6-8), with up to two deflated reruns on a count mismatch.
+  // Inertia certificate (DESIGN §3.6-8), with up to two deflated reruns on a count mismatch. Its
+  // two counts per round come from an InertiaCounter when that pays (counter_pays): the main
+  // factors at sigma then stay intact for the reruns and the rescue.
   const bool want_cert = cfg.inertia_check != Toggle::Off;
   InertiaCertificate& cert = rep.certificate;
+  CountSource<T> counts(fac, pencil, want_cert && counter_pays(c, fac, pencil, 2));
   for (int round = 0; want_cert && round < 3; ++round) {
     if (sel.size() == 0) break;
     const double tiny = 1e-12 * std::max(scale, std::abs(t.sigma));
@@ -363,8 +366,8 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     double b_end = push_out(t.sigma + r, +1.0);
     if (zero_tol >= 0 && a_end <= zero_tol && b_end >= -zero_tol) return hand_over();  // window meets the band
     const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-    const index_t nu_a = count_below(c, fac, pencil, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
-    const index_t nu_b = count_below(c, fac, pencil, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+    const index_t nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+    const index_t nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
     cert.performed = true;
     cert.lower = a_end;
     cert.upper = b_end;
@@ -490,7 +493,15 @@ class WindowSolver {
  public:
   WindowSolver(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double n2a, double n2b,
                double scale, const SpectrumEstimate& est)
-      : c_(c), pencil_(pencil), fac_(fac), n2a_(n2a), n2b_(n2b), scale_(scale), est_(est), n_(pencil.order()) {
+      : c_(c),
+        pencil_(pencil),
+        fac_(fac),
+        counts_(fac, pencil, c.cfg.inertia_counter == Toggle::On),
+        n2a_(n2a),
+        n2b_(n2b),
+        scale_(scale),
+        est_(est),
+        n_(pencil.order()) {
     cost_ = make_cost_model(fac.estimate(), n_, fac.options().threads, is_complex_v<T>);
   }
 
@@ -530,6 +541,9 @@ class WindowSolver {
   Ctx& c_;
   const ShiftedPencil<T>& pencil_;
   SparseFactorization<T>& fac_;
+  /// Counts on the main object by default: a count point can then serve as a one-sided shift
+  /// without refactorization (anchors), which an InertiaCounter count cannot.
+  CountSource<T> counts_;
   double n2a_, n2b_, scale_;
   SpectrumEstimate est_;
   index_t n_;
@@ -561,7 +575,7 @@ CountPoint WindowSolver<T>::count(double s, double outward) {
     if (p.s == s) return p;
   const double step = 1e-10 * std::max(scale_, std::abs(s));
   bool off = false, near = false;
-  const index_t nu = count_below(c_, fac_, pencil_, s, outward, step, &off, false, &near);
+  const index_t nu = count_below(c_, counts_, s, outward, step, &off, false, &near);
   const CountPoint p{s, nu, off, near};
   remember(p);
   event(c_, "count", {{"s", s}, {"nu", static_cast<std::int64_t>(nu)}, {"near_eigenvalue", near}});
