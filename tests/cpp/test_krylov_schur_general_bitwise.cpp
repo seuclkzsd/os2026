@@ -380,7 +380,8 @@ TYPED_TEST(KrylovSchurGeneralBitwise, BlockSizeOneReproducesTheBaseCommitSolver)
     return;
   }
   std::cout << "[ info     ] platform key 0x" << std::hex << fingerprint << std::dec
-            << " (" << cpu_model() << ") has no recorded reference: bitwise check skipped (counts checked)\n";
+            << " (" << cpu_model()
+            << ") has no recorded reference: bitwise check skipped (counts checked)\n";
 }
 
 }  // namespace
