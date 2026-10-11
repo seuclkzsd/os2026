@@ -1428,8 +1428,10 @@ TYPED_TEST(LanczosBlockTyped, ReproducibleForFixedSeed) {
   EXPECT_EQ(r1.op_applies, r2.op_applies);
 }
 
-TYPED_TEST(LanczosBlockTyped, BlockSizeOneIsTheSingleVectorSolver) {
-  // block_size = 1 is the default and takes the single-vector code path: bitwise identical.
+TYPED_TEST(LanczosBlockTyped, BlockSizeOneKeepsTheSingleVectorBasisLayout) {
+  // block_size = 1 (the default) is the single-vector solver: a basis of exactly ncv = 11 vectors
+  // (no whole blocks), keep = 5 + (11 - 5) / 2 = 8, so 11 applications and 3 per restart. The
+  // bitwise identity with the base commit's solver is pinned in test_lanczos_bitwise.cpp.
   using T = TypeParam;
   const index_t n = 120;
   const auto a = hs::test::random_hermitian<T>(n, 0.08, 61);
@@ -1440,14 +1442,12 @@ TYPED_TEST(LanczosBlockTyped, BlockSizeOneIsTheSingleVectorSolver) {
   KrylovSchurOptions<T> opt;
   opt.nev = 5;
   opt.ncv = 11;
-  const auto r0 = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
   opt.block_size = 1;
-  const auto r1 = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
-  ASSERT_GT(r0.restarts, 0);
-  EXPECT_EQ(0, std::memcmp(r0.theta.data(), r1.theta.data(), r0.theta.size() * sizeof(double)));
-  EXPECT_EQ(0, std::memcmp(r0.vectors.data(), r1.vectors.data(),
-                           static_cast<std::size_t>(n * opt.nev) * sizeof(T)));
-  EXPECT_EQ(r0.op_applies, r1.op_applies);
+  const auto r = hs::lanczos_krylov_schur<T>(op, &bop, Which::LargestMagnitude, opt);
+  ASSERT_GT(r.restarts, 0);
+  EXPECT_EQ(r.ritz_all.size(), 11u);
+  EXPECT_EQ(r.op_applies, 11 + 3 * r.restarts);
+  for (index_t c = 0; c <= r.restarts; ++c) EXPECT_EQ(r.history[c].op_applies, 11 + 3 * c);
 }
 
 TYPED_TEST(LanczosBlockTyped, InvalidAndMalformedInputsThrowInvalidInput) {

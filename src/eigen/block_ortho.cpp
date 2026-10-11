@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 
+#include "eigen/block_lanczos.hpp"
 #include "hsolve/error.hpp"
 #include "linalg/blas_lapack.hpp"
 #include "linalg/dense_ops.hpp"
@@ -16,9 +17,9 @@ namespace {
 
 using lapack::fint;
 
-/// A random replacement keeps most of its M-norm against an M-orthonormal basis that leaves room;
-/// losing more than this fraction means M is not positive definite (as in the single-vector code).
-constexpr double kRandomMinRatio = 1e-8;
+// A random replacement losing more than kRandomMinRatio of its M-norm (block_lanczos.hpp, shared
+// with the single-vector solver) means that M is not positive definite.
+
 /// Largest accepted ||Q1^H M Q1 - I||_F before the second Cholesky-QR pass. The column-scaled
 /// condition test bounds it by ~eps * kMaxCholQrCond^2 for any Hermitian M, so failing it means
 /// non-finite or inconsistent arithmetic.

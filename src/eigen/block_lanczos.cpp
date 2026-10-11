@@ -71,14 +71,6 @@ namespace {
 
 using lapack::fint;
 
-constexpr double kEps = std::numeric_limits<double>::epsilon();
-/// Same local breakdown threshold as the single-vector solver, applied per column.
-constexpr double kBreakdownTol = 64 * kEps;
-/// Same locking threshold as the single-vector solver (on ||b(:, l)||_2).
-constexpr double kLockTol = 4 * kEps;
-/// A start-block column keeping at most this fraction of its M-norm against D and the earlier
-/// start columns is dependent (the single-vector solver's start-vector threshold).
-constexpr double kStartMinRatio = 1e-12;
 /// Blocks added to the single-vector auto basis size when ncv is chosen automatically (see
 /// "Early stop"; measured on shift-invert cases, bench/blockks_shiftinvert.cpp).
 constexpr index_t kAutoExtraBlocks = 4;
@@ -101,8 +93,6 @@ class BlockThickRestartLanczos {
   void set_start_block();
   bool expand(index_t first);
   void rayleigh_ritz();
-  index_t wanted_converged() const;
-  index_t record_history();
   void restart();
   HermitianEigResult<T> finish();
 
@@ -131,14 +121,9 @@ class BlockThickRestartLanczos {
   DenseMatrix<T> rlast_;           ///< p x p coupling R of V(:, m-p:m) to V_m = V(:, m:m+p)
   std::uint64_t next_stream_ = 0;  ///< fill_random stream: 0..p-1 start block, then replacements
 
-  // Rayleigh-Ritz results of the current cycle.
-  std::vector<double> theta_;   ///< ascending (heev order)
-  DenseMatrix<T> s_;            ///< eigenvectors of H, column i <-> theta_[i]
-  DenseMatrix<T> coupling_;     ///< p x m: R S(m-p:m, :), the Ritz vectors' couplings to V_m
-  std::vector<double> est_;     ///< residual estimates, ||coupling_(:, i)||_2
-  std::vector<char> conv_;      ///< est_ <= tol * reference
-  std::vector<double> ref_;     ///< |theta|, or max |theta| when theta == 0
-  std::vector<index_t> order_;  ///< indices into theta_ by decreasing preference (which_)
+  // Rayleigh-Ritz results of the current cycle; rr_.est[i] = ||coupling_(:, i)||_2.
+  RitzPairs<T> rr_;
+  DenseMatrix<T> coupling_;  ///< p x m: R S(m-p:m, :), the Ritz vectors' couplings to V_m
 
   index_t restarts_ = 0;
   index_t op_applies0_ = 0;
@@ -260,7 +245,7 @@ bool BlockThickRestartLanczos<T>::expand(index_t first) {
     rlast_ = rblk_;
     if (m_ < ncv_ && m_ >= (restarts_ == 0 ? first_probe_ : keep_ + p)) {
       rayleigh_ritz();
-      if (wanted_converged() >= nev_) return true;
+      if (rr_.wanted_converged(nev_) >= nev_) return true;
     }
   }
   return false;
@@ -271,72 +256,21 @@ void BlockThickRestartLanczos<T>::rayleigh_ritz() {
   ScopedTimer t(time_.rayleigh_ritz);
   const index_t m = m_, p = p_;
   const auto mm = static_cast<fint>(m), pp = static_cast<fint>(p);
-  s_.resize(m, m);  // H(0:m, 0:m), stored exactly Hermitian (both triangles)
-  for (index_t c = 0; c < m; ++c) std::copy(h_.col(c), h_.col(c) + m, s_.col(c));
-  theta_.assign(static_cast<std::size_t>(m), 0.0);
-  lapack::heev('V', 'L', mm, s_.data(), mm, theta_.data());
-
-  double max_abs = 0.0;
-  for (double th : theta_) max_abs = std::max(max_abs, std::abs(th));
-
+  rr_.s.resize(m, m);  // H(0:m, 0:m), stored exactly Hermitian (both triangles)
+  for (index_t c = 0; c < m; ++c) std::copy(h_.col(c), h_.col(c) + m, rr_.s.col(c));
+  rr_.theta.assign(static_cast<std::size_t>(m), 0.0);
+  lapack::heev('V', 'L', mm, rr_.s.data(), mm, rr_.theta.data());
   // Couplings of all Ritz vectors to V_m: R * S(m-p:m, :).
   coupling_.resize(p, m);
-  lapack::gemm('N', 'N', pp, mm, pp, T(1), rlast_.data(), pp, s_.data() + (m - p), mm, T(0),
+  lapack::gemm('N', 'N', pp, mm, pp, T(1), rlast_.data(), pp, rr_.s.data() + (m - p), mm, T(0),
                coupling_.data(), pp);
-  est_.assign(static_cast<std::size_t>(m), 0.0);
-  conv_.assign(static_cast<std::size_t>(m), 0);
-  ref_.assign(static_cast<std::size_t>(m), 0.0);
+  rr_.est.assign(static_cast<std::size_t>(m), 0.0);
   for (index_t i = 0; i < m; ++i) {
     double e2 = 0.0;
     for (index_t r = 0; r < p; ++r) e2 += abs2(coupling_(r, i));
-    est_[i] = std::sqrt(e2);
-    ref_[i] = theta_[i] != 0.0 ? std::abs(theta_[i]) : max_abs;
-    conv_[i] = est_[i] <= opt_.tol * ref_[i] ? 1 : 0;
+    rr_.est[i] = std::sqrt(e2);
   }
-
-  order_.resize(static_cast<std::size_t>(m));
-  std::iota(order_.begin(), order_.end(), index_t{0});
-  switch (which_) {
-    case Which::SmallestAlgebraic:
-      break;  // heev returns ascending eigenvalues
-    case Which::LargestAlgebraic:
-      std::reverse(order_.begin(), order_.end());
-      break;
-    case Which::LargestMagnitude:
-      // Ties in |theta| prefer the positive value, so the ranking is a strict total order.
-      std::stable_sort(order_.begin(), order_.end(), [this](index_t a, index_t b) {
-        const double fa = std::abs(theta_[a]), fb = std::abs(theta_[b]);
-        return fa > fb || (fa == fb && theta_[a] > theta_[b]);
-      });
-      break;
-  }
-}
-
-/// Converged pairs among the nev wanted ones of the current Rayleigh-Ritz step.
-template <class T>
-index_t BlockThickRestartLanczos<T>::wanted_converged() const {
-  index_t nconv = 0;
-  for (index_t l = 0; l < nev_; ++l) nconv += conv_[order_[l]] ? 1 : 0;
-  return nconv;
-}
-
-template <class T>
-index_t BlockThickRestartLanczos<T>::record_history() {
-  RestartRecord rec;
-  rec.restart = restarts_;
-  for (index_t l = 0; l < nev_; ++l) {
-    const index_t i = order_[l];
-    if (conv_[i]) {
-      ++rec.nconv;
-    } else {
-      const double rel =
-          ref_[i] > 0.0 ? est_[i] / ref_[i] : std::numeric_limits<double>::infinity();
-      rec.max_estimate = std::max(rec.max_estimate, rel);
-    }
-  }
-  rec.op_applies = op_.applications() - op_applies0_;
-  history_.push_back(rec);
-  return rec.nconv;
+  rr_.classify(opt_.tol, which_);
 }
 
 /// Thick restart keeping the keep_ best Ritz pairs (ranking order); converged pairs whose coupling
@@ -346,15 +280,13 @@ void BlockThickRestartLanczos<T>::restart() {
   ScopedTimer t(time_.restart);
   HS_ASSERT(m_ == ncv_, "restart after an early-stopped cycle (m=" << m_ << ")");
   const index_t m = ncv_, k = keep_, p = p_;
-  double min_wanted_ref = std::numeric_limits<double>::infinity();
-  for (index_t l = 0; l < nev_; ++l) min_wanted_ref = std::min(min_wanted_ref, ref_[order_[l]]);
-  const double lock_tol = kLockTol * min_wanted_ref;
+  const double lock_tol = kLockTol * rr_.min_wanted_reference(nev_);
   DenseMatrix<T> sk(m, k), b(p, k);
   for (index_t l = 0; l < k; ++l) {
-    const index_t i = order_[l];
-    std::copy(s_.col(i), s_.col(i) + m, sk.col(l));
+    const index_t i = rr_.order[l];
+    std::copy(rr_.s.col(i), rr_.s.col(i) + m, sk.col(l));
     std::copy(coupling_.col(i), coupling_.col(i) + p, b.col(l));
-    if (conv_[i] && est_[i] <= lock_tol) std::fill(b.col(l), b.col(l) + p, T(0));
+    if (rr_.conv[i] && rr_.est[i] <= lock_tol) std::fill(b.col(l), b.col(l) + p, T(0));
   }
 
   rotate_in_place(n_, vcol(0), sk);
@@ -368,7 +300,7 @@ void BlockThickRestartLanczos<T>::restart() {
   // Block arrowhead: diag(theta) with the couplings in rows/columns k..k+p-1.
   h_.set_zero();
   for (index_t l = 0; l < k; ++l) {
-    h_(l, l) = T(theta_[order_[l]]);
+    h_(l, l) = T(rr_.theta[rr_.order[l]]);
     for (index_t r = 0; r < p; ++r) {
       h_(k + r, l) = b(r, l);
       h_(l, k + r) = conj_if(b(r, l));
@@ -378,25 +310,10 @@ void BlockThickRestartLanczos<T>::restart() {
 
 template <class T>
 HermitianEigResult<T> BlockThickRestartLanczos<T>::finish() {
-  HermitianEigResult<T> r;
-  const index_t m = m_;
-  // The wanted pairs are the nev best ranked; converged ones first, both groups in ranking order.
-  std::vector<index_t> sel(order_.begin(), order_.begin() + nev_);
-  std::stable_partition(sel.begin(), sel.end(), [this](index_t i) { return conv_[i] != 0; });
-  DenseMatrix<T> ssel(m, nev_);
-  for (index_t l = 0; l < nev_; ++l) {
-    const index_t i = sel[l];
-    std::copy(s_.col(i), s_.col(i) + m, ssel.col(l));
-    r.theta.push_back(theta_[i]);
-    r.estimate.push_back(est_[i]);
-    if (conv_[i]) ++r.nconv;
-  }
-  r.vectors.resize(n_, nev_);
-  linalg::multiply(n_, m, nev_, vcol(0), n_, ssel.data(), m, r.vectors.data(), n_);
-  r.ritz_all = theta_;
+  // rr_ holds the Rayleigh-Ritz step of the m_ leading basis vectors (an early stop's probe).
+  HermitianEigResult<T> r = rr_.result(n_, nev_, vcol(0));
   r.restarts = restarts_;
   r.op_applies = op_.applications() - op_applies0_;
-  r.converged = r.nconv >= nev_;
   r.history = std::move(history_);
   return r;
 }
@@ -411,8 +328,8 @@ HermitianEigResult<T> BlockThickRestartLanczos<T>::run() {
   index_t first = 0;
   for (;;) {
     if (!expand(first)) rayleigh_ritz();  // an early stop leaves its probe's state current
-    const index_t nconv = record_history();
-    if (nconv >= nev_ || restarts_ == opt_.max_restarts) break;
+    history_.push_back(rr_.record(restarts_, nev_, op_.applications() - op_applies0_));
+    if (history_.back().nconv >= nev_ || restarts_ == opt_.max_restarts) break;
     restart();
     first = keep_;
     ++restarts_;

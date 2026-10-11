@@ -1,7 +1,9 @@
 // Thick-restart Lanczos == Hermitian Krylov-Schur (Stewart 2001; Wu & Simon 2000) with full CGS2
 // reorthogonalization, locking by zeroing couplings, and an optional deflation block D.
 // options.block_size > 1 dispatches to the block variant (block_lanczos.cpp), which shares the
-// option checks, the deflation check and the basis rotation defined at the bottom of this file.
+// thresholds, the option checks, the deflation check, the basis rotation and the Rayleigh-Ritz
+// bookkeeping of the result contract (RitzPairs) declared in block_lanczos.hpp and defined at the
+// bottom of this file.
 //
 // Notation. M = b_inner (HPD) or I, <x, y>_M = y^H M x; every basis below is M-orthonormal.
 //   D   n x d deflation block, copied into the leading d columns of the basis storage so that a
@@ -78,23 +80,18 @@ namespace {
 
 using lapack::fint;
 
-constexpr double kEps = std::numeric_limits<double>::epsilon();
-/// beta <= kBreakdownTol * ||Op v_j||_M is an invariant subspace to rounding: a few dozen
-/// roundoffs of the step's own magnitude, the accuracy to which Op v_j and its CGS2 projection
-/// are computed anyway (see "Breakdown" above).
-constexpr double kBreakdownTol = 64 * kEps;
-/// A converged pair is locked (coupling zeroed) once |b_l| <= kLockTol * (smallest reference
-/// |theta| of the wanted pairs): a few roundoffs relative to every wanted pair.
-constexpr double kLockTol = 4 * kEps;
+// Thresholds shared with the block solver (block_lanczos.hpp): kBreakdownTol, a few dozen
+// roundoffs of the step's own magnitude, the accuracy to which Op v_j and its CGS2 projection are
+// computed anyway (see "Breakdown" above); kLockTol, a few roundoffs relative to every wanted pair
+// (see "Locking"); kStartMinRatio for a user start vector against D; kRandomMinRatio for random
+// vectors, which are drawn only while the free space is not exhausted.
+using eigen_detail::kBreakdownTol;
+using eigen_detail::kLockTol;
+using eigen_detail::kRandomMinRatio;
+using eigen_detail::kStartMinRatio;
 /// Largest accepted |(D^H M D - I)_ij|: D is used as an orthonormal projector basis, so a
 /// noticeably non-orthonormal block would silently corrupt every orthogonalization.
 constexpr double kDeflationOrthoTol = 1e-8;
-/// A user start vector must keep at least this fraction of its M-norm after projecting out D.
-constexpr double kStartMinRatio = 1e-12;
-/// Random vectors are drawn only while the free space is not exhausted. With an M-orthonormal
-/// basis a random vector keeps most of its M-norm, so losing more than this fraction to [D V]
-/// means that M (b_inner) is not positive definite.
-constexpr double kRandomMinRatio = 1e-8;
 /// Rows per block of the in-place basis rotation (temporary of kRowBlock x k scalars instead of
 /// a second n x k basis).
 constexpr index_t kRowBlock = 4096;
@@ -149,13 +146,7 @@ class ThickRestartLanczos {
   double beta_ = 0.0;              ///< coupling of v_{ncv-1} to the residual vector v_ncv
   std::uint64_t next_stream_ = 0;  ///< fill_random stream: 0 = start vector, then breakdowns
 
-  // Rayleigh-Ritz results of the current cycle.
-  std::vector<double> theta_;   ///< ascending (heev order)
-  DenseMatrix<T> s_;            ///< eigenvectors of H, column i <-> theta_[i]
-  std::vector<double> est_;     ///< residual estimates
-  std::vector<char> conv_;      ///< est_ <= tol * reference
-  std::vector<double> ref_;     ///< |theta|, or max |theta| when theta == 0
-  std::vector<index_t> order_;  ///< indices into theta_ by decreasing preference (which_)
+  eigen_detail::RitzPairs<T> rr_;  ///< Rayleigh-Ritz results of the current cycle
 
   index_t restarts_ = 0;
   index_t op_applies0_ = 0;
@@ -315,59 +306,20 @@ void ThickRestartLanczos<T>::rayleigh_ritz() {
   ScopedTimer t(time_.rayleigh_ritz);
   const index_t m = ncv_;
   const auto mm = static_cast<fint>(m);
-  s_ = h_;  // H is stored exactly Hermitian (both triangles), so it is its own Hermitian part
-  theta_.assign(static_cast<std::size_t>(m), 0.0);
-  lapack::heev('V', 'L', mm, s_.data(), mm, theta_.data());
-
-  double max_abs = 0.0;
-  for (double th : theta_) max_abs = std::max(max_abs, std::abs(th));
-
-  est_.assign(static_cast<std::size_t>(m), 0.0);
-  conv_.assign(static_cast<std::size_t>(m), 0);
-  ref_.assign(static_cast<std::size_t>(m), 0.0);
-  for (index_t i = 0; i < m; ++i) {
-    est_[i] = beta_ * std::abs(s_(m - 1, i));
-    ref_[i] = theta_[i] != 0.0 ? std::abs(theta_[i]) : max_abs;
-    conv_[i] = est_[i] <= opt_.tol * ref_[i] ? 1 : 0;
-  }
-
-  order_.resize(static_cast<std::size_t>(m));
-  std::iota(order_.begin(), order_.end(), index_t{0});
-  switch (which_) {
-    case Which::SmallestAlgebraic:
-      break;  // heev returns ascending eigenvalues
-    case Which::LargestAlgebraic:
-      std::reverse(order_.begin(), order_.end());
-      break;
-    case Which::LargestMagnitude:
-      // Ties in |theta| prefer the positive value, so the ranking is a strict total order.
-      std::stable_sort(order_.begin(), order_.end(), [this](index_t a, index_t b) {
-        const double fa = std::abs(theta_[a]), fb = std::abs(theta_[b]);
-        return fa > fb || (fa == fb && theta_[a] > theta_[b]);
-      });
-      break;
-  }
+  rr_.s = h_;  // H is stored exactly Hermitian (both triangles), so it is its own Hermitian part
+  rr_.theta.assign(static_cast<std::size_t>(m), 0.0);
+  lapack::heev('V', 'L', mm, rr_.s.data(), mm, rr_.theta.data());
+  rr_.est.assign(static_cast<std::size_t>(m), 0.0);
+  for (index_t i = 0; i < m; ++i) rr_.est[i] = beta_ * std::abs(rr_.s(m - 1, i));
+  rr_.classify(opt_.tol, which_);
 }
 
 /// Appends the history record of the current Rayleigh-Ritz step; returns the number of converged
 /// wanted pairs.
 template <class T>
 index_t ThickRestartLanczos<T>::record_history() {
-  RestartRecord rec;
-  rec.restart = restarts_;
-  for (index_t l = 0; l < nev_; ++l) {
-    const index_t i = order_[l];
-    if (conv_[i]) {
-      ++rec.nconv;
-    } else {
-      const double rel =
-          ref_[i] > 0.0 ? est_[i] / ref_[i] : std::numeric_limits<double>::infinity();
-      rec.max_estimate = std::max(rec.max_estimate, rel);
-    }
-  }
-  rec.op_applies = op_.applications() - op_applies0_;
-  history_.push_back(rec);
-  return rec.nconv;
+  history_.push_back(rr_.record(restarts_, nev_, op_.applications() - op_applies0_));
+  return history_.back().nconv;
 }
 
 /// Thick restart keeping the `keep` best Ritz pairs (ranking order) and locking the converged ones
@@ -376,16 +328,14 @@ template <class T>
 void ThickRestartLanczos<T>::restart(index_t keep) {
   ScopedTimer t(time_.restart);
   const index_t m = ncv_;
-  double min_wanted_ref = std::numeric_limits<double>::infinity();
-  for (index_t l = 0; l < nev_; ++l) min_wanted_ref = std::min(min_wanted_ref, ref_[order_[l]]);
-  const double lock_tol = kLockTol * min_wanted_ref;
+  const double lock_tol = kLockTol * rr_.min_wanted_reference(nev_);
   DenseMatrix<T> sk(m, keep);
   std::vector<T> b(static_cast<std::size_t>(keep));
   for (index_t l = 0; l < keep; ++l) {
-    const index_t i = order_[l];
-    std::copy(s_.col(i), s_.col(i) + m, sk.col(l));
-    b[l] = T(beta_) * s_(m - 1, i);  // coupling of Ritz vector l to v_m
-    if (conv_[i] && std::abs(b[l]) <= lock_tol) b[l] = T(0);
+    const index_t i = rr_.order[l];
+    std::copy(rr_.s.col(i), rr_.s.col(i) + m, sk.col(l));
+    b[l] = T(beta_) * rr_.s(m - 1, i);  // coupling of Ritz vector l to v_m
+    if (rr_.conv[i] && std::abs(b[l]) <= lock_tol) b[l] = T(0);
   }
 
   eigen_detail::rotate_in_place(n_, vcol(0), sk);
@@ -398,7 +348,7 @@ void ThickRestartLanczos<T>::restart(index_t keep) {
   // Arrowhead: diag(theta) with the couplings in row/column `keep`.
   h_.set_zero();
   for (index_t l = 0; l < keep; ++l) {
-    h_(l, l) = T(theta_[order_[l]]);
+    h_(l, l) = T(rr_.theta[rr_.order[l]]);
     h_(keep, l) = b[l];
     h_(l, keep) = conj_if(b[l]);
   }
@@ -406,25 +356,9 @@ void ThickRestartLanczos<T>::restart(index_t keep) {
 
 template <class T>
 HermitianEigResult<T> ThickRestartLanczos<T>::finish() {
-  HermitianEigResult<T> r;
-  const index_t m = ncv_;
-  // The wanted pairs are the nev best ranked; converged ones first, both groups in ranking order.
-  std::vector<index_t> sel(order_.begin(), order_.begin() + nev_);
-  std::stable_partition(sel.begin(), sel.end(), [this](index_t i) { return conv_[i] != 0; });
-  DenseMatrix<T> ssel(m, nev_);
-  for (index_t l = 0; l < nev_; ++l) {
-    const index_t i = sel[l];
-    std::copy(s_.col(i), s_.col(i) + m, ssel.col(l));
-    r.theta.push_back(theta_[i]);
-    r.estimate.push_back(est_[i]);
-    if (conv_[i]) ++r.nconv;
-  }
-  r.vectors.resize(n_, nev_);
-  linalg::multiply(n_, m, nev_, vcol(0), n_, ssel.data(), m, r.vectors.data(), n_);
-  r.ritz_all = theta_;
+  HermitianEigResult<T> r = rr_.result(n_, nev_, vcol(0));
   r.restarts = restarts_;
   r.op_applies = op_.applications() - op_applies0_;
-  r.converged = r.nconv >= nev_;
   r.history = std::move(history_);
   return r;
 }
@@ -554,6 +488,88 @@ void rotate_in_place(index_t n, T* v, const DenseMatrix<T>& s) {
 }
 
 template <class T>
+void RitzPairs<T>::classify(double tol, Which which) {
+  const index_t m = static_cast<index_t>(theta.size());
+  double max_abs = 0.0;
+  for (double th : theta) max_abs = std::max(max_abs, std::abs(th));
+  ref.assign(static_cast<std::size_t>(m), 0.0);
+  conv.assign(static_cast<std::size_t>(m), 0);
+  for (index_t i = 0; i < m; ++i) {
+    ref[i] = theta[i] != 0.0 ? std::abs(theta[i]) : max_abs;
+    conv[i] = est[i] <= tol * ref[i] ? 1 : 0;
+  }
+  order.resize(static_cast<std::size_t>(m));
+  std::iota(order.begin(), order.end(), index_t{0});
+  switch (which) {
+    case Which::SmallestAlgebraic:
+      break;  // heev returns ascending eigenvalues
+    case Which::LargestAlgebraic:
+      std::reverse(order.begin(), order.end());
+      break;
+    case Which::LargestMagnitude:
+      // Ties in |theta| prefer the positive value, so the ranking is a strict total order.
+      std::stable_sort(order.begin(), order.end(), [this](index_t a, index_t b) {
+        const double fa = std::abs(theta[a]), fb = std::abs(theta[b]);
+        return fa > fb || (fa == fb && theta[a] > theta[b]);
+      });
+      break;
+  }
+}
+
+template <class T>
+index_t RitzPairs<T>::wanted_converged(index_t nev) const {
+  index_t nconv = 0;
+  for (index_t l = 0; l < nev; ++l) nconv += conv[order[l]] ? 1 : 0;
+  return nconv;
+}
+
+template <class T>
+RestartRecord RitzPairs<T>::record(index_t restart, index_t nev, index_t op_applies) const {
+  RestartRecord rec;
+  rec.restart = restart;
+  for (index_t l = 0; l < nev; ++l) {
+    const index_t i = order[l];
+    if (conv[i]) {
+      ++rec.nconv;
+    } else {
+      const double rel = ref[i] > 0.0 ? est[i] / ref[i] : std::numeric_limits<double>::infinity();
+      rec.max_estimate = std::max(rec.max_estimate, rel);
+    }
+  }
+  rec.op_applies = op_applies;
+  return rec;
+}
+
+template <class T>
+double RitzPairs<T>::min_wanted_reference(index_t nev) const {
+  double min_ref = std::numeric_limits<double>::infinity();
+  for (index_t l = 0; l < nev; ++l) min_ref = std::min(min_ref, ref[order[l]]);
+  return min_ref;
+}
+
+template <class T>
+HermitianEigResult<T> RitzPairs<T>::result(index_t n, index_t nev, const T* basis) const {
+  HermitianEigResult<T> r;
+  const index_t m = static_cast<index_t>(theta.size());
+  // The wanted pairs are the nev best ranked; converged ones first, both groups in ranking order.
+  std::vector<index_t> sel(order.begin(), order.begin() + nev);
+  std::stable_partition(sel.begin(), sel.end(), [this](index_t i) { return conv[i] != 0; });
+  DenseMatrix<T> ssel(m, nev);
+  for (index_t l = 0; l < nev; ++l) {
+    const index_t i = sel[l];
+    std::copy(s.col(i), s.col(i) + m, ssel.col(l));
+    r.theta.push_back(theta[i]);
+    r.estimate.push_back(est[i]);
+    if (conv[i]) ++r.nconv;
+  }
+  r.vectors.resize(n, nev);
+  linalg::multiply(n, m, nev, basis, n, ssel.data(), m, r.vectors.data(), n);
+  r.ritz_all = theta;
+  r.converged = r.nconv >= nev;
+  return r;
+}
+
+template <class T>
 HermitianEigResult<T> lanczos_krylov_schur_timed(LinearOperator<T>& op, LinearOperator<T>* b_inner,
                                                  Which which, const KrylovSchurOptions<T>& options,
                                                  LanczosTimings& timings) {
@@ -590,7 +606,8 @@ HermitianEigResult<T> lanczos_krylov_schur(LinearOperator<T>& op, LinearOperator
       const LinearOperator<T>&, const LinearOperator<T>*, const KrylovSchurOptions<T>&);         \
   template void eigen_detail::check_deflation<T>(index_t, index_t, const T*, T*,                 \
                                                  LinearOperator<T>*, T*, index_t);               \
-  template void eigen_detail::rotate_in_place<T>(index_t, T*, const DenseMatrix<T>&);
+  template void eigen_detail::rotate_in_place<T>(index_t, T*, const DenseMatrix<T>&);            \
+  template struct eigen_detail::RitzPairs<T>;
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_LANCZOS)
 #undef HS_INSTANTIATE_LANCZOS
