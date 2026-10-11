@@ -38,7 +38,29 @@
 //   * With L0-OpenMP tree parallelism (ICNTL(48)=1, the MUMPS default) and more than one thread,
 //     repeated factorizations and solves of the same data differ in the last bits from call to
 //     call (dynamic assembly order). ICNTL(48)=0 makes them bitwise reproducible for a fixed
-//     thread count (FactorOptions::deterministic).
+//     thread count (FactorOptions::deterministic). With ICNTL(48)=1 a factorization must run with
+//     the thread count of its analysis, else INFO(1) = -58; analyze() therefore fixes ICNTL(16)
+//     (threads = 0 -> omp_get_max_threads() at analysis). With ICNTL(16) > 0 MUMPS restores the
+//     caller's OpenMP thread count after each call.
+//   * Sequential MUMPS is NOT thread-safe across distinct instances: factorizations share
+//     process-global Fortran module state (MUMPS_LOAD_INIT arrays, communication buffers); two
+//     instances factorizing concurrently from two std::threads aborted in MUMPS_LOAD_INIT
+//     (SIGSEGV) in every trial. All MUMPS calls of the process are therefore serialized by one
+//     lock: objects may be used from different threads, but never gain from it.
+//   * Two SCOTCH analyses of the same matrix in one process give different orderings (SCOTCH's
+//     random state is not reset between calls; flops differed by 10%), while a fresh process
+//     reproduces them. An analysis given a previous analysis' pivot order (SYM_PERM -> PERM_IN,
+//     ICNTL(7)=1) takes 0.03-0.05 s instead of 0.9-1.3 s (SCOTCH, n ~ 1e5); against AMD it saves
+//     little or nothing (0.035 vs 0.043 s on wg-square-1e5, 0.38 vs 0.26-0.30 s on the 5e6-entry
+//     complex embedding of syn-near-singular-complex-1e5: reading the input dominates). It does
+//     not quite reproduce the elimination (MUMPS rebuilds the tree; the SYM_PERM it returns
+//     differs from the one given): +0.4..3.4% factor entries on the 1e5 test cases, +1..7% (AMD,
+//     SCOTCH) and up to +15% (METIS) on random sparse matrices.
+//   * ICNTL(31)=1 (discard factors) is read at ANALYSIS; set before a factorization it changes
+//     nothing. With it, only the pivot signs survive (INFOG(12), INFOG(28)): working memory
+//     INFOG(21) -41..-61% and 10-23% less factorization time on the real 1e5 test cases (2
+//     threads; no gain on the low-fill complex embedding), and JOB=3 fails with INFO(1) = -44.
+//   * JOB=-4 frees the factors and keeps the analysis; JOB=2 and JOB=3 work afterwards.
 //
 // Null-pivot threshold (CNTL(3)), measured on 5.8.2 with ICNTL(8)=7 scaling. MUMPS flags a pivot
 // whose remaining row is below CNTL(3)*||A_pre|| (A_pre: the scaled, permuted matrix). At an
@@ -81,6 +103,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
@@ -158,7 +181,8 @@ struct FactorStats {
 };
 
 /// One object = one sparsity pattern (a ShiftedPencil): analyze() once, then factorize() any
-/// number of times for different (alpha, beta). Not thread-safe; not copyable.
+/// number of times for different (alpha, beta). Not thread-safe; not copyable. Distinct objects
+/// may be used from different threads, but their MUMPS calls run one at a time (header comment).
 template <class T>
 class SparseFactorization {
  public:
@@ -199,13 +223,23 @@ class SparseFactorization {
 
   /// Inertia of the last factorized K: neg = INFOG(12), zero = null pivots (both halved, zero
   /// rounded up, for complex T), pos = n - neg - zero, valid = (last factorize() succeeded, i.e.
-  /// no null pivots). With Single or BLR it is the inertia of the rounded / compressed matrix,
-  /// exact only when no eigenvalue lies within that perturbation of the shift (compute_inertia
-  /// always factorizes in double precision without BLR).
+  /// no null pivots, and its factors were not released since: valid <=> solve() works). With
+  /// Single or BLR it is the inertia of the rounded / compressed matrix, exact only when no
+  /// eigenvalue lies within that perturbation of the shift (compute_inertia always factorizes in
+  /// double precision without BLR).
   virtual Inertia inertia() const = 0;
 
   /// Toggle out-of-core storage of the factors; takes effect at the next factorize().
   virtual void set_out_of_core(bool on) = 0;
+
+  /// Frees the numerical factors and their workspace but keeps the analysis (MUMPS JOB=-4), e.g.
+  /// to count inertia with an InertiaCounter without holding both in memory. Afterwards solve()
+  /// throws Internal until the next successful factorize(), and inertia().valid is false (it is
+  /// the "usable factorization" test of ShiftInvertOperator and the driver), while inertia()'s
+  /// counts and stats() keep describing the released factorization: copy inertia() before
+  /// releasing if its certified counts are still needed. Returns true if memory was released
+  /// (false: nothing to release - inertia() unchanged - or a backend without this feature).
+  virtual bool release_factors() { return false; }
 
   /// Toggle null-pivot detection (ICNTL(24)/CNTL(3), default on); takes effect at the next
   /// factorize(). Off is for shifts inside an eigenvalue cluster denser than
@@ -228,11 +262,120 @@ std::unique_ptr<SparseFactorization<T>> make_mumps_factorization(const FactorOpt
 
 /// Inertia of alpha*A + beta*B in one call (own analysis + factorization). Always uses double
 /// precision without BLR whatever `options` says (inertia of a perturbed matrix is wrong near
-/// small gaps). Never fails on singularity: returns valid == false instead.
-/// For the B-definiteness test and unit tests; the driver reuses its main factorization object
-/// (same pattern) for certificate endpoints. B is HPD iff valid && neg == 0 && zero == 0.
+/// small gaps), and discards the factors (ICNTL(31): working memory only). Never fails on
+/// singularity: returns valid == false instead.
+/// For the B-definiteness test and unit tests; certificate endpoints should use an
+/// InertiaCounter on the main factorization (no new ordering). B is HPD iff
+/// valid && neg == 0 && zero == 0.
 template <class T>
 Inertia compute_inertia(const ShiftedPencil<T>& pencil, double alpha, double beta,
                         const FactorOptions& options = {});
+
+struct InertiaCounterStats {
+  index_t analyses = 0;        ///< analyses of the counter's own MUMPS instances
+  double analyze_s = 0.0;      ///< their accumulated time
+  index_t counts = 0;          ///< factorizations (all precisions)
+  index_t single_counts = 0;   ///< ... of which in single precision
+  double count_s = 0.0;        ///< accumulated time of the counts (assembly + factorization)
+  double max_mb_used = 0.0;    ///< largest INFOG(21) of a count (working memory; no factors kept)
+  index_t workspace_retries = 0;   ///< automatic ICNTL(14) increases (as in FactorStats)
+  bool reused_pivot_order = false; ///< the analyses took the source's pivot order (PERM_IN)
+};
+
+/// Inertia ("Sylvester") counts nu(alpha*A + beta*B) on the pattern of an analysed
+/// SparseFactorization, without touching it: the source's factors stay valid (no refactorization
+/// at the working shift after a certificate), and only the pivot signs are kept.
+///
+/// Mechanism: one inertia-only MUMPS instance (ICNTL(31)=1) analysed with the source's pivot
+/// order (PERM_IN), i.e. without a second fill-reducing ordering. Measured with
+/// bench/certpar_inertia.cpp --exp counter (2 threads, the main factors resident, driver path =
+/// refactorize the main object at both endpoints; medians of 5 interleaved repetitions):
+///   case (ordering)                       driver pair   counter: analysis + pair    single pair
+///   syn-mem27-46 (SCOTCH)                   3.85 s       0.06 + 3.27 s  (-13%)      1.82 s
+///   yee-pec-cube-32 (SCOTCH)                3.00 s       0.05 + 2.59 s  (-12%)      1.40 s
+///   ss-qa8fk-qa8fm (SCOTCH, GHEP)           1.57 s       0.04 + 1.30 s  (-15%)      0.74 s
+///   wg-square-1e5 (AMD, 2-D)                0.31 s       0.04 + 0.26 s  ( -2%)      0.22 s
+///   syn-near-singular-complex-1e5 (AMD)     1.03 s       0.48 + 0.98 s  (+42%)      0.90 s (wrong)
+/// The counter's analysis costs about what an AMD analysis of the same input costs (it reads and
+/// processes the whole matrix; the given order only saves the ordering itself), so it pays off
+/// when the factorizations dominate the input size - nested-dissection (3-D) cases - and not on
+/// low-fill inputs such as the complex embedding above (5e6 entries, no fill). Working memory
+/// INFOG(21) of a count: 289 / 213 / 128 / 35 / 73 MB vs 683 / 543 / 326 / 88 / 124 MB of the
+/// main factors; with the main factors resident that adds to the peak (RSS +228 / +168 / +79 /
+/// +9 / +166 MB) unless the source's factors are released first (release_factors(): no growth).
+/// Not done, because measured useless or impossible:
+///   * concurrent counts from two threads: sequential MUMPS is not thread-safe (header comment);
+///   * both endpoints in one factorization of diag(K(b), -K(a)) (two independent trees for
+///     L0-OpenMP): 1-10% slower than two counts, 1.5x the memory.
+///
+/// Precision. Double counts are exact for shifts farther than O(eps*||K||*growth) from every
+/// eigenvalue. Null-pivot detection usually flags closer shifts (valid == false), but it is the
+/// same elimination-order-dependent heuristic as in SparseFactorization (header comment) and can
+/// miss an exact singularity; that eigenvalue is then counted on an arbitrary side. The counter
+/// eliminates in its own order (given pivot order, no compressed 2x2 ordering), so it misses at
+/// other shifts than the source would: shifts exactly on 24 eigenvalues of 2-D Laplacians (AMD,
+/// CNTL(3) = 1e-8; bench/certpar_fix_probes.cpp --exp nullpivot) were reported valid by the
+/// counter at 1/24 (100x101, real and complex; the source flagged all 24) and by both at 1/24
+/// each, at different shifts (200x201); every count reported valid lay within [#below,
+/// #below + multiplicity]. valid == true therefore certifies a count only when the shift lies in
+/// a spectral gap: certificate endpoints must still be placed at gap midpoints.
+/// Single-precision counts (smumps; 45-53% faster than double on the 3-D cases, none on the
+/// low-fill ones) are the exact counts of a matrix perturbed by O(eps_single*||K||*growth), and
+/// only within the float range (alpha = 1e-50 underflows K to the zero matrix: valid == false).
+/// With delta = distance from the shift to the nearest eigenvalue in units of (scale + |shift|),
+/// scale = ||A||_2/||B||_2: miscounts were seen up to delta ~ 1.6e-6 (27-point stencil, HEP) and
+/// ~ 5e-6 (dense complex prescribed spectrum, relative spacing 5e-6: wrong almost everywhere,
+/// mostly but not always with null pivots flagged), never at delta >= 1e-5; for a GHEP the
+/// perturbation grows with cond(B). The certificate endpoints of the three 3-D cases have
+/// delta >= 2.8e-4. A single count is therefore a screening value only, to be trusted when the
+/// caller knows every eigenvalue within ~1e-4*cond(B)*(scale + |shift|) of the shift (see the
+/// driver recommendation in the certpar report), and to be confirmed in double otherwise.
+///
+/// Not thread-safe (one caller at a time); MUMPS calls serialize with all other MUMPS objects.
+/// Scalar set: T in {double, cplx} (complex: counts of the real embedding, halved, as in
+/// SparseFactorization::inertia()).
+template <class T>
+class InertiaCounter {
+ public:
+  /// `analysed_source` must come from make_mumps_factorization<T> and have been analysed; its
+  /// pencil must outlive the counter (the source itself need not). Used fields of `options`:
+  /// threads (0: omp_get_max_threads() now; fixed for the counter's life because L0-OpenMP
+  /// factorizations must use the thread count of their analysis), scaling, mem_relax_pct,
+  /// max_memory_mb (cap of each count), null_pivot_tol, single_null_pivot_tol, deterministic,
+  /// verbosity, and ordering only if the source has no pivot order. Counts are always in-core
+  /// and without BLR. Analyses the double-precision instance right away (estimate() is
+  /// available). Throws InvalidInput (no MUMPS source / not analysed) or as analyze().
+  InertiaCounter(const SparseFactorization<T>& analysed_source, const FactorOptions& options);
+  ~InertiaCounter();
+  InertiaCounter(const InertiaCounter&) = delete;
+  InertiaCounter& operator=(const InertiaCounter&) = delete;
+
+  /// Inertia of K = alpha*A + beta*B, valid == false when K is (numerically) singular (as
+  /// SparseFactorization::factorize()). null_pivot_detection == false counts without
+  /// ICNTL(24) (for shifts inside clusters denser than the detection threshold; see
+  /// set_null_pivot_detection()). FactorPrecision::Single factorizes with smumps (own
+  /// inertia-only instance, analysed with the same pivot order at the first single count); see
+  /// the class comment for when such a count can be trusted. Throws InvalidInput (non-finite
+  /// alpha/beta) or as factorize() for MUMPS errors (memory cap, workspace exhausted).
+  Inertia count(double alpha, double beta, bool null_pivot_detection = true,
+                FactorPrecision precision = FactorPrecision::Double);
+
+  /// The two counts of a certificate window, one after the other (see the class comment for why
+  /// not concurrently).
+  std::pair<Inertia, Inertia> count_pair(double alpha1, double beta1, double alpha2, double beta2,
+                                         bool null_pivot_detection = true,
+                                         FactorPrecision precision = FactorPrecision::Double);
+
+  /// MUMPS estimate of a double count (INFOG(16) etc. of the inertia-only analysis: incore_mb
+  /// is the working memory, there are no factors to keep).
+  FactorEstimate estimate() const;
+  const InertiaCounterStats& stats() const;
+  /// Order n of K.
+  index_t order() const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
 
 }  // namespace hs

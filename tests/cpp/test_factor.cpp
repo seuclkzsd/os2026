@@ -48,7 +48,7 @@ std::vector<double> mid_gap_shifts(const std::vector<double>& w, int count, doub
   const index_t n = static_cast<index_t>(w.size());
   for (int t = 1; t <= count; ++t) {
     for (index_t k = n * t / (count + 1); k < n; ++k) {
-      if (w[k] - w[k - 1] > min_gap) {
+      if (k > 0 && w[k] - w[k - 1] > min_gap) {
         s.push_back(0.5 * (w[k - 1] + w[k]));
         break;
       }
