@@ -444,6 +444,7 @@ def test_ghiep_indefinite_b_with_complex_pair(tmp_path):
     assert doc["summary"]["n_complex"] == 2 and doc["summary"]["b_orthogonality"] is None
     assert doc["summary"]["max_backward_error"] < 1e-13
     assert doc["completeness"]["status"] == "complete"
+    assert doc["format"]["issues"] == [] and doc["format"]["max_orthogonality_error"] is None
 
 
 @pytest.mark.parametrize("split", [1e-3, 1e-6, 1e-7])
@@ -493,10 +494,43 @@ def test_baseline_ghiep_operator_passes_and_mode3_fails(tmp_path):
     doc = evaluate.evaluate("g", out, root=tmp_path)
     assert doc["verdict"] == "pass", doc["reasons"]
     assert doc["solver"] == "scipy" and doc["summary"]["n_real"] == 6
+    assert doc["format"]["issues"] == []      # GHIEP vectors: unit 2-norm, not a B-"norm"
     # the textbook eigs(A, k, M=B, sigma) is wrong for indefinite B, and the evaluator says so
     out = baseline_scipy.run_baseline("g", tmp_path / "mode3", root=tmp_path, ghiep_variant="mode3")
     doc = evaluate.evaluate("g", out, root=tmp_path)
     assert doc["verdict"] == "fail" and doc["summary"]["max_backward_error"] > 1e-6
+
+
+def test_baseline_ghiep_complex_pairs(tmp_path):
+    # Real sparse GHIEP whose 6 eigenvalues nearest sigma = 0.37 are two complex conjugate pairs (from
+    # blocks [[c, a], [a, -c]] / diag(1, -1): lambda = c +- i a) and the real 0.30, 0.50; the rest are
+    # real and >= 0.5 away. Congruence by a sparse unit upper triangular W keeps the spectrum.
+    n, rng = 200, np.random.default_rng(13)
+    lam = np.concatenate([[0.30, 0.50], rng.uniform(-5.0, -0.2, 90), rng.uniform(1.0, 5.0, n - 96)])
+    db = rng.uniform(0.5, 2.0, lam.size) * np.where(rng.random(lam.size) < 0.3, -1.0, 1.0)
+    A0, B0 = sp.lil_matrix((n, n)), sp.lil_matrix((n, n))
+    A0.setdiag(np.concatenate([lam * db, np.zeros(4)]))
+    B0.setdiag(np.concatenate([db, np.zeros(4)]))
+    for j, (c, a) in zip((n - 4, n - 2), ((0.35, 0.02), (0.42, 0.04))):
+        A0[j:j + 2, j:j + 2] = [[c, a], [a, -c]]
+        B0[j:j + 2, j:j + 2] = np.diag([1.0, -1.0])
+    W = sp.identity(n) + 0.3 * sp.triu(sp.random(n, n, density=0.02, random_state=rng), 1)
+    sym = lambda m: ((m + m.T) / 2).tocsr()    # noqa: E731
+    _case(tmp_path, "gc", sym(W.T @ A0.tocsr() @ W), sym(W.T @ B0.tocsr() @ W), problem="GHIEP", sigma=0.37, k=6)
+    reference.build_reference("gc", tmp_path)
+    out = baseline_scipy.run_baseline("gc", tmp_path / "op", root=tmp_path)
+    res = cio.load_result(out)
+    assert res.report["success"], res.report["warnings"]
+    assert res.eigenvalues == pytest.approx([0.30, 0.50])
+    wc, Vc = res.complex_eigenvalues, res.complex_eigenvectors
+    assert np.sort_complex(wc) == pytest.approx([0.35 - 0.02j, 0.35 + 0.02j, 0.42 - 0.04j, 0.42 + 0.04j])
+    # a real pencil's pairs come as (lambda, x), (conj lambda, conj x)
+    assert wc[1::2] == pytest.approx(wc[::2].conj()) and np.array_equal(Vc[:, 1::2], Vc[:, ::2].conj())
+    doc = evaluate.evaluate("gc", out, root=tmp_path)
+    assert doc["verdict"] == "pass", doc["reasons"]
+    assert doc["summary"]["n_complex"] == 4 and doc["summary"]["max_backward_error"] < 1e-12
+    assert doc["completeness"]["status"] == "complete" and doc["completeness"]["found"] == 6
+    assert doc["format"]["issues"] == [] and doc["format"]["max_normalization_error"] < 1e-12
 
 
 # ---------------------------------------------------------------------------------- baseline
