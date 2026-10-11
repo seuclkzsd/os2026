@@ -1,5 +1,6 @@
 // Regression tests for the review fixes of hsolve's nested-dissection ordering (src/factor/
-// ordering*.cpp, compute_ordering): coarsening with small targets on graphs with many components.
+// ordering*.cpp, compute_ordering): coarsening with small targets on graphs with many components;
+// calls from inside an OpenMP parallel region (threads = 1 included).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -139,6 +140,73 @@ TEST(FactorOrderingCoarsening, SmallTargetsTerminateOnManyComponents) {
   EXPECT_TRUE(ord::check_separator(g, where).valid);
   for (std::size_t k = 1; k < tr.vertices.size(); ++k)
     EXPECT_LT(tr.vertices[k], tr.vertices[k - 1]) << "level " << k << " removed nothing";
+}
+
+// ------------------------------------------------------------- inside a parallel region
+
+// compute_ordering with threads = 1 used to run without a parallel region of its own: called
+// from inside an active team, its dissection tasks were deferred to that team and outlived the
+// call (invalid permutations, crashes).
+TEST(FactorOrderingThreads, CallableFromInsideAParallelRegion) {
+  const auto a = hs::test::laplacian_2d<double>(120, 120);
+  const ShiftedPencil<double> pencil(a, nullptr);
+  hs::OrderingOptions o;
+  o.threads = 1;
+  const std::vector<int> ref = hs::compute_ordering(pencil, o);
+  ASSERT_TRUE(is_pivot_order(ref, pencil.order()));
+  std::vector<std::vector<int>> single_one(2), single_two(2), each(4);
+#pragma omp parallel num_threads(2) default(shared)
+  {
+#pragma omp single
+    for (int rep = 0; rep < 2; ++rep) {
+      hs::OrderingOptions oo = o;
+      single_one[rep] = hs::compute_ordering(pencil, oo);
+      oo.threads = 2;
+      single_two[rep] = hs::compute_ordering(pencil, oo);
+    }
+    // One ordering per thread of the team (the one-thread-per-instance pattern).
+#pragma omp for schedule(static)
+    for (int k = 0; k < 4; ++k) each[k] = hs::compute_ordering(pencil, o);
+  }
+  for (int rep = 0; rep < 2; ++rep) {
+    EXPECT_EQ(single_one[rep], ref) << "threads = 1 inside single, rep " << rep;
+    EXPECT_EQ(single_two[rep], ref) << "threads = 2 inside single, rep " << rep;
+  }
+  for (int k = 0; k < 4; ++k) EXPECT_EQ(each[k], ref) << "omp for, iteration " << k;
+}
+
+using Scalars = ::testing::Types<double, cplx>;
+template <class T>
+class FactorOrderingThreadsPencil : public ::testing::Test {};
+TYPED_TEST_SUITE(FactorOrderingThreadsPencil, Scalars);
+
+// FactorOptions{ordering = kOrderingNestedDissection, threads = 1} analysed concurrently from an
+// OpenMP team (MUMPS calls are serialized by the factor module; the ordering runs outside).
+TYPED_TEST(FactorOrderingThreadsPencil, FactorizationsInsideAParallelRegion) {
+  using T = TypeParam;
+  const index_t nx = 120, ny = 90;
+  const auto a = hs::test::laplacian_2d<T>(nx, ny);
+  const auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
+  const ShiftedPencil<T> pencil(a, nullptr);
+  index_t k = 2000;  // a shift in a gap of the (sorted) spectrum, k eigenvalues below it
+  while (w[k] - w[k - 1] < 1e-6) ++k;
+  const double sigma = 0.5 * (w[k - 1] + w[k]);
+  std::vector<index_t> neg(4, -1);
+  std::vector<int> ok(4, 0);
+#pragma omp parallel for num_threads(2) schedule(static) default(shared)
+  for (int it = 0; it < 4; ++it) {
+    hs::FactorOptions fo;
+    fo.ordering = hs::kOrderingNestedDissection;
+    fo.threads = 1;
+    auto f = hs::make_mumps_factorization<T>(fo);
+    f->analyze(pencil, 1.0, -sigma);
+    ok[it] = f->factorize(1.0, -sigma) ? 1 : 0;
+    neg[it] = f->inertia().neg;
+  }
+  for (int it = 0; it < 4; ++it) {
+    EXPECT_EQ(ok[it], 1) << "iteration " << it;
+    EXPECT_EQ(neg[it], k) << "iteration " << it;
+  }
 }
 
 }  // namespace

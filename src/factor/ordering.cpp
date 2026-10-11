@@ -171,14 +171,13 @@ std::vector<std::int32_t> nested_dissection(Graph g, const DissectionParams& par
   auto root = std::make_unique<Piece>();
   root->g = std::move(g);
   root->seed = params.seed;
-  if (threads == 1) {
-    d.run(std::move(root));
-  } else {
-    Piece* r = root.release();
+  // A region of its own even for one thread: dissect() never waits for the tasks it spawns, the
+  // end of this region does. Without it, a call from inside an active parallel region would
+  // defer them to the caller's team, and they would outlive `d`.
+  Piece* r = root.release();
 #pragma omp parallel num_threads(threads) default(none) shared(d) firstprivate(r)
 #pragma omp single
-    d.run(std::unique_ptr<Piece>(r));
-  }
+  d.run(std::unique_ptr<Piece>(r));
   if (stats) stats->threads = threads;
   return d.take(stats);
 }

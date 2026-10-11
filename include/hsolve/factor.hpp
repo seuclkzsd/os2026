@@ -483,8 +483,11 @@ struct OrderingStats {
 /// left out, as in the factorization) is ordered - see OrderingOptions::embedding.
 /// Returns PERM_IN for ICNTL(7) = 1: entry v is the 1-based pivot position of variable v (size n,
 /// or 2n). Deterministic: a function of the pencil's pattern and `options` (threads excluded).
-/// Thread-safe (no shared state; uses its own OpenMP parallel region). O(nnz log n) work.
-/// Throws InvalidInput (bad options), Unsupported (order above the 32-bit MUMPS range).
+/// Thread-safe (no shared state). Always runs in an OpenMP parallel region of its own, also for
+/// threads = 1, and waits for all its tasks: it may be called from inside a parallel region
+/// (without nested parallelism it then runs on one thread, with the same result). O(nnz log n)
+/// work. Throws InvalidInput (options outside the documented ranges), Unsupported (order above
+/// the 32-bit MUMPS range).
 /// Scalar set: T in {double, cplx}.
 template <class T>
 std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil,

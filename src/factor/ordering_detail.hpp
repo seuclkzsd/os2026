@@ -147,7 +147,9 @@ struct DissectionStats {
 };
 
 /// Nested-dissection elimination order of g with `threads` OpenMP threads (>= 1): order[k] =
-/// vertex eliminated k-th. The result does not depend on `threads`.
+/// vertex eliminated k-th. The result does not depend on `threads`. Always opens a parallel
+/// region of its own (also for one thread), whose end waits for every dissection task: safe to
+/// call from inside a parallel region (without nested parallelism it then runs on one thread).
 std::vector<std::int32_t> nested_dissection(Graph g, const DissectionParams& params, int threads,
                                             DissectionStats* stats = nullptr);
 
