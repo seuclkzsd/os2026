@@ -308,18 +308,28 @@ struct InertiaCounterStats {
 ///   * both endpoints in one factorization of diag(K(b), -K(a)) (two independent trees for
 ///     L0-OpenMP): 1-10% slower than two counts, 1.5x the memory.
 ///
-/// Precision. Double counts are exact for shifts farther than O(eps*||K||) from an eigenvalue
-/// (and null-pivot detection flags closer ones: valid == false). Single-precision counts
-/// (smumps; 45-53% faster than double on the 3-D cases, none on the low-fill ones) are the exact
-/// counts of a matrix perturbed by O(eps_single*||K||*growth). With delta = distance from the
-/// shift to the nearest eigenvalue in units of (scale + |shift|), scale = ||A||_2/||B||_2:
-/// miscounts were seen up to delta ~ 1.6e-6 (27-point stencil, HEP) and ~ 5e-6 (dense complex
-/// prescribed spectrum, relative spacing 5e-6: wrong almost everywhere, mostly but not always
-/// with null pivots flagged), never at delta >= 1e-5; for a GHEP the perturbation grows with
-/// cond(B). The certificate endpoints of the three 3-D cases have delta >= 2.8e-4. A single
-/// count is therefore a screening value only, to be trusted when the caller knows every
-/// eigenvalue within ~1e-4*cond(B)*(scale + |shift|) of the shift (see the driver
-/// recommendation in the certpar report), and to be confirmed in double otherwise.
+/// Precision. Double counts are exact for shifts farther than O(eps*||K||*growth) from every
+/// eigenvalue. Null-pivot detection usually flags closer shifts (valid == false), but it is the
+/// same elimination-order-dependent heuristic as in SparseFactorization (header comment) and can
+/// miss an exact singularity; that eigenvalue is then counted on an arbitrary side. The counter
+/// eliminates in its own order (given pivot order, no compressed 2x2 ordering), so it misses at
+/// other shifts than the source would: shifts exactly on 24 eigenvalues of 2-D Laplacians (AMD,
+/// CNTL(3) = 1e-8; bench/certpar_fix_probes.cpp --exp nullpivot) were reported valid by the
+/// counter at 1/24 (100x101, real and complex; the source flagged all 24) and by both at 1/24
+/// each, at different shifts (200x201); every count reported valid lay within [#below,
+/// #below + multiplicity]. valid == true therefore certifies a count only when the shift lies in
+/// a spectral gap: certificate endpoints must still be placed at gap midpoints.
+/// Single-precision counts (smumps; 45-53% faster than double on the 3-D cases, none on the
+/// low-fill ones) are the exact counts of a matrix perturbed by O(eps_single*||K||*growth), and
+/// only within the float range (alpha = 1e-50 underflows K to the zero matrix: valid == false).
+/// With delta = distance from the shift to the nearest eigenvalue in units of (scale + |shift|),
+/// scale = ||A||_2/||B||_2: miscounts were seen up to delta ~ 1.6e-6 (27-point stencil, HEP) and
+/// ~ 5e-6 (dense complex prescribed spectrum, relative spacing 5e-6: wrong almost everywhere,
+/// mostly but not always with null pivots flagged), never at delta >= 1e-5; for a GHEP the
+/// perturbation grows with cond(B). The certificate endpoints of the three 3-D cases have
+/// delta >= 2.8e-4. A single count is therefore a screening value only, to be trusted when the
+/// caller knows every eigenvalue within ~1e-4*cond(B)*(scale + |shift|) of the shift (see the
+/// driver recommendation in the certpar report), and to be confirmed in double otherwise.
 ///
 /// Not thread-safe (one caller at a time); MUMPS calls serialize with all other MUMPS objects.
 /// Scalar set: T in {double, cplx} (complex: counts of the real embedding, halved, as in
