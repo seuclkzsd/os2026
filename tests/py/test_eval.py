@@ -259,7 +259,9 @@ def test_format_issues_are_reported_but_do_not_fail(tmp_path, problem):
 def test_slepc_style_report_and_guard_summary(tmp_path):
     ref = _hermitian_case(tmp_path, "c")
     w, V = _nearest(ref, SIGMA, 4)
-    out = cio.save_result(tmp_path / "slepc", w, V, {"solver": "slepc-ks", "time_total_s": 2.0,
+    # tools/bench/baseline_slepc.py: time_total_s includes Python case loading and pair extraction
+    out = cio.save_result(tmp_path / "slepc", w, V, {"solver": "slepc-ks", "time_total_s": 2.0, "time_load_s": 0.3,
+                                                    "time_setup_s": 0.5, "time_solve_s": 1.0,
                                                     "peak_rss_bytes_sum": 3 * 2**20, "success": False,
                                                     "warnings": ["w1"]})
     guard = {"returncode": 0, "killed": None, "wall_s": 4.5, "peak_rss_gib": 0.25, "cores": "28,29", "threads": 2}
@@ -267,10 +269,23 @@ def test_slepc_style_report_and_guard_summary(tmp_path):
     assert doc["solver"] == "slepc-ks" and doc["peak_rss_bytes"] == 3 * 2**20 and doc["solver_warnings"] == ["w1"]
     assert doc["measured"] == {"wall_s": 4.5, "peak_rss_bytes": 2**28, "returncode": 0, "killed": None,
                                "cores": "28,29", "threads": 2}
+    assert doc["time_total_s"] == 2.0 and doc["solve_time_s"] == 1.5
+    assert doc["solve_time_scope"] == "time_setup_s + time_solve_s"
     assert doc["verdict"] == "pass" and doc["summary"]["solver_claim"] == "underclaim"
     text = report.render([doc], "t")
-    assert "| dense | 2 | 4.5 | 256 |" in text and "| under | pass |" in text
+    assert "| solve [s] |" in text and "| dense | 1.5 | 4.5 | 256 |" in text and "| under | pass |" in text
     assert "**slepc-ks**: 1 pass / 0 fail, 1 underclaim(s)" in text
+    # hsolve-style report: time_total_s is the solve proper; an old document without solve_time_s too
+    hs = evaluate.evaluate("c", _save(tmp_path / "hs", w, V), root=tmp_path)
+    assert hs["solve_time_s"] == 0.5 and hs["solve_time_scope"] == "time_total_s"
+    old = {k: v for k, v in hs.items() if k != "solve_time_s"}
+    assert "| dense | 0.5 | - | 1* |" in report.render([old], "t")
+    # a run the guard killed fails even when it left a result
+    killed = evaluate.evaluate("c", out, root=tmp_path, guard=dict(guard, returncode=-9, killed="timeout 60 s"))
+    assert killed["verdict"] == "fail" and killed["reasons"] == [
+        "run killed or terminated by a signal (exit status -9, killed: timeout 60 s, wall 4.5 s): "
+        "the result directory may be partial or stale"]
+    assert "| ok | **fail** (exit -9) |" in report.render([killed], "t")
 
 
 # ------------------------------------------------------------------------- pooled references
@@ -659,32 +674,60 @@ def test_sweep_over_a_raw_run(tmp_path, monkeypatch):
     _guard(run / "p" / "guard-crashed.json", returncode=-9, killed="rss 8.1 GiB > 8 GiB", wall_s=3.0)
     _guard(run / "p" / "guard-late.json", returncode=1)
     _save(run / "p" / "late", w[near[:4]], V[:, near[:4]])
+    _guard(run / "p" / "guard-killed.json", returncode=-9, killed="timeout 600 s")   # left a (stale?) result
+    _save(run / "p" / "killed", w[near[:4]], V[:, near[:4]])
+    _save(run / "p" / "broken", w[near[:4]], np.ascontiguousarray(V[:, near[:4]].T))   # transposed vectors
 
     md, ev = tmp_path / "eval_run.md", tmp_path / "ev"
     monkeypatch.setenv("HS_GUARDED", "1")
-    assert sweep.main([str(run), "--root", str(tmp_path), "--eval-dir", str(ev), "--out", str(md),
-                       "--note", "p has no stored reference"]) == 0
+    argv = [str(run), "--root", str(tmp_path), "--eval-dir", str(ev), "--out", str(md),
+            "--note", "p has no stored reference", "--title", "T"]
+    assert sweep.main(argv) == 0
     text = md.read_text()
-    assert f"evaluation JSONs in `{ev}/<case>/<solver>/evaluation.json`" in text
-    assert text.endswith("- p has no stored reference\n")
-    assert ("**full**: 1 pass / 0 fail; **hsolve**: 1 pass / 0 fail; **late**: 1 pass / 0 fail; "
-            "**short**: 0 pass / 1 fail, 1 overclaim(s)") in text
+    assert f"written to `{ev.resolve()}/<case>/<solver>/evaluation.json`" in text
+    preamble = text.split("\n")[2]      # with the regeneration command, minus the free-text options
+    assert f"-- python -m tools.eval.sweep {run} --root {tmp_path} --eval-dir {ev} --out {md}`" in preamble
+    assert "p has no stored reference" not in preamble
+    assert text.startswith("# T\n") and text.endswith("- p has no stored reference\n")
+    # every run is counted: crashes and malformed results are failures, exit statuses are marked
+    assert ("Verdicts - **broken**: 0 pass / 1 fail, 1 not evaluated, 1 overclaim(s); "
+            "**crashed**: 0 pass / 1 fail, 1 not evaluated, 1 non-zero exit(s); **full**: 1 pass / 0 fail; "
+            "**hsolve**: 1 pass / 0 fail; **killed**: 0 pass / 1 fail, 1 overclaim(s), 1 non-zero exit(s); "
+            "**late**: 1 pass / 0 fail, 1 non-zero exit(s); **short**: 0 pass / 1 fail, 1 overclaim(s)\n") in text
     doc = json.loads((ev / "p" / "short" / evaluate.EVAL_FILE).read_text())
     assert doc["reference"]["kind"] == "pooled" and doc["completeness"]["status"] == "inconsistent"
-    assert doc["measured"]["wall_s"] == 1.5
+    assert doc["measured"]["wall_s"] == 1.5 and doc["evaluated"]
     hs = json.loads((ev / "c" / "hsolve" / evaluate.EVAL_FILE).read_text())
     assert hs["reference"]["kind"] == "dense" and hs["measured"]["peak_rss_bytes"] == 2**29
     assert "| c | hsolve | HEP | 20 | 4 | dense | 0.5 | 1.5 | 512 |" in text
-    assert "- p / crashed: no result directory (exit status -9, killed: rss 8.1 GiB > 8 GiB, wall 3.0 s)" in text
-    assert "- p / late: result written but the run ended with exit status 1, wall 1.5 s" in text
+    crashed = json.loads((ev / "p" / "crashed" / evaluate.EVAL_FILE).read_text())
+    assert not crashed["evaluated"] and crashed["verdict"] == "fail" and crashed["n"] == 20
+    assert "| p | crashed | HEP | 20 | 4 | - | - | 3 | 512 |" in text
+    assert "| - | **fail** (not evaluated) (exit -9) |" in text
+    assert "- p / crashed: no result directory (run exit status -9, killed: rss 8.1 GiB > 8 GiB, wall 3.0 s)" in text
+    assert "- p / broken: evaluation failed: ValueError: " in text and "shape (4, 20), expected (n, m) = (20, 4)" in text
+    assert "- p / killed: run killed or terminated by a signal (exit status -9, killed: timeout 600 s" in text
+    assert "| consistent (4/4) | ok | pass (exit 1) |" in text      # late: content passes, exit marked
     # without pooling the unreferenced case cannot catch the missed copy
-    docs, notes = sweep.sweep(run, root=tmp_path, eval_dir=ev, pool=False, solvers=["short"])
+    docs = sweep.sweep(run, root=tmp_path, eval_dir=ev, pool=False, solvers=["short"])
     assert [d["verdict"] for d in docs] == ["pass"] and docs[0]["completeness"]["status"] == "unknown"
-    assert notes == []
-    # by default the evaluation goes into the result directory; a broken result becomes a note
+    # by default the evaluation goes into the result directory; a garbage file is a failure row
     assert not (run / "p" / "full" / evaluate.EVAL_FILE).exists()
-    docs, _ = sweep.sweep(run, root=tmp_path, cases=["p"], solvers=["full"])
+    docs = sweep.sweep(run, root=tmp_path, cases=["p"], solvers=["full"])
     assert (run / "p" / "full" / evaluate.EVAL_FILE).exists() and docs[0]["completeness"]["status"] == "unknown"
     (run / "p" / "short" / "eigenvectors.npy").write_bytes(b"garbage")
-    docs, notes = sweep.sweep(run, root=tmp_path, cases=["p"], solvers=["short"])
-    assert docs == [] and notes[0].startswith("p / short: evaluation failed: ")
+    (doc,) = sweep.sweep(run, root=tmp_path, cases=["p"], solvers=["short"])
+    assert doc["verdict"] == "fail" and not doc["evaluated"] and doc["summary"]["solver_claim"] == "overclaim"
+    assert doc["reasons"][0].startswith("evaluation failed: ")
+    # an invalid config fails every run of the case, and the document still renders
+    cfg_path = tmp_path / "cases" / "p" / "config.json"
+    cfg_path.write_text(json.dumps(dict(json.loads(cfg_path.read_text()), target={"mode": "bogus", "k": 4})))
+    (doc,) = sweep.sweep(run, root=tmp_path, cases=["p"], solvers=["full"])
+    assert not doc["evaluated"] and doc["target"] is None and doc["problem"] == "HEP" and doc["n"] == 20
+    assert "target mode 'bogus'" in doc["reasons"][0] and "| p | full | HEP | 20 | - |" in report.render([doc], "t")
+    # a case that cannot be loaded fails every run of it
+    (tmp_path / "cases" / "p" / "A.npz").unlink()
+    docs = sweep.sweep(run, root=tmp_path, cases=["p"])
+    assert len(docs) == 6 and all(not d["evaluated"] and d["problem"] is None for d in docs)
+    assert all(d["reasons"][0].startswith("case cannot be evaluated: ") for d in docs)
+    assert "| p | full | - | - | - | - | 0.5 |" in report.render(docs, "t")

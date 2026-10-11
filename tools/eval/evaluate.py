@@ -61,11 +61,12 @@ near-parallel vectors are duplicates whatever their eigenvalues. B-orthogonality
 (Python's JSON extension), never hidden.
 Verdict 'pass' iff every eta <= tol, no duplicate or degenerate vectors, completeness is not
 incomplete/inconsistent, no computed eigenvalue is spurious (unmatched where a complete reference
-lists every eigenvalue) and pairs were returned (for an interval target: unless a reference
-confirms the interval holds no eigenvalue). Disagreement with an uncertified reference fails too: it
-means either the solver or the reference is wrong and needs a look. A result that cannot be
-evaluated at all (missing or malformed files, e.g. eigenvectors.npy not of shape (n, m)) raises
-ValueError.
+lists every eigenvalue), pairs were returned (for an interval target: unless a reference confirms
+the interval holds no eigenvalue) and the run was not killed (guard summary: killed, or ended by a
+signal - its result directory may be partial or stale). Disagreement with an uncertified reference
+fails too: it means either the solver or the reference is wrong and needs a look. A result that
+cannot be evaluated at all (missing or malformed files, e.g. eigenvectors.npy not of shape (n, m))
+raises ValueError here; tools/eval/sweep.py turns it into a 'fail' document (not_evaluated_document).
 
 Pooled references: a case without a comparable stored reference can be checked against the accepted,
 distinct pairs of several solvers (pooled_reference; tools/eval/sweep.py does this per case). It is
@@ -91,7 +92,11 @@ Bookkeeping that is reported but not part of the verdict:
   * time and peak memory as reported by the solver (peak_rss_bytes, or the SLEPc baseline's
     peak_rss_bytes_sum over its MPI ranks) and, when the caller passes the tools/run/guard.py summary
     of the run, as measured by the guard ('measured': wall time and peak RSS of the process tree, the
-    same yardstick for every solver).
+    same yardstick for every solver). solve_time_s is the solver-reported time of the solve proper,
+    like for like across solvers (tools/bench/compare.py's 'solve'): time_setup_s + time_solve_s
+    where a report has both (SLEPc baseline: EPSSetUp incl. the MUMPS factorization + EPSSolve; its
+    time_total_s adds Python case loading, PETSc assembly and pair extraction), else time_total_s
+    (hsolve: all of hs::solve after the CLI loaded the matrices; scipy baseline: splu + ARPACK).
 """
 from __future__ import annotations
 
@@ -534,6 +539,31 @@ def _measured(guard: dict[str, Any] | None) -> dict[str, Any] | None:
             "threads": guard.get("threads")}
 
 
+def _solve_time(report: dict[str, Any]) -> tuple[float | None, str | None]:
+    """(solve_time_s, scope): the solver-reported time of the solve proper (module docstring)."""
+    if report.get("time_setup_s") is not None and report.get("time_solve_s") is not None:
+        return float(report["time_setup_s"]) + float(report["time_solve_s"]), "time_setup_s + time_solve_s"
+    if report.get("time_total_s") is not None:
+        return float(report["time_total_s"]), "time_total_s"
+    return None, None
+
+
+def run_status(guard: dict[str, Any] | None) -> str:
+    """One-line exit status of a run from its tools/run/guard.py summary."""
+    if guard is None:
+        return "no guard summary"
+    killed = f", killed: {guard['killed']}" if guard.get("killed") else ""
+    return f"exit status {guard.get('returncode')}{killed}, wall {guard.get('wall_s')} s"
+
+
+def run_killed(guard: dict[str, Any] | None) -> bool:
+    """The guard killed the run or a signal ended it (negative return code)."""
+    if guard is None:
+        return False
+    rc = guard.get("returncode")
+    return bool(guard.get("killed")) or (rc is not None and rc < 0)
+
+
 def _claim(solver_success: Any, verdict: str) -> str | None:
     if solver_success is None:
         return None
@@ -554,6 +584,57 @@ def _summary(pairs: list[dict], **extra) -> dict[str, Any]:
         "max_eig_rel_error": _max(p["eig_rel_error"] for p in pairs),
         "max_eig_scaled_error": _max(p["eig_scaled_error"] for p in pairs),
         "max_subspace_angle": None, "b_orthogonality": None, "solver_claim": None, **extra,
+    }
+
+
+def _bookkeeping(report: dict[str, Any], guard: dict[str, Any] | None) -> dict[str, Any]:
+    """Time / memory / claim fields of an evaluation document taken from report.json and the guard."""
+    solve_s, scope = _solve_time(report)
+    return {"time_total_s": report.get("time_total_s"), "solve_time_s": solve_s, "solve_time_scope": scope,
+            "peak_rss_bytes": _reported_peak(report), "measured": _measured(guard),
+            "solver_success": report.get("success"), "solver_warnings": list(report.get("warnings", []))}
+
+
+def not_evaluated_document(case: str | cio.Case, solver: str, reason: str, *, result_dir: str | Path | None = None,
+                           guard: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Evaluation document with verdict 'fail' for a run that cannot be evaluated: it left no result
+    directory (crashed, killed, timed out), its result is malformed, or its case cannot be loaded.
+    Keeps the run in the verdict counts (a crash is a robustness failure, not an absence). The
+    reason gets the run's exit status appended when a guard summary is given. `case` is a loaded
+    case (problem, n and target are then filled in) or just its name."""
+    c = case if isinstance(case, cio.Case) else None
+    report: dict[str, Any] = {}
+    if result_dir is not None and (Path(result_dir) / "report.json").exists():
+        try:
+            report = json.loads((Path(result_dir) / "report.json").read_text())
+        except ValueError:
+            pass
+    if not isinstance(report, dict):
+        report = {}
+    reasons = [reason if guard is None else f"{reason} (run {run_status(guard)})"]
+    summary = _summary([], solver_claim=_claim(report.get("success"), "fail"))
+
+    def case_info(fn):   # an inconsistent meta/config may be why the evaluation failed
+        try:
+            return fn(c) if c is not None else None
+        except ValueError:
+            return None
+
+    return {
+        "schema_version": cio.SCHEMA_VERSION, "evaluated": False,
+        "case": c.name if c is not None else str(case), "solver": solver,
+        "inputs": {"case": str(c.path) if c is not None else None,
+                   "result": str(result_dir) if result_dir is not None else None, "reference": None},
+        "problem": case_info(common.problem_type), "n": c.n if c is not None else None,
+        "target": case_info(common.target), "tol": case_info(common.tol),
+        **_bookkeeping(report, guard),
+        "reference": None, "pairs": [], "duplicates": [],
+        "completeness": {"status": "unknown", "certified": False, "expected": None, "found": None, "missing": [],
+                         "boundary_deficit": 0, "boundary_candidates": [], "extra": [], "beyond_target": [],
+                         "unmatched": [], "spurious": [], "distinct_returned": 0},
+        "clusters": [],
+        "format": {"order_ok": None, "max_normalization_error": None, "max_orthogonality_error": None, "issues": []},
+        "summary": summary, "verdict": "fail", "reasons": reasons,
     }
 
 
@@ -678,6 +759,9 @@ def evaluate(case_ref: str | Path | cio.Case, result_dir: str | Path, *, root: s
                        f"{completeness['distinct_returned']} distinct returned")
     if completeness["spurious"]:
         reasons.append(f"{len(completeness['spurious'])} spurious eigenvalue(s) absent from the complete reference")
+    if run_killed(guard):
+        reasons.append(f"run killed or terminated by a signal ({run_status(guard)}): the result directory "
+                       "may be partial or stale")
 
     report = res.report
     verdict = "fail" if reasons else "pass"
@@ -685,6 +769,7 @@ def evaluate(case_ref: str | Path | cio.Case, result_dir: str | Path, *, root: s
                        solver_claim=_claim(report.get("success"), verdict))
     return {
         "schema_version": cio.SCHEMA_VERSION,
+        "evaluated": True,
         "case": c.name,
         "solver": solver or report.get("solver") or Path(result_dir).name,
         "inputs": {"case": str(c.path), "result": str(Path(result_dir)),
@@ -694,10 +779,7 @@ def evaluate(case_ref: str | Path | cio.Case, result_dir: str | Path, *, root: s
         "config": c.config, "target": tgt, "tol": tol,
         "tolerances": {"match_rtol": match_rtol, "cluster_rtol": cluster_rtol, "tie_rtol": tie_rtol,
                        "dup_tol": dup_tol},
-        "time_total_s": report.get("time_total_s"), "peak_rss_bytes": _reported_peak(report),
-        "measured": _measured(guard),
-        "solver_success": report.get("success"),
-        "solver_warnings": list(report.get("warnings", [])),
+        **_bookkeeping(report, guard),
         "norms": {"norm2_a": norms.norm2_a, "norm2_b": norms.norm2_b, "scale": scale,
                   "norm_method": {"A": norms.method_a, "B": norms.method_b}},
         "reference": None if stored_ref is None else {
