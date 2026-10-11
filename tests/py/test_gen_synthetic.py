@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import scipy.linalg as sl
 import scipy.sparse as sp
+from scipy.sparse.csgraph import connected_components
 
 from tools import case
 from tools.gen import synthetic as syn
@@ -149,6 +150,8 @@ def test_prescribed_hermitian_matches_spectrum(kind, complex_):
     assert np.iscomplexobj(a.data) == complex_
     _assert_hermitian(a)
     assert a.getnnz(axis=1).max() <= 3 * 8
+    # the staggered second layer couples all blocks: no permuted direct sum of small problems
+    assert connected_components(abs(a), directed=False)[0] == 1
     assert _max_rel_err(sl.eigvalsh(a.toarray()), spec.eigenvalues) < 1e-13
     for t in spec.targets:
         assert t["k"] == syn.nearest_k_closed(spec.eigenvalues, t["sigma"], t["k"])
@@ -197,6 +200,7 @@ def test_magnitude_grouping_keeps_rows_local():
     bound = w[np.minimum(np.arange(400) + 11, 399)] * (1 + 1e-12)
     a = syn.prescribed_hermitian(w, block=8, seed=4, grouping="magnitude", permute=False)
     assert np.all(abs(a).max(axis=1).toarray().ravel() <= bound)
+    assert connected_components(abs(a), directed=False)[0] == 1        # the form congruence_pair uses
     a = syn.prescribed_hermitian(w, block=8, seed=4, grouping="random", permute=False)
     assert not np.all(abs(a).max(axis=1).toarray().ravel() <= bound)
     with pytest.raises(ValueError):
@@ -217,6 +221,7 @@ def test_congruence_pair_matches_spectrum(complex_):
     assert _max_rel_err(w, spec.eigenvalues) < 1e-12
     # rows i..i+3 of M (W's band) touch at most 4 offset blocks, widened by the band of W
     assert a.getnnz(axis=1).max() <= 4 * 8 + 3
+    assert connected_components(abs(a), directed=False)[0] == 1
 
 
 # ------------------------------------------------------------------------- case writers / CLI
