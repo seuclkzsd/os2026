@@ -1,4 +1,6 @@
 """Offline tests for tools/gen/suitesparse.py: a file:// mirror of tiny .tar.gz archives."""
+import dataclasses
+import gzip
 import io
 import json
 import tarfile
@@ -35,19 +37,25 @@ def _mtx_bytes(matrix, symmetry):
     return buf.getvalue()
 
 
-def _publish(mirror, name, matrix, symmetry, extra_members=()):
-    """Write MM/<GROUP>/<name>.tar.gz containing <name>/<name>.mtx (+ extra raw members)."""
+def _publish(mirror, name, matrix, symmetry, extra_members=(), compresslevel=9):
+    """Write MM/<GROUP>/<name>.tar.gz containing <name>/<name>.mtx (+ extra raw members);
+    returns its path. compresslevel=0 stores the tar verbatim in deflate 'stored' blocks."""
     folder = mirror / "MM" / GROUP
     folder.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(folder / f"{name}.tar.gz", "w:gz") as tf:
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w") as tf:
         for member, data in [(f"{name}/{name}.mtx", _mtx_bytes(matrix, symmetry)), *extra_members]:
             info = tarfile.TarInfo(member)
             info.size = len(data)
             tf.addfile(info, io.BytesIO(data))
+    path = folder / f"{name}.tar.gz"
+    path.write_bytes(gzip.compress(raw.getvalue(), compresslevel=compresslevel))
+    return path
 
 
-def _registry(*names):
-    return {n: ss.Matrix(GROUP, n, 0, 0, "real", False, 0.1, f"test matrix {n}") for n in names}
+def _registry(*names, field="real", spd=()):
+    """Registry entries without index n/nnz; `spd` names the entries indexed as SPD."""
+    return {n: ss.Matrix(GROUP, n, None, None, field, n in spd, 0.1, f"test matrix {n}") for n in names}
 
 
 def _fetch(tmp_path, cname, cases, registry, **kw):
@@ -66,7 +74,8 @@ def _assert_sigma_inside(c):
 def test_hermitian_matrix_becomes_hep_case(tmp_path, symmetry, complex_):
     a = _sym(30, 1, complex_)
     _publish(tmp_path / "mirror", "M1", a, symmetry)
-    path = _fetch(tmp_path, "t-m1", {"t-m1": ss.CaseSpec("M1")}, _registry("M1"))
+    path = _fetch(tmp_path, "t-m1", {"t-m1": ss.CaseSpec("M1")},
+                  _registry("M1", field="complex" if complex_ else "real"))
     c = case.load_case(path)
     assert abs(c.A - a).max() < 1e-15 * abs(a).max()
     assert c.B is None and c.meta["problem"] == "HEP" and c.meta["family"] == "suitesparse"
@@ -101,19 +110,73 @@ def test_explicit_zeros_dropped_and_real_complex_demoted(tmp_path):
         ss.read_hermitian(path)
 
 
+def test_single_triangle_with_explicit_zeros_in_the_other_is_symmetrized(tmp_path):
+    """The storage rule looks at numerical nonzeros: a stored zero in the upper triangle of a
+    lower-triangle file must not turn it into a (non-Hermitian) full matrix."""
+    path = tmp_path / "lowz.mtx"
+    path.write_text("%%MatrixMarket matrix coordinate real general\n3 3 6\n"
+                    "1 1 2\n2 1 -1\n3 2 -0.5\n2 2 3\n3 3 1\n1 2 0\n")
+    m, info = ss.read_hermitian(path)
+    assert m.toarray().tolist() == [[2.0, -1.0, 0.0], [-1.0, 3.0, -0.5], [0.0, -0.5, 1.0]]
+    assert info["notes"] == ["dropped 1 explicit zeros",
+                             "'general' file stores only the lower triangle: symmetrized"]
+
+
+def test_integer_file_becomes_float64_case(tmp_path):
+    path = tmp_path / "int.mtx"
+    path.write_text("%%MatrixMarket matrix coordinate integer symmetric\n3 3 4\n1 1 2\n2 1 -1\n2 2 2\n3 3 5\n")
+    m, info = ss.read_hermitian(path)
+    assert m.dtype == np.float64 and m.toarray().tolist() == [[2.0, -1.0, 0.0], [-1.0, 2.0, 0.0], [0.0, 0.0, 5.0]]
+    assert info["notes"] == ["integer file stored as float64"]
+    c = case.load_case(case.save_case("t-int", m, meta={"family": "t", "problem": "HEP"}, root=tmp_path))
+    assert c.A.dtype == np.float64 and c.meta["dtype"] == "float64"
+
+
+@pytest.mark.parametrize("text", [
+    "%%MatrixMarket matrix coordinate real symmetric\n3 3 2\n1 1 2\n9 1 1\n",
+    "%%MatrixMarket matrix coordinate real symmetric\n3 3 4\n1 1 2\n2 1 1\n",
+    "%%MatrixMarket matrix coordinate realx symmetric\n3 3 1\n1 1 2\n",
+    "\0" * 64,
+], ids=["index-out-of-range", "truncated", "bad-banner", "binary"])
+def test_malformed_files_are_skipped(tmp_path, text):
+    path = tmp_path / "bad.mtx"
+    path.write_text(text)
+    with pytest.raises(ss.Skipped, match="bad.mtx"):
+        ss.read_hermitian(path)
+
+
+def test_download_must_match_the_collection_index(tmp_path):
+    a = _sym(30, 1)
+    a.eliminate_zeros()
+    _publish(tmp_path / "mirror", "M1", a, "symmetric")
+    cases = {"t-m1": ss.CaseSpec("M1")}
+    indexed = ss.Matrix(GROUP, "M1", 30, a.nnz, "real", False, 0.1, "index facts of the file")
+    assert case.load_case(_fetch(tmp_path, "t-m1", cases, {"M1": indexed})).A.nnz == a.nnz
+    for wrong, message in ((dataclasses.replace(indexed, n=31), "n=30 [(]index: 31[)]"),
+                           (dataclasses.replace(indexed, nnz=a.nnz + 2), f"nnz={a.nnz} [(]index: {a.nnz + 2}[)]"),
+                           (dataclasses.replace(indexed, field="complex"), "field=real [(]index: complex[)]")):
+        with pytest.raises(ss.Skipped, match=f"M1.mtx does not match the collection index: {message}"):
+            _fetch(tmp_path, "t-m1", cases, {"M1": wrong})
+
+
 def test_pencils_classified_by_inertia_of_b(tmp_path):
     mirror = tmp_path / "mirror"
     _publish(mirror, "K", _sym(30, 4), "symmetric")
     _publish(mirror, "M", _spd(30, 5), "symmetric")
     _publish(mirror, "S", _sym(30, 6), "symmetric")
     cases = {"t-km": ss.CaseSpec("K", "M", "pencil"), "t-ks": ss.CaseSpec("K", "S")}
-    reg = _registry("K", "M", "S")
+    reg = _registry("K", "M", "S", spd=("M",))
     c = case.load_case(_fetch(tmp_path, "t-km", cases, reg))
     assert c.meta["problem"] == "GHEP" and c.meta["inertia"]["B"] == [0, 0, 30]
     assert c.meta["description"].startswith("pencil")
     _assert_sigma_inside(c)
     c = case.load_case(_fetch(tmp_path, "t-ks", cases, reg))
     assert c.meta["problem"] == "GHIEP" and "indefinite-B" in c.meta["scenarios"]
+    # the definiteness test must agree with the collection index
+    with pytest.raises(ss.Skipped, match="B is HPD by factorization, but the collection index says spd=False"):
+        _fetch(tmp_path, "t-km", cases, _registry("K", "M", "S"))
+    with pytest.raises(ss.Skipped, match="B is not HPD by factorization, but the collection index says spd=True"):
+        _fetch(tmp_path, "t-ks", cases, _registry("K", "M", "S", spd=("S",)))
 
 
 def test_pencil_from_auxiliary_member_downloads_archive_once(tmp_path, monkeypatch):
@@ -140,7 +203,7 @@ def test_complex_symmetric_and_nonsymmetric_rejected(tmp_path):
     _publish(tmp_path / "mirror", "CS", m + m.T + sp.identity(20), "general")
     _publish(tmp_path / "mirror", "NS", sp.random(20, 20, density=0.3, random_state=rng) + sp.identity(20),
              "general")
-    reg = _registry("CS", "NS")
+    reg = _registry("CS", field="complex") | _registry("NS")
     cases = {"t-cs": ss.CaseSpec("CS"), "t-ns": ss.CaseSpec("NS")}
     with pytest.raises(ss.Skipped, match="complex symmetric"):
         _fetch(tmp_path, "t-cs", cases, reg)
@@ -162,6 +225,46 @@ def test_offline_size_cap_and_unsafe_archives_skip_cleanly(tmp_path):
     with pytest.raises(ss.Skipped, match="unusable archive"):
         _fetch(tmp_path, "t-evil", cases, reg)
     assert not (tmp_path / "data" / "downloads" / "Evil").exists()
+
+
+def test_damaged_archives_skip_cleanly(tmp_path):
+    """A truncated transfer the length check cannot see (file:// and some mirrors send no
+    Content-Length) and a corrupted payload that still inflates (a changed byte inside a stored
+    deflate block: only the gzip CRC-32 reveals it) are both skipped without leftovers."""
+    reg = _registry("Cut", "Bad")
+    cases = {"t-cut": ss.CaseSpec("Cut"), "t-bad": ss.CaseSpec("Bad")}
+    cut = _publish(tmp_path / "mirror", "Cut", _sym(60, 3), "symmetric")
+    cut.write_bytes(cut.read_bytes()[: cut.stat().st_size // 2])
+    with pytest.raises(ss.Skipped, match="unusable archive"):
+        _fetch(tmp_path, "t-cut", cases, reg)
+    bad = _publish(tmp_path / "mirror", "Bad", _sym(60, 3), "symmetric", compresslevel=0)
+    blob = bytearray(bad.read_bytes())
+    blob[blob.index(b"%%MatrixMarket") + 300] ^= 0x01                 # a digit of the data
+    bad.write_bytes(bytes(blob))
+    with pytest.raises(ss.Skipped, match="CRC check failed"):
+        _fetch(tmp_path, "t-bad", cases, reg)
+    for name in ("Cut", "Bad"):
+        assert not (tmp_path / "data" / "downloads" / name).exists()
+
+
+def test_deadline_unpack_cap_and_interrupt_leave_no_download(tmp_path, monkeypatch):
+    reg = _registry("M1", "Bomb")
+    cases = {"t-m1": ss.CaseSpec("M1"), "t-bomb": ss.CaseSpec("Bomb")}
+    _publish(tmp_path / "mirror", "M1", _sym(30, 1), "symmetric")
+    with pytest.raises(ss.Skipped, match="exceeded"):
+        _fetch(tmp_path, "t-m1", cases, reg, max_seconds=0.0)
+    # 3 MB of blanks compress to a few kB: under the 20 kB download cap, over the 400 kB unpack cap
+    _publish(tmp_path / "mirror", "Bomb", _sym(5, 1), "symmetric", [("Bomb/pad.txt", b" " * 3_000_000)])
+    with pytest.raises(ss.Skipped, match="unpacks to more than"):
+        _fetch(tmp_path, "t-bomb", cases, reg, max_mb=0.02)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ss, "_extract", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _fetch(tmp_path, "t-m1", cases, reg)
+    assert list((tmp_path / "data" / "downloads").iterdir()) == []
 
 
 def test_completed_download_is_reused_and_refresh_refetches(tmp_path):

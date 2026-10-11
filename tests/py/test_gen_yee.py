@@ -2,6 +2,7 @@
 import numpy as np
 import pytest
 import scipy.linalg as sl
+import scipy.sparse as sp
 
 from tools import case
 from tools.gen import synthetic as syn
@@ -89,6 +90,52 @@ def test_material_averaging():
         yee.exact_eigenvalues(g, eps)
 
 
+def _loop_hodge(grid, eps, mu):
+    """M_eps and M_nu by explicit loops, independent of the Kronecker assembly: eps on an edge is
+    the mean over the 4 cells around it times |e~|/|e|, 1/mu on a face the mean over the 2 cells
+    its dual edge crosses times |f~|/|f|. Blocks and C order as documented in yee.operators."""
+    cells, h = grid.cells, grid.spacing
+    nodes = [grid.nodes(d) for d in range(3)]
+
+    def cells_at_node(d, j):
+        """The two cells along d adjacent to unknown node j (PEC: node j + 1 of the grid)."""
+        return (j, j + 1) if grid.boundary == "pec" else ((j - 1) % cells[d], j)
+
+    def cell(idx, moves):
+        out = list(idx)
+        for d, c in moves.items():
+            out[d] = c
+        return tuple(out)
+
+    m_eps, m_nu = [], []
+    for d in range(3):                       # d-edges: cells along d, nodes across
+        e, f = (d + 1) % 3, (d + 2) % 3
+        for idx in np.ndindex(*[cells[x] if x == d else nodes[x] for x in range(3)]):
+            around = [eps[cell(idx, {e: ce, f: cf})]
+                      for ce in cells_at_node(e, idx[e]) for cf in cells_at_node(f, idx[f])]
+            m_eps.append(np.mean(around) * h[e] * h[f] / h[d])
+    for d in range(3):                       # d-faces: nodes along d, cells across
+        e, f = (d + 1) % 3, (d + 2) % 3
+        for idx in np.ndindex(*[nodes[x] if x == d else cells[x] for x in range(3)]):
+            along = [1.0 / mu[cell(idx, {d: c})] for c in cells_at_node(d, idx[d])]
+            m_nu.append(np.mean(along) * h[d] / (h[e] * h[f]))
+    return np.array(m_eps), np.array(m_nu)
+
+
+@pytest.mark.parametrize("grid", GRIDS, ids=lambda g: f"{g.boundary}-{'x'.join(map(str, g.cells))}")
+def test_material_averaging_matches_loop_reference(grid):
+    """Inhomogeneous eps and mu: B and the face weights inside A = C^H M_nu C must be the FIT
+    averages over the right cells (constant fields cannot reveal a wrong neighbour)."""
+    rng = np.random.default_rng(3)
+    eps, mu = rng.uniform(1.0, 10.0, grid.cells), rng.uniform(0.5, 2.0, grid.cells)
+    a, b = yee.assemble(grid, eps, mu)
+    m_eps, m_nu = _loop_hodge(grid, eps, mu)
+    assert np.max(np.abs(b.diagonal() - m_eps)) <= 1e-14 * m_eps.max()
+    curl, _ = yee.operators(grid)
+    a_ref = curl.conj().T @ sp.diags(m_nu) @ curl
+    assert abs(a - a_ref).max() <= 1e-14 * abs(a_ref).max()
+
+
 @pytest.mark.parametrize("shape", ["spheres", "rods"])
 def test_photonic_crystal(shape):
     g = yee.YeeGrid((6, 6, 6), boundary="bloch", phases=(0.4 * np.pi, 0.25 * np.pi, 0.1 * np.pi))
@@ -113,6 +160,17 @@ def test_grid_validation():
     with pytest.raises(ValueError):
         yee.YeeGrid((4, 4, 4), boundary="pmc")
     assert yee.YeeGrid((2, 2, 2), boundary="bloch", phases=(2 * np.pi, 0, 0)).phases == (0.0, 0.0, 0.0)
+    assert yee.YeeGrid((2, 2, 2), boundary="bloch", phases=(-0.5 * np.pi, 0, 0)).phases == (1.5 * np.pi, 0.0, 0.0)
+
+
+def test_tiny_negative_phase_is_the_gamma_point():
+    """np.mod(-1e-17, 2 pi) is exactly 2 pi, whose wrap factor is snapped to 1: the matrix is the
+    k = 0 one, so the reduced phase must be 0 for the null-space count and the reference to agree."""
+    g = yee.YeeGrid((3, 3, 4), boundary="bloch", phases=(-1e-17, 0.0, 0.0))
+    assert g.phases == (0.0, 0.0, 0.0) and not g.is_complex
+    dense = _dense_pencil(*yee.assemble(g))
+    zeros = np.count_nonzero(np.abs(dense) < 1e-10 * dense.max())
+    assert zeros == g.null_space_dimension() == np.count_nonzero(yee.exact_eigenvalues(g) == 0) == g.node_count + 2
 
 
 def test_case_writers(tmp_path):

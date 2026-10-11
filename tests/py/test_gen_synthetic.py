@@ -1,10 +1,12 @@
 """Tests for tools/gen/synthetic.py: exact spectra against dense eigensolvers on small sizes."""
 import json
+import re
 
 import numpy as np
 import pytest
 import scipy.linalg as sl
 import scipy.sparse as sp
+from scipy.sparse.csgraph import connected_components
 
 from tools import case
 from tools.gen import synthetic as syn
@@ -38,6 +40,32 @@ def test_nearest_k_closed_skips_ties():
     assert syn.nearest_k_closed(w, 10.0, 6) == 6
     with pytest.raises(ValueError):
         syn.nearest_k_closed(w, 0.0, 7)
+
+
+def test_nearest_k_closed_requires_a_gap_the_solver_resolves():
+    """At tol = 1e-10 an accepted eigenvalue may be off by tol cond(B) (rho + |lambda|): distances
+    closer than SEPARATION times that tie, however large their relative difference."""
+    w = np.array([-1.0, 1e-9, 1.03e-9, 3e-9, 1.0])        # rho = 1: required gap ~1e-9
+    assert syn.nearest_k_closed(w, 0.0, 1) == 2               # 1e-9 and 1.03e-9 tie
+    assert syn.nearest_k_closed(w, 0.0, 1, cond_b=10.0) == 3  # a pencil resolves cond(B) times less
+    assert syn.nearest_k_closed(np.append(w, 1e3), 0.0, 1) == 3   # so does a 1000x larger ||A||
+    assert syn.nearest_k_closed(w, 0.0, 1, tol=1e-13) == 1
+    assert syn.eigenvalue_error_bound(2.0, 1.0, cond_b=10.0) == pytest.approx(3e-9)
+
+
+@pytest.mark.parametrize("n,seed,b_cond", [(100_000, 200, None), (10_000, 310, 1e2)],
+                         ids=["syn-zero-cluster-real-1e5", "syn-ghep-zero-cluster-complex-1e4"])
+def test_zero_cluster_targets_are_decidable_at_the_default_tolerance(n, seed, b_cond):
+    """Regression: these presets' sigma=0 targets had gaps of 2.5e-11 and 3.3e-11 between the k-th
+    and (k+1)-th distance, below the eigenvalue error an accepted solution may have (1e-10 and,
+    with cond(B), ~1e-8): a correct solver could return the (k+1)-th eigenvalue instead."""
+    cond_b = 1.0 if b_cond is None else syn.congruence_cond_bound(b_cond)
+    spec = syn.spectrum_preset("zero-cluster", n, seed, cond_b=cond_b)
+    w = spec.eigenvalues
+    for t in spec.targets:
+        d, k = np.sort(np.abs(w - t["sigma"])), t["k"]
+        error = syn.DEFAULT_TOL * cond_b * (np.abs(w).max() + abs(t["sigma"]) + d[k])
+        assert d[k] - d[k - 1] > syn.SEPARATION * error and k <= 30
 
 
 def test_targets_and_inertia():
@@ -96,12 +124,19 @@ def test_stencil_operator_matches_dense_and_has_full_stencil(order, points):
     assert shifted.getnnz(axis=1).max() == points
 
 
-def test_shift_between_levels_avoids_eigenvalues():
+def test_shift_between_levels_avoids_eigenvalues(tmp_path):
     w = np.array([0.0, 1.0, 1.0, 2.0, 3.0])
     c = syn.shift_between_levels(w, 0.5)
     assert 1.0 < c < 2.0
     with pytest.raises(ValueError):
         syn.laplacian((3,), None)
+    # one level: no shift avoids it (the old clamp returned the eigenvalue itself, A = 0)
+    with pytest.raises(ValueError, match="two distinct"):
+        syn.shift_between_levels([4.0, 4.0], 0.5)
+    with pytest.raises(ValueError, match="two distinct"):
+        syn.make_laplacian_case("t", (1, 1), None, 0.5, root=tmp_path)
+    with pytest.raises(ValueError, match="two distinct"):
+        syn.stencil_shift((1, 1, 1), 1, 0.5)
 
 
 # ------------------------------------------------------------- (b, c) prescribed spectra
@@ -115,14 +150,24 @@ def test_prescribed_hermitian_matches_spectrum(kind, complex_):
     assert np.iscomplexobj(a.data) == complex_
     _assert_hermitian(a)
     assert a.getnnz(axis=1).max() <= 3 * 8
+    # the staggered second layer couples all blocks: no permuted direct sum of small problems
+    assert connected_components(abs(a), directed=False)[0] == 1
     assert _max_rel_err(sl.eigvalsh(a.toarray()), spec.eigenvalues) < 1e-13
     for t in spec.targets:
         assert t["k"] == syn.nearest_k_closed(spec.eigenvalues, t["sigma"], t["k"])
 
 
 def test_spectrum_presets_have_their_features():
-    w = syn.spectrum_preset("zero-cluster", 1000, 3).eigenvalues
-    assert np.count_nonzero(np.abs(w) <= 1e-6) == 100
+    spec = syn.spectrum_preset("zero-cluster", 1000, 3)
+    h, w = spec.params["cluster_halfwidth"], spec.eigenvalues
+    assert h == pytest.approx(100 * syn.SEPARATION * syn.DEFAULT_TOL)   # mean spacing = required gap
+    assert np.count_nonzero(np.abs(w) <= h) == 100 and np.all(np.abs(w[np.abs(w) > h]) >= 0.05)
+    h_pencil = syn.spectrum_preset("zero-cluster", 1000, 3, cond_b=900.0).params["cluster_halfwidth"]
+    assert h_pencil == pytest.approx(900.0 * h)
+    with pytest.raises(ValueError, match="n >= 40"):
+        syn.spectrum_preset("zero-cluster", 39, 0)
+    with pytest.raises(ValueError, match="regular part"):
+        syn.spectrum_preset("zero-cluster", 100_000, 0, cond_b=1e4)
     _, counts = syn.distinct_levels(syn.spectrum_preset("multiplicity", 1000, 3).eigenvalues)
     assert counts.max() >= 6 and counts[counts > 1].sum() >= 600
     spec = syn.spectrum_preset("near-singular", 1000, 3)
@@ -135,6 +180,18 @@ def test_spectrum_presets_have_their_features():
         syn.spectrum_preset("nope", 10, 0)
 
 
+@pytest.mark.parametrize("kind", syn.SPECTRUM_KINDS)
+def test_target_descriptions_quote_no_eigenvalues(kind):
+    """meta.json carries no reference values (docs/FORMATS.md section 1): no number in a target's
+    'why' may reproduce an eigenvalue (the near-singular and multiplicity presets quoted them)."""
+    spec = syn.spectrum_preset(kind, 1000, seed=4)
+    w = spec.eigenvalues
+    for t in spec.targets:
+        for number in re.findall(r"\d*\.?\d+(?:[eE][-+]?\d+)?", t["why"]):
+            x = float(number)
+            assert not np.any(np.abs(np.abs(w) - x) <= 1e-5 * np.abs(w)), (t["why"], number)
+
+
 def test_magnitude_grouping_keeps_rows_local():
     """With grouping='magnitude' (unpermuted) row i only mixes eigenvalues l <= i + 11 (its offset
     block straddles two aligned blocks), so |a_ij| <= max_(l <= i+11) |lambda_l| by Cauchy-Schwarz:
@@ -143,6 +200,7 @@ def test_magnitude_grouping_keeps_rows_local():
     bound = w[np.minimum(np.arange(400) + 11, 399)] * (1 + 1e-12)
     a = syn.prescribed_hermitian(w, block=8, seed=4, grouping="magnitude", permute=False)
     assert np.all(abs(a).max(axis=1).toarray().ravel() <= bound)
+    assert connected_components(abs(a), directed=False)[0] == 1        # the form congruence_pair uses
     a = syn.prescribed_hermitian(w, block=8, seed=4, grouping="random", permute=False)
     assert not np.all(abs(a).max(axis=1).toarray().ravel() <= bound)
     with pytest.raises(ValueError):
@@ -158,11 +216,12 @@ def test_congruence_pair_matches_spectrum(complex_):
     _assert_hermitian(b)
     bd = b.toarray()
     sl.cholesky(bd)                                     # B is HPD
-    assert np.linalg.cond(bd) <= 9 * 1e3
+    assert np.linalg.cond(bd) <= syn.congruence_cond_bound(1e3)
     w = sl.eigh(a.toarray(), bd, eigvals_only=True)
     assert _max_rel_err(w, spec.eigenvalues) < 1e-12
     # rows i..i+3 of M (W's band) touch at most 4 offset blocks, widened by the band of W
     assert a.getnnz(axis=1).max() <= 4 * 8 + 3
+    assert connected_components(abs(a), directed=False)[0] == 1
 
 
 # ------------------------------------------------------------------------- case writers / CLI

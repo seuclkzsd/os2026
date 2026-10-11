@@ -77,7 +77,7 @@ class YeeGrid:
             raise ValueError("Bloch phases require boundary='bloch'")
         object.__setattr__(self, "cells", tuple(int(c) for c in self.cells))
         object.__setattr__(self, "lengths", tuple(float(x) for x in self.lengths))
-        object.__setattr__(self, "phases", tuple(float(np.mod(p, 2 * np.pi)) for p in self.phases))
+        object.__setattr__(self, "phases", tuple(_reduce_phase(p) for p in self.phases))
 
     @property
     def spacing(self) -> tuple[float, float, float]:
@@ -111,6 +111,17 @@ class YeeGrid:
         if self.boundary == "pec":
             return self.node_count
         return self.node_count + (2 if all(p == 0.0 for p in self.phases) else 0)
+
+
+def _reduce_phase(phase: float) -> float:
+    """phase modulo 2 pi in [0, 2 pi).
+
+    np.mod rounds a tiny negative phase (e.g. -1e-17 on a k-path through Gamma) up to exactly
+    2 pi; _wrap_factor would then snap exp(2 pi i) to 1 and assemble the k = 0 matrix, while the
+    spectrum formula and the null-space count still saw k != 0. Such a phase is 0 to rounding.
+    """
+    p = float(np.mod(phase, 2 * np.pi))
+    return 0.0 if p >= 2 * np.pi else p
 
 
 def _wrap_factor(phase: float) -> float | complex:
@@ -301,21 +312,25 @@ def _meta(grid: YeeGrid, problem: str, description: str, params: dict[str, Any],
             "inertia": inertia, "scenarios": scenarios}
 
 
-def _exact_targets(w: np.ndarray) -> list[dict[str, Any]]:
+def _exact_targets(w: np.ndarray, cond_b: float) -> list[dict[str, Any]]:
     """Low modes (between the 3rd and 4th nonzero levels; level 0 is the null space) and a
-    higher band (25th level): both far from the gradient null space relative to their k."""
-    return [target_between_levels(w, 3, 10, "lowest resonances above the gradient null space"),
-            target_between_levels(w, 25, 20, "higher band, many polarization-degenerate pairs")]
+    higher band (25th level): both far from the gradient null space relative to their k.
+    cond_b = cond(B) of the stored pencil (1 for the standard form) sets the decidable k."""
+    return [target_between_levels(w, 3, 10, "lowest resonances above the gradient null space",
+                                  cond_b=cond_b),
+            target_between_levels(w, 25, 20, "higher band, many polarization-degenerate pairs",
+                                  cond_b=cond_b)]
 
 
 def make_homogeneous_case(name: str, grid: YeeGrid, form: str, root: str | Path) -> Path:
     """Empty PEC cavity or homogeneous Bloch cell (eps = mu = 1) with its exact spectrum."""
     a, b, problem = _pencil(grid, form)
     w = exact_eigenvalues(grid)
+    cond_b = 1.0 if b is None else float(b.diagonal().max() / b.diagonal().min())
     what = "PEC cavity" if grid.boundary == "pec" else "Bloch-periodic cell"
     meta = _meta(grid, problem, f"empty {what} {grid.cells} cells, curl-curl ({form} form)",
                  {"form": form, "eps": 1.0, "mu": 1.0}, homogeneous=True)
-    return write_case(name, a, b, meta=meta, targets=_exact_targets(w), root=root, eigenvalues=w,
+    return write_case(name, a, b, meta=meta, targets=_exact_targets(w, cond_b), root=root, eigenvalues=w,
                       ref_note=("discrete Yee/FIT spectrum: sum_d (2/h_d sin(theta_d))^2 with TE/TM "
                                 "multiplicities and the gradient null space; exact up to assembly rounding"))
 

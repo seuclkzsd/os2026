@@ -6,13 +6,17 @@ Pipeline per matrix (archives are untrusted data):
      raise Skipped with the reason). A finished download is recorded in download.json (url,
      bytes, sha256) and reused on later runs; anything else in the directory is never trusted:
      an incomplete directory is only replaced with --refresh.
-  2. extract with tarfile filter='data' (no absolute paths, links out of the tree, devices) after
-     checking the total unpacked size, and pick <Name>.mtx or an auxiliary member such as
+  2. verify the gzip stream (CRC-32 and length, which tarfile alone never checks) and the unpacked
+     size, extract with tarfile filter='data' (no absolute paths, links out of the tree, devices)
+     and pick <Name>.mtx or an auxiliary member such as
      <Name>_M.mtx (the Guettel TEM archives ship the pencil (C, M): curl-curl and mass matrix).
-  3. scipy.io.mmread; a 'general' file holding a single triangle is symmetrized; explicit zeros are
-     dropped; the matrix must be Hermitian (complex-symmetric matrices are rejected: they are not
-     valid cases); an O(eps) defect is removed by taking the Hermitian part.
-  4. problem by inspection: one matrix -> HEP; a pair -> GHEP when B is proven HPD by a symmetric
+  3. scipy.io.mmread (integer files become float64); explicit zeros are dropped, then a 'general'
+     file holding a single triangle is symmetrized; the matrix must be Hermitian (complex-symmetric
+     matrices are rejected: they are not valid cases); an O(eps) defect is removed by taking the
+     Hermitian part.
+  4. the file must match the collection index (field, n, nnz; spd of a pencil's B) - the only
+     integrity check available, as the collection publishes no checksums.
+     Problem by inspection: one matrix -> HEP; a pair -> GHEP when B is proven HPD by a symmetric
      diagonal-pivoting factorization (Sylvester inertia), GHIEP otherwise.
   5. targets: sigma inside the spectrum from a cheap Rayleigh-Ritz estimate (never from reference
      solutions): Krylov Ritz values of a Hermitian pencil with HPD B lie in [lambda_min, lambda_max]
@@ -27,6 +31,7 @@ Usage (from the repository root):
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import http.client
 import json
@@ -35,6 +40,7 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -67,8 +73,9 @@ class Matrix:
     is set, an auxiliary matrix shipped in the same archive (e.g. the mass matrix TEM27623_M).
 
     n, nnz, field and spd are the collection index values (ssstats.csv, 2023-10; n/nnz None where
-    the index has no entry, as for auxiliary members); field and Hermitian-ness are re-checked on
-    the downloaded file. archive_mb is the size of the (possibly shared) archive.
+    the index has no entry, as for auxiliary members; nnz counts both triangles without explicit
+    zeros). fetch_case checks the downloaded file against them (check_index; spd where a pencil's B
+    is tested for definiteness anyway). archive_mb is the size of the (possibly shared) archive.
     """
     group: str
     name: str
@@ -184,15 +191,28 @@ def _download(url: str, dest: Path, *, max_bytes: int, timeout: float, max_secon
 
 
 def _extract(archive: Path, dest: Path, max_unpacked: int) -> None:
-    """Extract the archive into dest with filter='data' after checking its unpacked size."""
+    """Extract the archive into dest with filter='data' after verifying it.
+
+    The gzip stream is first decompressed to its end, because only there are its CRC-32 and
+    length checked: tarfile stops reading at the tar end-of-archive marker, so a corrupted
+    payload (e.g. a changed byte in a stored deflate block) would otherwise be extracted
+    silently. That pass stops after max_unpacked bytes (decompression bomb); the member sizes
+    are checked as well, since a sparse member unpacks to more than the data stored for it.
+    Truncated or corrupt streams (EOFError, zlib.error, gzip.BadGzipFile) raise Skipped.
+    """
+    over_cap = Skipped(f"{archive.name}: unpacks to more than the {max_unpacked / 1e6:.0f} MB cap")
     try:
+        streamed = 0
+        with gzip.open(archive, "rb") as stream:
+            while chunk := stream.read(1 << 20):
+                streamed += len(chunk)
+                if streamed > max_unpacked:
+                    raise over_cap
         with tarfile.open(archive, "r:gz") as tf:
-            unpacked = sum(m.size for m in tf.getmembers() if m.isfile())
-            if unpacked > max_unpacked:
-                raise Skipped(f"{archive.name}: unpacks to {unpacked / 1e6:.0f} MB "
-                              f"(cap {max_unpacked / 1e6:.0f} MB)")
+            if sum(m.size for m in tf.getmembers() if m.isfile()) > max_unpacked:
+                raise over_cap
             tf.extractall(dest, filter="data")
-    except (tarfile.TarError, OSError) as exc:
+    except (tarfile.TarError, OSError, EOFError, zlib.error) as exc:
         raise Skipped(f"{archive.name}: unusable archive ({exc})") from exc
 
 
@@ -211,8 +231,9 @@ def obtain(matrix: Matrix, downloads: Path, *, base_url: str = BASE_URL, max_mb:
     (extraction directory, download record {url, bytes, sha256}).
 
     The directory must be new and empty; a completed earlier download (download.json, written
-    last) is reused; refresh=True deletes the directory and starts over. A failed fresh download
-    removes the directory it created, so a rerun starts clean.
+    last) is reused; refresh=True deletes the directory and starts over. A fresh download that
+    fails in any way (including an interrupt) removes the directory it created, so a rerun
+    starts clean.
     """
     folder = downloads / matrix.name
     extract_dir = folder / "extract"
@@ -230,10 +251,10 @@ def obtain(matrix: Matrix, downloads: Path, *, base_url: str = BASE_URL, max_mb:
         max_bytes = int(max_mb * 1e6)
         record = _download(url, archive, max_bytes=max_bytes, timeout=timeout, max_seconds=max_seconds)
         _extract(archive, extract_dir, UNPACK_FACTOR * max_bytes)
-    except Skipped:
-        shutil.rmtree(folder)
+        record_path.write_text(json.dumps(record, indent=2) + "\n")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
         raise
-    record_path.write_text(json.dumps(record, indent=2) + "\n")
     return extract_dir, record
 
 
@@ -255,28 +276,40 @@ def _restore_triangle(a: sp.csr_matrix) -> tuple[sp.csr_matrix, str | None]:
 
 
 def read_hermitian(path: Path) -> tuple[sp.csr_matrix, dict[str, Any]]:
-    """Read a MatrixMarket file as a full Hermitian CSR matrix. Raises Skipped otherwise.
+    """Read a MatrixMarket file as a full Hermitian CSR matrix (float64 or complex128). Raises
+    Skipped otherwise, also for malformed files.
 
+    Explicit zeros are dropped before the storage rule is applied: a 'general' file that stores
+    one triangle plus explicit zeros in the other still stores a single triangle numerically.
     Returns (A, info) with info = {mm_header, notes}.
     """
-    rows, cols, entries, fmt, field, symmetry = scipy.io.mminfo(path)
+    try:
+        rows, cols, entries, fmt, field, symmetry = scipy.io.mminfo(path)
+    except ValueError as exc:
+        raise Skipped(f"{path.name}: not a MatrixMarket file ({exc})") from exc
     header = {"rows": rows, "cols": cols, "entries": entries, "format": fmt, "field": field,
               "symmetry": symmetry}
     if rows != cols:
         raise Skipped(f"{path.name}: not square ({rows} x {cols})")
     if field == "pattern" or symmetry == "skew-symmetric":
         raise Skipped(f"{path.name}: {field}/{symmetry} matrix is not a Hermitian operator")
-    a = sp.csr_matrix(scipy.io.mmread(path, spmatrix=False))
-    a.sum_duplicates()
+    try:
+        a = sp.csr_matrix(scipy.io.mmread(path, spmatrix=False))
+    except ValueError as exc:
+        raise Skipped(f"{path.name}: unreadable MatrixMarket data ({exc})") from exc
     notes = []
-    if symmetry == "general":
-        a, note = _restore_triangle(a)
-        if note:
-            notes.append(note)
+    if field == "integer":
+        a = a.astype(np.float64)   # the case format stores float64 or complex128 only
+        notes.append("integer file stored as float64")
+    a.sum_duplicates()
     stored = a.nnz
     a.eliminate_zeros()
     if a.nnz < stored:
         notes.append(f"dropped {stored - a.nnz} explicit zeros")
+    if symmetry == "general":
+        a, note = _restore_triangle(a)
+        if note:
+            notes.append(note)
     defect = case.hermitian_defect(a)
     if defect > HERMITIAN_TOL:
         if np.iscomplexobj(a.data) and spla.norm(a - a.T) <= HERMITIAN_TOL * spla.norm(a):
@@ -289,6 +322,18 @@ def read_hermitian(path: Path) -> tuple[sp.csr_matrix, dict[str, Any]]:
         a = sp.csr_matrix(a.real)
         notes.append("complex file with zero imaginary parts: stored as real")
     return a, {"mm_header": header, "notes": notes}
+
+
+def check_index(matrix: Matrix, a: sp.csr_matrix, header: dict[str, Any]) -> None:
+    """Require the converted file to be the matrix the collection index describes: its field and,
+    where the index has them, n and nnz (full storage without explicit zeros, as read_hermitian
+    returns it). Archives come from a plain-HTTP mirror without published checksums, so these
+    facts are the integrity check left against a wrong, stale or substituted archive."""
+    found = {"field": header["field"], "n": a.shape[0], "nnz": a.nnz}
+    expected = {"field": matrix.field, "n": matrix.n, "nnz": matrix.nnz}
+    wrong = [f"{k}={found[k]} (index: {v})" for k, v in expected.items() if v is not None and found[k] != v]
+    if wrong:
+        raise Skipped(f"{matrix.key}.mtx does not match the collection index: {', '.join(wrong)}")
 
 
 # ============================================================================== inspection
@@ -408,6 +453,7 @@ def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[s
                                            timeout=timeout, max_seconds=max_seconds, refresh=refresh)
         extract_dir, record = archives[matrix.name]
         m, info = read_hermitian(find_mtx(extract_dir, matrix.key))
+        check_index(matrix, m, info["mm_header"])
         mats.append(m)
         sources.append({"group": matrix.group, "name": matrix.name, "file": f"{matrix.key}.mtx",
                         "url": record["url"], "archive_bytes": record["bytes"],
@@ -420,7 +466,11 @@ def fetch_case(name: str, *, root: str | Path = case.DEFAULT_ROOT, cases: dict[s
     else:
         if b.shape != a.shape:
             raise Skipped(f"{name}: A is {a.shape}, B is {b.shape}")
-        if is_hpd(b):
+        hpd = is_hpd(b)
+        if hpd != registry[spec.b].spd:
+            raise Skipped(f"{name}: B is {'' if hpd else 'not '}HPD by factorization, but the "
+                          f"collection index says spd={registry[spec.b].spd}")
+        if hpd:
             problem = "GHEP"
             inertia["B"] = [0, 0, b.shape[0]]
         else:
