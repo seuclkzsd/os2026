@@ -15,3 +15,6 @@ __pycache__/
 .DS_Store
 # large source material kept outside version control
 开放原子上海.docx
+
+# agent worktrees created by the harness
+/.claude/

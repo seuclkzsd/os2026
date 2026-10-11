@@ -3,7 +3,9 @@
 // Scalar set: T in {double, cplx}.
 //
 // Definitions used throughout (docs/DESIGN.md §4.5):
-//   ||A||_2, ||B||_2 : certified upper estimates from ~20 Lanczos steps (B = I -> 1)
+//   ||A||_2, ||B||_2 : largest |Ritz value| after ~30 Lanczos steps (B = I -> 1). A Ritz value is a
+//                      LOWER bound of ||.||_2, which makes eta below an UPPER bound of the true
+//                      backward error (conservative acceptance). Typically within a few percent.
 //   scale            : ||A||_2 / ||B||_2, the natural eigenvalue magnitude of the problem
 //   backward error   : eta = ||A x - lambda B x||_2 / ((||A||_2 + |lambda| ||B||_2) ||x||_2)
 #pragma once
@@ -109,7 +111,7 @@ struct SolveReport {
   index_t nnz_b = 0;
   bool complex_scalars = false;
   ProblemType problem = ProblemType::Auto;  ///< resolved type
-  double norm2_a = 0.0;          ///< certified upper estimate of ||A||_2
+  double norm2_a = 0.0;          ///< Lanczos lower bound of ||A||_2 (conservative eta)
   double norm2_b = 1.0;          ///< idem for B (1 when B = I)
   double scale = 0.0;            ///< norm2_a / norm2_b
   double hermitian_defect_a = 0.0;

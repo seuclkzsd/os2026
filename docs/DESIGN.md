@@ -138,7 +138,7 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 
 ### 3.6 driver（`include/hsolve/solver.hpp`）
 1. **诊断**：规模、nnz、实/复（A 复 B 实时 `to_complex`）、厄密缺陷（超 `hermitian_tol` 抛错，
-   否则 `hermitian_part`）、‖A‖₂/‖B‖₂ 估计（~20 步 Lanczos，Ritz 值 + 残差给出有保证的上界）、
+   否则 `hermitian_part`）、‖A‖₂/‖B‖₂ 估计（~30 步 Lanczos 的最大 |Ritz 值|：它是 ‖·‖₂ 的**下界**，从而 η 是真实后向误差的**上界**，验收偏保守）、
    scale = ‖A‖₂/‖B‖₂、B 正定性（`compute_inertia(pencil, 0, 1)`）。
 2. **策略**：HEP/GHEP → 位移反演 + `lanczos_krylov_schur`（B 内积）；GHIEP → 位移反演 +
    `krylov_schur_general`；谱两端且 k 小 → 不分解，直接 Lanczos。
@@ -196,8 +196,9 @@ Ritz 估计 ≤ tol_inner·|θ|（θ = 0 时用最大 |Ritz 值|）。
 ### 4.5 残差与精度指标（报告中全部给出）
 - 绝对残差 r = ‖A x − λ B x‖₂
 - 相对残差 r / (|λ|·‖B x‖₂)（λ = 0 时退化为 r / ‖Bx‖₂）
-- **后向误差 η = r / ((‖A‖₂ + |λ|·‖B‖₂)·‖x‖₂)**，‖·‖₂ 用 Lanczos 得到的**上界**估计（使 η 偏
-  保守而非偏乐观）。driver 以 η ≤ tol 为接受标准。scale = ‖A‖₂/‖B‖₂。
+- **后向误差 η = r / ((‖A‖₂ + |λ|·‖B‖₂)·‖x‖₂)**，‖·‖₂ 取 Lanczos 最大 |Ritz 值|——它是 ‖·‖₂ 的
+  **下界**，所以算出的 η ≥ 真实 η（验收偏保守而非偏乐观；1-范数是上界，会使 η 偏乐观，故不用）。
+  driver 以 η ≤ tol 为接受标准。scale = ‖A‖₂/‖B‖₂。
 - 与参考解比较：特征值相对误差；特征向量用子空间夹角（重特征值按整个簇的子空间比较）。
 
 ## 5. 编码规范
