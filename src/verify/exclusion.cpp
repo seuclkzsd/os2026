@@ -182,6 +182,8 @@ void validate(index_t n, const ExclusionOptions& opt, index_t x_rows, index_t m,
       if (!std::isfinite(t)) HS_THROW(InvalidInput, "exclusion_check: deflated_theta must be finite");
   if (opt.max_block_steps < 0 || opt.max_new_pairs < 1)
     HS_THROW(InvalidInput, "exclusion_check: need max_block_steps >= 0 and max_new_pairs >= 1");
+  if (opt.max_krylov_vectors < 0 || !(opt.max_memory_bytes >= 0.0) || !std::isfinite(opt.max_memory_bytes))
+    HS_THROW(InvalidInput, "exclusion_check: need max_krylov_vectors >= 0 and a finite max_memory_bytes >= 0");
   if (!(opt.tol > 0.0) || !std::isfinite(opt.tol))
     HS_THROW(InvalidInput, "exclusion_check: tol must be positive and finite");
   if (opt.start_scaling) {
@@ -307,11 +309,30 @@ ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_i
     return r;
   }
 
-  // ---- 3. Plan s from delta and run one Lanczos cycle on the deflated operator.
+  // ---- 3. Plan s from delta, check it against the resource budget, and run one Lanczos cycle on
+  // the deflated operator.
   const bool cplx_scalars = is_complex_v<T>;
   index_t s = exclusion_block_steps(r.epsilon, opt.delta, r.dimension, p, r.kappa, cplx_scalars);
   if (opt.max_block_steps > 0) s = std::min(s, opt.max_block_steps);
   r.block_steps_planned = s;
+  const ExclusionRunSize plan = exclusion_run_size(n, m, s, p, opt.max_new_pairs, cplx_scalars);
+  r.krylov_vectors_planned = plan.krylov_vectors;
+  r.memory_bytes_planned = plan.bytes;
+  if ((opt.max_krylov_vectors > 0 && plan.krylov_vectors > opt.max_krylov_vectors) ||
+      (opt.max_memory_bytes > 0.0 && plan.bytes > opt.max_memory_bytes)) {
+    r.over_budget = true;
+    r.status = ExclusionStatus::Inconclusive;
+    r.failure_probability = 1.0;
+    std::ostringstream st;
+    st.precision(6);
+    st << "no statement: the plan (s = " << s << " block steps of p = " << p << ", " << plan.krylov_vectors
+       << " Krylov vectors" << (plan.covers ? " covering the complement" : "") << ", " << plan.bytes
+       << " bytes; eps = " << r.epsilon << ", kappa = " << r.kappa << ") exceeds the resource budget ("
+       << opt.max_krylov_vectors << " vectors, " << opt.max_memory_bytes
+       << " bytes; 0 = no limit): nothing was run, fall back to exact counts";
+    r.statement = st.str();
+    return r;
+  }
   const index_t n_free = r.dimension;
   // Basis size: s blocks; the single-vector solver needs ncv > nev (or the whole free space).
   index_t ncv = std::max<index_t>(s * p, p == 1 ? 2 : 1);

@@ -3,6 +3,9 @@
 //   * a start scaling without b_inner (B = I) is charged in kappa = cond(S^2); before the fix
 //     kappa was 1 and a hidden eigenvalue under a tiny s_i passed with "P <= 1e-13";
 //   * the rank test of the B-orthonormalization ignores the column scaling of X;
+//   * a plan beyond the resource budget ends Inconclusive before the Krylov run; the step
+//     planner is logarithmic and agrees with a linear scan; the cost model honours the budget;
+//     exclusion_run_size matches the run the check performs.
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -179,6 +182,152 @@ TYPED_TEST(VerifyFixScaling, ColumnScaledBasisIsAccepted) {
   near(0, 1) = T(1e3);
   near(1, 1) = T(1e-6);  // column 1 = 1e3 (e_0 + 1e-9 e_1)
   EXPECT_EQ(error_code_of([&] { hs::exclusion_check<T>(op, nullptr, near, 0.0, 1.0 / 9.0, o); }), invalid);
+}
+
+// ------------------------------------------------ resource budget and planner (findings 3, 7)
+
+// A narrow gap: the plan (eps ~ 1e-4, N = 1e5, p = 4: ~5000 vectors, ~4 GB) ends Inconclusive
+// before anything is allocated or applied.
+TEST(VerifyFixBudget, NarrowGapPlanIsRefusedBeforeTheRun) {
+  const index_t n = 100000;
+  hs::test::DiagonalOperator<double> op(hidden_spectrum<double>(n));
+  const DenseMatrix<double> none(n, 0);
+  ExclusionOptions o = hidden_options(4, 1);
+  o.pass_radius = 1.0 / (1.0 - 1e-4);
+  const auto r = hs::exclusion_check<double>(op, nullptr, none, 0.0, 1.0, o);
+  EXPECT_EQ(r.status, ExclusionStatus::Inconclusive) << r.statement;
+  EXPECT_TRUE(r.over_budget);
+  EXPECT_EQ(r.op_applications, 0);
+  EXPECT_EQ(r.block_steps, 0);
+  EXPECT_GT(r.block_steps_planned, 1000);
+  EXPECT_GT(r.krylov_vectors_planned, o.max_krylov_vectors);
+  EXPECT_GT(r.memory_bytes_planned, 3e9);
+  EXPECT_EQ(r.failure_probability, 1.0);
+  EXPECT_NE(r.statement.find("resource budget"), std::string::npos) << r.statement;
+  // The byte budget alone refuses it too; a wide gap fits and runs.
+  ExclusionOptions bytes_only = o;
+  bytes_only.max_krylov_vectors = 0;
+  bytes_only.max_memory_bytes = 1e8;
+  EXPECT_TRUE(hs::exclusion_check<double>(op, nullptr, none, 0.0, 1.0, bytes_only).over_budget);
+  ExclusionOptions wide = hidden_options(4, 1);
+  wide.max_memory_bytes = 1e8;
+  const auto w = hs::exclusion_check<double>(op, nullptr, none, 0.0, 1.0, wide);
+  EXPECT_FALSE(w.over_budget);
+  EXPECT_EQ(w.status, ExclusionStatus::Detected) << w.statement;
+  EXPECT_LE(w.memory_bytes_planned, 1e8);
+}
+
+// A small complement whose plan covers it (a full-space cycle) is refused under a vector budget
+// below N and runs exactly without limits (0).
+TEST(VerifyFixBudget, CoveringPlanHonoursTheBudgetAndZeroMeansNoLimit) {
+  const index_t n = 300;
+  hs::test::DiagonalOperator<double> op(hidden_spectrum<double>(n));
+  const DenseMatrix<double> none(n, 0);
+  ExclusionOptions o = hidden_options(1, 3);
+  o.pass_radius = 1.0 / (1.0 - 1e-5);  // eps ~ 9e-6: the plan covers the complement
+  o.max_krylov_vectors = 100;
+  const auto refused = hs::exclusion_check<double>(op, nullptr, none, 0.0, 1.0, o);
+  EXPECT_TRUE(refused.over_budget);
+  EXPECT_EQ(refused.krylov_vectors_planned, n);
+  EXPECT_EQ(refused.op_applications, 0);
+  o.max_krylov_vectors = 0;
+  o.max_memory_bytes = 0.0;
+  const auto run = hs::exclusion_check<double>(op, nullptr, none, 0.0, 1.0, o);
+  EXPECT_FALSE(run.over_budget);
+  EXPECT_TRUE(run.exact);
+  EXPECT_EQ(run.status, ExclusionStatus::Detected) << run.statement;
+  EXPECT_EQ(error_code_of([&] {
+              ExclusionOptions bad = o;
+              bad.max_krylov_vectors = -1;
+              hs::exclusion_check<double>(op, nullptr, none, 0.0, 1.0, bad);
+            }),
+            hs::Error::Code::InvalidInput);
+}
+
+// exclusion_run_size mirrors the run: the number of Ritz values is the Krylov basis size.
+TEST(VerifyFixBudget, RunSizeMatchesThePerformedRun) {
+  for (index_t n : {60, 400})
+    for (index_t p : {1, 2, 4})
+      for (index_t steps : {1, 2, 5, 12, 40}) {
+        hs::test::DiagonalOperator<double> op(hidden_spectrum<double>(n));
+        DenseMatrix<double> x(n, 1);
+        x(n - 1, 0) = 1.0;  // one deflated (exact) eigenvector
+        ExclusionOptions o = hidden_options(p, 4);
+        o.max_block_steps = steps;
+        o.delta = 1e-30;
+        const auto r = hs::exclusion_check<double>(op, nullptr, x, 0.0, 1.0, o);
+        const auto size = hs::exclusion_run_size(n, 1, r.block_steps_planned, p, o.max_new_pairs, false);
+        EXPECT_EQ(r.krylov_vectors_planned, size.krylov_vectors);
+        EXPECT_EQ(static_cast<index_t>(r.ritz_all.size()), size.krylov_vectors)
+            << "n=" << n << " p=" << p << " steps=" << steps;
+        EXPECT_EQ(r.exact, size.covers) << "n=" << n << " p=" << p << " steps=" << steps;
+        EXPECT_GT(size.bytes, 8.0 * static_cast<double>(n) * static_cast<double>(size.krylov_vectors));
+      }
+  const auto big = hs::exclusion_run_size(100000, 10, 26, 4, 1, true);
+  EXPECT_EQ(big.krylov_vectors, 104);
+  EXPECT_FALSE(big.covers);
+  EXPECT_NEAR(big.bytes, 16.0 * (1e5 * (30 + 104 + 4 + 8 + 1) + 3.0 * 104 * 104), 1.0);
+  EXPECT_EQ(error_code_of([] { hs::exclusion_run_size(10, 10, 1, 1, 1, false); }), hs::Error::Code::InvalidInput);
+}
+
+/// The old planner: a linear scan (reference).
+index_t linear_steps(double eps, double delta, index_t big_n, index_t p, double kappa, bool c) {
+  const index_t cover = std::max<index_t>((big_n + p - 1) / p + 1, 1);
+  for (index_t s = 1; s < cover; ++s)
+    if (hs::exclusion_failure_bound(eps, s, big_n, p, kappa, c) <= delta) return s;
+  return cover;
+}
+
+TEST(VerifyFixBudget, PlannerAgreesWithALinearScanAndIsLogarithmic) {
+  for (bool c : {false, true})
+    for (double eps : {1e-7, 1e-3, 0.02, 0.3, 0.99})
+      for (index_t big_n : {0, 1, 2, 7, 40, 1000, 30000})
+        for (index_t p : {1, 3, 8})
+          for (double delta : {1e-3, 1e-12})
+            for (double kappa : {1.0, 1e8})
+              EXPECT_EQ(hs::exclusion_block_steps(eps, delta, big_n, p, kappa, c),
+                        linear_steps(eps, delta, big_n, p, kappa, c))
+                  << "eps=" << eps << " N=" << big_n << " p=" << p << " delta=" << delta << " kappa=" << kappa
+                  << " complex=" << c;
+  // Huge step counts: a covering answer for N = 1e7 (the linear scan took 2.1 s) and s ~ 3.7e7 for
+  // N = 1e9 (a linear scan: ~3.7e7 bound evaluations, ~10 s).
+  const auto t0 = std::chrono::steady_clock::now();
+  EXPECT_EQ(hs::exclusion_block_steps(1e-12, 1e-12, 10000000, 1, 1.0, false), 10000001);
+  const index_t s = hs::exclusion_block_steps(1e-12, 1e-12, 1000000000, 1, 1.0, false);
+  const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  EXPECT_LT(sec, 0.5);
+  EXPECT_GT(s, 10000000);
+  EXPECT_LT(s, 1000000001);
+  EXPECT_LE(hs::exclusion_failure_bound(1e-12, s, 1000000000, 1, 1.0, false), 1e-12);
+  EXPECT_GT(hs::exclusion_failure_bound(1e-12, s - 1, 1000000000, 1, 1.0, false), 1e-12);
+}
+
+TEST(VerifyFixBudget, CostModelSkipsPlansBeyondTheBudget) {
+  hs::CertificateCostInputs in;
+  in.n = 100000;
+  in.deflated = 10;
+  in.factorize_s = 1.8;
+  in.counter_analysis_s = 0.06;
+  in.apply1_s = 0.08;
+  in.epsilon = 1e-4;  // every p in {1, 2, 4, 8} plans more than 512 vectors
+  const auto refused = hs::certificate_cost(in);
+  EXPECT_TRUE(std::isinf(refused.randomized_s));
+  EXPECT_EQ(refused.recommended, hs::CertificateMethod::Exact);
+  in.max_krylov_vectors = 0;
+  in.max_memory_bytes = 0.0;
+  const auto unlimited = hs::certificate_cost(in);
+  EXPECT_TRUE(std::isfinite(unlimited.randomized_s));
+  EXPECT_GT(unlimited.block_size, 0);
+  // A wide gap fits the default budget.
+  hs::CertificateCostInputs wide;
+  wide.n = 100000;
+  wide.deflated = 10;
+  wide.factorize_s = 1.8;
+  wide.apply1_s = 0.08;
+  wide.epsilon = 0.6;
+  const auto ok = hs::certificate_cost(wide);
+  EXPECT_TRUE(std::isfinite(ok.randomized_s));
+  EXPECT_EQ(ok.recommended, hs::CertificateMethod::Randomized);
 }
 
 }  // namespace

@@ -74,10 +74,72 @@ index_t exclusion_block_steps(double epsilon, double delta, index_t dimension, i
   if (block_size < 1) HS_THROW(InvalidInput, "exclusion_block_steps: block_size must be >= 1");
   // A Krylov space of ceil(N / p) blocks covers the complement (exact, delta = 0); one more block
   // keeps the solver's layout feasible.
-  const index_t cover = (dimension + block_size - 1) / block_size + 1;
-  for (index_t s = 1; s < cover; ++s)
-    if (exclusion_failure_bound(epsilon, s, dimension, block_size, kappa, complex_scalars) <= delta) return s;
-  return std::max<index_t>(cover, 1);
+  const index_t cover = std::max<index_t>((dimension + block_size - 1) / block_size + 1, 1);
+  const auto reaches = [&](index_t s) {
+    return exclusion_failure_bound(epsilon, s, dimension, block_size, kappa, complex_scalars) <= delta;
+  };
+  // The bound is non-increasing in s (both Chebyshev thresholds are), so `reaches` is monotone:
+  // double s until it holds (or the cover is reached), then bisect (lo fails, hi holds).
+  index_t hi = 1;
+  while (hi < cover && !reaches(hi)) hi = hi > (cover - 1) / 2 ? cover : 2 * hi;
+  if (hi >= cover) {
+    if (cover - 1 >= 1 && reaches(cover - 1)) {
+      hi = cover - 1;  // the doubling jumped over steps that already reach delta
+    } else {
+      return cover;
+    }
+  }
+  index_t lo = hi / 2;  // reaches(lo) is false (or lo == 0)
+  while (hi - lo > 1) {
+    const index_t mid = lo + (hi - lo) / 2;
+    if (reaches(mid)) {
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+  return hi;
+}
+
+ExclusionRunSize exclusion_run_size(index_t n, index_t deflated, index_t block_steps, index_t block_size,
+                                    index_t max_new_pairs, bool complex_scalars) {
+  if (n < 1 || deflated < 0 || deflated >= n || block_steps < 1 || block_size < 1 || max_new_pairs < 1)
+    HS_THROW(InvalidInput, "exclusion_run_size: need n >= 1, 0 <= deflated < n, block_steps >= 1, block_size >= 1, "
+                           "max_new_pairs >= 1 (got "
+                               << n << ", " << deflated << ", " << block_steps << ", " << block_size << ", "
+                               << max_new_pairs << ")");
+  const index_t big_n = n - deflated, p = block_size;
+  ExclusionRunSize r;
+  // s p >= N (or an overflowing product) reaches the whole complement.
+  const bool long_plan = block_steps >= (big_n + p - 1) / p;
+  index_t residual = 1;
+  if (p == 1) {
+    // exclusion_check asks for ncv = max(s, 2); ncv >= N is the full-space cycle.
+    const index_t ncv = std::max<index_t>(block_steps, 2);
+    r.covers = long_plan || ncv >= big_n;
+    r.krylov_vectors = r.covers ? big_n : ncv;
+  } else {
+    // Block layout (eigen block_dimensions): nev = min(max_new_pairs, ncv - 1), ncv = s p rounded
+    // up to p, at least round_up(nev + 1) + 2p; infeasible (one single-vector full-space cycle)
+    // unless 2 (ncv + p) <= N.
+    const auto round_up = [p](index_t x) { return (x + p - 1) / p * p; };
+    index_t ncv = 0;
+    if (!long_plan) {
+      const index_t nev = std::min(max_new_pairs, std::max<index_t>(1, block_steps * p - 1));
+      ncv = std::max(round_up(block_steps * p), round_up(nev + 1) + 2 * p);
+    }
+    r.covers = long_plan || p > big_n / 8 || ncv + p > big_n / 2;
+    r.krylov_vectors = r.covers ? big_n : ncv;
+    residual = r.covers ? 1 : p;
+  }
+  const double scalar = complex_scalars ? 16.0 : 8.0;
+  // X and B X (exclusion_check's B-orthonormal copy) plus the solver's basis [X V V_m].
+  const double cols = 3.0 * static_cast<double>(deflated) + static_cast<double>(r.krylov_vectors) +
+                      static_cast<double>(residual) + 2.0 * static_cast<double>(p) +
+                      static_cast<double>(max_new_pairs);
+  const double kv = static_cast<double>(r.krylov_vectors);
+  r.bytes = scalar * (static_cast<double>(n) * cols + 3.0 * kv * kv);
+  return r;
 }
 
 }  // namespace hs

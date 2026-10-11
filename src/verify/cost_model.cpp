@@ -37,6 +37,8 @@ CertificateCostEstimate certificate_cost(const CertificateCostInputs& in) {
       HS_THROW(InvalidInput, "certificate_cost: times and ratios must be finite and >= 0");
   if (!(in.stream_bytes_per_s > 0.0) || !(in.preference >= 1.0) || !(in.kappa >= 1.0))
     HS_THROW(InvalidInput, "certificate_cost: need stream_bytes_per_s > 0, preference >= 1, kappa >= 1");
+  if (in.max_krylov_vectors < 0 || !(in.max_memory_bytes >= 0.0) || !std::isfinite(in.max_memory_bytes))
+    HS_THROW(InvalidInput, "certificate_cost: need max_krylov_vectors >= 0 and a finite max_memory_bytes >= 0");
 
   CertificateCostEstimate est;
   const double count_s = in.count_ratio * in.factorize_s;
@@ -50,6 +52,11 @@ CertificateCostEstimate certificate_cost(const CertificateCostInputs& in) {
     for (index_t p : kBlockSizes) {
       const index_t s = exclusion_block_steps(in.epsilon, in.delta, big_n, p, in.kappa, in.complex_scalars);
       if (s < 1) continue;
+      // exclusion_check refuses a plan beyond its resource budget (Inconclusive, no run).
+      const ExclusionRunSize size = exclusion_run_size(in.n, m, s, p, 1, in.complex_scalars);
+      if ((in.max_krylov_vectors > 0 && size.krylov_vectors > in.max_krylov_vectors) ||
+          (in.max_memory_bytes > 0.0 && size.bytes > in.max_memory_bytes))
+        continue;
       double t = static_cast<double>(s) * apply_seconds(in, p);
       if (!in.coupling_known && m > 0) t += apply_seconds(in, m);
       // Block CGS2 (two passes) of step j sweeps [X V_j] (m + j p columns) twice per pass.

@@ -91,7 +91,11 @@
 //
 // Cost: one block application of Op to X (unless coupling_bound >= 0) plus s block applications of
 // p columns, block CGS2 against [X V] (2 passes), O((s p)^3) for the projected eigenproblem;
-// memory n (m + s p + 2p) scalars. No factorization.
+// memory about n (3m + s p + 3p + 1) scalars (exclusion_run_size). No factorization. s grows like
+// log(N kappa / delta) / sqrt(eps): a narrow gap plans large bases (real, N = 1e5, p = 4,
+// delta = 1e-12: eps = 1e-3 -> 1480 vectors, 1.2 GB; eps = 1e-4 -> 4992 vectors, 4 GB). The
+// resource budget (max_krylov_vectors, max_memory_bytes) therefore ends such a plan Inconclusive
+// BEFORE anything is allocated or applied; the caller falls back to exact counts.
 #pragma once
 
 #include <cstdint>
@@ -140,6 +144,17 @@ struct ExclusionOptions {
   const std::vector<double>* deflated_theta = nullptr;
   double rounding_margin = 1e-6;  ///< relative safety margin on 1/r (see Rounding), in [0, 0.5)
   index_t max_block_steps = 0;    ///< cap on s (0: none); a capped run may end Inconclusive
+  /// Resource budget of the Krylov run, checked on the plan BEFORE anything is allocated or
+  /// applied: a plan (s from delta, after max_block_steps) whose run (exclusion_run_size) needs
+  /// more Krylov vectors or more bytes ends Inconclusive with no operator application, and the
+  /// caller falls back to exact counts. 0 = no limit. The defaults keep a narrow gap from
+  /// allocating gigabytes (or a full-space run for a small N) on the 16/32 GB machine; at N = 1e5
+  /// (delta = 1e-12, kappa = 1) they admit eps >= 0.01 for p = 4 and 0.005 for p = 1 (the
+  /// measured data cases plan at most 144 vectors, eps >= 0.07); at N = 1e6 the bytes bind
+  /// first (real: eps >= 0.1 for p = 1). A driver should derive max_memory_bytes from its own
+  /// memory budget (what the factorization leaves of SolverConfig::memory_budget_gb).
+  index_t max_krylov_vectors = 512;
+  double max_memory_bytes = 1073741824.0;  ///< 1 GiB
   /// Ritz vectors returned on detection (the best by |theta|; new_count still counts all). 1 keeps
   /// the block layout smallest (3 block steps at least, against 4 for p of them).
   index_t max_new_pairs = 1;
@@ -150,7 +165,7 @@ enum class ExclusionStatus {
   Passed,       ///< no Ritz value with |theta| >= 1/r'; the probability statement holds
   Detected,     ///< some Ritz value has |theta| >= 1/r' (a missing pair, or one in (r, r'])
   Inconclusive  ///< no statement: eps <= 0 (gap too small / coupling too large), step cap hit,
-                ///< or kappa not finite
+                ///< plan beyond the resource budget, or kappa not finite
 };
 
 const char* exclusion_status_name(ExclusionStatus s);
@@ -175,6 +190,9 @@ struct ExclusionResult {
   index_t certified_inside = 0;  ///< #{|mu_i| >= 1/r + e}: eigenvalues certainly within r
   index_t block_size = 0;        ///< p
   index_t block_steps_planned = 0;  ///< s from delta (0 when no run)
+  index_t krylov_vectors_planned = 0;  ///< exclusion_run_size of the plan (0 when no plan)
+  double memory_bytes_planned = 0.0;
+  bool over_budget = false;      ///< the plan exceeded the resource budget: no run (Inconclusive)
   index_t block_steps = 0;       ///< block steps performed (Krylov space K_s)
   bool exact = false;            ///< the Krylov space spanned the whole complement (delta = 0)
   double max_ritz = 0.0;         ///< rho = max |Ritz value| on the complement
@@ -203,9 +221,25 @@ double exclusion_failure_bound(double epsilon, index_t block_steps, index_t dime
 
 /// Smallest s >= 1 with exclusion_failure_bound(...) <= delta; returns
 /// ceil(dimension / block_size) + 1 (a space covering the complement, exact) when that is
-/// smaller, and -1 for eps <= 0 or delta outside (0, 1). O(log) evaluations of the bound.
+/// smaller, and -1 for eps <= 0 or delta outside (0, 1). The bound is monotone in s: doubling
+/// then bisection, O(log s) evaluations of the bound.
 index_t exclusion_block_steps(double epsilon, double delta, index_t dimension, index_t block_size,
                               double kappa, bool complex_scalars);
+
+/// Size of the Krylov run of exclusion_check for s planned block steps (the layout of
+/// lanczos_krylov_schur, eigen.hpp: ncv = s p, at least 3p in block mode with one returned pair;
+/// a free space N below twice the block basis plus its residual block, or s p >= N, is searched by
+/// one single-vector cycle over the whole complement).
+struct ExclusionRunSize {
+  index_t krylov_vectors = 0;  ///< Krylov basis vectors (N when the run covers the complement)
+  bool covers = false;         ///< the run spans the whole complement (exact, delta = 0)
+  /// Peak memory of the run: n (3m [X, B X, the solver's copy of X] + krylov_vectors + 1 or p
+  /// [residual block] + 2p [start block, B W workspace] + max_new_pairs [returned vectors])
+  /// scalars + 3 krylov_vectors^2 scalars (projected matrices).
+  double bytes = 0.0;
+};
+ExclusionRunSize exclusion_run_size(index_t n, index_t deflated, index_t block_steps, index_t block_size,
+                                    index_t max_new_pairs, bool complex_scalars);
 
 /// The randomized exclusion check (header comment). op = (A - sigma B)^{-1} B, self-adjoint and
 /// positive-definite-inner-product-compatible with b_inner = B (nullptr: B = I); x = n x m found
@@ -214,7 +248,8 @@ index_t exclusion_block_steps(double epsilon, double delta, index_t dimension, i
 /// opt.pass_radius > r. x may hold any full-rank basis of the found span, with columns of any
 /// relative scaling (the rank test sees the column-equilibrated X: cond_B(X D^{-1/2}) above ~1e6 is
 /// rejected). Throws InvalidInput for invalid sizes/options, a rank-deficient x, or a non-finite
-/// operator output. Cost and memory: header comment. Not thread-safe for a shared op.
+/// operator output. Cost and memory: header comment; a plan beyond opt's resource budget returns
+/// Inconclusive before the Krylov run. Not thread-safe for a shared op.
 template <class T>
 ExclusionResult<T> exclusion_check(LinearOperator<T>& op, LinearOperator<T>* b_inner,
                                    const DenseMatrix<T>& x, double sigma, double radius,
@@ -312,7 +347,8 @@ SingleCertificate single_precision_certificate(InertiaCounter<T>& counter,
 //   single     t_counter_analysis + 2 count_ratio single_ratio t_factor (only when the rule holds)
 //   randomized t_apply(m) [coupling, unless known] + s(p) t_apply(p) + CGS2 sweeps, with
 //              t_apply(q) = t_apply1 (1 + rhs_ratio (q - 1)) and s(p) = exclusion_block_steps;
-//              the block size p in {1, 2, 4, 8} minimizing the total is chosen.
+//              the block size p in {1, 2, 4, 8} minimizing the total among those whose plan fits
+//              the check's resource budget is chosen (+inf when none fits).
 // Default ratios measured at 2 threads (bench/certpar_inertia.cpp, bench/certfast_measure.cpp).
 //
 // Measured (bench/certfast_measure.cpp: 2 threads on the shared machine, X = hsolve's own
@@ -360,6 +396,10 @@ struct CertificateCostInputs {
   double epsilon = 0.0;          ///< relative gap of the exclusion check (ExclusionResult)
   double delta = 1e-12;
   double kappa = 1.0;
+  /// The check's resource budget (ExclusionOptions, same defaults): a block size whose plan
+  /// exceeds it is not considered (the check would end Inconclusive without a run).
+  index_t max_krylov_vectors = ExclusionOptions{}.max_krylov_vectors;
+  double max_memory_bytes = ExclusionOptions{}.max_memory_bytes;
   /// Randomized is recommended only when cheaper than the best exact option by this factor.
   double preference = 1.2;
 };
@@ -367,7 +407,7 @@ struct CertificateCostInputs {
 struct CertificateCostEstimate {
   double exact_s = 0.0;
   double exact_single_s = 0.0;  ///< +inf when the single rule does not hold
-  double randomized_s = 0.0;    ///< +inf when eps <= 0
+  double randomized_s = 0.0;    ///< +inf when eps <= 0 or no plan fits the resource budget
   index_t block_size = 0;       ///< p of the randomized estimate
   index_t block_steps = 0;
   double failure_bound = 1.0;
