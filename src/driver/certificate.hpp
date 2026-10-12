@@ -107,6 +107,8 @@ struct CheckOutcome {
 /// The prediction behind an auto choice, for the report.
 struct CertificateChoice {
   CertificateMethod method = CertificateMethod::Exact;
+  CertificateCostInputs inputs;  ///< what certificate_cost was given (logged: bench/certint_model.cpp
+                                 ///< re-evaluates it with other times, e.g. a 16-thread run's)
   CertificateCostEstimate estimate;
   bool kappa_rigorous = true;     ///< randomized considered only with a proven kappa (auto)
   std::string single_reason;      ///< why the single-count rule fails ("" when it holds)

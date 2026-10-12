@@ -232,6 +232,7 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
   in.delta = cfg.certificate_delta;
   in.kappa = std::isfinite(sc.kappa) && sc.kappa >= 1.0 ? sc.kappa : 1.0;
   in.max_memory_bytes = check_budget_bytes();
+  ch.inputs = in;
   ch.estimate = certificate_cost(in);
   ch.method = ch.estimate.recommended;
   return ch;
@@ -262,6 +263,8 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
     os << "; chose " << certificate_method_name(method);
     auto_note_ = os.str();
   }
+  // The prediction and every input of certificate_cost (bench/certint_model.cpp re-evaluates it).
+  const CertificateCostInputs& in = ch.inputs;
   event(c_, "certificate_choice",
         {{"round", static_cast<std::int64_t>(round)}, {"method", std::string(certificate_method_name(method))},
          {"exact_s", e.exact_s}, {"single_s", std::isfinite(e.exact_single_s) ? e.exact_single_s : -1.0},
@@ -269,7 +272,15 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
          {"block_size", static_cast<std::int64_t>(e.block_size)},
          {"block_steps", static_cast<std::int64_t>(e.block_steps)}, {"epsilon", ch.epsilon},
          {"kappa_rigorous", ch.kappa_rigorous}, {"factorize_s", timings_.factorize_s},
-         {"solve_call_s", timings_.solve_call_s}, {"rhs_per_call", timings_.rhs_per_call}});
+         {"solve_call_s", timings_.solve_call_s}, {"rhs_per_call", timings_.rhs_per_call},
+         {"in_n", static_cast<std::int64_t>(in.n)}, {"in_deflated", static_cast<std::int64_t>(in.deflated)},
+         {"in_complex", in.complex_scalars}, {"in_factorize_s", in.factorize_s},
+         {"in_counter_analysis_s", in.counter_analysis_s}, {"in_single_analysis_s", in.single_analysis_s},
+         {"in_count_ratio", in.count_ratio}, {"in_single_ratio", in.single_ratio},
+         {"in_single_valid", in.single_valid}, {"in_apply1_s", in.apply1_s}, {"in_rhs_ratio", in.rhs_ratio},
+         {"in_stream_bytes_per_s", in.stream_bytes_per_s}, {"in_epsilon", in.epsilon}, {"in_delta", in.delta},
+         {"in_kappa", in.kappa}, {"in_max_krylov_vectors", static_cast<std::int64_t>(in.max_krylov_vectors)},
+         {"in_max_memory_bytes", in.max_memory_bytes}, {"in_preference", in.preference}});
   if (method == CertificateMethod::Randomized) {
     const CheckOutcome out = randomized(w, pairs, e.block_size, round);
     if (out.verdict != CheckOutcome::Verdict::Undecided) return out;
