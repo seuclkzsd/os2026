@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "eigen/block_lanczos.hpp"
@@ -93,14 +94,16 @@ struct OrthoOutcome {
   double lower = 0.0;     ///< max |R(i, j)|, i > j
   double stored = 0.0;    ///< store mode: max |stored M Q - M Q| / max |M Q|
   bool fallback = false;
+  bool fast = false;  ///< try_fast accepted the block
   std::vector<char> deficient;
   DenseMatrix<double> rdiag;  ///< |R(i, i)|
 };
 
-/// Runs the kernel on [V W] and checks its output against its contract.
+/// Runs the kernel on [V W] (try_fast first when `fast`, run() when it refuses, as the block
+/// Lanczos steps do) and checks its output against its contract.
 template <class T>
 OrthoOutcome run_kernel(Mode mode, LinearOperator<T>* m_op, index_t k, const DenseMatrix<T>& w,
-                        double ratio = 64 * kEps) {
+                        bool fast = false, double ratio = 64 * kEps) {
   const index_t n = w.rows(), p = w.cols();
   LinearOperator<T>* m = mode == Mode::Euclidean ? nullptr : m_op;
   DenseMatrix<T> basis = basis_with_block<T>(m, n, k, w);
@@ -109,9 +112,14 @@ OrthoOutcome run_kernel(Mode mode, LinearOperator<T>* m_op, index_t k, const Den
   BlockOrthonormalizer<T> ortho(n, p, m, mode == Mode::Stored);
   std::uint64_t stream = 1000;
   DenseMatrix<T> coef, r;
-  ortho.run(basis.data(), mode == Mode::Stored ? mbasis.data() : nullptr, k, ratio, 7, stream, coef,
-            r);
+  T* mb = mode == Mode::Stored ? mbasis.data() : nullptr;
   OrthoOutcome out;
+  out.fast = fast && ortho.try_fast(basis.data(), mb, k, ratio, false, coef, r);
+  if (fast) {
+    EXPECT_EQ(ortho.fast_runs(), out.fast ? 1 : 0);
+    EXPECT_EQ(ortho.fast_refusals(), out.fast ? 0 : 1);
+  }
+  if (!out.fast) ortho.run(basis.data(), mb, k, ratio, 7, stream, coef, r);
   out.fallback = ortho.used_fallback();
   out.deficient = ortho.deficient();
   out.ortho = orthonormality_error(m, basis);
@@ -151,14 +159,24 @@ using Scalars = ::testing::Types<double, cplx>;
 TYPED_TEST_SUITE(LanczosBlockOrthoTyped, Scalars);
 
 constexpr Mode kModes[] = {Mode::Euclidean, Mode::Recompute, Mode::Stored};
+/// Every mode with the two-pass kernel alone and with try_fast first.
+constexpr std::pair<Mode, bool> kModesAndPaths[] = {
+    {Mode::Euclidean, false}, {Mode::Recompute, false}, {Mode::Stored, false},
+    {Mode::Euclidean, true},  {Mode::Recompute, true},  {Mode::Stored, true}};
+std::string trace(Mode mode, bool fast) {
+  return "mode " + std::to_string(static_cast<int>(mode)) + (fast ? ", try_fast" : "");
+}
 
 TYPED_TEST(LanczosBlockOrthoTyped, GenericBlockTakesTheBlas3Path) {
+  // Also the fast path (try_fast): accepted in Euclidean and recompute mode, always refused in
+  // store mode (the stored M Q needs a fresh M application), where run() takes over.
   using T = TypeParam;
   const index_t n = 300, k = 17, p = 5;
   DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.04, 3)));
-  for (Mode mode : kModes) {
-    SCOPED_TRACE(static_cast<int>(mode));
-    const auto o = run_kernel<T>(mode, &m, k, random_block<T>(n, p, 11));
+  for (const auto& [mode, fast] : kModesAndPaths) {
+    SCOPED_TRACE(trace(mode, fast));
+    const auto o = run_kernel<T>(mode, &m, k, random_block<T>(n, p, 11), fast);
+    EXPECT_EQ(o.fast, fast && mode != Mode::Stored);
     EXPECT_FALSE(o.fallback);
     EXPECT_LT(o.ortho, 1e-14);
     EXPECT_LT(o.relation, 1e-14);
@@ -167,28 +185,33 @@ TYPED_TEST(LanczosBlockOrthoTyped, GenericBlockTakesTheBlas3Path) {
     for (char c : o.deficient) EXPECT_EQ(c, 0);
   }
   // No basis at all (start block): pure Cholesky-QR2.
-  const auto o = run_kernel<T>(Mode::Recompute, &m, 0, random_block<T>(n, p, 12));
-  EXPECT_FALSE(o.fallback);
-  EXPECT_LT(o.ortho, 1e-14);
-  EXPECT_LT(o.relation, 1e-14);
+  for (bool fast : {false, true}) {
+    const auto o = run_kernel<T>(Mode::Recompute, &m, 0, random_block<T>(n, p, 12), fast);
+    EXPECT_EQ(o.fast, fast);
+    EXPECT_FALSE(o.fallback);
+    EXPECT_LT(o.ortho, 1e-14);
+    EXPECT_LT(o.relation, 1e-14);
+  }
 }
 
 TYPED_TEST(LanczosBlockOrthoTyped, BlockNearlyInsideTheBasisStaysOrthogonalToIt) {
   // W = V X + 1e-9 * (random): W1 is a billion times smaller than W, the regime of a converging
   // Lanczos block. Cholesky-QR amplifies the first pass's loss of orthogonality to V; the second
-  // pass must remove it.
+  // pass must remove it (two-pass kernel). The fast path's DGKS test sees the cancellation and
+  // projects twice before its Cholesky steps: as orthogonal.
   using T = TypeParam;
   const index_t n = 400, k = 24, p = 4;
   DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.03, 5)));
-  for (Mode mode : kModes) {
-    SCOPED_TRACE(static_cast<int>(mode));
+  for (const auto& [mode, fast] : kModesAndPaths) {
+    SCOPED_TRACE(trace(mode, fast));
     // The same V as run_kernel builds (deterministic).
     LinearOperator<T>* mm = mode == Mode::Euclidean ? nullptr : &m;
     const DenseMatrix<T> v = basis_with_block<T>(mm, n, k, DenseMatrix<T>(n, 0));
     DenseMatrix<T> w = mat_mul(v, random_block<T>(k, p, 21));
     const DenseMatrix<T> noise = random_block<T>(n, p, 22);
     for (index_t j = 0; j < p; ++j) hs::linalg::axpy(n, T(1e-9), noise.col(j), w.col(j));
-    const auto o = run_kernel<T>(mode, &m, k, w);
+    const auto o = run_kernel<T>(mode, &m, k, w, fast);
+    EXPECT_EQ(o.fast, fast && mode != Mode::Stored);
     EXPECT_FALSE(o.fallback);
     EXPECT_LT(o.ortho, 1e-14);
     EXPECT_LT(o.relation, 1e-14);
@@ -198,15 +221,17 @@ TYPED_TEST(LanczosBlockOrthoTyped, BlockNearlyInsideTheBasisStaysOrthogonalToIt)
 TYPED_TEST(LanczosBlockOrthoTyped, IllConditionedBlockFallsBackColumnByColumn) {
   // Two columns 1e-8 apart (scaled condition ~1e8 > kMaxCholQrCond): Cholesky-QR could not
   // restore orthogonality, so the column-wise path runs; nothing is dependent at rounding level.
+  // The fast path refuses (condition > kMaxFastCond) and restores W for run().
   using T = TypeParam;
   const index_t n = 250, k = 9, p = 4;
   DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.05, 6)));
-  for (Mode mode : kModes) {
-    SCOPED_TRACE(static_cast<int>(mode));
+  for (const auto& [mode, fast] : kModesAndPaths) {
+    SCOPED_TRACE(trace(mode, fast));
     DenseMatrix<T> w = random_block<T>(n, p, 31);
     std::copy(w.col(0), w.col(0) + n, w.col(2));
     w(5, 2) += T(1e-8);
-    const auto o = run_kernel<T>(mode, &m, k, w);
+    const auto o = run_kernel<T>(mode, &m, k, w, fast);
+    EXPECT_FALSE(o.fast);
     EXPECT_TRUE(o.fallback);
     EXPECT_LT(o.ortho, 1e-14);
     EXPECT_LT(o.relation, 1e-14);
@@ -224,15 +249,16 @@ TYPED_TEST(LanczosBlockOrthoTyped, DependentColumnsAreReplacedByRandomVectors) {
   using T = TypeParam;
   const index_t n = 200, k = 12, p = 4;
   DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.05, 8)));
-  for (Mode mode : kModes) {
-    SCOPED_TRACE(static_cast<int>(mode));
+  for (const auto& [mode, fast] : kModesAndPaths) {
+    SCOPED_TRACE(trace(mode, fast));
     LinearOperator<T>* mm = mode == Mode::Euclidean ? nullptr : &m;
     const DenseMatrix<T> v = basis_with_block<T>(mm, n, k, DenseMatrix<T>(n, 0));
     DenseMatrix<T> w = random_block<T>(n, p, 41);
     const DenseMatrix<T> in_span = mat_mul(v, random_block<T>(k, 1, 42));
     std::copy(in_span.col(0), in_span.col(0) + n, w.col(1));
     for (index_t i = 0; i < n; ++i) w(i, 3) = w(i, 0) + w(i, 2);
-    const auto o = run_kernel<T>(mode, &m, k, w);
+    const auto o = run_kernel<T>(mode, &m, k, w, fast);
+    EXPECT_FALSE(o.fast);
     EXPECT_TRUE(o.fallback);
     ASSERT_EQ(o.deficient.size(), 4u);
     EXPECT_EQ(o.deficient[0], 0);
@@ -253,14 +279,14 @@ TYPED_TEST(LanczosBlockOrthoTyped, BlockInsideANearlyOrthonormalBasisIsReplaced)
   // remainder of size ~loss made of V components, far above the rounding threshold, so the
   // Cholesky-QR path normalizes it and the second pass removes it again. Every column must come
   // out dependent and replaced by a random direction (the first-pass-only test used to throw
-  // InvalidInput "b_inner is not Hermitian positive definite" here).
+  // InvalidInput "b_inner is not Hermitian positive definite" here). The fast path, called with
+  // two_passes as the solver does next to a deflation block, sees the dependence and refuses.
   using T = TypeParam;
   const index_t n = 200, k = 40, p = 4;
   DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.05, 9)));
-  for (Mode mode : kModes) {
+  for (const auto& [mode, fast] : kModesAndPaths) {
     for (double loss : {3e-14, 1e-12, 1e-10}) {
-      SCOPED_TRACE("mode " + std::to_string(static_cast<int>(mode)) + ", loss " +
-                   std::to_string(loss));
+      SCOPED_TRACE(trace(mode, fast) + ", loss " + std::to_string(loss));
       LinearOperator<T>* mm = mode == Mode::Euclidean ? nullptr : &m;
       DenseMatrix<T> basis = basis_with_block<T>(mm, n, k, DenseMatrix<T>(n, p));
       const DenseMatrix<T> noise = random_block<T>(n, k, 62);
@@ -276,8 +302,11 @@ TYPED_TEST(LanczosBlockOrthoTyped, BlockInsideANearlyOrthonormalBasisIsReplaced)
       BlockOrthonormalizer<T> ortho(n, p, mm, mode == Mode::Stored);
       std::uint64_t stream = 100;
       DenseMatrix<T> coef, r;
-      ortho.run(basis.data(), mode == Mode::Stored ? mbasis.data() : nullptr, k, 64 * kEps, 7,
-                stream, coef, r);
+      T* mb = mode == Mode::Stored ? mbasis.data() : nullptr;
+      if (fast) {
+        EXPECT_FALSE(ortho.try_fast(basis.data(), mb, k, 64 * kEps, true, coef, r));
+      }
+      ortho.run(basis.data(), mb, k, 64 * kEps, 7, stream, coef, r);
       EXPECT_TRUE(ortho.used_fallback());
       for (char c : ortho.deficient()) EXPECT_EQ(c, 1);
       EXPECT_EQ(stream, 100u + static_cast<std::uint64_t>(p));
@@ -301,7 +330,7 @@ TYPED_TEST(LanczosBlockOrthoTyped, BlockInsideANearlyOrthonormalBasisIsReplaced)
           res = std::max(res, std::abs(w(i, j) - vc(i, j) - qr(i, j)));
         }
       }
-      EXPECT_LT(res / wmax, 1e-13);
+      EXPECT_LT(res / wmax, fast ? 1e-12 : 1e-13);  // + the rounding of the fast path's restore
       if (mode == Mode::Stored) {
         double dmax = 0.0;
         for (index_t j = 0; j < p; ++j)

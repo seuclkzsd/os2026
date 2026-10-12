@@ -74,9 +74,6 @@ namespace {
 
 using lapack::fint;
 
-/// Blocks added to the single-vector auto basis size when ncv is chosen automatically (see
-/// "Early stop"; measured on shift-invert cases, bench/blockks_shiftinvert.cpp).
-constexpr index_t kAutoExtraBlocks = 4;
 /// Smallest number of new blocks a cycle adds after the kept Ritz pairs (see block_dimensions).
 constexpr index_t kMinNewBlocks = 2;
 
@@ -85,7 +82,8 @@ class BlockThickRestartLanczos {
  public:
   BlockThickRestartLanczos(LinearOperator<T>& op, LinearOperator<T>* b_inner, Which which,
                            const KrylovSchurOptions<T>& options, const LanczosSetup& setup,
-                           const BlockDimensions& dims, LanczosTimings& timings);
+                           const BlockDimensions& dims, const BlockTuning& tuning,
+                           LanczosTimings& timings);
 
   HermitianEigResult<T> run();
 
@@ -116,6 +114,7 @@ class BlockThickRestartLanczos {
   index_t m_ = 0;            ///< basis size of the current cycle: ncv_, or less after an early stop
   index_t first_probe_ = 0;  ///< smallest basis size probed in the first cycle
   bool store_bv_ = false;
+  bool fast_ortho_ = false;  ///< block steps try BlockOrthonormalizer::try_fast first
 
   DenseMatrix<T> basis_;   ///< [D | V | V_m], n x (d + ncv + p)
   DenseMatrix<T> bbasis_;  ///< M * basis_ (store_bv only)
@@ -141,8 +140,10 @@ BlockThickRestartLanczos<T>::BlockThickRestartLanczos(LinearOperator<T>& op,
                                                       const KrylovSchurOptions<T>& options,
                                                       const LanczosSetup& setup,
                                                       const BlockDimensions& dims,
+                                                      const BlockTuning& tuning,
                                                       LanczosTimings& timings)
     : op_(op), b_inner_(b_inner), which_(which), opt_(options), time_(timings) {
+  fast_ortho_ = tuning.fast_ortho;
   n_ = setup.n;
   d_ = setup.d;
   nev_ = setup.nev;
@@ -227,8 +228,11 @@ bool BlockThickRestartLanczos<T>::expand(index_t first) {
     }
     {
       ScopedTimer t(time_.orthogonalization);
-      ortho_.run(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol, opt_.seed, next_stream_, coef_,
-                 rblk_);
+      // A deflation block is M-orthonormal only to 1e-8: always two projections (as p = 1).
+      if (!fast_ortho_ || !ortho_.try_fast(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol,
+                                           d_ > 0, coef_, rblk_))
+        ortho_.run(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol, opt_.seed, next_stream_,
+                   coef_, rblk_);
       // A_j: Op is M-self-adjoint, so the diagonal block is Hermitian up to rounding.
       for (index_t c = 0; c < p; ++c) {
         h_(j + c, j + c) = T(std::real(coef_(d_ + j + c, c)));
@@ -344,8 +348,14 @@ HermitianEigResult<T> BlockThickRestartLanczos<T>::run() {
 
 }  // namespace
 
-BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv) {
+BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv,
+                                 const BlockTuning& tuning) {
   HS_ASSERT(p >= 1, "block_dimensions: p=" << p);
+  HS_ASSERT(tuning.extra_blocks >= 0 && tuning.min_auto_ncv >= 0 && tuning.keep_fraction >= 0.0 &&
+                tuning.keep_fraction <= 1.0,
+            "block_dimensions: tuning extra_blocks=" << tuning.extra_blocks << " min_auto_ncv="
+                                                     << tuning.min_auto_ncv << " keep_fraction="
+                                                     << tuning.keep_fraction);
   BlockDimensions dims;
   // Every layout has ncv >= spare + kMinNewBlocks p >= 3p, so kFreeSpaceFactor * (ncv + p) <=
   // n_free needs p <= n_free / (4 kFreeSpaceFactor). Larger p (up to INT64_MAX) is infeasible
@@ -363,12 +373,18 @@ BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto
   const index_t base = std::max(round_up(setup.ncv), spare + kMinNewBlocks * p);
   dims.ncv = base;
   if (auto_ncv) {
-    // Up to kAutoExtraBlocks more blocks, as far as the free space stays kFreeSpaceFactor times
-    // the basis plus residual block (never below base).
+    // Up to tuning.extra_blocks more blocks (and at least min_auto_ncv), as far as the free space
+    // stays kFreeSpaceFactor times the basis plus residual block (never below base). The free
+    // space bounds every term, so nothing overflows for feasible p.
     const index_t room = (setup.n_free / kFreeSpaceFactor - p) / p * p;
-    dims.ncv = std::max(base, std::min(base + kAutoExtraBlocks * p, room));
+    const index_t extra = std::min(tuning.extra_blocks, room / p);
+    const index_t wanted = std::max(base + extra * p, round_up(std::min(tuning.min_auto_ncv, room)));
+    dims.ncv = std::max(base, std::min(wanted, room));
   }
-  dims.keep = std::clamp((setup.nev + (dims.ncv - setup.nev) / 2) / p * p, spare, dims.ncv - p);
+  const auto kept = static_cast<index_t>(
+      static_cast<double>(setup.nev) +
+      tuning.keep_fraction * static_cast<double>(dims.ncv - setup.nev));
+  dims.keep = std::clamp(kept / p * p, spare, dims.ncv - p);
   dims.first_probe = base;
   // kFreeSpaceFactor * (ncv + p) <= n_free, written without the product.
   dims.feasible = setup.ncv < setup.n_free && dims.ncv + p <= setup.n_free / kFreeSpaceFactor;
@@ -379,10 +395,12 @@ template <class T>
 HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
                                                        LinearOperator<T>* b_inner, Which which,
                                                        const KrylovSchurOptions<T>& options,
-                                                       LanczosTimings& timings) {
+                                                       LanczosTimings& timings,
+                                                       const BlockTuning& tuning) {
   HS_ASSERT(options.block_size > 1, "block solver called with block_size " << options.block_size);
   const LanczosSetup setup = validate_lanczos(op, b_inner, options);
-  const BlockDimensions dims = block_dimensions(setup, options.block_size, options.ncv == 0);
+  const BlockDimensions dims =
+      block_dimensions(setup, options.block_size, options.ncv == 0, tuning);
   if (!dims.feasible) {
     // The free space is below twice a block basis plus its residual block: one single-vector
     // cycle over the whole free space is exact (all copies of multiple eigenvalues included) and
@@ -396,7 +414,7 @@ HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
   }
   timings = LanczosTimings{};
   Timer total;
-  BlockThickRestartLanczos<T> solver(op, b_inner, which, options, setup, dims, timings);
+  BlockThickRestartLanczos<T> solver(op, b_inner, which, options, setup, dims, tuning, timings);
   HermitianEigResult<T> result = solver.run();
   timings.total = total.seconds();
   return result;
@@ -405,7 +423,7 @@ HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
 #define HS_INSTANTIATE_BLOCK_LANCZOS(T)                                            \
   template HermitianEigResult<T> block_lanczos_krylov_schur_timed<T>(              \
       LinearOperator<T>&, LinearOperator<T>*, Which, const KrylovSchurOptions<T>&, \
-      LanczosTimings&);
+      LanczosTimings&, const BlockTuning&);
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_BLOCK_LANCZOS)
 #undef HS_INSTANTIATE_BLOCK_LANCZOS

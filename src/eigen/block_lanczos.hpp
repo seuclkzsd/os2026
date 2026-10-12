@@ -130,14 +130,32 @@ struct BlockDimensions {
 };
 /// Free space needed by a block run, in units of its basis plus residual block (see above).
 constexpr index_t kFreeSpaceFactor = 2;
-BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv);
+
+/// Layout parameters of the block solver that the measurements behind its defaults vary
+/// (bench/blocktune_sweep.cpp). A default-constructed BlockTuning is the solver's layout.
+///   extra_blocks:  blocks added to base for the automatic ncv;
+///   min_auto_ncv:  the automatic ncv is at least this (rounded up to a multiple of p);
+///   keep_fraction: a restart keeps nev + keep_fraction * (ncv - nev) Ritz pairs (rounded down to
+///                  a multiple of p, clamped to [spare, ncv - p]).
+/// Requested ncv values (setup from options.ncv > 0) use only keep_fraction.
+///   fast_ortho:    block steps try BlockOrthonormalizer::try_fast first.
+struct BlockTuning {
+  index_t extra_blocks = 4;
+  index_t min_auto_ncv = 0;
+  double keep_fraction = 0.5;
+  bool fast_ortho = false;
+};
+BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv,
+                                 const BlockTuning& tuning = BlockTuning{});
 
 /// Block Krylov-Schur, options.block_size > 1 (lanczos_krylov_schur_timed dispatches here). Same
-/// contract and timing semantics as lanczos_krylov_schur_timed.
+/// contract and timing semantics as lanczos_krylov_schur_timed. `tuning` (measurement use) changes
+/// only the basis layout.
 template <class T>
 HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
                                                        LinearOperator<T>* b_inner, Which which,
                                                        const KrylovSchurOptions<T>& options,
-                                                       LanczosTimings& timings);
+                                                       LanczosTimings& timings,
+                                                       const BlockTuning& tuning = BlockTuning{});
 
 }  // namespace hs::eigen_detail

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include "eigen/block_lanczos.hpp"
 #include "hsolve/error.hpp"
@@ -63,6 +64,31 @@ double scaled_condition(const DenseMatrix<T>& r, const DenseMatrix<T>& g) {
   for (index_t j = 0; j < p; ++j)
     for (index_t i = 0; i <= j; ++i) fro_inv += abs2(inv(i, j));
   return std::sqrt(fro) * std::sqrt(fro_inv);
+}
+
+/// 2-norm condition number of the column-scaled block W1 D^{-1}, D = diag(||W1(:, i)||_M), from
+/// its Gram matrix g = W1^H M W1 (Hermitian): sqrt(mu_max / mu_min) with mu the eigenvalues of
+/// D^{-1} g D^{-1} (unit diagonal). The test at kMaxFastCond needs mu_min / mu_max >= 2.4e-4, far
+/// above their rounding (~p eps), so the estimate is accurate where it decides (the Frobenius
+/// estimate scaled_condition above is >= p for every p x p factor, too coarse for wide blocks).
+/// +infinity when that matrix is not numerically positive definite or not finite. O(p^3).
+template <class T>
+double scaled_condition_2norm(const DenseMatrix<T>& g) {
+  const index_t p = g.rows();
+  std::vector<double> inv_d(static_cast<std::size_t>(p));
+  for (index_t j = 0; j < p; ++j) inv_d[j] = 1.0 / std::sqrt(std::real(g(j, j)));
+  DenseMatrix<T> gs(p, p);
+  for (index_t j = 0; j < p; ++j) {
+    for (index_t i = 0; i < p; ++i) {
+      gs(i, j) = g(i, j) * T(inv_d[i] * inv_d[j]);
+      if (!std::isfinite(std::abs(gs(i, j)))) return std::numeric_limits<double>::infinity();
+    }
+  }
+  std::vector<double> mu(static_cast<std::size_t>(p));
+  const auto pp = static_cast<fint>(p);
+  lapack::heev('N', 'U', pp, gs.data(), pp, mu.data());  // ascending
+  if (!(mu.front() > 0.0)) return std::numeric_limits<double>::infinity();
+  return std::sqrt(mu.back() / mu.front());
 }
 
 /// X <- X U in place for X (n x p, ld n) and an upper triangular U (p x p): column j becomes
@@ -236,6 +262,76 @@ void BlockOrthonormalizer<T>::run(T* basis, T* mbasis, index_t k, double ratio, 
   }
   lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), g2.data(), pp, w, nn);
   if (store_m_) lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), g2.data(), pp, slot, nn);
+}
+
+template <class T>
+bool BlockOrthonormalizer<T>::try_fast(T* basis, T* mbasis, index_t k, double ratio,
+                                       bool two_passes, DenseMatrix<T>& coef, DenseMatrix<T>& r) {
+  HS_ASSERT(store_m_ == (mbasis != nullptr),
+            "BlockOrthonormalizer: mbasis must be given exactly in store mode");
+  if (store_m_) {  // stored M*Q must come from a fresh M application: run()
+    ++fast_refusals_;
+    return false;
+  }
+  const index_t n = n_, p = p_;
+  const auto nn = static_cast<fint>(n), kk = static_cast<fint>(k), pp = static_cast<fint>(p);
+  T* w = basis + k * n;
+  T* mw = m_ ? mw_.data() : nullptr;  // M W, updated by orthogonalize_block_cgs2
+  coef.resize(k, p);
+  r.resize(p, p);
+  fallback_ = false;
+  deficient_.assign(static_cast<std::size_t>(p), 0);
+  before_.assign(static_cast<std::size_t>(p), 0.0);
+  std::vector<double> after(static_cast<std::size_t>(p));
+  const linalg::ApplyBlockFn<T> apply = [this](const T* x, index_t ldx, T* y, index_t ldy,
+                                               index_t q) { m_->apply(x, ldx, y, ldy, q); };
+  const linalg::OrthoOptions passes{two_passes ? linalg::Reorth::Always : linalg::Reorth::Auto};
+  linalg::orthogonalize_block_cgs2<T>(n, k, p, basis, n, nullptr, 0, w, n, mw, n, coef.data(), k,
+                                      before_.data(), after.data(), m_ ? &apply : nullptr, passes);
+  auto refuse = [&]() {
+    if (k > 0)  // W = W1 + V C: the input block (up to rounding) for run()
+      lapack::gemm('N', 'N', nn, pp, kk, T(1), basis, nn, coef.data(), kk, T(1), w, nn);
+    ++fast_refusals_;
+    return false;
+  };
+  // A column that lost more than its share (or non-finite input: NaN fails every test here, and
+  // run() then reports it).
+  for (index_t c = 0; c < p; ++c)
+    if (!(after[c] > ratio * before_[c]) || !std::isfinite(before_[c])) return refuse();
+  DenseMatrix<T> g1(p, p);
+  linalg::gram(n, p, w, n, mw ? mw : w, n, g1.data(), p);
+  hermitize(g1);
+  if (!(scaled_condition_2norm(g1) <= kMaxFastCond)) return refuse();
+  DenseMatrix<T> r1 = g1;
+  if (lapack::potrf('U', pp, r1.data(), pp) != 0) return refuse();
+  for (index_t j = 0; j < p; ++j)
+    for (index_t i = j + 1; i < p; ++i) r1(i, j) = T(0);
+  lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), r1.data(), pp, w, nn);  // Q1 = W1 R1^{-1}
+  if (mw) lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), r1.data(), pp, mw, nn);  // M Q1
+  DenseMatrix<T> g2(p, p);
+  linalg::gram(n, p, w, n, mw ? mw : w, n, g2.data(), p);
+  hermitize(g2);
+  double dev2 = 0.0;
+  for (index_t j = 0; j < p; ++j)
+    for (index_t i = 0; i < p; ++i) dev2 += abs2(g2(i, j) - T(i == j ? 1.0 : 0.0));
+  if (!(std::sqrt(dev2) <= kMaxSecondPassDeviation) || lapack::potrf('U', pp, g2.data(), pp) != 0) {
+    multiply_upper_right(w, n, r1);  // back to W1
+    return refuse();
+  }
+  for (index_t j = 0; j < p; ++j)
+    for (index_t i = j + 1; i < p; ++i) g2(i, j) = T(0);
+  lapack::trsm('R', 'U', 'N', 'N', nn, pp, T(1), g2.data(), pp, w, nn);  // Q = Q1 R2^{-1}
+  // R = R2 R1 (upper triangular: the strictly lower products are exact zeros); R(i, i) is the
+  // M-norm of the part of column i orthogonal to V and the block's earlier columns.
+  lapack::gemm('N', 'N', pp, pp, pp, T(1), g2.data(), pp, r1.data(), pp, T(0), r.data(), pp);
+  for (index_t c = 0; c < p; ++c) {
+    if (!(std::abs(r(c, c)) > ratio * before_[c])) {
+      multiply_upper_right(w, n, r);  // Q R = W1
+      return refuse();
+    }
+  }
+  ++fast_runs_;
+  return true;
 }
 
 template <class T>
