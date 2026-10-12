@@ -66,10 +66,15 @@ void print_summary(const hs::Solution<T>& sol) {
     std::printf("%5zu %24.16e %24.16e %12.3e %4s\n", i, p.lambda_re, p.lambda_im, p.backward_error,
                 p.accepted ? "yes" : "NO");
   }
-  if (r.certificate.performed)
-    std::printf("certificate: [%g, %g] inertia=%lld found=%lld -> %s\n", r.certificate.lower, r.certificate.upper,
-                static_cast<long long>(r.certificate.count_inertia), static_cast<long long>(r.certificate.count_found),
-                r.certificate.passed ? "passed" : "FAILED");
+  const auto& c = r.certificate;
+  if (c.performed && c.count_inertia >= 0)
+    std::printf("certificate (%s): [%g, %g] inertia=%lld found=%lld -> %s\n", c.method.c_str(), c.lower, c.upper,
+                static_cast<long long>(c.count_inertia), static_cast<long long>(c.count_found),
+                c.passed ? (c.rigorous ? "passed" : "passed (screening only)") : "FAILED");
+  else if (c.performed)  // randomized check: no count, a failure probability
+    std::printf("certificate (%s): [%g, %g] found=%lld -> %s, failure probability <= %.3g%s\n", c.method.c_str(),
+                c.lower, c.upper, static_cast<long long>(c.count_found), c.passed ? "passed" : "FAILED",
+                c.failure_probability, c.rigorous ? "" : " (screening only: kappa of B assumed)");
   for (const auto& w : r.warnings) std::printf("warning: %s\n", w.c_str());
 }
 
@@ -110,10 +115,13 @@ int main(int argc, char** argv) {
   auto* o_prec = app.add_option("--precision", precision, "factorization precision: double|single");
   auto* o_slice = app.add_option("--slice-size", slice_size, "max eigenvalues per shift in sliced targets (0 = auto)");
   auto* o_block = app.add_option("--block-size", block_size,
-                                 "Krylov block width of the HEP/GHEP runs (0 = auto, 1 = single vector)");
+                                 "Krylov block width of the shift-invert runs - HEP/GHEP Lanczos and GHIEP "
+                                 "Krylov-Schur (0 = auto, 1 = single vector)");
   auto* o_zero = app.add_option("--zero-filter-tol", zero_filter, "drop |lambda| <= TOL*scale (zero modes); < 0 off");
   auto* o_cert = app.add_option("--certificate", certificate,
-                                "completeness check of nearest targets: exact|randomized|auto|off")
+                                "completeness check of nearest HEP/GHEP targets: exact (double Sylvester counts) | "
+                                "randomized (exclusion check on the held factorization) | auto (the cheapest that "
+                                "certifies, predicted from measured times) | off")
                      ->check(CLI::IsMember({"exact", "randomized", "auto", "off"}));
   app.add_option("--log", log_path, "JSON-lines event log file");
   app.add_flag("-v,--verbose", verbose, "debug output");
