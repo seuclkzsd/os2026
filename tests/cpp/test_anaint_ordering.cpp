@@ -298,12 +298,14 @@ TEST(DriverAdaptiveOrdering, HeavyWorkAnalysesMoreCandidates) {
   EXPECT_NE(heavy.choice, 0);
 }
 
-// A candidate whose factors would not fit the in-core cap loses to any that fits: a 2-D Laplacian
-// takes AMD, unless the cap lies between hsolve's nested dissection's estimate and AMD's.
+// A candidate whose factors would not fit the in-core cap loses to any that fits: with a single
+// factorization planned, a small 3-D Laplacian takes AMD (a nested dissection's analysis costs more
+// than it saves), unless the cap lies between hsolve's nested dissection's estimate and AMD's.
 TEST(DriverAdaptiveOrdering, FactorsBeyondTheCapLoseToOnesThatFit) {
   auto cfg = nearest_cfg(0.0, 12);
-  const auto flat = hs::test::laplacian_2d<double>(400, 300);
-  const hs::ShiftedPencil<double> pencil(flat, nullptr);
+  cfg.threads = 4;
+  const auto cube = laplacian_3d<double>(20, 20, 20);
+  const hs::ShiftedPencil<double> pencil(cube, nullptr);
   auto estimate = [&](int ordering) {
     hs::FactorOptions o = hs::driver::factor_options_from(cfg, 0.0);
     o.ordering = ordering;
@@ -313,12 +315,14 @@ TEST(DriverAdaptiveOrdering, FactorsBeyondTheCapLoseToOnesThatFit) {
   };
   const double amd = estimate(0), nd = estimate(kOrderingNestedDissection);
   ASSERT_LT(nd, 0.95 * amd);
-  const auto w = hs::driver::plan_work(cfg, hs::ProblemType::Standard, flat.nrows, 8.0);
-  EXPECT_EQ(run_adaptive(flat, cfg, w, "cap_none").choice, 0);
-  const auto capped = run_adaptive(flat, cfg, w, "cap_between", 0.5 * (amd + nd));
+  hs::driver::PlannedWork w;  // one factorization, no counts, no solves
+  w.solve_calls = 0.0;
+  const auto free = run_adaptive(cube, cfg, w, "cap_none");
+  EXPECT_EQ(free.choice, 0) << free.candidates;
+  const auto capped = run_adaptive(cube, cfg, w, "cap_between", 0.5 * (amd + nd));
   EXPECT_NE(capped.choice, 0) << capped.candidates;
   // Nothing fits: the smallest estimate is taken (the budget check then decides about out-of-core).
-  const auto none = run_adaptive(flat, cfg, w, "cap_tiny", 0.01 * nd);
+  const auto none = run_adaptive(cube, cfg, w, "cap_tiny", 0.01 * nd);
   EXPECT_NE(none.choice, 0) << none.candidates;
 }
 

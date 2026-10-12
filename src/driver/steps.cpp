@@ -603,10 +603,14 @@ double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_
   }
 }
 
+double factorization_s(const MumpsInputSize& in, double flops, double entries, int threads) {
+  return (kFacOrder * in.order + kFacEntry * in.entries + kFacFe * entries + kFacFlops * flops) *
+         thread_factor(threads, kFacThreadGamma);
+}
+
 double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
                          double entries, int threads) {
-  const double t_f = (kFacOrder * in.order + kFacEntry * in.entries + kFacFe * entries + kFacFlops * flops) *
-                     thread_factor(threads, kFacThreadGamma);
+  const double t_f = factorization_s(in, flops, entries, threads);
   const double t_s = (kSolveOrder * in.order + kSolveFe * entries) * thread_factor(threads, kSolveThreadGamma);
   double s = t_f + std::max(0.0, w.factorizations - 1.0) * kRefactor * t_f;
   if (w.counts > 0) {

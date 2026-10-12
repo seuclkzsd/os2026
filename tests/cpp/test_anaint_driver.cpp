@@ -299,7 +299,9 @@ void ghiep_without_factorizing_b() {
   for (double l : hs::test::laplacian_2d_eigenvalues(nx, ny)) w.push_back(l / (l - 2.0));
   auto cfg = nearest_cfg(3.3, 6);
   cfg.deterministic = true;
-  const std::string path = ::testing::TempDir() + "/anaint_ghiep_lanczos.jsonl";
+  // One file per scalar type: ctest runs the typed variants in parallel.
+  const std::string path =
+      ::testing::TempDir() + "/anaint_ghiep_lanczos_" + (hs::is_complex_v<T> ? "complex" : "real") + ".jsonl";
   hs::Solution<T> sol;
   {
     hs::Logger log(0, path);

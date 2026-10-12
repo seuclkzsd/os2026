@@ -302,6 +302,9 @@ OrderingInput ordering_input(const ShiftedPencil<T>& pencil);
 /// with `ordering` (MUMPS orderings are serial, hsolve's nested dissection runs on `threads`) of an
 /// input of sizes `in` whose factors hold `factor_entries`.
 double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_entries, int threads);
+/// Predicted seconds of one numeric factorization (the first on its analysis) of an input of sizes
+/// `in` whose factors take `flops` and hold `entries`, on `threads` (the fit of steps.cpp).
+double factorization_s(const MumpsInputSize& in, double flops, double entries, int threads);
 /// Predicted time of the planned numeric work with factors of `flops` and `entries` on `threads`:
 /// factorizations, certificate counts (on an InertiaCounter when counter_pays, which then adds the
 /// counter's analysis) and the solve calls of width w.block.
@@ -399,6 +402,11 @@ enum class Definiteness { Positive, NotPositive, Unknown };
 /// A Ritz value of B's norm-estimate Lanczos below -kIndefiniteRitz * ||B||_2 proves B indefinite
 /// (test_b_definiteness).
 constexpr double kIndefiniteRitz = 1e-10;
+
+/// hs::solve gives prove_positive_definite (norms.hpp) at most this fraction of the predicted time
+/// of the factorization of B it saves (factorization_s of the main analysis' estimate): a failed
+/// proof then costs at most half a factorization, a proof saves at least the other half.
+constexpr double kBProofBudget = 0.5;
 
 /// Whether B is HPD, as far as decided before the analysis, without a factorization.
 struct BDefiniteness {

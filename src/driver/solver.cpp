@@ -302,10 +302,45 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   }
   rep.factor_options = fac->options();
 
-  // 5. B's inertia when the cheap tests left it open: B is HPD iff its exact LDL^T has no negative
-  //    or zero pivots (Sylvester), counted on the main analysis.
+  // 5. B's definiteness when the cheap tests left it open. First the rigorous incomplete-Cholesky
+  //    proof (driver::prove_positive_definite, norms.hpp: B HPD, or B indefinite through a Lanczos
+  //    run on the scaled B) within kBProofBudget of the predicted time of the factorization it
+  //    saves; smallest / largest targets factorize B anyway (spectrum estimate below) and skip it.
+  //    Otherwise B's inertia: B is HPD iff its exact LDL^T has no negative or zero pivots
+  //    (Sylvester), counted on the main analysis.
+  const bool b_diagonal = b && is_diagonal(*b);
+  const bool one_end = cfg.target.mode == TargetMode::Smallest || cfg.target.mode == TargetMode::Largest;
+  if (b && type == ProblemType::Auto && !(one_end && !b_diagonal)) {
+    driver::PhaseScope phase(clock, driver::Phase::Factor);
+    tb.reset();
+    const FactorEstimate est = fac->estimate();
+    driver::HpdProofOptions po;
+    po.max_seconds = driver::kBProofBudget * driver::factorization_s(driver::mumps_input_size(pencil), est.flops,
+                                                                    static_cast<double>(est.factor_entries),
+                                                                    fopts.threads);
+    if (fopts.max_memory_mb > 0) po.max_bytes = fopts.max_memory_mb * 1e6;
+    po.seed = cfg.seed;
+    const driver::HpdProof proof = driver::prove_positive_definite(*b, po);
+    event(c, "b_proof", {{"outcome", proof.outcome}, {"proven", proof.proven}, {"indefinite", proof.indefinite},
+                         {"lower_bound", proof.lower_bound}, {"theta_min", proof.theta_min},
+                         {"theta_max", proof.theta_max}, {"level", static_cast<std::int64_t>(proof.level)},
+                         {"shift", proof.shift}, {"attempts", static_cast<std::int64_t>(proof.attempts)},
+                         {"budget_s", po.max_seconds}, {"seconds", proof.seconds}});
+    if (proof.proven) {
+      Inertia ib;
+      ib.neg = ib.zero = 0;
+      ib.pos = n;
+      ib.valid = true;
+      type = ProblemType::GeneralizedDefinite;
+      b_inertia_event(ib, "incomplete_cholesky");
+    } else if (proof.indefinite) {
+      type = ProblemType::GeneralizedIndefinite;
+      b_inertia_event(Inertia{}, "lanczos_scaled");
+    }
+  }
   bool b_factorized = false;  // the main object holds the factorization of B
   if (b && type == ProblemType::Auto) {
+    tb.reset();
     Inertia ib;
     std::string how;
     if (fopts.precision == FactorPrecision::Double && !fopts.blr) {
@@ -322,7 +357,6 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
                                                      : ProblemType::GeneralizedIndefinite;
     b_inertia_event(ib, how);
   }
-  const bool b_diagonal = b && is_diagonal(*b);
   rep.problem = type;
   Method method = cfg.method;
   if (method == Method::Auto)
@@ -334,7 +368,6 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   // Smallest / largest: Ritz estimates of the ends of the spectrum seed the inertia search
   // (A alone, or B^{-1}A in the B inner product with B's factorization on the main analysis).
   driver::SpectrumEstimate spectrum;
-  const bool one_end = cfg.target.mode == TargetMode::Smallest || cfg.target.mode == TargetMode::Largest;
   if (one_end && method == Method::ShiftInvertLanczos) {
     driver::NormEstimate e = na;
     if (b) {
