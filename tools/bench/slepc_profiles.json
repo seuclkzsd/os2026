@@ -43,6 +43,47 @@
   },
   {
    "scope": "case",
+   "name": "cav2d-rect-pert-1e5",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 16,
+    "threads": 1,
+    "bind": "core",
+    "options": {
+     "eps_ncv": "2k",
+     "eps_purify": "0",
+     "st_mat_mumps_icntl_7": "0",
+     "st_mat_mumps_icntl_8": "0"
+    }
+   },
+   "tuned": {
+    "tag": "tune-p16",
+    "date": "2026-10-12T00:12:47",
+    "host": "gpu01",
+    "valid": true,
+    "solver_s": 0.21757057,
+    "default_solver_s": 0.7877930000000001,
+    "default_valid": true,
+    "speedup_vs_default": 3.6208619575708245,
+    "reps": 5,
+    "flaky": false,
+    "phases": {
+     "analysis_s": 0.083439,
+     "numeric_s": 0.021555,
+     "solve_s": 0.094643,
+     "solves": 19,
+     "ortho_s": 0.010121,
+     "setup_s": 0.11029,
+     "eps_solve_s": 0.10738,
+     "vectors_s": 0.00029288,
+     "factorizations": 1
+    }
+   }
+  },
+  {
+   "scope": "case",
    "name": "ss-qa8fk-qa8fm",
    "mode": "nearest",
    "cores": 2,
@@ -78,6 +119,46 @@
      "eps_solve_s": 1.6973,
      "vectors_s": 0.0020702,
      "factorizations": 1
+    }
+   }
+  },
+  {
+   "scope": "case",
+   "name": "ss-qa8fk-qa8fm",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 8,
+    "threads": 2,
+    "bind": "core",
+    "options": {
+     "eps_purify": "0",
+     "st_mat_mumps_icntl_28": "2",
+     "st_mat_mumps_icntl_29": "1"
+    }
+   },
+   "tuned": {
+    "tag": "tune-p16",
+    "date": "2026-10-12T00:09:19",
+    "host": "gpu01",
+    "valid": true,
+    "solver_s": 1.469180115,
+    "default_solver_s": 2.614635,
+    "default_valid": true,
+    "speedup_vs_default": 1.77965585928176,
+    "reps": 20,
+    "flaky": true,
+    "phases": {
+     "analysis_s": 0.231995,
+     "numeric_s": 0.337345,
+     "solve_s": 0.792645,
+     "solves": 47.0,
+     "ortho_s": 0.0679165,
+     "setup_s": 0.5869850000000001,
+     "eps_solve_s": 0.8803000000000001,
+     "vectors_s": 0.000275305,
+     "factorizations": 1.0
     }
    }
   },
@@ -122,6 +203,42 @@
   },
   {
    "scope": "case",
+   "name": "syn-mem27-46",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 1,
+    "threads": 16,
+    "bind": "none",
+    "options": {}
+   },
+   "tuned": {
+    "tag": "tune-p16",
+    "date": "2026-10-11T23:42:11",
+    "host": "gpu01",
+    "valid": true,
+    "solver_s": 3.5026059499999995,
+    "default_solver_s": 3.5026059499999995,
+    "default_valid": true,
+    "speedup_vs_default": 1.0,
+    "reps": 20,
+    "flaky": true,
+    "phases": {
+     "analysis_s": 1.0876,
+     "numeric_s": 0.5278799999999999,
+     "solve_s": 1.83045,
+     "solves": 41.0,
+     "ortho_s": 0.0326785,
+     "setup_s": 1.6209500000000001,
+     "eps_solve_s": 1.87395,
+     "vectors_s": 0.0024428,
+     "factorizations": 1.0
+    }
+   }
+  },
+  {
+   "scope": "case",
    "name": "wg-square-1e5",
    "mode": "nearest",
    "cores": 2,
@@ -156,6 +273,45 @@
      "setup_s": 0.296495,
      "eps_solve_s": 1.7344499999999998,
      "vectors_s": 0.462115,
+     "factorizations": 1.0
+    }
+   }
+  },
+  {
+   "scope": "case",
+   "name": "wg-square-1e5",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 16,
+    "threads": 1,
+    "bind": "core",
+    "options": {
+     "st_mat_mumps_icntl_58": "1",
+     "st_mat_mumps_icntl_7": "0"
+    }
+   },
+   "tuned": {
+    "tag": "tune-p16",
+    "date": "2026-10-12T00:00:54",
+    "host": "gpu01",
+    "valid": true,
+    "solver_s": 0.882295,
+    "default_solver_s": 1.765635,
+    "default_valid": false,
+    "speedup_vs_default": 2.0011844111096626,
+    "reps": 20,
+    "flaky": true,
+    "phases": {
+     "analysis_s": 0.11745,
+     "numeric_s": 0.06510350000000001,
+     "solve_s": 0.5389649999999999,
+     "solves": 76.5,
+     "ortho_s": 0.12961499999999998,
+     "setup_s": 0.19713999999999998,
+     "eps_solve_s": 0.5613250000000001,
+     "vectors_s": 0.144345,
      "factorizations": 1.0
     }
    }
@@ -205,6 +361,48 @@
   {
    "scope": "case",
    "name": "yee-pec-box-1e5",
+   "mode": "interval",
+   "cores": 16,
+   "target": {
+    "mode": "interval",
+    "lower": 40,
+    "upper": 200
+   },
+   "config": {
+    "ranks": 4,
+    "threads": 4,
+    "bind": "none",
+    "options": {
+     "eps_krylovschur_nev": "60"
+    }
+   },
+   "tuned": {
+    "tag": "tune-p16",
+    "date": "2026-10-12T00:26:54",
+    "host": "gpu01",
+    "valid": true,
+    "solver_s": 10.359725099999999,
+    "default_solver_s": 13.707927999999999,
+    "default_valid": true,
+    "speedup_vs_default": 1.3231941839846697,
+    "reps": 5,
+    "flaky": false,
+    "phases": {
+     "analysis_s": 1.2837,
+     "numeric_s": 1.3008,
+     "solve_s": 6.6713,
+     "solves": 194,
+     "ortho_s": 0.93483,
+     "setup_s": 2.6932,
+     "eps_solve_s": 7.6644,
+     "vectors_s": 0.0041644,
+     "factorizations": 2
+    }
+   }
+  },
+  {
+   "scope": "case",
+   "name": "yee-pec-box-1e5",
    "mode": "nearest",
    "cores": 2,
    "target": null,
@@ -242,6 +440,48 @@
    }
   },
   {
+   "scope": "case",
+   "name": "yee-pec-box-1e5",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 4,
+    "threads": 4,
+    "bind": "core",
+    "options": {
+     "eps_nev": "k+2",
+     "st_mat_mumps_cntl_7": "1e-10",
+     "st_mat_mumps_icntl_28": "2",
+     "st_mat_mumps_icntl_29": "2",
+     "st_mat_mumps_icntl_35": "2"
+    }
+   },
+   "tuned": {
+    "tag": "tune-p16",
+    "date": "2026-10-11T23:52:27",
+    "host": "gpu01",
+    "valid": true,
+    "solver_s": 3.3353900000000003,
+    "default_solver_s": 4.19042,
+    "default_valid": false,
+    "speedup_vs_default": 1.2563508315369414,
+    "reps": 20,
+    "flaky": true,
+    "phases": {
+     "analysis_s": 0.71697,
+     "numeric_s": 0.782295,
+     "solve_s": 1.7487300000000001,
+     "solves": 60.0,
+     "ortho_s": 0.044932,
+     "setup_s": 1.5304,
+     "eps_solve_s": 1.3987,
+     "vectors_s": 0.40795,
+     "factorizations": 1.0
+    }
+   }
+  },
+  {
    "scope": "class",
    "name": "GHEP/interval",
    "mode": "interval",
@@ -249,6 +489,24 @@
    "config": {
     "ranks": 2,
     "threads": 1,
+    "bind": "none",
+    "options": {
+     "eps_krylovschur_nev": "60"
+    }
+   },
+   "validated": false,
+   "from_cases": [
+    "yee-pec-box-1e5"
+   ]
+  },
+  {
+   "scope": "class",
+   "name": "GHEP/interval",
+   "mode": "interval",
+   "cores": 16,
+   "config": {
+    "ranks": 4,
+    "threads": 4,
     "bind": "none",
     "options": {
      "eps_krylovschur_nev": "60"
@@ -282,6 +540,30 @@
   },
   {
    "scope": "class",
+   "name": "GHEP/nearest",
+   "mode": "nearest",
+   "cores": 16,
+   "config": {
+    "ranks": 4,
+    "threads": 4,
+    "bind": "core",
+    "options": {
+     "eps_nev": "k+2",
+     "st_mat_mumps_cntl_7": "1e-10",
+     "st_mat_mumps_icntl_28": "2",
+     "st_mat_mumps_icntl_29": "2",
+     "st_mat_mumps_icntl_35": "2"
+    }
+   },
+   "validated": false,
+   "from_cases": [
+    "yee-pec-box-1e5",
+    "ss-qa8fk-qa8fm",
+    "cav2d-rect-pert-1e5"
+   ]
+  },
+  {
+   "scope": "class",
    "name": "GHIEP/nearest",
    "mode": "nearest",
    "cores": 2,
@@ -302,6 +584,25 @@
   },
   {
    "scope": "class",
+   "name": "GHIEP/nearest",
+   "mode": "nearest",
+   "cores": 16,
+   "config": {
+    "ranks": 16,
+    "threads": 1,
+    "bind": "core",
+    "options": {
+     "st_mat_mumps_icntl_58": "1",
+     "st_mat_mumps_icntl_7": "0"
+    }
+   },
+   "validated": false,
+   "from_cases": [
+    "wg-square-1e5"
+   ]
+  },
+  {
+   "scope": "class",
    "name": "HEP/nearest",
    "mode": "nearest",
    "cores": 2,
@@ -313,6 +614,22 @@
      "eps_ncv": "2k",
      "st_mat_mumps_icntl_7": "4"
     }
+   },
+   "validated": false,
+   "from_cases": [
+    "syn-mem27-46"
+   ]
+  },
+  {
+   "scope": "class",
+   "name": "HEP/nearest",
+   "mode": "nearest",
+   "cores": 16,
+   "config": {
+    "ranks": 1,
+    "threads": 16,
+    "bind": "none",
+    "options": {}
    },
    "validated": false,
    "from_cases": [
