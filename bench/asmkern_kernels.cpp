@@ -342,11 +342,11 @@ int run_shapes(const std::map<std::string, std::string>& o) {
       return 2;
     }
   }
-  std::printf("threads %d, %s, BLAS %s, AVX-512 %d, pool %.0f MB, reps %d\n\n",
+  std::printf("threads %d, %s, BLAS %s, ISA %s, pool %.0f MB, reps %d\n\n",
               omp_get_max_threads(),
               inpar ? "calls inside a parallel region by every thread (us and GB/s per thread)"
                     : "calls from one thread",
-              hs::blas::real_blas().library.c_str(), hs::blas::cpu_has_avx512f() ? 1 : 0, pool_mb,
+              hs::blas::real_blas().library.c_str(), hs::blas::isa_name(hs::blas::best_isa()), pool_mb,
               reps);
   std::printf("| shape | real us | real GB/s |");
   for (const auto& nm : names) std::printf(" %s us | x | GB/s | rel diff |", nm.c_str());

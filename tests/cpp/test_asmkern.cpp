@@ -93,8 +93,10 @@ void expect_close(const std::vector<double>& got, const std::vector<double>& wan
   }
 }
 
+// Every instruction set this CPU can run (the kernels are tested on each).
 std::vector<Isa> isas() {
   std::vector<Isa> v{Isa::Portable};
+  if (hs::blas::cpu_has_avx2_fma()) v.push_back(Isa::Avx2);
   if (hs::blas::cpu_has_avx512f()) v.push_back(Isa::Avx512);
   return v;
 }
@@ -142,12 +144,16 @@ TEST(BlasHookConfig, ParsesTokensAndReportsUnknownOnes) {
 
   c = hs::blas::parse_route_config("all", &unknown);
   EXPECT_TRUE(c.gemm_n1_gemv && c.narrow && c.parallel);
-  EXPECT_EQ(c.trsv_max_n, 16);
+  EXPECT_EQ(c.trsv_max_n, 0);
+  EXPECT_EQ(c.small_trsm_max_m, 512);
+  c = hs::blas::parse_route_config("narrow,rows=128", &unknown);
+  EXPECT_EQ(c.nn_split_rows, 128);
+  EXPECT_TRUE(unknown.empty()) << unknown;
   c = hs::blas::parse_route_config("all,off", &unknown);
   EXPECT_FALSE(c.gemm_n1_gemv || c.trsv_max_n > 0 || c.narrow || c.parallel);
 
-  c = hs::blas::parse_route_config("gemv1,bogus,maxn=0,maxn=65,threads=x,par", &unknown);
-  EXPECT_EQ(unknown, "bogus,maxn=0,maxn=65,threads=x");
+  c = hs::blas::parse_route_config("gemv1,bogus,maxn=0,maxn=65,threads=x,rows=7,par", &unknown);
+  EXPECT_EQ(unknown, "bogus,maxn=0,maxn=65,threads=x,rows=7");
   EXPECT_TRUE(c.gemm_n1_gemv);
   EXPECT_TRUE(c.parallel);
   EXPECT_EQ(c.narrow_max_n, 16);
@@ -176,18 +182,38 @@ TEST(BlasHookConfig, ToStringRoundTrips) {
   }
 }
 
+// HS_BLAS_NO_AVX512 / HS_BLAS_NO_AVX2 force the lower instruction sets (as on a CPU without
+// them), and the route tokens cap the ISA.
 TEST(BlasHookConfig, ForcedFallbackWithoutAvx512) {
+  const fint m = 300, n = 4, k = 70;
+  const auto a = random_vec(static_cast<std::size_t>(m) * k, 1);
+  const auto b = random_vec(static_cast<std::size_t>(k) * n, 2);
+  const auto c0 = random_vec(static_cast<std::size_t>(m) * n, 3);
+  const bool has_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
   {
     EnvGuard g("HS_BLAS_NO_AVX512", "1");
     EXPECT_FALSE(hs::blas::cpu_has_avx512f());
     const RouteConfig c = hs::blas::parse_route_config("all,minkb=1000000");
+    EXPECT_EQ(c.isa, has_avx2 ? Isa::Avx2 : Isa::Portable);
+    EXPECT_EQ(hs::blas::best_isa(), c.isa);
+    std::vector<double> got = c0, want, bound;
+    ref_gemm('N', 'N', m, n, k, 1.5, a.data(), m, b.data(), k, -1.0, c0.data(), m, &want, &bound);
+    EXPECT_EQ(hs::blas::dgemm(c, 'N', 'N', m, n, k, 1.5, a.data(), m, b.data(), k, -1.0,
+                              got.data(), m),
+              has_avx2 ? Route::Narrow : Route::Real);
+    expect_close(got, want, bound, "avx2 fallback");
+  }
+  EXPECT_EQ(hs::blas::parse_route_config("all,avx2").isa,
+            std::min(Isa::Avx2, hs::blas::best_isa()));
+  EXPECT_EQ(hs::blas::parse_route_config("all,avx2,portable").isa, Isa::Portable);
+  {
+    EnvGuard g1("HS_BLAS_NO_AVX512", "1");
+    EnvGuard g2("HS_BLAS_NO_AVX2", "yes");
+    EXPECT_FALSE(hs::blas::cpu_has_avx2_fma());
+    const RouteConfig c = hs::blas::parse_route_config("all,minkb=1000000");
     EXPECT_EQ(c.isa, Isa::Portable);
-    // The narrow route needs the AVX-512 kernels: without them the call goes to the real dgemm
-    // and the result is the real routine's.
-    const fint m = 300, n = 4, k = 70;
-    const auto a = random_vec(static_cast<std::size_t>(m) * k, 1);
-    const auto b = random_vec(static_cast<std::size_t>(k) * n, 2);
-    const auto c0 = random_vec(static_cast<std::size_t>(m) * n, 3);
+    // The narrow route needs SIMD kernels: without them the call goes to the real dgemm and the
+    // result is the real routine's.
     std::vector<double> got = c0, want = c0;
     EXPECT_EQ(hs::blas::dgemm(c, 'N', 'N', m, n, k, 1.5, a.data(), m, b.data(), k, -1.0,
                               got.data(), m),
@@ -198,6 +224,7 @@ TEST(BlasHookConfig, ForcedFallbackWithoutAvx512) {
   {
     EnvGuard g("HS_BLAS_NO_AVX512", "0");
     EXPECT_EQ(hs::blas::cpu_has_avx512f(), __builtin_cpu_supports("avx512f") != 0);
+    EXPECT_EQ(hs::blas::cpu_has_avx2_fma(), has_avx2);
   }
 }
 
@@ -247,7 +274,7 @@ TEST(BlasHookKernels, NarrowGemmMatchesLongDoubleReference) {
                     }
                   }
                 expect_close(c, want, bound,
-                             std::string("isa ") + (isa == Isa::Avx512 ? "avx512" : "portable") +
+                             std::string("isa ") + hs::blas::isa_name(isa) +
                                  " " + ta + " m=" + std::to_string(m) + " n=" + std::to_string(n) +
                                  " k=" + std::to_string(k) + " alpha=" + std::to_string(alpha) +
                                  " beta=" + std::to_string(beta));
@@ -255,8 +282,10 @@ TEST(BlasHookKernels, NarrowGemmMatchesLongDoubleReference) {
           }
 }
 
+// Row splits without a K split (k < 512) give every element the same arithmetic: the result does
+// not depend on the thread count. min_rows = 8 / 4 makes small row blocks: with m = 61 the
+// per-thread blocks of NN take the register path, the whole (one thread) the chunked one.
 TEST(BlasHookKernels, NarrowGemmIsBitwiseIndependentOfThreads) {
-  // m = 61: per-thread blocks of <= 32 rows take the register path (NN), the whole the chunked one
   for (const fint m : {2049, 61})
   for (const fint n : {6, 3})
   for (const fint k : {300, 5})
@@ -271,16 +300,77 @@ TEST(BlasHookKernels, NarrowGemmIsBitwiseIndependentOfThreads) {
         std::vector<double> c = c0;
         if (ta == 'N')
           hs::blas::narrow_gemm_nn(isa, threads, m, n, k, -1.0, a.data(), lda, b.data(), k, 1.0,
-                                   c.data(), m);
+                                   c.data(), m, 8);
         else
           hs::blas::narrow_gemm_tn(isa, threads, m, n, k, -1.0, a.data(), lda, b.data(), k, 1.0,
-                                   c.data(), m);
+                                   c.data(), m, 4);
         if (ref.empty())
           ref = c;
         else
-          EXPECT_EQ(c, ref) << ta << " threads " << threads;
+          EXPECT_EQ(c, ref) << hs::blas::isa_name(isa) << " " << ta << " m=" << m
+                            << " threads " << threads;
       }
     }
+}
+
+// Parallel split with K chunks (few rows of C, long K: MUMPS' backward-solve updates above its L0
+// layer, hsolve's Gram products): accurate against the long-double reference, padding rows and
+// (beta = 0) C untouched / unread, and bitwise reproducible for a fixed thread count.
+TEST(BlasHookKernels, NarrowGemmSplitKIsAccurateAndDeterministic) {
+  std::uint64_t seed = 300;
+  for (char ta : {'N', 'T'})
+    for (const fint m : {3, 40, 300, 700})
+      for (const fint n : {2, 4, 9})
+        for (const fint k : {1100, 3001}) {
+          const fint lda = (ta == 'N' ? m : k) + 5;
+          const fint ldb = k + 3;
+          const fint ldc = m + 2;
+          const auto a = random_vec(static_cast<std::size_t>(lda) * (ta == 'N' ? k : m), ++seed);
+          const auto b = random_vec(static_cast<std::size_t>(ldb) * n, ++seed);
+          const auto c0 = random_vec(static_cast<std::size_t>(ldc) * n, ++seed);
+          for (double beta : {0.0, -0.5}) {
+            std::vector<double> cin = c0, want, bound;
+            if (beta == 0.0) std::fill(cin.begin(), cin.end(), kNaN);  // must not be read
+            ref_gemm(ta, 'N', m, n, k, 0.75, a.data(), lda, b.data(), ldb, beta, cin.data(), ldc,
+                     &want, &bound);
+            for (fint j = 0; j < n; ++j)
+              for (fint i = m; i < ldc; ++i) want[i + static_cast<std::size_t>(j) * ldc] = 0.0;
+            for (Isa isa : isas())
+              for (const int threads : {2, 7, 16})
+                for (const fint rows : {fint{8}, hs::blas::kNnSplitRows}) {
+                  auto run = [&] {
+                    std::vector<double> c = cin;
+                    if (ta == 'N')
+                      hs::blas::narrow_gemm_nn(isa, threads, m, n, k, 0.75, a.data(), lda, b.data(),
+                                               ldb, beta, c.data(), ldc, rows);
+                    else
+                      hs::blas::narrow_gemm_tn(isa, threads, m, n, k, 0.75, a.data(), lda, b.data(),
+                                               ldb, beta, c.data(), ldc, rows);
+                    return c;
+                  };
+                  std::vector<double> c = run();
+                  const std::vector<double> again = run();
+                  const std::string what =
+                      std::string(hs::blas::isa_name(isa)) + " " + ta +
+                      " m=" + std::to_string(m) + " n=" + std::to_string(n) + " k=" +
+                      std::to_string(k) + " threads=" + std::to_string(threads) +
+                      " rows=" + std::to_string(rows) + " beta=" + std::to_string(beta);
+                  for (std::size_t i = 0; i < c.size(); ++i)
+                    ASSERT_TRUE(c[i] == again[i] || (std::isnan(c[i]) && std::isnan(again[i])))
+                        << what << ": not reproducible at " << i;
+                  for (fint j = 0; j < n; ++j)
+                    for (fint i = m; i < ldc; ++i) {  // padding rows untouched
+                      const std::size_t q = i + static_cast<std::size_t>(j) * ldc;
+                      if (beta == 0.0)
+                        ASSERT_TRUE(std::isnan(c[q])) << what;
+                      else
+                        ASSERT_EQ(c[q], c0[q]) << what;
+                      c[q] = 0.0;
+                    }
+                  expect_close(c, want, bound, what);
+                }
+          }
+        }
 }
 
 TEST(BlasHookKernels, NarrowGemmPropagatesNaN) {
@@ -452,7 +542,7 @@ TEST(BlasHookKernels, SmallTrsmMatchesRealDtrsm) {
                                           want.data(), &ldb, 1, 1, 1, 1);
               for (std::size_t i = 0; i < got.size(); ++i)
                 ASSERT_NEAR(got[i], want[i], 1e-13 * (1.0 + std::abs(want[i])))
-                    << (isa == Isa::Avx512 ? "avx512 " : "portable ") << uplo << tr << diag
+                    << hs::blas::isa_name(isa) << " " << uplo << tr << diag
                     << " m=" << m << " n=" << n << " at " << i;
             }
   // NaN in B: the solved entries that depend on it become NaN, the others stay finite.
@@ -466,6 +556,23 @@ TEST(BlasHookKernels, SmallTrsmMatchesRealDtrsm) {
     hs::blas::small_trsm_left(isa, 'L', 'N', 'N', m, 1, a.data(), m, b.data(), m);
     for (fint i = 0; i < m; ++i) EXPECT_EQ(std::isnan(b[i]), i >= 5) << i;
   }
+}
+
+TEST(BlasHookRouter, SmallTrsmLimitDependsOnTheInstructionSet) {
+  const RouteConfig p = hs::blas::parse_route_config("strsm=512,portable");
+  EXPECT_EQ(hs::blas::small_trsm_limit(p), 32);
+  EXPECT_EQ(hs::blas::small_trsm_limit(hs::blas::parse_route_config("strsm=16,portable")), 16);
+  const RouteConfig a2 = hs::blas::parse_route_config("strsm=512,avx2");
+  EXPECT_EQ(hs::blas::small_trsm_limit(a2), a2.isa == Isa::Avx2 ? 256 : 32);
+  const RouteConfig best = hs::blas::parse_route_config("strsm=512");
+  if (best.isa == Isa::Avx512) EXPECT_EQ(hs::blas::small_trsm_limit(best), 512);
+  // The cap applies to routing: m = 40 goes to the real dtrsm on the portable kernels.
+  std::vector<double> a(40 * 40, 0.0), b(40 * 2, 1.0);
+  for (int i = 0; i < 40; ++i) a[i * 41] = 2.0;
+  EXPECT_EQ(hs::blas::dtrsm(p, 'L', 'U', 'N', 'N', 40, 2, 1.0, a.data(), 40, b.data(), 40),
+            Route::Real);
+  EXPECT_EQ(hs::blas::dtrsm(p, 'L', 'U', 'N', 'N', 32, 2, 1.0, a.data(), 40, b.data(), 40),
+            Route::SmallTrsm);
 }
 
 TEST(BlasHookRouter, DtrsmSmallRoute) {
@@ -589,6 +696,33 @@ TEST(BlasHookRouter, ParallelThreadRule) {
     inside = hs::blas::parallel_threads(c, 1e12);  // no nested parallelism
   }
   EXPECT_EQ(inside, 1);
+}
+
+// Without the parallel route a large call outside parallel regions stays with the real dgemm
+// (which may thread it); the same call inside a parallel region, or a small one, takes the
+// serial narrow kernel; with the parallel route the large call is split.
+TEST(BlasHookRouter, NarrowRouteLeavesLargeSerialCallsToTheRealBlas) {
+  if (hs::blas::best_isa() == Isa::Portable) GTEST_SKIP() << "narrow kernels need AVX2 or AVX-512";
+  const RouteConfig narrow = hs::blas::parse_route_config("narrow,minkb=64");
+  const RouteConfig both = hs::blas::parse_route_config("narrow,par,minkb=64,threads=4");
+  const fint m = 1000, n = 4, k = 40;  // A: 320 KB >= 2 * 64 KB
+  const auto a = random_vec(static_cast<std::size_t>(m) * k, 21);
+  const auto b = random_vec(static_cast<std::size_t>(k) * n, 22);
+  std::vector<double> c(static_cast<std::size_t>(m) * n, 0.0);
+  auto call = [&](const RouteConfig& cfg, fint rows) {
+    return hs::blas::dgemm(cfg, 'N', 'N', rows, n, k, 1.0, a.data(), m, b.data(), k, 0.0,
+                           c.data(), m);
+  };
+  EXPECT_EQ(call(narrow, m), Route::Real);
+  EXPECT_EQ(call(narrow, 100), Route::Narrow);  // 32 KB
+  EXPECT_EQ(call(both, m), Route::Parallel);
+  Route inside = Route::Real;
+#pragma omp parallel num_threads(2)
+  {
+#pragma omp single
+    inside = call(narrow, m);
+  }
+  EXPECT_EQ(inside, Route::Narrow);
 }
 
 // Many threads calling the router at once (as MUMPS' L0 subtrees do) get the serial results.

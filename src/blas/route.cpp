@@ -170,9 +170,33 @@ bool cpu_has_avx512f() noexcept {
   return __builtin_cpu_supports("avx512f") != 0;
 }
 
+bool cpu_has_avx2_fma() noexcept {
+  if (env_flag("HS_BLAS_NO_AVX2")) return false;
+  __builtin_cpu_init();
+  return __builtin_cpu_supports("avx2") != 0 && __builtin_cpu_supports("fma") != 0;
+}
+
+Isa best_isa() noexcept {
+  if (cpu_has_avx512f()) return Isa::Avx512;
+  if (cpu_has_avx2_fma()) return Isa::Avx2;
+  return Isa::Portable;
+}
+
+const char* isa_name(Isa isa) noexcept {
+  switch (isa) {
+    case Isa::Avx512:
+      return "avx512";
+    case Isa::Avx2:
+      return "avx2";
+    case Isa::Portable:
+      return "portable";
+  }
+  return "?";
+}
+
 RouteConfig parse_route_config(const std::string& spec, std::string* unknown) {
   RouteConfig c;
-  bool portable = false;
+  Isa cap = Isa::Avx512;
   std::size_t pos = 0;
   while (pos <= spec.size()) {
     std::size_t end = spec.find(',', pos);
@@ -200,10 +224,11 @@ RouteConfig parse_route_config(const std::string& spec, std::string* unknown) {
         c.parallel = true;
       } else if (key == "all") {
         c.gemm_n1_gemv = c.narrow = c.parallel = true;
-        c.trsv_max_n = 16;
-        c.small_trsm_max_m = 64;
+        c.small_trsm_max_m = 512;
       } else if (key == "portable") {
-        portable = true;
+        cap = Isa::Portable;
+      } else if (key == "avx2") {
+        cap = std::min(cap, Isa::Avx2);
       } else {
         ok = false;
       }
@@ -213,6 +238,8 @@ RouteConfig parse_route_config(const std::string& spec, std::string* unknown) {
       c.trsv_max_n = static_cast<int>(v);
     } else if (key == "maxn" && parse_int(val, 1, 64, &v)) {
       c.narrow_max_n = static_cast<int>(v);
+    } else if (key == "rows" && parse_int(val, 8, 65536, &v)) {
+      c.nn_split_rows = static_cast<int>(v);
     } else if (key == "minkb" && parse_int(val, 0, 1LL << 30, &v)) {
       c.parallel_min_bytes = static_cast<std::int64_t>(v) * 1024;
     } else if (key == "threads" && parse_int(val, 0, 4096, &v)) {
@@ -225,7 +252,7 @@ RouteConfig parse_route_config(const std::string& spec, std::string* unknown) {
       *unknown += tok;
     }
   }
-  c.isa = (!portable && cpu_has_avx512f()) ? Isa::Avx512 : Isa::Portable;
+  c.isa = std::min(cap, best_isa());
   return c;
 }
 
@@ -242,9 +269,10 @@ std::string to_string(const RouteConfig& c) {
   if (c.parallel) add("par");
   if (s.empty()) add("off");
   add("maxn=" + std::to_string(c.narrow_max_n));
+  add("rows=" + std::to_string(c.nn_split_rows));
   add("minkb=" + std::to_string(c.parallel_min_bytes / 1024));
   add("threads=" + std::to_string(c.threads));
-  if (c.isa == Isa::Portable) add("portable");
+  if (c.isa != Isa::Avx512) add(isa_name(c.isa));
   return s;
 }
 
@@ -283,6 +311,11 @@ const char* route_name(Route r) noexcept {
   return "?";
 }
 
+int small_trsm_limit(const RouteConfig& cfg) noexcept {
+  const int cap = cfg.isa == Isa::Avx512 ? 4096 : cfg.isa == Isa::Avx2 ? 256 : 32;
+  return std::min(cfg.small_trsm_max_m, cap);
+}
+
 int parallel_threads(const RouteConfig& cfg, double bytes) noexcept {
   if (omp_in_parallel()) return 1;
   const int max_t = cfg.threads > 0 ? cfg.threads : omp_get_max_threads();
@@ -311,6 +344,20 @@ Route dgemm(const RouteConfig& cfg, char ta_c, char tb_c, fint m, fint n, fint k
   const double a_bytes = 8.0 * static_cast<double>(m) * static_cast<double>(k);
   const int threads = cfg.parallel ? parallel_threads(cfg, a_bytes) : 1;
 
+  // Narrow kernels: split over threads by the parallel route, serially inside parallel regions
+  // and for small calls; without the parallel route a large call outside parallel regions stays
+  // with the real routine, which may thread it (one thread of the narrow kernel would not keep up).
+  const bool large_serial = !cfg.parallel && !omp_in_parallel() &&
+                            a_bytes >= 2.0 * static_cast<double>(cfg.parallel_min_bytes);
+  if (cfg.narrow && cfg.isa != Isa::Portable && !tb && n >= 2 && n <= cfg.narrow_max_n &&
+      !large_serial) {
+    if (ta)
+      narrow_gemm_tn(cfg.isa, threads, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
+    else
+      narrow_gemm_nn(cfg.isa, threads, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc,
+                     cfg.nn_split_rows);
+    return threads > 1 ? Route::Parallel : Route::Narrow;
+  }
   if (ta && !tb && n <= cfg.narrow_max_n && threads > 1 && m < 4 * threads &&
       k >= 1024 * threads) {
     splitk_gemm_tn(threads, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
@@ -340,18 +387,9 @@ Route dgemm(const RouteConfig& cfg, char ta_c, char tb_c, fint m, fint n, fint k
     rb.dgemv(&t, &rows, &cols, &alpha, b, &ldb, a, &incx, &beta, c, &ldc, 1);
     return Route::Gemv;
   }
-  if (n >= 2 && n <= cfg.narrow_max_n && !tb) {
-    if (cfg.narrow && cfg.isa == Isa::Avx512) {
-      if (ta)
-        narrow_gemm_tn(cfg.isa, threads, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
-      else
-        narrow_gemm_nn(cfg.isa, threads, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
-      return threads > 1 ? Route::Parallel : Route::Narrow;
-    }
-    if (threads > 1 && m >= 16 * threads) {
-      parallel_gemm(threads, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
-      return Route::Parallel;
-    }
+  if (n >= 2 && n <= cfg.narrow_max_n && !tb && threads > 1 && m >= 16 * threads) {
+    parallel_gemm(threads, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
+    return Route::Parallel;
   }
   return forward();
 }
@@ -365,7 +403,7 @@ Route dtrsm(const RouteConfig& cfg, char side, char uplo, char ta, char diag, fi
                      n >= 0 && lda >= std::max<fint>(1, s == 'L' ? m : n) &&
                      ldb >= std::max<fint>(1, m);
   if (valid && s == 'L' && n >= 1 && n <= cfg.narrow_max_n && m >= 1 &&
-      m <= cfg.small_trsm_max_m && alpha == 1.0) {
+      m <= small_trsm_limit(cfg) && alpha == 1.0) {
     small_trsm_left(cfg.isa, u, t, d, m, n, a, lda, b, ldb);
     return Route::SmallTrsm;
   }
