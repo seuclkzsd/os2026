@@ -94,7 +94,11 @@ struct SolverConfig {
   FactorPrecision factor_precision = FactorPrecision::Double;
   int ordering = -1;                ///< -1: adaptive AMD / nested dissection by cost model (DESIGN
                                     ///< §3.6-3b; nested dissection = SCOTCH, METIS if deterministic);
-                                    ///< >= 0: MUMPS ICNTL(7) (7 auto, 5 METIS, 3 SCOTCH, 0 AMD, ...)
+                                    ///< 0, 2..7: MUMPS ICNTL(7) (7 auto, 5 METIS, 3 SCOTCH, 0 AMD, ...);
+                                    ///< 10 (kOrderingNestedDissection, factor.hpp): hsolve's own
+                                    ///< multithreaded nested dissection, given to MUMPS as its pivot
+                                    ///< order (compute_ordering: the same order for every thread
+                                    ///< count and run). 1 (a caller-given order) is rejected
   bool deterministic = false;       ///< true: bitwise-reproducible factorizations/solves for a fixed
                                     ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves; the
                                     ///< adaptive ordering then takes METIS, not SCOTCH, whose orderings

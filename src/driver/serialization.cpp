@@ -196,7 +196,10 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
   if (!(c.certificate_delta > 0.0) || !(c.certificate_delta < 1.0))
     HS_THROW(InvalidInput, "config: certificate_delta must be in (0, 1)");
   if (c.certificate_fault_drop < 0) HS_THROW(InvalidInput, "config: certificate_fault_drop must be >= 0");
-  if (c.ordering < -1 || c.ordering > 7) HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive) or a MUMPS ICNTL(7) value 0..7");
+  // ICNTL(7) = 1 means "pivot order given by the caller": the config cannot give one.
+  if (c.ordering != kOrderingNestedDissection && (c.ordering < -1 || c.ordering > 7 || c.ordering == 1))
+    HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive), a MUMPS ICNTL(7) value 0 or 2..7, or "
+                               << kOrderingNestedDissection << " (hsolve's nested dissection), got " << c.ordering);
   return c;
 }
 
