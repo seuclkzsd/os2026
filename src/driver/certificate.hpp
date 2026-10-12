@@ -36,10 +36,16 @@
 // within r', detected. A check still detecting after the last rerun leaves the final verdict to
 // the exact counts (the solve never fails where the counts pass).
 //
-// On a verdict "missing" (exact: count > found; randomized: Detected, new_count Ritz values
-// beyond the pass threshold) definite.cpp runs its deflated rerun and checks again. Detection of
-// an eigenvalue in (r_c, r'] (an unconverged Ritz hint placed the window end too far) is not an
-// error: the rerun finds it, the next window ends mid-way to it.
+// On a verdict "missing" (exact: count > found; exact_single: valid single counts above the found
+// pairs; randomized: Detected, new_count Ritz values beyond the pass threshold) definite.cpp runs
+// its deflated rerun and checks again with the same method - no double counts just to confirm
+// the deficit (the P5 detection runs on yee-pec-box-1e5 spent 2.1 s of double counts on a deficit
+// the single counts had already shown). Single counts are exact for K(s) + E: a deficit means an
+// eigenvalue within [a - eta_a, b + eta_b) is not found - inside the window, or within eta of an
+// end, which the rerun then converges and the next window ends mid-way to. Detection of an
+// eigenvalue in (r_c, r'] (an unconverged Ritz hint placed the window end too far) is likewise
+// not an error. Single counts BELOW the found pairs, or an invalid (singular) single count, leave
+// the verdict to the exact counts (duplicates / ghosts are theirs to report).
 #pragma once
 
 #include <memory>
@@ -144,7 +150,9 @@ class NearestCertifier {
  private:
   struct Found;
   Found found_in_window(const NearestWindow& w, const Block<T>& all) const;
-  /// The randomized check's deflation block X (RoundPairs comment).
+  /// Columns of the randomized check's deflation block X (RoundPairs comment), pointers into
+  /// `pairs`; deflation_block copies them.
+  std::vector<const T*> deflation_columns(const NearestWindow& w, const RoundPairs<T>& pairs) const;
   DenseMatrix<T> deflation_block(const NearestWindow& w, const RoundPairs<T>& pairs) const;
   bool converged(const Block<T>& blk, index_t j) const;
   CheckOutcome randomized(const NearestWindow& w, const RoundPairs<T>& pairs, index_t block_size, int round);
@@ -159,11 +167,14 @@ class NearestCertifier {
   double sigma_;
   bool detection_off_;
   double scale_, n2a_, n2b_;
+  /// 1 / sqrt(min b_ii) (1 for B = I, +inf without a positive diagonal): turns ||r||_2 into a bound
+  /// on ||r||_{B^{-1}} for a diagonal B (the single-count rule's error bars).
+  double inv_sqrt_bmin_ = 1.0;
   CertificateTimings timings_;
   std::unique_ptr<StartScaling> scaling_;
   std::unique_ptr<InertiaCounter<T>> counter_;  ///< single counts (created at the first one)
   bool randomized_failed_ = false;  ///< an earlier round's check could not decide: not again
-  bool single_failed_ = false;
+  bool single_failed_ = false;      ///< single counts could not decide (invalid / below found)
   std::string auto_note_;           ///< auto: the last prediction, prefixed to the statement
   std::string fallback_note_;       ///< why this round's fast check left the verdict to the counts
 };

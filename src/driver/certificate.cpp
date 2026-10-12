@@ -62,7 +62,17 @@ NearestCertifier<T>::NearestCertifier(Ctx& c, const ShiftedPencil<T>& pencil, Sp
       scale_(scale),
       n2a_(n2a),
       n2b_(n2b),
-      timings_(timings) {}
+      timings_(timings) {
+  // ||r||_{B^{-1}} <= ||r||_2 / sqrt(min b_ii) for a diagonal B (B-normalized x); B = I: ||r||_2.
+  // For other B the bound only feeds the single-count rule, which then does not apply anyway.
+  if (const CsrMatrix<T>* b = pencil_.b()) {
+    double bmin = std::numeric_limits<double>::infinity();
+    for (index_t i = 0; i < b->nrows; ++i)
+      for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q)
+        if (b->colind[q] == i) bmin = std::min(bmin, std::real(b->values[q]));
+    inv_sqrt_bmin_ = bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
+  }
+}
 
 template <class T>
 NearestCertifier<T>::~NearestCertifier() = default;
@@ -72,23 +82,13 @@ typename NearestCertifier<T>::Found NearestCertifier<T>::found_in_window(const N
                                                                          const Block<T>& all) const {
   Found f;
   const index_t n = all.x.rows();
-  // ||r||_{B^{-1}} <= ||r||_2 / sqrt(min b_ii) for a diagonal B (B-normalized x); B = I: ||r||_2.
-  // For other B the bound only feeds the single-count rule, which then does not apply anyway.
-  double inv_sqrt_bmin = 1.0;
-  if (const CsrMatrix<T>* b = pencil_.b()) {
-    double bmin = std::numeric_limits<double>::infinity();
-    for (index_t i = 0; i < b->nrows; ++i)
-      for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q)
-        if (b->colind[q] == i) bmin = std::min(bmin, std::real(b->values[q]));
-    inv_sqrt_bmin = bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
-  }
   for (index_t j = 0; j < all.size(); ++j) {
     const double l = all.lambda[j];
     if (!std::isfinite(l) || l < w.lower || l > w.upper) continue;
     const PairMetrics pm = pair_metrics(all.ax.col(j), all.bx.col(j), all.x.col(j), n, l, n2a_, n2b_);
     f.window.push_back(j);
     f.lambda.push_back(l);
-    f.error.push_back(pm.abs_residual * inv_sqrt_bmin);
+    f.error.push_back(pm.abs_residual * inv_sqrt_bmin_);
   }
   return f;
 }
@@ -101,7 +101,8 @@ bool NearestCertifier<T>::converged(const Block<T>& blk, index_t j) const {
 }
 
 template <class T>
-DenseMatrix<T> NearestCertifier<T>::deflation_block(const NearestWindow& w, const RoundPairs<T>& pairs) const {
+std::vector<const T*> NearestCertifier<T>::deflation_columns(const NearestWindow& w,
+                                                             const RoundPairs<T>& pairs) const {
   std::vector<const T*> cols;
   const auto in_window = [&](double l) { return std::isfinite(l) && l >= w.lower && l <= w.upper; };
   std::vector<char> taken(static_cast<std::size_t>(pairs.all.size()), 0);
@@ -114,6 +115,12 @@ DenseMatrix<T> NearestCertifier<T>::deflation_block(const NearestWindow& w, cons
   for (index_t j = 0; j < pairs.all.size(); ++j)
     if (!taken[static_cast<std::size_t>(j)] && in_window(pairs.all.lambda[j]) && converged(pairs.all, j))
       cols.push_back(pairs.all.x.col(j));
+  return cols;
+}
+
+template <class T>
+DenseMatrix<T> NearestCertifier<T>::deflation_block(const NearestWindow& w, const RoundPairs<T>& pairs) const {
+  const std::vector<const T*> cols = deflation_columns(w, pairs);
   const index_t n = pairs.all.x.rows(), m = static_cast<index_t>(cols.size());
   DenseMatrix<T> x(n, m);
   for (index_t j = 0; j < m; ++j) std::copy(cols[j], cols[j] + n, x.col(j));
@@ -178,7 +185,7 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
 
   CertificateCostInputs in;
   in.n = n;
-  in.deflated = std::min<index_t>(deflation_block(w, pairs).cols(), n - 1);
+  in.deflated = std::min<index_t>(static_cast<index_t>(deflation_columns(w, pairs).size()), n - 1);
   in.complex_scalars = is_complex_v<T>;
   in.factorize_s = timings_.factorize_s > 0.0 ? timings_.factorize_s : model_factor_s(est, in_size.order, threads);
   const double analysis = model_analysis_s(in_size.order, in_size.entries, static_cast<double>(est.factor_entries));
@@ -206,7 +213,7 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
   }
   if (single_failed_) {
     single_ok = false;
-    ch.single_reason = "single counts did not certify in an earlier round";
+    ch.single_reason = "single counts could not decide in an earlier round";
   }
   in.single_valid = single_ok;
   // Measured solve calls of the Krylov run; t_apply(q) = apply1 (1 + rhs_ratio (q - 1)).
@@ -330,8 +337,9 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   try {
     res = exclusion_check<T>(op, b_op.get(), x, sigma_, rad.claim, o);
   } catch (const Error& err) {
-    if (err.code() != Error::Code::InvalidInput) throw;
-    fallback_note_ = std::string("randomized check rejected its input: ") + err.what();
+    // Rejected input (e.g. a rank-deficient X) or memory: the exact counts decide instead.
+    if (err.code() != Error::Code::InvalidInput && err.code() != Error::Code::OutOfMemoryBudget) throw;
+    fallback_note_ = std::string("randomized check could not run (") + to_string(err.code()) + "): " + err.what();
     return {};
   }
   cert.solves += res.op_applications;
@@ -417,10 +425,11 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   event(c_, "single_counts", {{"lower", w.lower}, {"upper", w.upper}, {"count", static_cast<std::int64_t>(s.count)},
                               {"found", static_cast<std::int64_t>(f.window.size())}, {"certified", s.certified},
                               {"eta_lower", v.eta_lower}, {"eta_upper", v.eta_upper}, {"seconds", s.seconds}});
-  if (!s.certified) {
+  const auto found = static_cast<index_t>(f.window.size());
+  const bool counted = s.lower.valid && s.upper.valid;
+  if (!s.certified && !(counted && s.count > found)) {
     std::ostringstream os;
-    os << "single counts did not certify (valid " << (s.lower.valid && s.upper.valid) << ", count " << s.count
-       << " vs found " << f.window.size() << ")";
+    os << "single counts did not certify (valid " << counted << ", count " << s.count << " vs found " << found << ")";
     fallback_note_ = os.str();
     return {};
   }
@@ -430,14 +439,27 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   cert.lower = w.lower;
   cert.upper = w.upper;
   cert.count_inertia = s.count;
-  cert.count_found = static_cast<index_t>(f.window.size());
+  cert.count_found = found;
+  std::ostringstream os;
+  os.precision(6);
+  if (!s.certified) {
+    // A deficit (see certificate.hpp): rerun with the same method; the exact counts give the
+    // final verdict after the last rerun.
+    cert.passed = false;
+    cert.rigorous = false;
+    cert.failure_probability = 1.0;
+    os << prefix() << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", "
+       << w.upper << "] exceed the " << found << " found pairs there: an eigenvalue within [a - eta_a, b + eta_b) = ["
+       << w.lower - v.eta_lower << ", " << w.upper + v.eta_upper << ") is not found";
+    cert.statement = os.str();
+    fallback_note_ = os.str();  // in case the counts decide after all
+    return {CheckOutcome::Verdict::Missing, s.count - found};
+  }
   cert.passed = true;
   cert.rigorous = true;
   cert.failure_probability = 0.0;
-  std::ostringstream os;
-  os.precision(6);
   os << prefix() << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", "
-     << w.upper << "] equal the " << f.window.size()
+     << w.upper << "] equal the " << found
      << " found pairs there; by the perturbation rule (verify.hpp; B = I or diagonal B, backward error of the "
         "single LDL^T assumed <= 1e3 u_s ||K||_1, as double counts assume a backward-stable LDL^T) every "
         "eigenvalue in [a + eta_a, b - eta_b) = ["

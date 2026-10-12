@@ -155,13 +155,16 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
                        {"op_applies", static_cast<std::int64_t>(res.op_applies)},
                        {"deflated", static_cast<std::int64_t>(deflation ? deflation->cols() : 0)},
                        {"max_estimate", res.history.empty() ? 0.0 : res.history.back().max_estimate}});
-  if (!res.converged)  // where the restarts stalled: a sample of the restart history and its end
-    for (std::size_t i = 0; i < res.history.size(); i = (i + 1 == res.history.size() || i < 4) ? i + 1 : std::min(4 * i, res.history.size() - 1)) {
+  if (!res.converged) {
+    // Where the restarts stalled: the first restarts, then every 4^j-th, and the last one.
+    const std::size_t len = res.history.size();
+    for (std::size_t i = 0; i < len; i = (i < 4 || i + 1 == len) ? i + 1 : std::min(4 * i, len - 1)) {
       const RestartRecord& h = res.history[i];
       event(c, "lanczos_history", {{"restart", static_cast<std::int64_t>(h.restart)},
                                    {"nconv", static_cast<std::int64_t>(h.nconv)}, {"max_estimate", h.max_estimate},
                                    {"op_applies", static_cast<std::int64_t>(h.op_applies)}});
     }
+  }
   for (double th : res.ritz_all)
     if (th != 0.0) out.ritz_hints.push_back(sigma + 1.0 / th);
   // Append the new vectors (all nev, converged first) to the candidate block.

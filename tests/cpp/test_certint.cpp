@@ -490,7 +490,9 @@ TYPED_TEST(DriverCertificateTyped, EstimatedKappaIsScreeningOnly) {
 }
 
 // Single-precision counts on the exact certificate's window: the rule holds (B = I, wide margins),
-// the counts equal the found pairs - certified; one pair left out of the found set - not.
+// the counts equal the found pairs - certified; one pair left out of the found set - a deficit,
+// verdict Missing (the rerun follows, no double counts to confirm it); one pair found twice - more
+// found than counted, left to the exact counts.
 TYPED_TEST(DriverCertificateTyped, SingleCountsCertifyTheWindowOrDeferToExactCounts) {
   using T = TypeParam;
   auto s = solved_laplacian<T>(hs::CertificateMode::Auto);
@@ -510,19 +512,45 @@ TYPED_TEST(DriverCertificateTyped, SingleCountsCertifyTheWindowOrDeferToExactCou
     EXPECT_GT(rig.clock.seconds(hs::driver::Phase::Certificate), 0.0);
     EXPECT_FALSE(s->fac->inertia().valid);  // the main factors were released for the counts
   }
-  // One pair fewer: the counts (8) exceed the found pairs (7), no certificate; the exact counts
-  // that follow say why.
+  // One pair fewer: the counts (8) exceed the found pairs (7) - a deficit of one; the report says
+  // so (not passed, not a proof), and the same method may check again after the rerun.
   ASSERT_TRUE(s->fac->factorize(1.0, -s->sigma));
   auto dropped = s->all;
   std::vector<double> hints;
   const auto removed = hs::driver::drop_found_pairs(dropped, hints, s->sol.eigenvalues, s->sigma, 1);
   ASSERT_EQ(removed.size(), 1u);
+  {
+    CertifierRig<T> rig(*s, {});
+    const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {dropped}, 0);
+    EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Missing);
+    EXPECT_EQ(out.missing, 1);
+    const auto& c = rig.rep.certificate;
+    EXPECT_EQ(c.method, "exact_single");
+    EXPECT_FALSE(c.passed);
+    EXPECT_FALSE(c.rigorous);
+    EXPECT_EQ(c.count_inertia, 8);
+    EXPECT_EQ(c.count_found, 7);
+    EXPECT_NE(c.statement.find("exceed the 7 found pairs"), std::string::npos) << c.statement;
+    // the full set certifies on the same certifier (and its counter) in the next round
+    EXPECT_EQ(rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {s->all}, 1).verdict,
+              hs::driver::CheckOutcome::Verdict::Passed);
+    EXPECT_TRUE(rig.rep.certificate.passed);
+  }
+  // One pair twice: 9 found against 8 counted - the exact counts decide (and report duplicates).
+  ASSERT_EQ(s->all.size(), 8);
+  const index_t n = s->all.x.rows();
+  hs::driver::Block<T> doubled;
+  doubled.x.resize(n, 9);
+  for (index_t j = 0; j < 9; ++j) std::copy(s->all.x.col(j % 8), s->all.x.col(j % 8) + n, doubled.x.col(j));
+  doubled.lambda = s->all.lambda;
+  doubled.lambda.push_back(s->all.lambda[0]);
+  hs::driver::recompute_products(s->a, static_cast<const hs::CsrMatrix<T>*>(nullptr), doubled);
   CertifierRig<T> rig(*s, {});
-  const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {dropped}, 0);
+  const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {doubled}, 0);
   EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Undecided);
   rig.rep.certificate.passed = false;
   rig.certifier.record_exact(true);
-  EXPECT_NE(rig.rep.certificate.statement.find("single counts did not certify (valid 1, count 8 vs found 7)"),
+  EXPECT_NE(rig.rep.certificate.statement.find("single counts did not certify (valid 1, count 8 vs found 9)"),
             std::string::npos)
       << rig.rep.certificate.statement;
 }
