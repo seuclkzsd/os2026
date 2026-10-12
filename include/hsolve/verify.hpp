@@ -299,6 +299,10 @@ StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety = 100.0, boo
 
 struct SingleCountRule {
   double backward_factor = 1e3;  ///< assumed c g (see above)
+  /// ||A||_1 of the pencil when the caller has it (>= 0), else computed (O(nnz(A)); a complex A's
+  /// |a_ij| are hypot calls: ~10 ms per 1e6 entries, which a caller checking several windows of
+  /// one pencil should not pay each time).
+  double a_norm_1 = -1.0;
 };
 
 /// One certificate window for single counts.
@@ -319,8 +323,9 @@ struct SingleCountValidity {
   bool valid() const { return applicable && margins_ok; }
 };
 
-/// The rule alone (no factorization): O(nnz(A) + nnz(B) + #found). Throws InvalidInput for a
-/// malformed window (a >= b, wanted region outside (a, b), found_error size mismatch).
+/// The rule alone (no factorization): O(nnz(A) + nnz(B) + #found), without nnz(A) when
+/// rule.a_norm_1 is given. Throws InvalidInput for a malformed window (a >= b, wanted region
+/// outside (a, b), found_error size mismatch) or a non-finite a_norm_1.
 template <class T>
 SingleCountValidity single_count_validity(const ShiftedPencil<T>& pencil, const SingleWindow& w,
                                           const SingleCountRule& rule = {});
