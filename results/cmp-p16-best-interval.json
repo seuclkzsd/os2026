@@ -1,0 +1,157 @@
+{
+ "tag": "cmp-p16-best-interval",
+ "cores": "16-31",
+ "ncores": 16,
+ "solvers": [
+  "hsolve",
+  "hsolve-nocert",
+  "slepc"
+ ],
+ "slepc_profile": "best",
+ "slepc_ranks": 1,
+ "reps": 5,
+ "target_override": {
+  "mode": "interval",
+  "lower": 40,
+  "upper": 200
+ },
+ "evaluated": true,
+ "rows": [
+  {
+   "case": "yee-pec-box-1e5",
+   "n": 109744,
+   "problem": "GHEP",
+   "target": {
+    "mode": "interval",
+    "lower": 40,
+    "upper": 200
+   },
+   "target_desc": "[40, 200]",
+   "k": null,
+   "norms": {
+    "norm2_a": 568.3983920770473,
+    "norm2_b": 0.023699562469615958,
+    "scale": 23983.49728210227,
+    "time_s": 0.6611802577972412
+   },
+   "solvers": {
+    "hsolve": {
+     "reps": 5,
+     "valid_runs": 5,
+     "ok": true,
+     "solver_s": 4.418261284,
+     "solver_s_min": 4.335258803,
+     "solver_s_max": 4.427678585,
+     "solver_s_all": [
+      4.337539531,
+      4.335258803,
+      4.418261284,
+      4.427678585,
+      4.426350041
+     ],
+     "solver_s_scope": "report time_total_s",
+     "wall_s": 4.585,
+     "peak_rss_gib": 1.179,
+     "solver_peak_gib": 1.1786422729492188,
+     "max_eta": 2.3495606393327405e-11,
+     "completeness": [
+      "complete"
+     ],
+     "pairs": 37,
+     "phases": {
+      "analysis_s": 0.562265269,
+      "numeric_s": 1.473616388,
+      "factorizations": 3.0,
+      "solves": 144.0,
+      "solve_s": 1.5746834499999995,
+      "ortho_s": null,
+      "iterate_s": 2.080360466,
+      "verify_s": 0.13227767100000087
+     },
+     "errors": [],
+     "invalid_reasons": [],
+     "set_err_vs_ref": 3.6497303634488176e-17,
+     "set_diff_vs_slepc": 1.9767981366977507e-13
+    },
+    "hsolve-nocert": {
+     "reps": 5,
+     "valid_runs": 5,
+     "ok": true,
+     "solver_s": 4.341706977,
+     "solver_s_min": 4.296270261,
+     "solver_s_max": 4.439859695,
+     "solver_s_all": [
+      4.310710447,
+      4.394495469,
+      4.439859695,
+      4.341706977,
+      4.296270261
+     ],
+     "solver_s_scope": "report time_total_s",
+     "wall_s": 4.534,
+     "peak_rss_gib": 1.187,
+     "solver_peak_gib": 1.1868629455566406,
+     "max_eta": 1.1386752153408283e-11,
+     "completeness": [
+      "complete"
+     ],
+     "pairs": 37,
+     "phases": {
+      "analysis_s": 0.551259269,
+      "numeric_s": 1.489424586,
+      "factorizations": 3.0,
+      "solves": 144.0,
+      "solve_s": 1.5660296409999996,
+      "ortho_s": null,
+      "iterate_s": 2.066743779,
+      "verify_s": 0.1324838359999989
+     },
+     "errors": [],
+     "invalid_reasons": [],
+     "set_err_vs_ref": 3.997604826782059e-17,
+     "set_diff_vs_slepc": 1.9767922219036102e-13
+    },
+    "slepc": {
+     "reps": 5,
+     "valid_runs": 5,
+     "ok": true,
+     "solver_s": 10.4550453,
+     "solver_s_min": 10.3752597,
+     "solver_s_max": 12.828365400000001,
+     "solver_s_all": [
+      10.3752597,
+      10.4550453,
+      10.403919199999999,
+      12.828365400000001,
+      12.7623474
+     ],
+     "solver_s_scope": "log_view setup+solve+vectors",
+     "wall_s": 13.2,
+     "peak_rss_gib": 1.948,
+     "solver_peak_gib": 1.8793525695800781,
+     "max_eta": 3.236179962564745e-12,
+     "completeness": [
+      "complete"
+     ],
+     "pairs": 37,
+     "phases": {
+      "analysis_s": 1.2824,
+      "numeric_s": 1.3364,
+      "factorizations": 2.0,
+      "solves": 194.0,
+      "solve_s": 6.7877,
+      "ortho_s": 0.92843,
+      "iterate_s": null,
+      "verify_s": null
+     },
+     "errors": [],
+     "invalid_reasons": [],
+     "config": "4x4 eps_krylovschur_nev=60",
+     "config_source": "case profile yee-pec-box-1e5",
+     "config_scope": "case",
+     "set_err_vs_ref": 1.9770347284637635e-13
+    }
+   }
+  }
+ ]
+}
