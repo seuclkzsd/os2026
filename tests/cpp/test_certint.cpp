@@ -581,7 +581,11 @@ TYPED_TEST(DriverCertificateTyped, AutoChoiceFollowsTheMeasuredTimes) {
   {
     hs::driver::CertificateTimings slow_solves{1e-4, 10.0, 4.0};
     CertifierRig<T> rig(*s, slow_solves);
-    EXPECT_EQ(rig.certifier.choose(s->window, {s->all}).method, hs::CertificateMethod::Exact);
+    const auto ch = rig.certifier.choose(s->window, {s->all});
+    EXPECT_EQ(ch.method, hs::CertificateMethod::Exact);
+    // cheap factorizations: single counts cannot win, their rule is not even evaluated
+    EXPECT_EQ(ch.single_reason, "predicted no cheaper than the exact counts");
+    EXPECT_FALSE(ch.inputs.single_valid);
     EXPECT_EQ(rig.certifier.check(s->window, {s->all}, 0).verdict, hs::driver::CheckOutcome::Verdict::Undecided);
     EXPECT_FALSE(rig.rep.certificate.performed);  // left to the exact counts
   }

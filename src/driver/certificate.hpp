@@ -110,8 +110,11 @@ struct CertificateChoice {
   CertificateCostInputs inputs;  ///< what certificate_cost was given (logged: bench/certint_model.cpp
                                  ///< re-evaluates it with other times, e.g. a 16-thread run's)
   CertificateCostEstimate estimate;
-  bool kappa_rigorous = true;     ///< randomized considered only with a proven kappa (auto)
-  std::string single_reason;      ///< why the single-count rule fails ("" when it holds)
+  /// kappa of B proven (auto considers the randomized check only then); true when kappa was not
+  /// needed (the check was out of the question before: randomized_reason)
+  bool kappa_rigorous = true;
+  std::string single_reason;      ///< why single counts are not considered ("" when the rule holds)
+  std::string randomized_reason;  ///< why the randomized check is not considered ("" when it is)
   double epsilon = 0.0;           ///< eps of the randomized estimate (coupling taken as 0)
 };
 
@@ -150,8 +153,12 @@ class NearestCertifier {
   CertificateChoice choose(const NearestWindow& w, const RoundPairs<T>& pairs);
 
  private:
-  struct Found;
-  Found found_in_window(const NearestWindow& w, const Block<T>& all) const;
+  /// The single-count window of w: the found pairs of `all` in [lower, upper] with their residual
+  /// bounds ||A x - lambda B x||_{B^{-1}} (diagonal B or B = I), the wanted region the selected
+  /// pairs' disc.
+  SingleWindow single_window(const NearestWindow& w, const Block<T>& all);
+  /// The single-count rule with the pencil's ||A||_1 (computed at the first call).
+  const SingleCountRule& single_rule();
   /// Columns of the randomized check's deflation block X (RoundPairs comment), pointers into
   /// `pairs`; deflation_block copies them.
   std::vector<const T*> deflation_columns(const NearestWindow& w, const RoundPairs<T>& pairs) const;
@@ -170,8 +177,9 @@ class NearestCertifier {
   bool detection_off_;
   double scale_, n2a_, n2b_;
   /// 1 / sqrt(min b_ii) (1 for B = I, +inf without a positive diagonal): turns ||r||_2 into a bound
-  /// on ||r||_{B^{-1}} for a diagonal B (the single-count rule's error bars).
+  /// on ||r||_{B^{-1}} for a diagonal B (the single-count rule's error bars); set by single_rule().
   double inv_sqrt_bmin_ = 1.0;
+  SingleCountRule rule_;  ///< a_norm_1 < 0 until single_rule() computed it
   CertificateTimings timings_;
   std::unique_ptr<StartScaling> scaling_;
   std::unique_ptr<InertiaCounter<T>> counter_;  ///< single counts (created at the first one)

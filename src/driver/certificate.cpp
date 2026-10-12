@@ -44,13 +44,6 @@ std::string predicted(double s) { return std::isfinite(s) ? sec(s) : std::string
 }  // namespace
 
 template <class T>
-struct NearestCertifier<T>::Found {
-  std::vector<index_t> window;     ///< columns of `all` with a finite lambda in [lower, upper]
-  std::vector<double> lambda;      ///< their eigenvalues
-  std::vector<double> error;       ///< their residual bounds ||A x - lambda B x||_{B^{-1}}
-};
-
-template <class T>
 NearestCertifier<T>::NearestCertifier(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac,
                                       double sigma, bool detection_off, double scale, double n2a, double n2b,
                                       const CertificateTimings& timings)
@@ -62,35 +55,47 @@ NearestCertifier<T>::NearestCertifier(Ctx& c, const ShiftedPencil<T>& pencil, Sp
       scale_(scale),
       n2a_(n2a),
       n2b_(n2b),
-      timings_(timings) {
-  // ||r||_{B^{-1}} <= ||r||_2 / sqrt(min b_ii) for a diagonal B (B-normalized x); B = I: ||r||_2.
-  // For other B the bound only feeds the single-count rule, which then does not apply anyway.
-  if (const CsrMatrix<T>* b = pencil_.b()) {
-    double bmin = std::numeric_limits<double>::infinity();
-    for (index_t i = 0; i < b->nrows; ++i)
-      for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q)
-        if (b->colind[q] == i) bmin = std::min(bmin, std::real(b->values[q]));
-    inv_sqrt_bmin_ = bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
-  }
-}
+      timings_(timings) {}
 
 template <class T>
 NearestCertifier<T>::~NearestCertifier() = default;
 
+// The pencil's ||A||_1 and min b_ii, computed once (O(nnz)), and only when the single-count rule
+// is evaluated at all.
 template <class T>
-typename NearestCertifier<T>::Found NearestCertifier<T>::found_in_window(const NearestWindow& w,
-                                                                         const Block<T>& all) const {
-  Found f;
+const SingleCountRule& NearestCertifier<T>::single_rule() {
+  if (rule_.a_norm_1 < 0.0) {
+    rule_.a_norm_1 = norm_one(pencil_.a());
+    // ||r||_{B^{-1}} <= ||r||_2 / sqrt(min b_ii) for a diagonal B (B-normalized x); B = I: ||r||_2.
+    // For other B the bound only feeds the rule, which then does not apply anyway.
+    if (const CsrMatrix<T>* b = pencil_.b()) {
+      double bmin = std::numeric_limits<double>::infinity();
+      for (index_t i = 0; i < b->nrows; ++i)
+        for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q)
+          if (b->colind[q] == i) bmin = std::min(bmin, std::real(b->values[q]));
+      inv_sqrt_bmin_ = bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
+    }
+  }
+  return rule_;
+}
+
+template <class T>
+SingleWindow NearestCertifier<T>::single_window(const NearestWindow& w, const Block<T>& all) {
+  (void)single_rule();  // inv_sqrt_bmin_
+  SingleWindow sw;
+  sw.lower = w.lower;
+  sw.upper = w.upper;
+  sw.wanted_lower = w.target - w.radius;
+  sw.wanted_upper = w.target + w.radius;
   const index_t n = all.x.rows();
   for (index_t j = 0; j < all.size(); ++j) {
     const double l = all.lambda[j];
     if (!std::isfinite(l) || l < w.lower || l > w.upper) continue;
     const PairMetrics pm = pair_metrics(all.ax.col(j), all.bx.col(j), all.x.col(j), n, l, n2a_, n2b_);
-    f.window.push_back(j);
-    f.lambda.push_back(l);
-    f.error.push_back(pm.abs_residual * inv_sqrt_bmin_);
+    sw.found.push_back(l);
+    sw.found_error.push_back(pm.abs_residual * inv_sqrt_bmin_);
   }
-  return f;
+  return sw;
 }
 
 template <class T>
@@ -177,7 +182,6 @@ template <class T>
 CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const RoundPairs<T>& pairs) {
   const SolverConfig& cfg = c_.cfg;
   CertificateChoice ch;
-  const Found f = found_in_window(w, pairs.all);
   const index_t n = pencil_.order();
   const MumpsInputSize in_size = mumps_input_size(pencil_);
   const FactorEstimate est = fac_.estimate();
@@ -195,43 +199,62 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
   in.single_analysis_s = counter_ ? (counter_->stats().single_counts > 0 ? 0.0 : analysis) : 2.0 * analysis;
   in.single_ratio = static_cast<double>(est.factor_entries) > kThreeDFill * in_size.entries ? kSingleRatio3d
                                                                                              : kSingleRatioLowFill;
-  // The single-count rule on this window (wanted region: the selected pairs' disc).
-  SingleWindow sw;
-  sw.lower = w.lower;
-  sw.upper = w.upper;
-  sw.wanted_lower = w.target - w.radius;
-  sw.wanted_upper = w.target + w.radius;
-  sw.found = f.lambda;
-  sw.found_error = f.error;
-  bool single_ok = false;
-  if (sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper) {
-    const SingleCountValidity v = single_count_validity(pencil_, sw);
-    single_ok = v.valid();
-    ch.single_reason = v.reason;
-  } else {
-    ch.single_reason = "window does not strictly contain the wanted region";
-  }
-  if (single_failed_) {
-    single_ok = false;
-    ch.single_reason = "single counts could not decide in an earlier round";
-  }
-  in.single_valid = single_ok;
   // Measured solve calls of the Krylov run; t_apply(q) = apply1 (1 + rhs_ratio (q - 1)).
   const double q = std::max(1.0, timings_.rhs_per_call);
   const double call = timings_.solve_call_s > 0.0 ? timings_.solve_call_s
                                                   : model_solve_s(est) * (1.0 + in.rhs_ratio * (q - 1.0));
   in.apply1_s = call / (1.0 + in.rhs_ratio * (q - 1.0));
-  const Radii rad = randomized_radii(w, sigma_);
-  const StartScaling& sc = scaling();
-  ch.kappa_rigorous = sc.rigorous;
-  ch.epsilon = rad.valid ? rad.epsilon : 0.0;
-  // Randomized: never after an undecided check; auto takes it only with a proven kappa.
-  const bool randomized_allowed =
-      rad.valid && !randomized_failed_ && (cfg.certificate == CertificateMode::Randomized || sc.rigorous);
-  in.epsilon = randomized_allowed ? rad.epsilon : 0.0;
   in.delta = cfg.certificate_delta;
-  in.kappa = std::isfinite(sc.kappa) && sc.kappa >= 1.0 ? sc.kappa : 1.0;
   in.max_memory_bytes = check_budget_bytes();
+  // Randomized: never after an undecided check; auto takes it only with a proven kappa, and asks
+  // for kappa (start_scaling_for: O(nnz(B)) for a general B) only when the check, at the smallest
+  // possible kappa = 1, would beat the exact counts.
+  const Radii rad = randomized_radii(w, sigma_);
+  ch.epsilon = rad.valid ? rad.epsilon : 0.0;
+  in.epsilon = rad.valid && !randomized_failed_ ? rad.epsilon : 0.0;
+  in.kappa = 1.0;
+  if (!rad.valid) {
+    ch.randomized_reason = "the window leaves no gap beyond the wanted radius";
+  } else if (randomized_failed_) {
+    ch.randomized_reason = "could not decide in an earlier round";
+  } else if (cfg.certificate == CertificateMode::Auto && pencil_.b()) {
+    in.single_valid = false;
+    const CertificateCostEstimate optimistic = certificate_cost(in);
+    if (!(optimistic.randomized_s * in.preference < optimistic.exact_s)) {
+      in.epsilon = 0.0;
+      ch.randomized_reason = "predicted no cheaper than the exact counts";
+    }
+  }
+  if (in.epsilon > 0.0) {
+    const StartScaling& sc = scaling();
+    ch.kappa_rigorous = sc.rigorous;
+    in.kappa = std::isfinite(sc.kappa) && sc.kappa >= 1.0 ? sc.kappa : 1.0;
+    if (cfg.certificate != CertificateMode::Randomized && !sc.rigorous) {
+      in.epsilon = 0.0;
+      ch.randomized_reason = "no proven kappa of B (general B): not a certificate";
+    }
+  }
+  // The single-count rule (O(nnz(A)) and the residuals of the window's pairs) is evaluated only
+  // when single counts would be cheaper than the exact counts if it held - not on low-fill inputs,
+  // whose single counts save nothing (kSingleRatioLowFill).
+  in.single_valid = !single_failed_;
+  if (single_failed_) {
+    ch.single_reason = "single counts could not decide in an earlier round";
+  } else if (const CertificateCostEstimate optimistic = certificate_cost(in);
+             !(optimistic.exact_single_s < optimistic.exact_s)) {
+    in.single_valid = false;
+    ch.single_reason = "predicted no cheaper than the exact counts";
+  } else {
+    const SingleWindow sw = single_window(w, pairs.all);  // wanted region: the selected pairs' disc
+    if (sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper) {
+      const SingleCountValidity v = single_count_validity(pencil_, sw, single_rule());
+      in.single_valid = v.valid();
+      ch.single_reason = v.reason;
+    } else {
+      in.single_valid = false;
+      ch.single_reason = "window does not strictly contain the wanted region";
+    }
+  }
   ch.inputs = in;
   ch.estimate = certificate_cost(in);
   ch.method = ch.estimate.recommended;
@@ -244,7 +267,9 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
   if (cfg.certificate == CertificateMode::Exact || cfg.certificate == CertificateMode::Off) return {};
   PhaseScope phase(c_.clock, Phase::Certificate);
   fallback_note_.clear();
+  const Timer choice_timer;
   const CertificateChoice ch = choose(w, pairs);
+  const double choice_s = choice_timer.seconds();
   CertificateMethod method = ch.method;
   if (cfg.certificate == CertificateMode::Randomized)
     method = randomized_failed_ ? CertificateMethod::Exact : CertificateMethod::Randomized;
@@ -258,8 +283,10 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
     os << ", randomized check " << predicted(e.randomized_s);
     if (e.block_size > 0)
       os << " [p = " << e.block_size << ", s = " << e.block_steps << ", eps = " << ch.epsilon << "]";
-    else if (!ch.kappa_rigorous)
-      os << " [no proven kappa of B (general B): not a certificate, not considered]";
+    else if (!ch.randomized_reason.empty())
+      os << " [" << ch.randomized_reason << "]";
+    else
+      os << " [no plan within the resource budget]";
     os << "; chose " << certificate_method_name(method);
     auto_note_ = os.str();
   }
@@ -280,7 +307,8 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
          {"in_single_valid", in.single_valid}, {"in_apply1_s", in.apply1_s}, {"in_rhs_ratio", in.rhs_ratio},
          {"in_stream_bytes_per_s", in.stream_bytes_per_s}, {"in_epsilon", in.epsilon}, {"in_delta", in.delta},
          {"in_kappa", in.kappa}, {"in_max_krylov_vectors", static_cast<std::int64_t>(in.max_krylov_vectors)},
-         {"in_max_memory_bytes", in.max_memory_bytes}, {"in_preference", in.preference}});
+         {"in_max_memory_bytes", in.max_memory_bytes}, {"in_preference", in.preference},
+         {"choice_s", choice_s}});
   if (method == CertificateMethod::Randomized) {
     const CheckOutcome out = randomized(w, pairs, e.block_size, round);
     if (out.verdict != CheckOutcome::Verdict::Undecided) return out;
@@ -411,19 +439,12 @@ template <class T>
 CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>& all) {
   InertiaCertificate& cert = c_.rep.certificate;
   single_failed_ = true;  // reset below on a verdict
-  const Found f = found_in_window(w, all);
-  SingleWindow sw;
-  sw.lower = w.lower;
-  sw.upper = w.upper;
-  sw.wanted_lower = w.target - w.radius;
-  sw.wanted_upper = w.target + w.radius;
-  sw.found = f.lambda;
-  sw.found_error = f.error;
+  const SingleWindow sw = single_window(w, all);
   if (!(sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper)) {
     fallback_note_ = "single counts: the window does not strictly contain the wanted region";
     return {};
   }
-  const SingleCountValidity v = single_count_validity(pencil_, sw);
+  const SingleCountValidity v = single_count_validity(pencil_, sw, single_rule());
   if (!v.valid()) {
     fallback_note_ = "single counts do not certify this window: " + v.reason;
     return {};
@@ -432,11 +453,11 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   // only for a rerun, which refactorizes; the counts never hold both in memory.
   if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
   if (!counter_) counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
-  const SingleCertificate s = single_precision_certificate(*counter_, pencil_, sw);
+  const SingleCertificate s = single_precision_certificate(*counter_, pencil_, sw, single_rule());
+  const auto found = static_cast<index_t>(sw.found.size());
   event(c_, "single_counts", {{"lower", w.lower}, {"upper", w.upper}, {"count", static_cast<std::int64_t>(s.count)},
-                              {"found", static_cast<std::int64_t>(f.window.size())}, {"certified", s.certified},
+                              {"found", static_cast<std::int64_t>(found)}, {"certified", s.certified},
                               {"eta_lower", v.eta_lower}, {"eta_upper", v.eta_upper}, {"seconds", s.seconds}});
-  const auto found = static_cast<index_t>(f.window.size());
   const bool counted = s.lower.valid && s.upper.valid;
   if (!s.certified && !(counted && s.count > found)) {
     std::ostringstream os;
