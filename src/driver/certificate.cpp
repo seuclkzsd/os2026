@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "driver/projection.hpp"
@@ -61,27 +63,67 @@ template <class T>
 NearestCertifier<T>::~NearestCertifier() = default;
 
 // The pencil's ||A||_1 and min b_ii, computed once (O(nnz)), and only when the single-count rule
-// is evaluated at all.
+// is evaluated at all; with prove, a general B's proven lambda_min(B) (b_bounds(), P8).
+// ||r||_{B^{-1}} <= ||r||_2 / sqrt(lambda_min(B)) for B-normalized x gives the found pairs' error
+// bars: min b_ii for a diagonal B, ||r||_2 for B = I, a general B's proven b_min, else no bound (the
+// rule then does not apply anyway).
 template <class T>
-const SingleCountRule& NearestCertifier<T>::single_rule() {
+const SingleCountRule& NearestCertifier<T>::single_rule(bool prove) {
   if (rule_.a_norm_1 < 0.0) {
     rule_.a_norm_1 = norm_one(pencil_.a());
-    // ||r||_{B^{-1}} <= ||r||_2 / sqrt(min b_ii) for a diagonal B (B-normalized x); B = I: ||r||_2.
-    // For other B the bound only feeds the rule, which then does not apply anyway.
     if (const CsrMatrix<T>* b = pencil_.b()) {
       double bmin = std::numeric_limits<double>::infinity();
       for (index_t i = 0; i < b->nrows; ++i)
-        for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q)
-          if (b->colind[q] == i) bmin = std::min(bmin, std::real(b->values[q]));
-      inv_sqrt_bmin_ = bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
+        for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q) {
+          if (b->colind[q] == i)
+            bmin = std::min(bmin, std::real(b->values[q]));
+          else if (b->values[q] != T(0))
+            b_diagonal_ = false;
+        }
+      b_diag_min_ = bmin;
+      inv_sqrt_bmin_ = b_diagonal_ && bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
     }
+  }
+  if (prove && !b_diagonal_) {
+    const ConditionBound& cb = b_bounds();  // computed once (also by scaling()), applied here every time
+    rule_.b_min_proven = cb.proven ? cb.b_min : 0.0;
+    inv_sqrt_bmin_ = cb.proven ? 1.0 / std::sqrt(cb.b_min) : std::numeric_limits<double>::infinity();
   }
   return rule_;
 }
 
 template <class T>
-SingleWindow NearestCertifier<T>::single_window(const NearestWindow& w, const Block<T>& all) {
-  (void)single_rule();  // inv_sqrt_bmin_
+double NearestCertifier<T>::bounds_budget_s() const {
+  const FactorEstimate est = fac_.estimate();
+  const MumpsInputSize in = mumps_input_size(pencil_);
+  const double t_factor =
+      timings_.factorize_s > 0.0 ? timings_.factorize_s : model_factor_s(est, in.order, fac_.options().threads);
+  // The exact counts: two factorizations' worth (CertificateCostInputs::count_ratio ~ 0.9 each).
+  return kBoundsProofShare * 2.0 * CertificateCostInputs{}.count_ratio * t_factor;
+}
+
+template <class T>
+const ConditionBound& NearestCertifier<T>::b_bounds() {
+  if (!b_bounds_) {
+    HpdProofOptions po;
+    po.max_seconds = bounds_budget_s();
+    po.max_bytes = check_budget_bytes();
+    po.seed = c_.cfg.seed;
+    b_bounds_ = std::make_unique<ConditionBound>();
+    if (const CsrMatrix<T>* b = pencil_.b()) *b_bounds_ = prove_condition_bound(*b, po);
+    const ConditionBound& cb = *b_bounds_;
+    event(c_, "b_condition_bound",
+          {{"proven", cb.proven}, {"outcome", cb.proof.outcome}, {"lower", cb.lower}, {"upper", cb.upper},
+           {"kappa", std::isfinite(cb.kappa) ? cb.kappa : -1.0}, {"b_min", cb.b_min},
+           {"theta_min", cb.proof.theta_min}, {"level", static_cast<std::int64_t>(cb.proof.level)},
+           {"shift", cb.proof.shift}, {"attempts", static_cast<std::int64_t>(cb.proof.attempts)},
+           {"seconds", cb.proof.seconds}, {"budget_s", po.max_seconds}});
+  }
+  return *b_bounds_;
+}
+
+template <class T>
+SingleWindow NearestCertifier<T>::single_window(const NearestWindow& w, const Block<T>& all, double inv_sqrt_bmin) {
   SingleWindow sw;
   sw.lower = w.lower;
   sw.upper = w.upper;
@@ -93,7 +135,7 @@ SingleWindow NearestCertifier<T>::single_window(const NearestWindow& w, const Bl
     if (!std::isfinite(l) || l < w.lower || l > w.upper) continue;
     const PairMetrics pm = pair_metrics(all.ax.col(j), all.bx.col(j), all.x.col(j), n, l, n2a_, n2b_);
     sw.found.push_back(l);
-    sw.found_error.push_back(pm.abs_residual * inv_sqrt_bmin_);
+    sw.found_error.push_back(pm.abs_residual * inv_sqrt_bmin);
   }
   return sw;
 }
@@ -132,13 +174,32 @@ DenseMatrix<T> NearestCertifier<T>::deflation_block(const NearestWindow& w, cons
   return x;
 }
 
-// The randomized check needs kappa, and only a proven one certifies: the Lanczos estimate of a
-// general B's kappa (~0.1 s at n = 1e5) is computed only for a run() that asks for a screening
-// result (the solve path never runs the check without a proven kappa).
+// The randomized check needs kappa, and only a proven one certifies: B = I, a diagonal or a
+// diagonally dominant B have one at O(nnz(B)) (start_scaling_for); a general B's comes from the
+// incomplete-Cholesky bounds (b_bounds(), P8) with the same Jacobi scaling. The Lanczos estimate
+// of a general B's kappa (~0.1 s at n = 1e5) is computed only for a run() that asks for a
+// screening result where no bound is proven (the solve path never runs the check without one).
 template <class T>
 const StartScaling& NearestCertifier<T>::scaling(bool estimate) {
-  if (!proven_scaling_)
-    proven_scaling_ = std::make_unique<StartScaling>(start_scaling_for<T>(pencil_.b(), 100.0, false));
+  if (!proven_scaling_) {
+    StartScaling s = start_scaling_for<T>(pencil_.b(), 100.0, false);
+    if (!s.rigorous && pencil_.b()) {
+      const ConditionBound& cb = b_bounds();
+      if (cb.proven) {
+        s.scaling = cb.weights;  // the proof's W: the bound is about W B W with exactly these weights
+        s.kappa = cb.kappa;
+        s.rigorous = true;
+        std::ostringstream os;
+        os.precision(4);
+        os << "Jacobi scaling of a general B: kappa <= " << cb.kappa << " proven (lambda_min >= " << cb.lower
+           << " by incomplete Cholesky + Gershgorin, lambda_max <= " << cb.upper << " by Gershgorin)";
+        s.note = os.str();
+      } else {
+        s.note += "; no bound from incomplete Cholesky either (" + cb.proof.outcome + ")";
+      }
+    }
+    proven_scaling_ = std::make_unique<StartScaling>(std::move(s));
+  }
   if (proven_scaling_->rigorous || !estimate) return *proven_scaling_;
   if (!estimated_scaling_)
     estimated_scaling_ = std::make_unique<StartScaling>(start_scaling_for<T>(pencil_.b(), 100.0, true));
@@ -249,14 +310,33 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
     in.single_valid = false;
     ch.single_reason = "predicted no cheaper than the exact counts";
   } else {
-    const SingleWindow sw = single_window(w, pairs.all);  // wanted region: the selected pairs' disc
+    // auto demands the safety margin over the rule's assumed backward error (kAutoSingleSafety)
+    const double safety = cfg.certificate == CertificateMode::Auto ? kAutoSingleSafety : 1.0;
+    SingleCountRule rule = single_rule(/*prove=*/false);
+    const SingleWindow sw = single_window(w, pairs.all, inv_sqrt_bmin_);  // wanted: the selected pairs' disc
     if (sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper) {
-      // auto demands the safety margin over the rule's assumed backward error (kAutoSingleSafety)
-      SingleCountRule rule = single_rule();
-      if (cfg.certificate == CertificateMode::Auto) rule.backward_factor *= kAutoSingleSafety;
-      const SingleCountValidity v = single_count_validity(pencil_, sw, rule);
-      in.single_valid = v.valid();
-      ch.single_reason = v.reason;
+      rule.backward_factor *= safety;
+      std::string optimistic_reason;
+      if (!b_diagonal_ && !b_bounds_) {
+        // A general B: no proof can give lambda_min(B) above min b_ii (a Rayleigh quotient), so the
+        // rule is first tried with that value - when even it does not hold the window, the proof
+        // (b_bounds(), its attempts within kBoundsProofShare of the exact counts' time) is not worth running.
+        SingleCountRule best = rule;
+        best.b_min_proven = b_diag_min_;
+        const SingleWindow swb = single_window(w, pairs.all, 1.0 / std::sqrt(b_diag_min_));
+        const SingleCountValidity vb = single_count_validity(pencil_, swb, best);
+        if (!vb.valid()) optimistic_reason = "even lambda_min(B) = min b_ii would not do: " + vb.reason;
+      }
+      if (!optimistic_reason.empty()) {
+        in.single_valid = false;
+        ch.single_reason = optimistic_reason;
+      } else {
+        rule = single_rule(/*prove=*/true);
+        rule.backward_factor *= safety;
+        const SingleCountValidity v = single_count_validity(pencil_, single_window(w, pairs.all, inv_sqrt_bmin_), rule);
+        in.single_valid = v.valid();
+        ch.single_reason = v.reason;
+      }
     } else {
       in.single_valid = false;
       ch.single_reason = "window does not strictly contain the wanted region";
@@ -275,14 +355,15 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
   PhaseScope phase(c_.clock, Phase::Certificate);
   fallback_note_.clear();
   if (cfg.certificate == CertificateMode::Randomized && pencil_.b() && !scaling(false).rigorous) {
-    // A general B: kappa can only be estimated, so a pass would be a SCREENING result, not a
-    // certificate - and the check costs more than the counts it cannot replace. Not run (the
-    // note goes into every round's statement).
+    // A general B whose bounds are not proven: kappa can only be estimated, so a pass would be a
+    // SCREENING result, not a certificate - and the check costs more than the counts it cannot
+    // replace. Not run (the note goes into every round's statement).
     fallback_note_ = "randomized check not run: the kappa of B is not proven (" + scaling(false).note +
                      "), so a pass would be a screening result, not a certificate";
     if (!randomized_failed_)
       warn(c_, "certificate=randomized: the kappa of B is not proven (B neither diagonal nor diagonally "
-               "dominant); the exact counts certify instead of a screening-only randomized check");
+               "dominant, and no incomplete-Cholesky bound); the exact counts certify instead of a "
+               "screening-only randomized check");
     randomized_failed_ = true;
     return {};
   }
@@ -380,7 +461,19 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   }
   const DenseMatrix<T> x = deflation_block(w, pairs);
   const index_t m = x.cols();
-  refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
+  const std::string refactor_failed = "randomized check could not run: the refactorization at sigma failed (";
+  try {
+    if (fault(cfg, kFaultRefactorization))
+      throw_injected_fault(cfg, kFaultRefactorization, "refactorization at sigma for the randomized check");
+    refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
+  } catch (const Error& err) {
+    if (!count_failure(err)) throw;
+    fallback_note_ = refactor_failed + to_string(err.code()) + ": " + err.what() + ")";
+    return {};
+  } catch (const std::bad_alloc&) {
+    fallback_note_ = refactor_failed + "allocation failure, std::bad_alloc)";
+    return {};
+  }
   DriverShiftInvert<T> op(cfg, fac_, pencil_, sigma_);  // inexact factors: refined and checked
   std::unique_ptr<CsrOperator<T>> b_op;
   if (pencil_.b()) b_op = std::make_unique<CsrOperator<T>>(*pencil_.b());
@@ -396,9 +489,13 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   try {
     res = exclusion_check<T>(op, b_op.get(), x, sigma_, rad.claim, o);
   } catch (const Error& err) {
-    // Rejected input (e.g. a rank-deficient X) or memory: the exact counts decide instead.
-    if (err.code() != Error::Code::InvalidInput && err.code() != Error::Code::OutOfMemoryBudget) throw;
+    // Rejected input (e.g. a rank-deficient X), memory or a MUMPS solve error: the exact counts
+    // decide instead.
+    if (err.code() != Error::Code::InvalidInput && !count_failure(err)) throw;
     fallback_note_ = std::string("randomized check could not run (") + to_string(err.code()) + "): " + err.what();
+    return {};
+  } catch (const std::bad_alloc&) {
+    fallback_note_ = "randomized check could not run: allocation failure (std::bad_alloc)";
     return {};
   }
   cert.solves += res.op_applications;
@@ -459,12 +556,12 @@ template <class T>
 CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>& all, double safety) {
   InertiaCertificate& cert = c_.rep.certificate;
   single_failed_ = true;  // reset below on a verdict
-  const SingleWindow sw = single_window(w, all);
+  SingleCountRule rule = single_rule(/*prove=*/true);  // a general B: its proven lambda_min (P8)
+  const SingleWindow sw = single_window(w, all, inv_sqrt_bmin_);
   if (!(sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper)) {
     fallback_note_ = "single counts: the window does not strictly contain the wanted region";
     return {};
   }
-  SingleCountRule rule = single_rule();
   rule.backward_factor *= safety;
   const SingleCountValidity v = single_count_validity(pencil_, sw, rule);
   if (!v.valid()) {
@@ -478,16 +575,43 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
     const bool exact = fac_.options().precision == FactorPrecision::Double && !fac_.options().blr;
     if (exact && !detection_off_ && !c_.held.detection_off) nu_sigma_ = fac_.inertia().neg;
   }
+  if (!counter_failure_.empty()) {
+    fallback_note_ = "single counts not made: the InertiaCounter failed earlier (" + counter_failure_ + ")";
+    return {};
+  }
   // As the exact counts on a counter (MainFactors::Release): the main factors are needed again
   // only for a rerun, which refactorizes; the counts never hold both in memory.
   if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
-  if (!counter_) {
-    // The double instance only for a check of the single counts (exact_counts): deferred.
-    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options(), /*defer_double_analysis=*/true);
-    event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s}, {"double_deferred", true},
-                                  {"owner", std::string("certifier")}});
+  SingleCertificate s;
+  try {
+    if (!counter_) {
+      // The double instance only for a check of the single counts (exact_counts): deferred.
+      counter_ = std::make_unique<InertiaCounter<T>>(fac_, counter_options(c_, fac_, counter_faults()),
+                                                     /*defer_double_analysis=*/true);
+      event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s}, {"double_deferred", true},
+                                    {"owner", std::string("certifier")}});
+    }
+    // The single counts' working memory must fit what the budget leaves (count_allowance_mb).
+    const double need = counter_->estimate(FactorPrecision::Single).incore_mb;
+    const double allowance = counter_allowance_mb(c_, fac_.options().max_memory_mb);
+    if (need > allowance)
+      HS_THROW(OutOfMemoryBudget, "single-precision InertiaCounter: its in-core estimate "
+                                      << need << " MB exceeds the " << allowance
+                                      << " MB the memory budget leaves for a count");
+    if (counter_faults() && counter_fault_throws(c_.cfg))
+      throw_injected_fault(c_.cfg, kFaultCounterCounts, "InertiaCounter single counts");
+    s = single_precision_certificate(*counter_, pencil_, sw, rule);
+  } catch (const Error& err) {
+    if (!count_failure(err)) throw;
+    counter_failed(std::string("single counts: ") + to_string(err.code()) + ": " + err.what(),
+                   err.code() == Error::Code::OutOfMemoryBudget);
+    fallback_note_ = "single counts failed (" + counter_failure_ + ")";
+    return {};
+  } catch (const std::bad_alloc&) {
+    counter_failed("single counts: allocation failure (std::bad_alloc)", true);
+    fallback_note_ = "single counts failed (" + counter_failure_ + ")";
+    return {};
   }
-  SingleCertificate s = single_precision_certificate(*counter_, pencil_, sw, rule);
   const auto found = static_cast<index_t>(sw.found.size());
   const bool counted = s.lower.valid && s.upper.valid;
   if (counted && (single_fault_lower_ != 0 || single_fault_upper_ != 0)) {  // fault injection (tests)
@@ -531,7 +655,10 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
     os << prefix() << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", "
        << w.upper << "] equal the " << found << " found pairs there"
        << (nu_sigma_ >= 0 ? " (on either side of sigma, with the exact count at sigma)" : "")
-       << "; by the perturbation rule (verify.hpp; B = I or diagonal B, backward error of the single LDL^T assumed <= "
+       << "; by the perturbation rule (verify.hpp; "
+       << (b_diagonal_ ? std::string("B = I or diagonal B")
+                       : "general B with lambda_min(B) >= " + fmt(rule.b_min_proven) + " proven")
+       << ", backward error of the single LDL^T assumed <= "
        << rule.backward_factor
        << " u_s ||K||_1, as double counts assume a backward-stable LDL^T) every eigenvalue in [a + eta_a, b - eta_b) "
           "= ["
@@ -544,8 +671,8 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   // counter decide (certificate.hpp). They are kept for the caller's exact counts (exact_counts).
   index_t nu_a = 0, nu_b = 0;
   if (!exact_counts(w.lower, w.upper, nu_a, nu_b)) {
-    os << "single counts nu(b) - nu(a) = " << s.count << " vs " << found
-       << " found pairs could not be checked in double (a window end is singular)";
+    os << "single counts nu(b) - nu(a) = " << s.count << " vs " << found << " found pairs could not be checked in double ("
+       << (counter_failure_.empty() ? std::string("a window end is singular") : counter_failure_) << ")";
     fallback_note_ = os.str();
     return {};
   }
@@ -586,11 +713,36 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
 
 template <class T>
 bool NearestCertifier<T>::exact_counts(double a, double b, index_t& nu_a, index_t& nu_b) {
-  if (!counter_) return false;
+  if (!counter_ || !counter_failure_.empty()) return false;
   if (!(kept_.counted && kept_.a == a && kept_.b == b)) {
     PhaseScope phase(c_.clock, Phase::Certificate);
     if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
-    const auto counts = counter_->count_pair(1.0, -a, 1.0, -b, true, FactorPrecision::Double);
+    std::pair<Inertia, Inertia> counts;
+    try {
+      // The double counts' working memory must fit what the budget leaves (count_allowance_mb);
+      // estimate() analyses the deferred double instance.
+      const double need = counter_->estimate().incore_mb;
+      const double allowance = counter_allowance_mb(c_, fac_.options().max_memory_mb);
+      if (need > allowance)
+        HS_THROW(OutOfMemoryBudget, "InertiaCounter: its in-core estimate "
+                                        << need << " MB exceeds the " << allowance
+                                        << " MB the memory budget leaves for a count");
+      if (counter_faults() && counter_fault_throws(c_.cfg))
+        throw_injected_fault(c_.cfg, kFaultCounterCounts, "InertiaCounter double counts");
+      counts = counter_->count_pair(1.0, -a, 1.0, -b, true, FactorPrecision::Double);
+    } catch (const Error& err) {
+      if (!count_failure(err)) throw;
+      counter_failed(std::string("double counts: ") + to_string(err.code()) + ": " + err.what(),
+                     err.code() == Error::Code::OutOfMemoryBudget);
+    } catch (const std::bad_alloc&) {
+      counter_failed("double counts: allocation failure (std::bad_alloc)", true);
+    }
+    if (!counter_failure_.empty()) {
+      // The caller counts on its CountSource; the statement says why.
+      fallback_note_ += (fallback_note_.empty() ? "" : "; ") + std::string("the certifier's InertiaCounter failed (") +
+                        counter_failure_ + ")";
+      return false;
+    }
     kept_ = KeptCounts{a, b, counts.first.neg, counts.second.neg, true, counts.first.valid && counts.second.valid};
     event(c_, "certifier_double_counts", {{"lower", a}, {"upper", b}, {"valid", kept_.valid},
                                           {"nu_lower", static_cast<std::int64_t>(kept_.nu_a)},
@@ -616,6 +768,41 @@ void NearestCertifier<T>::record_exact(bool on_counter) {
      << "): nu(b) - nu(a) = " << cert.count_inertia << " eigenvalue(s) in [" << cert.lower << ", " << cert.upper
      << "], " << cert.count_found << " distinct found pair(s) there";
   if (cert.passed) os << ": every eigenvalue in the window is found";
+  cert.statement = os.str();
+  fallback_note_.clear();
+}
+
+template <class T>
+void NearestCertifier<T>::counter_failed(const std::string& why, bool memory) {
+  counter_failure_ = why;
+  counter_memory_failure_ = memory;
+  counter_.reset();  // its analyses and whatever workspace MUMPS kept
+  kept_ = KeptCounts{};
+  event(c_, "certifier_counter_failed", {{"reason", why}, {"memory", memory},
+                                         {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
+}
+
+template <class T>
+void NearestCertifier<T>::record_not_completed(double a, double b, index_t found, const std::string& why) {
+  InertiaCertificate& cert = c_.rep.certificate;
+  cert.performed = true;
+  cert.method = certificate_method_name(CertificateMethod::Exact);
+  cert.lower = a;
+  cert.upper = b;
+  cert.count_inertia = -1;
+  cert.count_found = found;
+  cert.passed = false;
+  cert.rigorous = false;
+  cert.failure_probability = 1.0;
+  cert.note = "not completed: no inertia count possible";
+  std::ostringstream os;
+  os.precision(6);
+  os << prefix();
+  if (!fallback_note_.empty()) os << fallback_note_ << "; then ";
+  os << "no double-precision Sylvester count could be made at the window [" << a << ", " << b << "] (" << why
+     << "): the certificate is NOT completed, and the " << found
+     << " found pair(s) there are returned uncertified - no statement about eigenvalues near sigma that were not "
+        "found";
   cert.statement = os.str();
   fallback_note_.clear();
 }

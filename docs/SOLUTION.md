@@ -355,9 +355,13 @@ hsolve = 默认配置（certificate = exact），hsolve-auto = certificate = aut
 - 对 P4（main 2938cb4）的回归测量：42 个数据测例 ABBA 交错 3 次，41 个可比测例几何平均 0.786（HEP 0.772、
   GHEP 0.808、GHIEP 0.808），总时间 514.8 → 453.6 s；只有 ss-tem152078 慢 6.7%（排序模型选了自研 ND，
   分析比 SCOTCH 多 0.6 s）。
-- ss-3dspectralwave2 在 CLI 默认 14 GiB 内存预算下会随机失败（out-of-core，MUMPS 内存估计逐次波动约 30%，
-  新旧二进制都会），见 `results/p5c_measurements.md` §2.2。P7 起内存预算默认按运行环境的上限自动设定
+- ss-3dspectralwave2 在 14 GiB 内存预算下曾随机失败（out-of-core，MUMPS 内存估计逐次波动约 30%，
+  `results/p5c_measurements.md` §2.2）。P8 起计数失败换另一计数源、分析超上限再分析，都不行时交回已收敛的对
+  并标为证书未完成：14 GiB 下连续 15 次全部认证（`results/p8_certcost.md`）。P7 起内存预算默认按运行环境的上限自动设定
   （32 GiB 上限下约 27 GiB），1e6 三维测例在 32 GiB 下改为内存内、快 1.71–1.83×（`results/p7_membudget.md`）。
+- P8 实测：在保留确定性证明（certificate = exact）的前提下，更便宜的计数办法（两进程并行计数、单次合并分解、
+  省缩放或零主元检测、换计数源）都没有可用收益，ss-qa8fk-qa8fm（0.87×）与 cav2d-rect-pert-1e5（0.73×）的
+  差距仍是两次计数分解（`results/p8_certcost.md`）。
 - 本节未覆盖：16 以外的线程数、无 AVX-512 的 CPU。
 
 ### 9.2 P4 记录：对调优后的 SLEPc（2 核与 4 核）

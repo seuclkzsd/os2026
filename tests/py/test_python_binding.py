@@ -732,6 +732,28 @@ def test_unsuccessful_solve_warns():
     assert not any(p["accepted"] for p in res.report["pairs"])
 
 
+def test_certificate_without_counts_returns_pairs_uncertified():
+    # P8: every certificate count fails (fault injection: InertiaCounter capped at 1 MB -> MUMPS
+    # INFO -19, main-object counts fail); the converged pairs come back, the certificate says it
+    # was not completed, success is False - never an exception.
+    a = lap2d(60, 57, shift=4.0)  # large enough that a count needs more than the 1 MB cap
+    cfg = {"certificate_fault_count": 3, "inertia_counter": "on", "threads": 2}
+    with pytest.warns(hsolve.HsolveWarning):
+        res = hsolve.solve(a, sigma=0.3, k=8, config=cfg)
+    want = lap2d_eigs(60, 57, shift=4.0)
+    want = np.sort(want[np.argsort(np.abs(want - 0.3))[:8]])
+    assert not res.success
+    np.testing.assert_allclose(np.sort(res.eigenvalues), want, rtol=0, atol=1e-9)
+    assert all(p["accepted"] for p in res.report["pairs"])
+    c = res.report["certificate"]
+    assert c["performed"] and not c["passed"] and not c["rigorous"]
+    assert c["count_inertia"] == -1 and c["count_found"] == 8
+    assert c["note"].startswith("not completed")
+    # one failing source only: the other one certifies
+    res = hsolve.solve(a, sigma=0.3, k=8, config={**cfg, "certificate_fault_count": 1})
+    assert res.success and res.report["certificate"]["passed"]
+
+
 def test_version():
     v = hsolve.version()
     assert v == hsolve.__version__ and len(v.split(".")) == 3

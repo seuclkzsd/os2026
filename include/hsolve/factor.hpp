@@ -57,7 +57,11 @@
 //     lock: objects may be used from different threads, but never gain from it.
 //   * Two SCOTCH analyses of the same matrix in one process give different orderings (SCOTCH's
 //     random state is not reset between calls; flops differed by 10%), while a fresh process
-//     reproduces them. An analysis given a previous analysis' pivot order (SYM_PERM -> PERM_IN,
+//     reproduces them - with ONE OpenMP thread only (P8, gpu01): with 2 or more threads (the
+//     driver analyses with all of them, ICNTL(16)) SCOTCH's ordering differs from analysis to
+//     analysis even after SCOTCH_randomSeed + SCOTCH_randomReset (syn-lap3d-aniso-1e5, 8 threads:
+//     factor entries 33.1e6..35.2e6, out-of-core estimate 208..272 MB), and the one-thread
+//     ordering costs 2.6-3.7x the analysis time (1.4-2.6 s vs 0.45-0.8 s on four 1e5 cases). An analysis given a previous analysis' pivot order (SYM_PERM -> PERM_IN,
 //     ICNTL(7)=1) takes 0.03-0.05 s instead of 0.9-1.3 s (SCOTCH, n ~ 1e5); against AMD it saves
 //     little or nothing (0.035 vs 0.043 s on wg-square-1e5, 0.38 vs 0.26-0.30 s on the 5e6-entry
 //     complex embedding of syn-near-singular-complex-1e5: reading the input dominates). It does
@@ -424,7 +428,15 @@ struct InertiaCounterStats {
 /// Not done, because measured useless or impossible:
 ///   * concurrent counts from two threads: sequential MUMPS is not thread-safe (header comment);
 ///   * both endpoints in one factorization of diag(K(b), -K(a)) (two independent trees for
-///     L0-OpenMP): 1-10% slower than two counts, 1.5x the memory.
+///     L0-OpenMP): 1-10% slower than two counts, 1.5x the memory (2 threads); at 16 threads
+///     (P8, bench_certpar_inertia --exp blockpair) 0.96-1.09x the time of the sequential pair on
+///     the 1e5 cases, plus its own analysis (0.04-0.28 s) and 1.8-2.5x the working memory;
+///   * concurrent counts in separate processes (P8, bench_certcost_concurrent, 16-thread slot):
+///     two 8-thread counts at once take 0.99-1.29x less than the sequential 16-thread pair on the
+///     1e5 cases (ss-qa8fk-qa8fm 1.29x, cav2d-rect-pert-1e5 1.26x, the 3-D cases 0.99-1.12x: the
+///     counts are memory-bandwidth bound); fork() after OpenMP use crashes the child in MUMPS;
+///   * cheaper count settings (P8): no scaling (ICNTL(8) = 0) or no null-pivot detection saves
+///     <= 3% (noise), and 16 threads beat 8 on every case.
 ///
 /// Precision. Double counts are exact for shifts farther than O(eps*||K||*growth) from every
 /// eigenvalue. Null-pivot detection usually flags closer shifts (valid == false), but it is the
@@ -492,6 +504,12 @@ class InertiaCounter {
   /// is the working memory, there are no factors to keep). Analyses a deferred double instance
   /// first.
   FactorEstimate estimate() const;
+  /// The same for counts of `precision`: Single analyses the single-precision instance first if
+  /// no single count has (with representative values alpha = 1, beta = 0, as the double instance:
+  /// with a given pivot order they change nothing that matters to the counts). Lets a caller check
+  /// a count's working memory against what it may use before counting (the driver's count
+  /// allowance). Throws as analyze().
+  FactorEstimate estimate(FactorPrecision precision) const;
   /// Whether the double-precision instance is analysed (false only while deferred and unused).
   bool double_analysed() const;
   const InertiaCounterStats& stats() const;

@@ -835,11 +835,43 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
   return r;
 }
 
+// The bounds of norms.hpp (ConditionBound). lambda_min from the proof; lambda_max by Gershgorin
+// on W B W with every computed row sum inflated by its rounding: a term |b_ij| w_i w_j is computed
+// as fl(fl(|b_ij| w_i) w_j) (complex |b_ij|: hypot, within 2u), i.e. within (1 + u)^2 (1 + 2u) of
+// the exact product, and a sum of N nonnegative computed terms is within gamma_{N - 1} of their
+// exact sum (Higham §3.1); (1 + 2 gamma_{N + 4}) covers both with slack, as in IcProver::check.
+template <class T>
+ConditionBound prove_condition_bound(const CsrMatrix<T>& b, const HpdProofOptions& opt) {
+  ConditionBound r;
+  r.proof = prove_positive_definite(b, opt);
+  if (!r.proof.proven) return r;
+  const index_t n = b.nrows;
+  if (!jacobi_weights(b, r.weights)) return r;  // not reached: the proof needs a positive diagonal
+  double upper = 0.0, wmax = 0.0;
+#pragma omp parallel for schedule(static) reduction(max : upper, wmax)
+  for (index_t i = 0; i < n; ++i) {
+    double row = 0.0;
+    for (index_t q = b.rowptr[i]; q < b.rowptr[i + 1]; ++q)
+      row += (std::abs(b.values[q]) * r.weights[i]) * r.weights[b.colind[q]];
+    const double terms = static_cast<double>(b.rowptr[i + 1] - b.rowptr[i]);
+    upper = std::max(upper, row * (1.0 + 2.0 * gamma_m(terms + 4.0)));
+    wmax = std::max(wmax, r.weights[i]);
+  }
+  r.lower = r.proof.lower_bound;
+  r.upper = upper;
+  // Quotients and the square rounded outward (a relative 4u covers each).
+  r.kappa = (upper / r.lower) * (1.0 + 4.0 * kUnitRoundoff);
+  r.b_min = r.lower / (wmax * wmax) * (1.0 - 4.0 * kUnitRoundoff);
+  r.proven = std::isfinite(r.kappa) && r.kappa >= 1.0 && r.b_min > 0.0;
+  return r;
+}
+
 #define HS_INSTANTIATE_NORMS(T)                                                                     \
   template NormEstimate estimate_norm2<T>(const CsrMatrix<T>&, int, std::uint64_t);                 \
   template NormEstimate estimate_pencil_spectrum<T>(const CsrMatrix<T>&, const CsrMatrix<T>&,       \
                                                     const SolveFn<T>&, int, std::uint64_t);  \
   template HpdProof prove_positive_definite<T>(const CsrMatrix<T>&, const HpdProofOptions&);         \
+  template ConditionBound prove_condition_bound<T>(const CsrMatrix<T>&, const HpdProofOptions&);     \
   template IcBound incomplete_cholesky_bound<T>(const CsrMatrix<T>&, int, double);                   \
   template Level1Size level1_pattern_size<T>(const CsrMatrix<T>&, bool);                            \
   template double hpd_stored_bytes<T>(index_t, double);                                             \

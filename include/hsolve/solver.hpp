@@ -146,15 +146,18 @@ struct SolverConfig {
   ///   exact      double Sylvester counts at both ends of the certificate window (as before);
   ///   randomized the randomized exclusion check (verify.hpp) on the factorization held at sigma,
   ///              p and s from certificate_cost; exact counts when it cannot make a statement
-  ///              (gap too small, plan over the memory budget). With a general (non-diagonal,
-  ///              not diagonally dominant) B its kappa is only estimated, so a pass would only be
-  ///              a SCREENING result: the check is not run there and the exact counts certify (a
-  ///              warning says so) - no screening result is ever reported as the verdict;
+  ///              (gap too small, plan over the memory budget). It needs a proven kappa of B:
+  ///              B = I, diagonal or diagonally dominant B, or (P8) a general HPD B whose
+  ///              incomplete-Cholesky bounds prove one (src/driver/norms.hpp
+  ///              prove_condition_bound); where none is proven a pass would only be a SCREENING
+  ///              result: the check is not run there and the exact counts certify (a warning says
+  ///              so) - no screening result is ever reported as the verdict;
   ///   auto       the method certificate_cost predicts cheapest among exact counts, single-
   ///              precision counts (only where verify.hpp's rule certifies them with a 10x margin
-  ///              on its assumed backward error, certificate.hpp) and the randomized check (only
-  ///              with a proven kappa), from measured times of this run (main factorization, solve
-  ///              calls of the Krylov run at its block width);
+  ///              on its assumed backward error, certificate.hpp; for a general B with a proven
+  ///              lambda_min(B)) and the randomized check (only with a proven kappa), from measured
+  ///              times of this run (main factorization, solve calls of the Krylov run at its block
+  ///              width);
   ///   off        none (inertia_check = off also turns it off).
   /// A check that detects a missing pair triggers the deflated rerun and checks again; single
   /// counts that exceed the found pairs or contradict the exact count at sigma are checked by
@@ -162,7 +165,13 @@ struct SolverConfig {
   /// the found pairs only). Window targets (interval / smallest / largest, and nearest targets
   /// handed to the windows by the zero band) always count exactly: their count points are slice
   /// cuts and shifts. The report states what was proven (method, rigorous, failure_probability,
-  /// statement).
+  /// statement). A count whose factorization fails (MUMPS out of memory or another MUMPS error)
+  /// moves to the other count source (main factorization or InertiaCounter); when no count can be
+  /// made, a nearest target returns its converged pairs with the certificate performed but not
+  /// completed (passed = false, count_inertia = -1, note "not completed: ...", success = false); a
+  /// window target does so with the pairs of the slices it completed (count_inertia: the window's
+  /// count) when a count fails from its first slice on, and ends with the error before (window
+  /// ends and cuts: nothing solved yet).
   CertificateMode certificate = CertificateMode::Exact;
   double certificate_delta = 1e-12;  ///< randomized check: bound on the failure probability, (0, 1)
   /// FAULT INJECTION, for tests and measurements only (0 = off): after the first Krylov run of a
@@ -175,6 +184,19 @@ struct SolverConfig {
   /// (single precision, BLR) is not accepted - its first pair is marked above tol - so that the
   /// solve starts again with double factors (report.precision.fallback), as for a real miss.
   bool inexact_fault_reject = false;
+  /// FAULT INJECTION, for tests and measurements only (0 = off): a sum of bits making the
+  /// factorizations of the certificate fail, so that every recovery path can be exercised
+  /// (src/driver/internal.hpp kFault*): 1 every InertiaCounter gets a 1 MB working-memory cap
+  /// (its counts fail in MUMPS with INFO -19); 2 counts on the main factorization object fail
+  /// (OutOfMemoryBudget); 4 InertiaCounters are predicted not to fit the memory left (count
+  /// allowance 0); 8 the refactorization at the working shift before a deflated rerun or a
+  /// randomized check fails. Kind of the failures of 1, 2, 8 (at most one): 16 another MUMPS error
+  /// (FactorizationFailed; bit 1 then throws at each count instead of the cap), 32 std::bad_alloc.
+  /// 64: bits 1 and 2 only from a window target's first slice on. A count that fails moves to the
+  /// other count source; with none left the nearest target returns its pairs with the certificate
+  /// performed but not completed, a window target the pairs of its completed slices
+  /// (docs/FORMATS.md §3).
+  index_t certificate_fault_count = 0;
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
   double complex_tol = 1e-8;      ///< GHIEP: a pair is complex only if |Im lambda| >
@@ -281,14 +303,17 @@ struct InertiaCertificate {
   double lower = 0.0;          ///< a (-inf for Smallest)
   double upper = 0.0;          ///< b (+inf for Largest)
   index_t count_inertia = -1;  ///< eigenvalues required in the window according to Sylvester inertia
-                               ///< (-1 when the final verdict did not count: randomized)
+                               ///< (-1 when the final verdict did not count: randomized, or a
+                               ///< certificate not completed because no count was possible)
   index_t count_found = -1;    ///< distinct (B-orthogonal) computed eigenvectors in the window
   index_t endpoint_moves = 0;  ///< endpoints moved because inertia came back invalid
   bool passed = false;         ///< counts: count_inertia == count_found; randomized: the exclusion
                                ///< check passed (no further eigenvalue within the window radius,
                                ///< kappa of B proven). Always a proof (rigorous): screening
                                ///< results are never reported as the verdict
-  std::string note;            ///< e.g. "not available for GHIEP"
+  std::string note;            ///< e.g. "not available for GHIEP"; "not completed: no inertia count
+                               ///< possible ..." when every count source failed (P8; a window
+                               ///< target names the slices it could not solve)
   /// "exact" (double Sylvester counts), "exact_single" (single-precision counts under the
   /// perturbation rule of verify.hpp), "randomized" (exclusion check), "none" (not performed).
   std::string method = "none";

@@ -28,10 +28,16 @@
 // A nearest target whose selection or certificate window reaches the zero band is handed to the
 // windows as [sigma - r, sigma + r] minus the band, r grown from the plain run's Ritz hints until
 // the counts hold k eigenvalues outside the band (a single shift there converges null-space copies).
+// Counts that no source can make (CountFailure, P8; DESIGN §3.6-8): the nearest certificate returns
+// its converged pairs uncertified; a window target ends with the error while it counts its window
+// ends and cuts (nothing is solved yet), and from its first slice on loses only the slice whose
+// count failed (an anchor's gap point, a partial cluster's verification): the other slices' pairs
+// are returned with the certificate "not completed".
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <new>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -355,7 +361,8 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     timings.factorize_s = (fs.factorize_s - before_factor.factorize_s) /
                           static_cast<double>(fs.factorizations - before_factor.factorizations);
   event(c, "factorization", {{"sigma", sigma}, {"factor_s", fs.factorize_s}, {"entries", static_cast<std::int64_t>(fs.factor_entries)},
-                             {"mb", fs.factor_mb_used}, {"delayed_pivots", static_cast<std::int64_t>(fs.delayed_pivots)}});
+                             {"mb", fs.factor_mb_used}, {"mb_allocated", fs.factor_mb_allocated},
+                             {"delayed_pivots", static_cast<std::int64_t>(fs.delayed_pivots)}});
 
   // Converge exactly the k wanted pairs (most wanted by |theta| = nearest to sigma). Asking for
   // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
@@ -449,6 +456,17 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
                                                     fac.options().threads, 2);
   CountSource<T> counts(fac, pencil, on_counter, MainFactors::Release);
   NearestCertifier<T> fast(c, pencil, fac, sigma, detection_off, scale, n2a, n2b, timings);
+  // A count or rerun factorization that fails (MUMPS out of memory or another MUMPS error) never
+  // ends the solve: counts move to the other source (CountSource), and when no count can be made,
+  // or the deflated rerun cannot refactorize at sigma, the pairs found so far are returned with
+  // the certificate not completed (success = false; DESIGN §3.6-8).
+  bool not_completed = false;
+  auto found_in = [&](double lo, double hi) {
+    index_t found = 0;
+    for (double l : run.all.lambda)
+      if (std::isfinite(l) && l >= lo && l <= hi && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
+    return found;
+  };
   for (int round = 0; want_cert && round < 3; ++round) {
     if (sel.size() == 0) break;
     const double tiny = 1e-12 * std::max(scale, std::abs(t.sigma));
@@ -489,19 +507,35 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       // Exact counts: on the certifier's InertiaCounter when its single counts built one (no
       // second analysis; a window it counted to check single counts is not counted again).
       index_t nu_a = 0, nu_b = 0;
-      const bool on_certifier = fast.exact_counts(a_end, b_end, nu_a, nu_b);
-      if (!on_certifier) {
-        const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-        nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
-        nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+      bool on_certifier = false;
+      try {
+        on_certifier = fast.exact_counts(a_end, b_end, nu_a, nu_b);
+        if (!on_certifier) {
+          // The certifier's InertiaCounter (same pivot order) did not fit: neither would another.
+          if (fast.counter_memory_failure())
+            counts.avoid_counter(c, "the certifier's InertiaCounter on the same pivot order failed (" +
+                                        fast.counter_failure() + ")");
+          const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
+          nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+          nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+        }
+      } catch (const CountFailure& e) {
+        const index_t found = found_in(a_end, b_end);
+        fast.record_not_completed(a_end, b_end, found, e.what());
+        not_completed = true;
+        event(c, "certificate_counts_failed", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end},
+                                               {"upper", b_end}, {"found", static_cast<std::int64_t>(found)},
+                                               {"code", std::string(to_string(e.code()))},
+                                               {"reason", std::string(e.what())}});
+        warn(c, "certificate not completed: no inertia count possible (" + std::string(e.what()) + "); the " +
+                    std::to_string(sel.size()) + " converged pair(s) are returned uncertified");
+        break;
       }
       cert.performed = true;
       cert.lower = a_end;
       cert.upper = b_end;
       cert.count_inertia = nu_b - nu_a;
-      index_t found = 0;
-      for (double l : run.all.lambda)
-        if (std::isfinite(l) && l >= a_end && l <= b_end && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
+      const index_t found = found_in(a_end, b_end);
       cert.count_found = found;
       cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
       fast.record_exact(on_certifier || counts.uses_counter());
@@ -533,7 +567,25 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     // restart at widths 4 and 8, whole solve 4.65 .. 4.81 s (the review: 1000 restarts, ~200 s).
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
     if (nev_rerun < 1) break;
-    refactorize_at(c, fac, sigma, detection_off);
+    std::string why;
+    try {
+      if (fault(cfg, kFaultRefactorization))
+        throw_injected_fault(cfg, kFaultRefactorization, "refactorization at sigma for the deflated rerun");
+      refactorize_at(c, fac, sigma, detection_off);
+    } catch (const Error& e) {
+      if (!count_failure(e)) throw;
+      why = std::string(to_string(e.code())) + ": " + e.what();
+    } catch (const std::bad_alloc&) {
+      why = "allocation failure (std::bad_alloc)";
+    }
+    if (!why.empty()) {
+      event(c, "rerun_failed", {{"round", static_cast<std::int64_t>(round)}, {"reason", why}});
+      warn(c, "certificate: the deflated rerun for " + std::to_string(missing) +
+                  " missing pair(s) is not possible (the refactorization at sigma failed: " + why +
+                  "); the pairs found so far are returned");
+      cert.statement += "; the deflated rerun for the missing pair(s) failed (refactorization at sigma: " + why + ")";
+      break;
+    }
     DenseMatrix<T> defl = run.all.x;
     const index_t d = defl.cols();
     const index_t p_rerun =
@@ -544,7 +596,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   if (cert.performed && cert.passed && sel.size() < std::min<index_t>(k, n))
     cert.statement += "; but only " + std::to_string(sel.size()) + " of " + std::to_string(k) +
                       " pairs were found: the window covers the found pairs, not the k-th nearest eigenvalue";
-  if (cert.performed && !cert.passed) {
+  if (cert.performed && !cert.passed && !not_completed) {
     if (cert.count_inertia < 0)
       warn(c, "certificate failed: the " + cert.method + " check still finds eigenvalues missing near sigma");
     else if (cert.count_inertia < cert.count_found)
@@ -1511,27 +1563,50 @@ Solution<T> WindowSolver<T>::solve() {
   }
   reserve_pool(required + 4 * static_cast<index_t>(slices_.size()) + 8);
   event(c_, "slices", {{"slices", static_cast<std::int64_t>(slices_.size())}});
+  counts_.arm_late_faults();
+  // From here on a count that no source can make (CountFailure: the gap point of a one-sided
+  // anchor, the verification of a partial cluster) ends only the slice that needs it: the other
+  // slices are solved, the report says which were not completed (DESIGN §3.6-8).
+  std::string not_completed, count_failure;
   for (std::size_t i = 0; i < slices_.size(); ++i) {
-    if (run_slice(slices_[i], static_cast<index_t>(i))) continue;
-    // A partial cluster that is not numerically equal: all of its eigenvalues are needed - one
-    // slice (counts cannot split it), whose output and working set must fit the budget.
-    Slice& s = slices_[i];
-    const double need_bytes = 8.0 * static_cast<double>(n_) * sizeof(T) * static_cast<double>(s.count());
-    const double avail = budget_left(c_);
-    if (need_bytes > 0.9 * avail)
-      HS_THROW(OutOfMemoryBudget, "the target ends inside a cluster of " << s.count() << " eigenvalues in [" << s.lo.s
-                                                                         << ", " << s.hi.s
-                                                                         << "] that are not numerically equal: "
-                                                                         << need_bytes / 1073741824.0
-                                                                         << " GiB needed (zero_filter_tol?)");
-    warn(c_, "cluster [" + fmt(s.lo.s) + ", " + fmt(s.hi.s) + "] is not numerically multiple: all " +
-                 std::to_string(s.count()) + " of its eigenvalues computed");
-    for (auto& w : windows)
-      if (w.lo.s == s.lo.s && w.hi.s == s.hi.s) w.want = -1;
-    required += s.count() - s.want;
-    cert.count_inertia = required;
-    s.want = -1;
-    run_slice(s, static_cast<index_t>(i));
+    try {
+      if (run_slice(slices_[i], static_cast<index_t>(i))) continue;
+      // A partial cluster that is not numerically equal: all of its eigenvalues are needed - one
+      // slice (counts cannot split it), whose output and working set must fit the budget.
+      Slice& s = slices_[i];
+      const double need_bytes = 8.0 * static_cast<double>(n_) * sizeof(T) * static_cast<double>(s.count());
+      const double avail = budget_left(c_);
+      if (need_bytes > 0.9 * avail)
+        HS_THROW(OutOfMemoryBudget, "the target ends inside a cluster of "
+                                        << s.count() << " eigenvalues in [" << s.lo.s << ", " << s.hi.s
+                                        << "] that are not numerically equal: " << need_bytes / 1073741824.0
+                                        << " GiB needed (zero_filter_tol?)");
+      warn(c_, "cluster [" + fmt(s.lo.s) + ", " + fmt(s.hi.s) + "] is not numerically multiple: all " +
+                   std::to_string(s.count()) + " of its eigenvalues computed");
+      for (auto& w : windows)
+        if (w.lo.s == s.lo.s && w.hi.s == s.hi.s) w.want = -1;
+      required += s.count() - s.want;
+      cert.count_inertia = required;
+      s.want = -1;
+      run_slice(s, static_cast<index_t>(i));
+    } catch (const CountFailure& e) {
+      const Slice& s = slices_[i];
+      if (static_cast<index_t>(reports_.size()) <= static_cast<index_t>(i)) reports_.resize(i + 1);
+      SliceReport& sr = reports_[i];
+      sr.lower = s.lo.s;
+      sr.upper = s.hi.s;
+      sr.count_inertia = s.count();
+      sr.count_found = 0;
+      sr.passed = false;
+      const std::string range = "[" + fmt(s.lo.s) + ", " + fmt(s.hi.s) + "]";
+      not_completed += (not_completed.empty() ? "" : ", ") + range;
+      count_failure = e.what();
+      event(c_, "slice_not_completed", {{"slice", static_cast<std::int64_t>(i)}, {"lower", s.lo.s}, {"upper", s.hi.s},
+                                        {"required", static_cast<std::int64_t>(s.required())},
+                                        {"code", std::string(to_string(e.code()))}, {"reason", count_failure}});
+      warn(c_, "slice " + range + " not completed: no inertia count possible (" + count_failure + "); its " +
+                   std::to_string(s.required()) + " eigenvalue(s) are not returned");
+    }
   }
   const index_t removed = deduplicate();
   if (removed > 0) event(c_, "deduplicate", {{"removed", static_cast<std::int64_t>(removed)}});
@@ -1560,12 +1635,32 @@ Solution<T> WindowSolver<T>::solve() {
   event(c_, "certificate", {{"lower", cert.lower}, {"upper", cert.upper},
                             {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
                             {"count_found", static_cast<std::int64_t>(cert.count_found)}, {"passed", cert.passed}});
-  if (!cert.passed)
+  const bool completed = cert.passed || not_completed.empty();
+  if (!completed)
+    warn(c_, "certificate not completed: no inertia count possible for the slice(s) " + not_completed + "; the " +
+                 std::to_string(cert.count_found) + " pair(s) of the completed slices are returned");
+  else if (!cert.passed)
     warn(c_, "certificate failed: inertia " + std::to_string(cert.count_inertia) + " vs found " +
                  std::to_string(cert.count_found) + " over " + std::to_string(slices_.size()) + " slice(s)");
   if (slices_.size() > 1) {
     const std::string sl = std::to_string(slices_.size()) + " slices";
     cert.note = cert.note.empty() ? sl : sl + "; " + cert.note;
+  }
+  if (!completed) {
+    // As the nearest target's uncompleted certificate (FORMATS §3): the note leads with "not
+    // completed"; the method and statement are set here (solve_definite's finish() keeps them).
+    cert.method = certificate_method_name(CertificateMethod::Exact);
+    cert.rigorous = false;
+    cert.failure_probability = 1.0;
+    cert.note = "not completed: no inertia count possible for the slice(s) " + not_completed +
+                (cert.note.empty() ? std::string() : "; " + cert.note);
+    cert.statement = "double-precision Sylvester counts at every window end and slice cut: " +
+                     std::to_string(cert.count_inertia) + " eigenvalue(s) required, " +
+                     std::to_string(cert.count_found) +
+                     " distinct found pair(s); NOT completed: the slice(s) " + not_completed +
+                     " could not be solved - a count they needed was not possible (" + count_failure +
+                     ") - and their eigenvalues are not returned; the pairs returned are those of the completed "
+                     "slices, each checked against the counts at its ends (report.slices)";
   }
 
   // ---- 5. Output: target order and selection, applied to the pool in place.

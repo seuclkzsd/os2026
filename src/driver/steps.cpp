@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <new>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -320,50 +321,180 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 
 // ------------------------------------------------------------------------------ inertia counts
 
+double count_allowance_mb(const Ctx& c, double cap_mb) {
+  double mb = kCountMemoryShare * std::max(0.0, budget_left(c)) / 1e6;  // in the budget's measure (P7)
+  if (cap_mb > 0) mb = std::min(mb, cap_mb);
+  return mb;
+}
+
+double counter_allowance_mb(const Ctx& c, double cap_mb) {
+  return fault(c.cfg, kFaultCountAllowance) ? 0.0 : count_allowance_mb(c, cap_mb);
+}
+
+void throw_injected_fault(const SolverConfig& cfg, index_t bit, const std::string& what) {
+  if (fault(cfg, kFaultBadAlloc)) throw std::bad_alloc();
+  const std::string msg = "fault injection (certificate_fault_count & " + std::to_string(bit) + "): " + what;
+  if (fault(cfg, kFaultOtherError)) HS_THROW(FactorizationFailed, msg);
+  HS_THROW(OutOfMemoryBudget, msg);
+}
+
+template <class T>
+FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac, bool faults) {
+  FactorOptions o = fac.options();
+  // MUMPS INFO -19 at every count
+  if (faults && fault(c.cfg, kFaultCounterCounts) && !counter_fault_throws(c.cfg)) o.max_memory_mb = 1.0;
+  return o;
+}
+
 template <class T>
 CountSource<T>::CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter,
                             MainFactors main)
     : fac_(fac), pencil_(pencil), main_(main) {
-  const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
-  use_counter_ = prefer_counter || !exact;
+  main_exact_ = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
+  use_counter_ = prefer_counter || !main_exact_;
+  last_on_counter_ = use_counter_;
 }
 
 template <class T>
 CountSource<T>::~CountSource() = default;
 
+// The preferred source first; a source that failed is not tried again in this solve (whatever
+// stopped it - the memory its working set needs, a MUMPS error - would stop it again: an
+// InertiaCounter's analysis on a given pivot order is deterministic, and so is the main object's).
 template <class T>
 Inertia CountSource<T>::count(Ctx& c, double s, bool detection) {
   PhaseScope phase(c.clock, Phase::Certificate);
-  if (!use_counter_) {
-    c.held = FactorHeld{};
-    fac_.set_null_pivot_detection(detection);
-    Inertia in;
-    if (fac_.factorize(1.0, -s)) in = fac_.inertia();
-    fac_.set_null_pivot_detection(true);
-    if (in.valid) c.held = FactorHeld{s, !detection};
-    return in;
+  for (;;) {
+    const bool counter_ok = !counter_failed_;
+    const bool main_ok = main_exact_ && !main_failed_;
+    if (!counter_ok && !main_ok) break;
+    const bool on_counter = use_counter_ ? counter_ok : !main_ok;
+    try {
+      const Inertia in = on_counter ? count_on_counter(c, s, detection) : count_on_main(c, s, detection);
+      last_on_counter_ = on_counter;
+      return in;
+    } catch (const Error& e) {
+      if (!count_failure(e)) throw;
+      abandon(c, on_counter, std::string(to_string(e.code())) + ": " + e.what(),
+              e.code() == Error::Code::OutOfMemoryBudget);
+    } catch (const std::bad_alloc&) {
+      abandon(c, on_counter, "allocation failure (std::bad_alloc)", true);
+    }
   }
+  // Out of memory only when every source that failed failed for memory (CountFailure comment).
+  const bool memory = (!counter_failed_ || counter_memory_) && (!main_failed_ || main_memory_);
+  throw CountFailure(memory ? Error::Code::OutOfMemoryBudget : Error::Code::FactorizationFailed,
+                     "no inertia count possible at s = " + fmt(s) + " (" + failures() + ")");
+}
+
+template <class T>
+Inertia CountSource<T>::count_on_main(Ctx& c, double s, bool detection) {
+  if (injected(c, kFaultMainCounts)) throw_injected_fault(c.cfg, kFaultMainCounts, "count on the main factorization");
+  if (use_counter_) {
+    // Standing in for the preferred counter, which failed: memory is short. The main object's own
+    // ICNTL(23) cap was fixed at the analysis, before the Krylov basis and the pairs, so it does
+    // not keep this count within the budget (CountSource comment): its factors go first, then the
+    // working memory of its last factorization (INFOG(21); before any, the analysis estimate) must
+    // fit what the budget leaves.
+    if (fac_.inertia().valid && fac_.release_factors()) c.held = FactorHeld{};
+    const FactorEstimate est = fac_.estimate();
+    const double need = fac_.stats().factor_mb_used > 0 ? fac_.stats().factor_mb_used
+                                                        : (fac_.options().out_of_core ? est.ooc_mb : est.incore_mb);
+    const double allowance = count_allowance_mb(c, fac_.options().max_memory_mb);
+    event(c, "main_count_check", {{"s", s}, {"need_mb", need}, {"allowance_mb", allowance},
+                                  {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
+    if (need > allowance)
+      HS_THROW(OutOfMemoryBudget, "main factorization: the working memory of its last factorization, "
+                                      << need << " MB, exceeds the " << allowance
+                                      << " MB the memory budget leaves for a count");
+  }
+  c.held = FactorHeld{};
+  fac_.set_null_pivot_detection(detection);
+  Inertia in;
+  try {
+    if (fac_.factorize(1.0, -s)) in = fac_.inertia();
+  } catch (...) {
+    fac_.set_null_pivot_detection(true);
+    throw;
+  }
+  fac_.set_null_pivot_detection(true);
+  if (in.valid) c.held = FactorHeld{s, !detection};
+  return in;
+}
+
+template <class T>
+Inertia CountSource<T>::count_on_counter(Ctx& c, double s, bool detection) {
   const double cap = fac_.options().max_memory_mb;
   if (!counter_) {
     // Inertia-only instance on the main analysis' pivot order.
-    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
+    counter_ = std::make_unique<InertiaCounter<T>>(fac_, counter_options(c, fac_, injected(c, kFaultCounterCounts)));
     event(c, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s},
                                  {"incore_mb", counter_->estimate().incore_mb}, {"cap_mb", cap}});
   }
+  const double counter_mb = counter_->estimate().incore_mb;
   // The counter's working memory comes on top of resident main factors. Decided before every
   // count: the main object may hold factors again since the last one (refactorized for a rerun,
   // a rescue, a slice shift).
-  if (fac_.inertia().valid) {
+  auto release_main = [&](bool over_cap, const char* why) {
     const double main_mb = fac_.stats().factor_mb_used;
-    const bool over_cap = cap > 0 && main_mb + counter_->estimate().incore_mb > cap;
-    if ((main_ == MainFactors::Release || over_cap) && fac_.release_factors()) {
-      c.held = FactorHeld{};
-      event(c, "main_factors_released", {{"main_mb", main_mb}, {"counter_mb", counter_->estimate().incore_mb},
-                                         {"cap_mb", cap}, {"over_cap", over_cap}});
-    }
+    if (!(fac_.inertia().valid && fac_.release_factors())) return false;
+    c.held = FactorHeld{};
+    event(c, "main_factors_released", {{"main_mb", main_mb}, {"counter_mb", counter_mb}, {"cap_mb", cap},
+                                       {"over_cap", over_cap}, {"why", std::string(why)}});
+    return true;
+  };
+  if (fac_.inertia().valid) {
+    const bool over_cap = cap > 0 && fac_.stats().factor_mb_used + counter_mb > cap;
+    if (main_ == MainFactors::Release || over_cap) release_main(over_cap, over_cap ? "cap" : "policy");
   }
+  // The counter must fit what the budget leaves now (CountSource comment); resident main factors
+  // go first.
+  double allowance = counter_allowance_mb(c, cap);
+  if (counter_mb > allowance && release_main(false, "allowance")) allowance = counter_allowance_mb(c, cap);
+  if (counter_mb > allowance)
+    HS_THROW(OutOfMemoryBudget, "InertiaCounter: its in-core estimate " << counter_mb << " MB exceeds the "
+                                                                        << allowance
+                                                                        << " MB the memory budget leaves for a count");
+  if (injected(c, kFaultCounterCounts) && counter_fault_throws(c.cfg))
+    throw_injected_fault(c.cfg, kFaultCounterCounts, "InertiaCounter count");
   return counter_->count(1.0, -s, detection);
 }
+
+template <class T>
+void CountSource<T>::abandon(Ctx& c, bool counter, const std::string& why, bool memory) {
+  (counter ? counter_failed_ : main_failed_) = true;
+  (counter ? counter_why_ : main_why_) = why;
+  (counter ? counter_memory_ : main_memory_) = memory;
+  if (counter) counter_.reset();  // its analysis and whatever workspace MUMPS kept
+  const bool other = counter ? main_exact_ && !main_failed_ : !counter_failed_;
+  event(c, "count_source",
+        {{"failed", std::string(counter ? "inertia_counter" : "main_factorization")},
+         {"next", std::string(!other ? "none" : counter ? "main_factorization" : "inertia_counter")},
+         {"reason", why}, {"memory", memory}, {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
+  if (other)
+    warn(c, std::string("certificate counts: the ") + (counter ? "InertiaCounter" : "main factorization") +
+                " could not count (" + why + "); counting on the " +
+                (counter ? "main factorization" : "InertiaCounter") + " instead");
+}
+
+template <class T>
+void CountSource<T>::avoid_counter(Ctx& c, const std::string& why) {
+  if (!counter_failed_) abandon(c, true, why, true);  // another counter on the same order failed for memory
+}
+
+template <class T>
+std::string CountSource<T>::failures() const {
+  std::string s;
+  if (counter_failed_) s += "InertiaCounter: " + counter_why_;
+  if (main_failed_) s += (s.empty() ? "" : "; ") + std::string("main factorization: ") + main_why_;
+  if (!main_exact_) s += (s.empty() ? "" : "; ") + std::string("the main factors are inexact (single / BLR)");
+  return s;
+}
+
+#define HS_INSTANTIATE_COUNTER_OPTIONS(T) \
+  template FactorOptions counter_options<T>(const Ctx&, const SparseFactorization<T>&, bool);
+HS_FOR_EACH_SCALAR(HS_INSTANTIATE_COUNTER_OPTIONS)
+#undef HS_INSTANTIATE_COUNTER_OPTIONS
 
 bool counter_pays(const SolverConfig& cfg, const FactorEstimate& e, const MumpsInputSize& in, int threads,
                   index_t counts) {
@@ -411,6 +542,13 @@ index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, doub
 
 // Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3): in-core if the
 // estimate fits the cap, else out-of-core if allowed and fitting, else OutOfMemoryBudget.
+// An ordering that differs from analysis to analysis (SCOTCH, taken_on_prediction: multithreaded,
+// not reproducible even with its random state reset, factor.hpp) whose estimate does not fit is
+// analysed again, up to kMaxReanalyses times, before giving up (P8): its estimates scatter by up to
+// ~30% - ss-3dspectralwave2 at the default 14 GiB budget had out-of-core estimates of 10.6..11.9 GB
+// in most analyses and 13.4..14.4 GB in 6 of 42 (P5c and P8; 5 of them above the cap of ~13.49 GB;
+// results/p8_certcost.md §2.3); each re-analysis costs one ordering (16 s there).
+constexpr int kMaxReanalyses = 2;
 template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed) {
@@ -418,19 +556,27 @@ void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPen
     PhaseScope phase(c.clock, Phase::Factor);
     fac.analyze(pencil, 1.0, -sigma0);
   }
-  const FactorEstimate est = fac.estimate();
-  event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
-                        {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
-  const double cap_mb = fac.options().max_memory_mb;
-  if (cap_mb > 0 && est.incore_mb > cap_mb) {
+  for (int attempt = 0;; ++attempt) {
+    const FactorEstimate est = fac.estimate();
+    event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
+                          {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
+    const double cap_mb = fac.options().max_memory_mb;
+    if (!(cap_mb > 0 && est.incore_mb > cap_mb)) return;
     if (c.cfg.out_of_core != Toggle::Off && est.ooc_mb <= cap_mb) {
       fac.set_out_of_core(true);
       warn(c, "factor estimate " + fmt(est.incore_mb) + " MB exceeds the budget; using out-of-core factors");
-    } else {
-      HS_THROW(OutOfMemoryBudget, "predicted factorization memory " << est.incore_mb << " MB (out-of-core "
-                                                                    << est.ooc_mb << " MB) exceeds the budget of "
-                                                                    << cap_mb << " MB");
+      return;
     }
+    if (attempt < kMaxReanalyses && taken_on_prediction(fac.options().ordering)) {
+      warn(c, "factor estimate " + fmt(est.incore_mb) + " MB (out-of-core " + fmt(est.ooc_mb) +
+                  " MB) exceeds the budget of " + fmt(cap_mb) + " MB; analysing again (the ordering differs from run "
+                  "to run)");
+      PhaseScope phase(c.clock, Phase::Factor);
+      fac.analyze(pencil, 1.0, -sigma0);
+      continue;
+    }
+    HS_THROW(OutOfMemoryBudget, "predicted factorization memory " << est.incore_mb << " MB (out-of-core " << est.ooc_mb
+                                                                  << " MB) exceeds the budget of " << cap_mb << " MB");
   }
 }
 

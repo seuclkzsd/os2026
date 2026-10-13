@@ -60,14 +60,20 @@ SingleCountValidity single_count_validity(const ShiftedPencil<T>& pencil, const 
   if (!std::isfinite(rule.a_norm_1))
     HS_THROW(InvalidInput, "single_count_validity: a_norm_1 must be finite (< 0: computed)");
 
+  if (!(rule.b_min_proven >= 0.0) || !std::isfinite(rule.b_min_proven))
+    HS_THROW(InvalidInput, "single_count_validity: b_min_proven must be finite and >= 0");
   SingleCountValidity v;
   double bmin = 1.0, bmax = 1.0;
   if (const CsrMatrix<T>* b = pencil.b()) {
     if (!diagonal_range(*b, bmin, bmax)) {
-      v.reason = "B is not diagonal: no cheap rigorous lower bound on lambda_min(B), single counts certify nothing";
-      return v;
-    }
-    if (!(bmin > 0.0)) {
+      if (!(rule.b_min_proven > 0.0)) {
+        v.reason = "B is not diagonal and no lower bound on lambda_min(B) is proven: single counts certify nothing";
+        return v;
+      }
+      // A general HPD B with a proven lambda_min(B) >= b_min_proven (SingleCountRule).
+      bmin = rule.b_min_proven;
+      bmax = norm_one(*b);
+    } else if (!(bmin > 0.0)) {
       v.reason = "diagonal B is not positive definite";
       return v;
     }
