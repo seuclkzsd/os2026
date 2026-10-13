@@ -605,10 +605,20 @@ OrderingInput ordering_input(const ShiftedPencil<T>& pencil) {
   return in;
 }
 
-// Candidates of the adaptive ordering. SCOTCH is not among them: its orderings differ from
-// analysis to analysis (nd_ordering), so a choice that compared its estimate with another
-// candidate's could differ between identical runs.
-std::vector<int> candidate_orderings(const SolverConfig& /*cfg*/) { return {0, kOrderingNestedDissection, 5, 4}; }
+// Candidates of the adaptive ordering, in order of preference on near-equal scores: AMD, SCOTCH,
+// hsolve's nested dissection, METIS, PORD. SCOTCH's orderings differ from analysis to analysis
+// (nd_ordering), so it is taken on its prediction (taken_on_prediction): once it is the
+// best-scoring candidate it is analysed and used, its estimate never compared with another
+// candidate's - the choice stays a function of deterministic estimates. Why SCOTCH and why before
+// hsolve's nested dissection: at 16 threads its factors need 0.80..0.95x the flops of hsolve's on
+// the high-fill 3-D cases (Yee grids, ss-ge87h76, ss-tem152078; bench/anaint_orderings.cpp), which
+// the fill-based shape fits see only beyond fill ~150; end to end (16 threads, P5c) hsolve's
+// nested dissection in its place cost yee-pec-box-1e5 13% and ss-ge87h76 17% (69 vs 59 s).
+std::vector<int> candidate_orderings(const SolverConfig& /*cfg*/) {
+  return {0, kOrderingScotch, kOrderingNestedDissection, 5, 4};
+}
+
+bool taken_on_prediction(int ordering) { return ordering == kOrderingScotch; }
 
 double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_entries, int threads) {
   const double floor = given_order_analysis_s(in.mumps, factor_entries);
@@ -670,12 +680,13 @@ std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates) {
 // from 3-D-like fill) prices every candidate on the planned work: AMD by its own estimate, the
 // others by the shape fits. The best-scoring candidate is analysed and its actual estimate replaces
 // the prediction (the remaining nested dissections are then predicted from it, more tightly); the
-// loop ends when the best-scoring candidate is an analysed one. A second analysis therefore runs
-// only where the numeric work dwarfs it (the expected gain of an actual estimate, kGainFrom*, is a
-// fraction of the numeric time): on the largest 3-D cases, never on the 1e5 ones. Analysis objects
-// that can no longer be chosen are freed at once (at most two live). Every input of the decisions
-// is deterministic (estimates of deterministic orderings, models, thread count): identical runs
-// choose the same ordering. Wall times are logged, never used.
+// loop ends when the best-scoring candidate is an analysed one, or SCOTCH (taken on its
+// prediction, candidate_orderings). A second analysis beyond the probe therefore runs only where
+// the numeric work dwarfs it (the expected gain of an actual estimate, kGainFrom*, is a fraction
+// of the numeric time). Analysis objects that can no longer be chosen are freed at once (at most
+// two live; three while an analysed SCOTCH exceeds the in-core cap). Every input of the decisions is deterministic (estimates of deterministic orderings,
+// models, thread count; SCOTCH's estimate only for the in-core cap): identical runs choose the
+// same ordering. Wall times are logged, never used.
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
@@ -772,13 +783,25 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   };
   predict(0);
   // Analyse the best-scoring candidate while it is not analysed yet: then no further analysis is
-  // expected to pay, and the choice is among the analysed ones.
+  // expected to pay, and the choice is among the analysed ones. A candidate taken on its
+  // prediction (SCOTCH) ends the loop as the choice once analysed - unless its factors exceed the
+  // in-core cap; it never anchors the predictions of the others.
+  std::size_t pick = cand.size();
   for (std::size_t next = choose_ordering(cand); !cand[next].analysed; next = choose_ordering(cand)) {
     analyse(next);
+    if (taken_on_prediction(orderings[next])) {
+      if (cand[next].score_s < kOverCapScore) {
+        pick = next;
+        break;
+      }
+      continue;  // beyond the cap: the analysed candidates decide (its over-cap score loses)
+    }
     keep_best_analysed();
     predict(next);
   }
-  const std::size_t pick = keep_best_analysed();
+  if (pick == cand.size()) pick = keep_best_analysed();
+  for (std::size_t i = 0; i < cand.size(); ++i)
+    if (i != pick) obj[i].reset();
   // The log: every candidate's price, which were analysed (with their wall time), the choice.
   std::string summary;
   for (std::size_t i = 0; i < cand.size(); ++i) {

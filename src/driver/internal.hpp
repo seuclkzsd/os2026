@@ -283,10 +283,15 @@ struct OrderingCandidate {
   double score_s = 0.0;
 };
 
-/// Orderings the adaptive analysis chooses from, in order of preference on equal scores (cheapest
-/// analysis first): AMD, hsolve's nested dissection (multithreaded), METIS, PORD (steps.cpp: why
-/// SCOTCH is not among them).
+/// Orderings the adaptive analysis chooses from, in order of preference on near-equal scores: AMD,
+/// SCOTCH, hsolve's nested dissection (multithreaded), METIS, PORD (steps.cpp: why this order).
 std::vector<int> candidate_orderings(const SolverConfig& cfg);
+/// FactorOptions::ordering of MUMPS' SCOTCH (ICNTL(7) = 3).
+constexpr int kOrderingScotch = 3;
+/// Whether adaptive_analysis takes `ordering` on its prediction: once it is the best-scoring
+/// candidate it is analysed and used without comparing its estimate (SCOTCH: its orderings differ
+/// between runs, so a comparison could choose differently in identical runs).
+bool taken_on_prediction(int ordering);
 
 /// Sizes of the graphs the orderings work on: MUMPS orders its input (mumps_input_size), hsolve's
 /// nested dissection the same graph - or, for a complex pencil whose couplings are mostly complex,

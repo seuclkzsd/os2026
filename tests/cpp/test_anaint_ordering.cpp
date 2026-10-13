@@ -241,12 +241,16 @@ TEST(DriverOrderingModel, ChoiceWithMargin) {
   EXPECT_EQ(choose_ordering(std::vector<hs::driver::OrderingCandidate>(1)), 0u);
 }
 
-TEST(DriverOrderingModel, CandidatesExcludeScotch) {
+// SCOTCH is a candidate taken on its prediction (its orderings vary between runs), preferred over
+// hsolve's nested dissection on near-equal scores; the others are compared on their estimates.
+TEST(DriverOrderingModel, CandidatesTakeScotchOnItsPrediction) {
+  using hs::driver::taken_on_prediction;
   const auto o = hs::driver::candidate_orderings(hs::SolverConfig{});
-  ASSERT_FALSE(o.empty());
-  EXPECT_EQ(o.front(), 0);  // the AMD probe comes first
-  EXPECT_EQ(std::count(o.begin(), o.end(), 3), 0);
-  EXPECT_EQ(std::count(o.begin(), o.end(), kOrderingNestedDissection), 1);
+  ASSERT_GE(o.size(), 3u);
+  EXPECT_EQ(o[0], 0);  // the AMD probe comes first
+  EXPECT_EQ(o[1], hs::driver::kOrderingScotch);
+  EXPECT_EQ(o[2], kOrderingNestedDissection);
+  for (const int x : o) EXPECT_EQ(taken_on_prediction(x), x == hs::driver::kOrderingScotch) << x;
 }
 
 // ------------------------------------------------------------------------------ adaptive analysis
@@ -286,8 +290,8 @@ int analysed_count(const std::string& s) {
   return n;
 }
 
-// 2-D fill: AMD; 3-D fill: hsolve's nested dissection (cheapest analysis, fill of METIS), each
-// with a single analysis beyond the probe at most; the same choice in every run.
+// 2-D fill: AMD; 3-D fill: a nested dissection (SCOTCH or hsolve's), each with a single analysis
+// beyond the probe at most; the same choice in every run.
 TEST(DriverAdaptiveOrdering, AmdOnTwoDimensionalAndNestedDissectionOnThreeDimensionalFill) {
   auto cfg = nearest_cfg(0.0, 12);
   cfg.threads = 4;
@@ -299,11 +303,13 @@ TEST(DriverAdaptiveOrdering, AmdOnTwoDimensionalAndNestedDissectionOnThreeDimens
   const auto cube = laplacian_3d<double>(30, 30, 30);
   const auto wc = hs::driver::plan_work(cfg, hs::ProblemType::Standard, cube.nrows, 12.0);
   const auto r3 = run_adaptive(cube, cfg, wc, "3d");
-  EXPECT_EQ(r3.choice, kOrderingNestedDissection) << r3.candidates;
+  EXPECT_TRUE(r3.choice == kOrderingNestedDissection || r3.choice == hs::driver::kOrderingScotch) << r3.candidates;
   EXPECT_EQ(analysed_count(r3.candidates), 2) << r3.candidates;
-  const auto again = run_adaptive(cube, cfg, wc, "3d_again");
-  EXPECT_EQ(again.choice, r3.choice);
-  EXPECT_EQ(again.candidates.substr(0, again.candidates.find('/')), r3.candidates.substr(0, r3.candidates.find('/')));
+  for (int rep = 0; rep < 3; ++rep) {  // SCOTCH's estimate may vary between runs, the choice does not
+    const auto again = run_adaptive(cube, cfg, wc, "3d_again_" + std::to_string(rep));
+    EXPECT_EQ(again.choice, r3.choice);
+    EXPECT_EQ(again.candidates.substr(0, again.candidates.find('/')), r3.candidates.substr(0, r3.candidates.find('/')));
+  }
 }
 
 // When the numeric work dwarfs an analysis, the expected gain of an actual estimate pays for more
@@ -349,14 +355,14 @@ TEST(DriverAdaptiveOrdering, FactorsBeyondTheCapLoseToOnesThatFit) {
   EXPECT_NE(none.choice, 0) << none.candidates;
 }
 
-// End to end: the solve takes the adaptive choice and succeeds; deterministic runs keep the P4 rule.
+// End to end: the solve takes the adaptive choice (a nested dissection on 3-D fill) and succeeds.
 TEST(DriverAdaptiveOrdering, SolveUsesTheChoice) {
   const auto cube = laplacian_3d<double>(31, 30, 29);
   auto cfg = nearest_cfg(0.9, 10);
   const auto sol = hs::solve(cube, nullptr, cfg);
   EXPECT_TRUE(sol.report.success);
-  EXPECT_EQ(sol.report.factor_options.ordering, kOrderingNestedDissection);
-  EXPECT_NE(sol.report.factor_options.ordering, 3);
+  const int o = sol.report.factor_options.ordering;
+  EXPECT_TRUE(o == kOrderingNestedDissection || o == hs::driver::kOrderingScotch) << o;
 }
 
 }  // namespace
