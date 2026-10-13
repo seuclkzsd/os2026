@@ -180,5 +180,8 @@ foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
     endif()
   elseif(name MATCHES "^asmkern_" AND TARGET bench_${name})
     target_link_libraries(bench_${name} PRIVATE hsolve_blas)
+  elseif(name MATCHES "^mixprec_" AND TARGET bench_${name} AND HSOLVE_BLAS_HOOK)
+    # Measured like the hsolve executable: the in-executable BLAS hook (HS_BLAS_ROUTE at run time).
+    hsolve_link_blas_hook(bench_${name})
   endif()
 endforeach()

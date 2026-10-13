@@ -59,3 +59,9 @@ P4 programs:
 Measurement scripts outside `bench/`: `python/bench/overhead.py` (Python API vs CLI wall time and
 peak), `python/bench/load_memory.py` (`hsolve.load_matrix` vs `scipy.sparse.load_npz` memory),
 `tools/eval/bench_norms.py` (the evaluator's norm-estimate settings).
+
+P6 programs (mixed precision, `results/p6_mixprec.md`):
+
+| program | measures | run |
+|---|---|---|
+| `bench_mixprec_phases` | double vs single (smumps) factorization of K = A - sigma B at the driver's shift, ordering and block width (from a baseline `report.json`): numeric time, factor memory, inertia, 1- and p-RHS solves, plain-single accuracy, mixed-precision refinement steps and time per accurate application (`--exp phases`); shift-invert Lanczos with the double, the refined single (V1) and the plain single operator plus Ritz-pair refinement (V2, `--exp v2`). Linked with the BLAS hook like `hsolve` | `bench_mixprec_phases --case DIR --report REPORT.json [--exp phases,v2] [--reps 5] [--v2-tols ...] [--v2-mode rii\|davidson] [--single-only]` |
