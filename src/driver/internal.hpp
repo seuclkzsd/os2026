@@ -185,15 +185,21 @@ SolveRefinement shift_invert_refinement(const SolverConfig& cfg, const FactorOpt
 
 /// The driver's shift-invert operator K(sigma)^{-1} B on the factorization `fac` holds at sigma:
 /// ShiftInvertOperator with shift_invert_refinement, and with an inexact factor every application
-/// is checked - one whose refinement did not converge (ShiftInvertOperator::last_apply_converged)
-/// throws InexactFactorFailure: its result would be the operator of a perturbed matrix, and the
-/// Krylov run, the randomized check and the eigenpairs built on it could not be trusted.
+/// is checked. One whose refinement did not converge (ShiftInvertOperator::last_apply_converged)
+/// and whose relative residual is still above the Krylov tolerance tol * inner_tol_factor - 10x
+/// the refinement's target, which stagnation at the attainable accuracy may just miss
+/// (wg-square-1e5: 1.08e-12 against 1e-12) - throws InexactFactorFailure: its result is the
+/// operator of a perturbed matrix (when eps_factor * cond(K) >= 1 the residual stays at 1e-5 and
+/// above: syn-mem27-46 2.4e-5), and the Krylov run, the randomized check and the eigenpairs built
+/// on it could not be trusted. (The returned pairs are checked against tol independently.)
 template <class T>
 class DriverShiftInvert final : public LinearOperator<T> {
  public:
   DriverShiftInvert(const SolverConfig& cfg, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil,
                     double sigma)
-      : op_(fac, pencil, sigma, shift_invert_refinement(cfg, fac.options())), checked_(inexact_factor(fac.options())) {}
+      : op_(fac, pencil, sigma, shift_invert_refinement(cfg, fac.options())),
+        checked_(inexact_factor(fac.options())),
+        accept_rel_(cfg.tol * cfg.inner_tol_factor) {}
   index_t size() const override { return op_.size(); }
 
  protected:
@@ -202,6 +208,7 @@ class DriverShiftInvert final : public LinearOperator<T> {
  private:
   ShiftInvertOperator<T> op_;
   bool checked_;
+  double accept_rel_;  ///< relative residual a non-converged application may still end at
 };
 
 /// Factorize K(sigma0) (DESIGN §3.6-4): perturb the shift by 1e-8 * max(scale, |sigma0|) on null

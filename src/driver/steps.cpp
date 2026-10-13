@@ -118,7 +118,7 @@ SolveRefinement shift_invert_refinement(const SolverConfig& cfg, const FactorOpt
 template <class T>
 void DriverShiftInvert<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) {
   op_.apply(x, ldx, y, ldy, p);
-  if (checked_ && !op_.last_apply_converged()) {
+  if (checked_ && !op_.last_apply_converged() && !(op_.last_relative_residual() <= accept_rel_)) {
     std::ostringstream os;
     os.precision(3);
     os << "the refinement of an operator application at sigma = " << op_.sigma()
@@ -239,13 +239,26 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
     return sigma0;
   }
   const index_t nulls = fac.stats().null_pivots;
-  // An inexact factor flagged singular: its threshold (single_null_pivot_tol, factor.hpp) flags
-  // K within ~1e-4 ||K|| of singular, where its refinement would not converge; the shift
-  // perturbation and the detection-off path below are calibrated for double factors only.
-  if (inexact_factor(fac.options()))
-    throw InexactFactorFailure("the " + std::string(fac.options().blr ? "BLR" : "single-precision") +
-                               " factorization of A - sigma B is flagged singular at sigma = " + fmt(sigma0) + " (" +
-                               std::to_string(nulls) + " null pivots)");
+  // An inexact factor flagged singular. Its threshold (single_null_pivot_tol, factor.hpp) flags K
+  // within ~1e-4 ||K|| of singular - a shift on an eigenvalue, or merely eigenvalues closer than
+  // single precision resolves (cav2d-rect-pert-1e5: 16 null pivots, yet its refinement converges
+  // in 3 steps, P6). The shift perturbation below is calibrated for double factors; an inexact
+  // one is factorized at sigma0 without detection instead, and the operator check of every
+  // application decides (DriverShiftInvert); an exactly singular factor ends the attempt.
+  if (inexact_factor(fac.options())) {
+    fac.set_null_pivot_detection(false);
+    const bool ok = fac.factorize(1.0, -sigma0);
+    fac.set_null_pivot_detection(true);
+    event(c, "inexact_singular_shift", {{"sigma", sigma0}, {"null_pivots", static_cast<std::int64_t>(nulls)},
+                                        {"without_detection", ok}});
+    if (!ok)
+      throw InexactFactorFailure("the " + std::string(fac.options().blr ? "BLR" : "single-precision") +
+                                 " factorization of A - sigma B is singular at sigma = " + fmt(sigma0) +
+                                 " even without null-pivot detection (" + std::to_string(nulls) + " null pivots)");
+    detection_off = true;
+    c.held = FactorHeld{sigma0, true};
+    return sigma0;
+  }
   const bool cluster = !on_eigenvalue && near_null_eigenvalues(nulls, is_complex_v<T>) >= 2;
   const bool may_perturb = c.cfg.max_shift_retries > 0;
   const double perturbed = sigma0 + 1e-8 * std::max(scale, std::abs(sigma0));

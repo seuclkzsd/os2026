@@ -176,9 +176,9 @@ TEST(DriverInexactFactors, SingleNearAnEigenvalueFallsBackToDouble) {
 }
 
 // The near-singular complex analogue (prescribed spectrum, localized eigenvectors): the single
-// factor - of the real embedding - is flagged singular at sigma. Before P7: "exactly singular"
-// error (rc = 2). Now: double.
-TEST(DriverInexactFactors, ComplexSingleFlaggedSingularFallsBackToDouble) {
+// factor - of the real embedding - is flagged singular at sigma, and without detection it is
+// singular or its refinement diverges. Before P7: "exactly singular" error (rc = 2). Now: double.
+TEST(DriverInexactFactors, ComplexSingleNearAnEigenvalueFallsBackToDouble) {
   const index_t n = 3000;
   std::vector<double> w(static_cast<std::size_t>(n));
   for (index_t i = 0; i < n; ++i) w[static_cast<std::size_t>(i)] = -1.0 + 2.0 * static_cast<double>(i) / (n - 1);
