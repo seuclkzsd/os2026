@@ -56,7 +56,9 @@ template <class T>
 void expect_valid(const hs::Solution<T>& sol) {
   EXPECT_TRUE(sol.report.success);
   for (const auto& p : sol.report.pairs) EXPECT_LE(p.backward_error, 1e-10);
-  if (sol.report.certificate.performed) EXPECT_TRUE(sol.report.certificate.passed);
+  if (sol.report.certificate.performed) {
+    EXPECT_TRUE(sol.report.certificate.passed);
+  }
 }
 
 bool warned(const hs::SolveReport& r, const std::string& what) {
