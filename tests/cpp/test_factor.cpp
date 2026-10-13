@@ -669,10 +669,12 @@ TYPED_TEST(FactorErrors, MemoryCapTooSmallThrowsOutOfMemoryBudget) {
   EXPECT_EQ(f->stats().last_info1, -19);
 }
 
-// With ICNTL(23) set MUMPS sizes its workspace from the cap rather than from the estimate:
-// factor_mb_allocated (INFOG(18)) grows towards cap/2 (a virtual reservation), while
-// factor_mb_used (INFOG(21)) still reports what the factorization needs.
-TYPED_TEST(FactorErrors, GenerousMemoryCapInflatesAllocationNotUse) {
+// MUMPS sizes its workspace from ICNTL(23), not from the estimate: given a generous cap as it is,
+// it reserved (virtually) about the whole cap - INFOG(18) approached cap/2 - which an address-space
+// limit counts in full (P7 review). factorize() therefore gives MUMPS only the relaxed estimate of
+// the factorization's mode, (1 + ICNTL(14)/100) * estimate + 32 MB, and the cap only when that
+// reaches it (factor.hpp header comment); what the factorization uses (INFOG(21)) is unchanged.
+TYPED_TEST(FactorErrors, AGenerousMemoryCapDoesNotInflateTheReservation) {
   using T = TypeParam;
   const auto a = hs::test::laplacian_2d<T>(100, 100);
   ShiftedPencil<T> pencil(a, nullptr);
@@ -682,15 +684,35 @@ TYPED_TEST(FactorErrors, GenerousMemoryCapInflatesAllocationNotUse) {
   const double used = uncapped->stats().factor_mb_used;
   EXPECT_GT(used, 0.0);
   EXPECT_LE(used, uncapped->stats().factor_mb_allocated);
+  EXPECT_EQ(uncapped->stats().workspace_reserved_mb, 0.0);  // no cap: MUMPS' own sizing
 
   FactorOptions opt;
-  opt.max_memory_mb = 400.0;
+  opt.max_memory_mb = 4000.0;
   auto capped = hs::make_mumps_factorization<T>(opt);
   capped->analyze(pencil, 1.0, -3.3);
+  const auto e = capped->estimate();
+  const double relaxed = std::ceil(e.incore_mb * (1.0 + opt.mem_relax_pct / 100.0)) + 32.0;
+  ASSERT_LT(relaxed, 0.1 * opt.max_memory_mb);
   ASSERT_TRUE(capped->factorize(1.0, -3.3));
+  EXPECT_EQ(capped->stats().workspace_reserved_mb, relaxed);
   EXPECT_NEAR(capped->stats().factor_mb_used, used, 1.0);
-  EXPECT_GT(capped->stats().factor_mb_allocated, 0.25 * opt.max_memory_mb);
-  EXPECT_LE(capped->stats().factor_mb_allocated, opt.max_memory_mb);
+  EXPECT_LE(capped->stats().factor_mb_allocated, relaxed);
+  EXPECT_EQ(capped->stats().workspace_retries, 0);
+  EXPECT_LE(solve_backward_error(*capped, pencil, 1.0, -3.3, 2, 5), 1e-12);
+  // out of core: the out-of-core estimate
+  capped->set_out_of_core(true);
+  ASSERT_TRUE(capped->factorize(1.0, -3.3));
+  EXPECT_EQ(capped->stats().workspace_reserved_mb, std::ceil(e.ooc_mb * (1.0 + opt.mem_relax_pct / 100.0)) + 32.0);
+
+  // a cap below the relaxed estimate is given as it is (the margin above INFOG(16) MUMPS needs:
+  // factor.hpp header comment)
+  opt.max_memory_mb = std::floor(1.1 * e.incore_mb) + 4.0;
+  ASSERT_LT(opt.max_memory_mb, relaxed);
+  auto tight = hs::make_mumps_factorization<T>(opt);
+  tight->analyze(pencil, 1.0, -3.3);
+  ASSERT_TRUE(tight->factorize(1.0, -3.3));
+  EXPECT_EQ(tight->stats().workspace_reserved_mb, opt.max_memory_mb);
+  EXPECT_LE(solve_backward_error(*tight, pencil, 1.0, -3.3, 2, 5), 1e-12);
 }
 
 TYPED_TEST(FactorErrors, InvalidOptionsAndMisuseAreRejected) {

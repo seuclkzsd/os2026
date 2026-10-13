@@ -253,18 +253,20 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
   //    factors - the block Lanczos basis plus candidate blocks (definite), or the general
   //    Krylov-Schur peak plus the bases held for the union refinement (indefinite); both while the
   //    type is still open.
-  const double budget = cfg.memory_budget_gb * 1073741824.0;
   // Definite path: the block Lanczos basis of the P4 width (reserved_block_size; DESIGN §3.6-3;
   // block layout of eigen.hpp). A wider width - an explicit block_size, or the blocktune rule's
   // 8 for a nearest target, picked after the factorization - is not reserved: the factorization
   // has priority, and fit_block_size() takes the wider width only where the factors leave room
-  // for its basis.
-  const double rss = static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
-  const double free_bytes = budget - rss;
+  // for its basis. Under an address-space budget (RLIMIT_AS) the memory in use is the address
+  // space: it already holds what the threads reserve without touching (BLAS buffers, malloc
+  // arenas, stacks), and the factorization adds MUMPS' workspace reservation (at most the cap).
+  const double in_use = driver::memory_in_use(c);
+  const double free_bytes = cfg.memory_budget_gb * 1073741824.0 - in_use;
   const driver::KrylovReservation reserve = driver::krylov_reservation<T>(cfg, type, n);
   const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(reserve.columns);
   const double cap_mb = (free_bytes - krylov_bytes) * 0.95 / 1e6;
-  event(c, "memory_plan", {{"budget_gb", cfg.memory_budget_gb}, {"rss_mb", rss / 1e6},
+  event(c, "memory_plan", {{"budget_gb", cfg.memory_budget_gb}, {"measure", to_string(rep.memory.measure)},
+                           {"in_use_mb", in_use / 1e6},
                            {"reserved_block_size", static_cast<std::int64_t>(reserve.block_size)},
                            {"reserved_columns", static_cast<std::int64_t>(reserve.columns)},
                            {"krylov_mb", krylov_bytes / 1e6}, {"cap_mb", cap_mb}});
@@ -295,8 +297,8 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
   }
   // The analysis keeps structures of its own resident (MUMPS' symbolic data and input copy: 0.55
   // GB at n = 5e5, 3-D) that the plan above could not see: the cap shrinks by what the process
-  // grew since, so that cap plus resident memory stays within the budget (DESIGN §3.6-3).
-  const double grown = static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)) - rss;
+  // grew since, so that cap plus memory in use stays within the budget (DESIGN §3.6-3).
+  const double grown = driver::memory_in_use(c) - in_use;
   if (grown > 0 && fopts.max_memory_mb > 0) {
     const double cap_after = std::max(1.0, fopts.max_memory_mb - 0.95 * grown / 1e6);
     fac->set_max_memory_mb(cap_after);
@@ -326,7 +328,7 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
                                                                     fopts.threads);
     // Its memory: what the budget leaves beside the process now (the proof's arrays are freed
     // before anything else is allocated), and at most the factorization cap.
-    po.max_bytes = std::max(0.0, budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)));
+    po.max_bytes = std::max(0.0, driver::budget_left(c));
     const double cap_now = fac->options().max_memory_mb;
     if (cap_now > 0) po.max_bytes = std::min(po.max_bytes, cap_now * 1e6);
     po.seed = cfg.seed;
@@ -430,19 +432,9 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   const OmpThreadsScope omp_threads(cfg_in.threads);
   driver::PhaseClock clock;  // starts in Phase::Setup
   SolveReport rep;
-  // Memory budget (DESIGN §3.6-3): configured, or derived from the memory limits of the process.
-  // Every later decision reads the resolved value from the working configuration.
-  SolverConfig cfg = cfg_in;
-  const MemoryBudget mb = resolve_memory_budget(cfg_in.memory_budget_gb);
-  cfg.memory_budget_gb = mb.gb;
-  rep.memory = MemoryReport{mb.gb, mb.source, mb.limit_gb, mb.limit_source, mb.limits};
+  SolverConfig cfg = cfg_in;  // memory_budget_gb: resolved after the diagnosis
   rep.precision.requested = cfg_in.factor_precision;
   Ctx c{cfg, log, rep, clock};
-  event(c, "memory_budget", {{"budget_gb", mb.gb}, {"source", mb.source}, {"limit_gb", mb.limit_gb},
-                             {"limit_source", mb.limit_source}});
-  if (mb.source == "config" && mb.limit_gb > 0 && mb.gb > mb.limit_gb)
-    warn(c, "memory_budget_gb = " + driver::fmt(mb.gb) + " exceeds the memory limit of this process (" +
-                driver::fmt(mb.limit_gb) + " GiB, " + mb.limit_source + "): the run may be killed");
 
   // 1. Diagnosis: exact Hermitian inputs, norms, scale.
   CsrMatrix<T> a_store, b_store;
@@ -467,6 +459,21 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   event(c, "problem", {{"n", static_cast<std::int64_t>(n)}, {"nnz_a", static_cast<std::int64_t>(rep.nnz_a)},
                        {"nnz_b", static_cast<std::int64_t>(rep.nnz_b)}, {"complex", rep.complex_scalars},
                        {"norm2_a", rep.norm2_a}, {"norm2_b", rep.norm2_b}});
+
+  // Memory budget (DESIGN §3.6-3): configured, or derived from the memory limits of the process.
+  // Resolved once the diagnosis has run parallel regions: an address-space budget counts what the
+  // threads reserve without touching (stacks, malloc arenas), present only from then on. Every
+  // later decision reads the resolved value from the working configuration.
+  const MemoryBudget mb = resolve_memory_budget(cfg_in.memory_budget_gb);
+  cfg.memory_budget_gb = mb.gb;
+  rep.memory = MemoryReport{mb.gb,     mb.source,  mb.limit_gb,    mb.limit_source,
+                            mb.limits, mb.measure, mb.reserved_gb};
+  event(c, "memory_budget", {{"budget_gb", mb.gb}, {"source", mb.source}, {"limit_gb", mb.limit_gb},
+                             {"limit_source", mb.limit_source}, {"measure", to_string(mb.measure)},
+                             {"reserved_gb", mb.reserved_gb}});
+  if (mb.source == "config" && mb.limit_gb > 0 && mb.gb > mb.limit_gb)
+    warn(c, "memory_budget_gb = " + driver::fmt(mb.gb) + " exceeds the memory limit of this process (" +
+                driver::fmt(mb.limit_gb) + " GiB, " + mb.limit_source + "): the run may be killed");
 
   ShiftedPencil<T> pencil(*a, b);
   if (b && cfg.problem == ProblemType::Standard) HS_THROW(InvalidInput, "problem 'standard' requested but B was given");

@@ -147,8 +147,7 @@ const StartScaling& NearestCertifier<T>::scaling(bool estimate) {
 
 template <class T>
 double NearestCertifier<T>::check_budget_bytes() const {
-  const double avail = c_.cfg.memory_budget_gb * 1073741824.0 -
-                       static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  const double avail = budget_left(c_);
   // ExclusionOptions: 0 means "no limit", so an exhausted budget is one byte, not zero.
   return std::max(1.0, kCheckMemoryShare * avail);
 }

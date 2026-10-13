@@ -9,7 +9,7 @@
 
 namespace hs {
 
-MemoryBudget resolve_memory_budget(double configured_gb, const MemoryLimits& limits) {
+MemoryBudget resolve_memory_budget(double configured_gb, const MemoryLimits& limits, double reserved_gib) {
   if (!std::isfinite(configured_gb) || configured_gb < 0)
     HS_THROW(InvalidInput, "memory_budget_gb must be > 0 (or 0 = auto), got " << configured_gb);
   MemoryBudget b;
@@ -26,14 +26,25 @@ MemoryBudget resolve_memory_budget(double configured_gb, const MemoryLimits& lim
     b.source = "default";
     return b;
   }
-  const double l = limits.gib;
-  b.gb = std::max(kAutoBudgetFloorGb, std::min(kAutoBudgetFraction * l, l - kAutoBudgetHeadroomGb));
   b.source = limits.source;
+  b.measure = measure_of(limits.source);
+  if (b.measure != MemoryMeasure::Resident && std::isfinite(reserved_gib) && reserved_gib > 0)
+    b.reserved_gb = reserved_gib;
+  const double l = limits.gib - b.reserved_gb;  // what the problem can use of the limit
+  b.gb = b.reserved_gb +
+         std::max(kAutoBudgetFloorGb, std::min(kAutoBudgetFraction * l, l - kAutoBudgetHeadroomGb));
   return b;
 }
 
 MemoryBudget resolve_memory_budget(double configured_gb) {
-  return resolve_memory_budget(configured_gb, detect_memory_limits());
+  const MemoryLimits limits = detect_memory_limits();
+  double reserved = 0.0;
+  const MemoryMeasure m = measure_of(limits.source);
+  if (configured_gb == kMemoryBudgetAuto && limits.gib > 0 && m != MemoryMeasure::Resident) {
+    const auto in_use = memory_in_use_bytes(m), rss = current_rss_bytes();
+    if (in_use > 0 && rss >= 0 && in_use > rss) reserved = static_cast<double>(in_use - rss) / 1073741824.0;
+  }
+  return resolve_memory_budget(configured_gb, limits, reserved);
 }
 
 }  // namespace hs

@@ -35,6 +35,25 @@ int max_threads();
 /// RSS cap it enforces on the run, so a guarded run sees its cap without a cgroup.
 inline constexpr const char* kMemoryLimitEnv = "HSOLVE_MEMORY_LIMIT_GB";
 
+/// The quantity of this process's memory a limit applies to (detect_memory_limits' sources).
+enum class MemoryMeasure {
+  Resident,      ///< resident memory, RSS: the cgroup, HSOLVE_MEMORY_LIMIT_GB (the guard), MemTotal
+  AddressSpace,  ///< virtual address space, VmSize: RLIMIT_AS (`ulimit -v`). It also counts what is
+                 ///< reserved but never touched - MUMPS' workspace up to its ICNTL(23) cap, thread
+                 ///< stacks, malloc arenas, BLAS buffers - and so exceeds RSS by GBs
+  Data,          ///< private writable mappings, VmData: RLIMIT_DATA (Linux >= 4.7; older kernels
+                 ///< limit only the brk heap, which malloc then bypasses)
+};
+/// This process's memory in `measure`, bytes (/proc/self/statm, /proc/self/status); -1 if
+/// unavailable.
+std::int64_t memory_in_use_bytes(MemoryMeasure measure);
+/// High-water mark of the address space (VmPeak of /proc/self/status), bytes; -1 if unavailable.
+std::int64_t peak_address_space_bytes();
+/// The measure a limit source applies to (MemoryLimitSource::name; unknown names: Resident).
+MemoryMeasure measure_of(const std::string& source);
+/// "resident", "address_space" or "data".
+const char* to_string(MemoryMeasure measure);
+
 /// One source of a memory limit of this process (detect_memory_limits).
 struct MemoryLimitSource {
   std::string name;    ///< "cgroup", "env", "rlimit_as", "rlimit_data" or "mem_total"
@@ -65,8 +84,9 @@ struct MemoryProbe {
 ///               /proc/self/cgroup up to the hierarchy's root ("max" / 2^63-ish = unlimited); a
 ///               container that shows its own cgroup as "/" is read at the mount's root;
 ///   env         kMemoryLimitEnv (GiB), e.g. the guard's cap;
-///   rlimit_as   RLIMIT_AS when finite (it limits VIRTUAL memory: MUMPS reserves part of its
-///               working-memory cap virtually, so it is stricter than an RSS limit of equal size);
+///   rlimit_as   RLIMIT_AS when finite (it limits VIRTUAL memory, MemoryMeasure::AddressSpace:
+///               stricter than an RSS limit of equal size, so a budget derived from it is planned
+///               against the address space, DESIGN §3.6-3);
 ///   rlimit_data RLIMIT_DATA when finite;
 ///   mem_total   MemTotal of /proc/meminfo (the whole machine; MemAvailable is not used, so the
 ///               decision does not depend on what other processes hold at the moment).

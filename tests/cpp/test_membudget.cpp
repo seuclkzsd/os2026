@@ -1,15 +1,18 @@
 // P7 memory budget: the memory limits of the process (detect_memory_limits: cgroup v1/v2, the
 // caller's HSOLVE_MEMORY_LIMIT_GB, rlimits, MemTotal), the automatic budget derived from them
-// (resolve_memory_budget), its configuration ("auto" / 0 / GiB) and report, and that a budget too
-// small for in-core factors gives a valid out-of-core run - also when the in-core attempt itself
-// fails for memory (FactorOptions::ooc_on_memory_error).
+// (resolve_memory_budget) in the measure of its limit (resident memory, or the address space under
+// RLIMIT_AS), its configuration ("auto" / 0 / GiB) and report, that a solve under a real RLIMIT_AS
+// succeeds, and that a budget too small for in-core factors gives a valid out-of-core run - also
+// when the in-core attempt itself fails for memory (FactorOptions::ooc_on_memory_error).
 #include <gtest/gtest.h>
 
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -154,6 +157,26 @@ TEST(UtilMemoryLimits, NothingReadableSetsNoLimit) {
   for (const auto& s : m.sources) EXPECT_LT(s.gib, 0.0) << s.name;
 }
 
+// The measures a limit applies to, read for this process.
+TEST(UtilMemoryLimits, MeasuresOfThisProcess) {
+  const auto rss = hs::memory_in_use_bytes(hs::MemoryMeasure::Resident);
+  const auto vm = hs::memory_in_use_bytes(hs::MemoryMeasure::AddressSpace);
+  const auto data = hs::memory_in_use_bytes(hs::MemoryMeasure::Data);
+  EXPECT_EQ(rss > 0, hs::current_rss_bytes() > 0);
+  EXPECT_GT(rss, 0);
+  EXPECT_GT(vm, rss);  // code, libraries and stacks are mapped, not all resident
+  EXPECT_GT(data, 0);
+  EXPECT_LE(data, vm);
+  EXPECT_GE(hs::peak_address_space_bytes(), vm);
+  EXPECT_EQ(hs::measure_of("rlimit_as"), hs::MemoryMeasure::AddressSpace);
+  EXPECT_EQ(hs::measure_of("rlimit_data"), hs::MemoryMeasure::Data);
+  for (const char* s : {"cgroup", "env", "mem_total", "config", "default", ""})
+    EXPECT_EQ(hs::measure_of(s), hs::MemoryMeasure::Resident) << s;
+  EXPECT_STREQ(hs::to_string(hs::MemoryMeasure::Resident), "resident");
+  EXPECT_STREQ(hs::to_string(hs::MemoryMeasure::AddressSpace), "address_space");
+  EXPECT_STREQ(hs::to_string(hs::MemoryMeasure::Data), "data");
+}
+
 TEST(UtilMemoryLimits, ThisProcessHasAtLeastItsMachine) {
   const auto m = hs::detect_memory_limits();
   EXPECT_GT(source(m, "mem_total").gib, 0.0);
@@ -191,6 +214,33 @@ TEST(DriverMemoryBudget, AutoIsAShareOfTheSmallestLimit) {
   EXPECT_DOUBLE_EQ(b.gb, hs::kAutoBudgetFallbackGb);
   EXPECT_EQ(b.source, "default");
   EXPECT_LT(b.limit_gb, 0.0);
+}
+
+// RLIMIT_AS / RLIMIT_DATA limit what the process maps, also what it reserves without touching:
+// the budget is charged in that measure, and what is reserved unused when it is resolved (BLAS
+// buffers, malloc arenas, stacks: 3.4 GB at 16 threads) is set aside before the formula's share.
+TEST(DriverMemoryBudget, AnAddressSpaceLimitIsPlannedInItsOwnMeasure) {
+  auto b = hs::resolve_memory_budget(0.0, limits_of(16.0, "rlimit_as"), 3.0);
+  EXPECT_EQ(b.measure, hs::MemoryMeasure::AddressSpace);
+  EXPECT_DOUBLE_EQ(b.reserved_gb, 3.0);
+  EXPECT_DOUBLE_EQ(b.gb, 3.0 + std::min(hs::kAutoBudgetFraction * 13.0, 13.0 - hs::kAutoBudgetHeadroomGb));
+  EXPECT_EQ(b.source, "rlimit_as");
+  b = hs::resolve_memory_budget(0.0, limits_of(16.0, "rlimit_data"), 2.0);
+  EXPECT_EQ(b.measure, hs::MemoryMeasure::Data);
+  EXPECT_DOUBLE_EQ(b.gb, 2.0 + hs::kAutoBudgetFraction * 14.0);
+  b = hs::resolve_memory_budget(0.0, limits_of(2.0, "rlimit_as"), 3.0);  // nothing left: the floor
+  EXPECT_DOUBLE_EQ(b.gb, 3.0 + hs::kAutoBudgetFloorGb);
+  // resident limits (and a configured budget, which states resident memory) set nothing aside
+  for (const char* src : {"env", "cgroup", "mem_total"}) {
+    b = hs::resolve_memory_budget(0.0, limits_of(16.0, src), 3.0);
+    EXPECT_EQ(b.measure, hs::MemoryMeasure::Resident) << src;
+    EXPECT_EQ(b.reserved_gb, 0.0) << src;
+    EXPECT_DOUBLE_EQ(b.gb, hs::kAutoBudgetFraction * 16.0) << src;
+  }
+  b = hs::resolve_memory_budget(5.0, limits_of(16.0, "rlimit_as"), 3.0);
+  EXPECT_EQ(b.measure, hs::MemoryMeasure::Resident);
+  EXPECT_DOUBLE_EQ(b.gb, 5.0);
+  EXPECT_EQ(b.reserved_gb, 0.0);
 }
 
 TEST(DriverMemoryBudget, AConfiguredBudgetWinsAndTheLimitIsStillRecorded) {
@@ -257,13 +307,16 @@ TEST(DriverMemoryBudget, TheSolveReportsItsBudgetAndWhereItCameFrom) {
     const auto& m = sol.report.memory;
     EXPECT_GT(m.limit_gb, 0.0);
     EXPECT_LE(m.limit_gb, 3.0);  // the declaration, or an even smaller limit of the test machine
-    const auto expected = hs::resolve_memory_budget(0.0, limits_of(m.limit_gb, m.limit_source));
+    const auto expected = hs::resolve_memory_budget(0.0, limits_of(m.limit_gb, m.limit_source), m.reserved_gb);
     EXPECT_DOUBLE_EQ(m.budget_gb, expected.gb);
     EXPECT_EQ(m.source, m.limit_source);
+    EXPECT_EQ(m.measure, hs::measure_of(m.source));
     EXPECT_EQ(m.limits.size(), 5u);
     const auto j = nlohmann::json::parse(sol.report.to_json());
     EXPECT_EQ(j["memory"]["budget_gb"], m.budget_gb);
     EXPECT_EQ(j["memory"]["source"], m.source);
+    EXPECT_EQ(j["memory"]["measure"], hs::to_string(m.measure));
+    EXPECT_EQ(j["memory"]["reserved_gb"], m.reserved_gb);
     EXPECT_EQ(j["memory"]["limits"].size(), 5u);
     EXPECT_EQ(j["precision"]["requested"], "double");
     EXPECT_EQ(j["precision"]["used"], "double");
@@ -393,6 +446,7 @@ TEST(DriverMemoryBudget, TheCapShrinksByWhatTheAnalysisKeepsResident) {
   for (std::string line; std::getline(in, line);) {
     const auto j = nlohmann::json::parse(line);
     EXPECT_TRUE(j.contains("rss_mb") && j.contains("peak_rss_mb")) << line;  // the memory timeline
+    EXPECT_TRUE(j.contains("vm_mb") && j.contains("peak_vm_mb")) << line;    // and the address space
     if (j["event"] == "memory_plan") plan = j["cap_mb"];
     if (j["event"] == "memory_replan") replan = j["cap_mb"], grown = j["grown_mb"];
   }
@@ -441,6 +495,68 @@ TEST(DriverMemoryBudget, ABudgetBelowTheInCoreFactorsGivesAValidOutOfCoreRun) {
   bool warned = false;
   for (const auto& msg : small.report.warnings) warned = warned || msg.find("out-of-core") != std::string::npos;
   EXPECT_TRUE(warned);
+}
+
+// ------------------------------------------------------------------------------ RLIMIT_AS
+
+// The child of AnAddressSpaceLimitIsHonoured: a 3-D solve (syn-mem27-46 under `ulimit -v 8`, scaled
+// down) under RLIMIT_AS = its address space + 1.25 GiB. Before the fix the budget derived from that
+// limit was planned against RSS and MUMPS reserved the whole factorization cap: with the BLAS
+// buffers and malloc arenas already mapped (~0.15 GB per thread) the address space ran out
+// (INFO -13, or OpenBLAS failing to allocate and the process crashing). Exits 0 on a valid result
+// planned in the address space, 1 on a wrong one, 2 when the solve throws.
+[[noreturn]] void solve_under_an_address_space_limit() {
+  ::unsetenv(hs::kMemoryLimitEnv);  // RLIMIT_AS must be the smallest limit (the guard declares one)
+  const index_t m = 30;
+  const auto a = laplacian_3d(m);
+  const auto w = laplacian_3d_eigenvalues(m);
+  std::size_t j = 40;
+  for (std::size_t i = 40; i < 100; ++i)
+    if (w[i + 1] - w[i] > w[j + 1] - w[j]) j = i;
+  const double sigma = w[j] + 0.3 * (w[j + 1] - w[j]);
+  auto cfg = nearest(sigma, 8);
+  cfg.threads = 4;
+  const auto vm = hs::memory_in_use_bytes(hs::MemoryMeasure::AddressSpace);
+  struct rlimit rl {};
+  ::getrlimit(RLIMIT_AS, &rl);
+  rl.rlim_cur = static_cast<rlim_t>(vm + static_cast<std::int64_t>(1.25 * kGiB));
+  if (vm <= 0 || ::setrlimit(RLIMIT_AS, &rl) != 0) {
+    std::fprintf(stderr, "cannot set RLIMIT_AS\n");
+    std::_Exit(3);
+  }
+  hs::Solution<double> sol;
+  try {
+    sol = hs::solve(a, nullptr, cfg);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "solve under RLIMIT_AS failed: %s\n", e.what());
+    std::_Exit(2);
+  }
+  const auto& r = sol.report;
+  auto want = nearest_of(w, sigma, 8);
+  auto got = sol.eigenvalues;
+  std::sort(got.begin(), got.end());
+  bool same = got.size() == want.size();
+  for (std::size_t i = 0; same && i < got.size(); ++i) same = std::abs(got[i] - want[i]) <= 1e-9;
+  std::fprintf(stderr, "measure %s, limit %.2f GiB (%s), reserved %.2f GiB, budget %.2f GiB, cap %.0f MB, "
+               "reserved by MUMPS %.0f MB, peak address space %.2f GiB\n",
+               hs::to_string(r.memory.measure), r.memory.limit_gb, r.memory.limit_source.c_str(),
+               r.memory.reserved_gb, r.memory.budget_gb, r.factor_options.max_memory_mb,
+               r.factor_stats.workspace_reserved_mb, static_cast<double>(hs::peak_address_space_bytes()) / kGiB);
+  if (!r.success || !same || r.memory.measure != hs::MemoryMeasure::AddressSpace ||
+      r.memory.limit_source != "rlimit_as" || !(r.memory.reserved_gb > 0)) {
+    std::fprintf(stderr, "wrong result under RLIMIT_AS (success %d, eigenvalues %s)\n", r.success ? 1 : 0,
+                 same ? "ok" : "wrong");
+    std::_Exit(1);
+  }
+  std::fprintf(stderr, "address-space solve ok\n");
+  std::_Exit(0);
+}
+
+// A solve under a real RLIMIT_AS, in a child process (threadsafe death-test style: the test binary
+// is re-executed, so the child starts without this process's threads and memory).
+TEST(DriverMemoryBudgetDeathTest, AnAddressSpaceLimitIsHonoured) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(solve_under_an_address_space_limit(), ::testing::ExitedWithCode(0), "address-space solve ok");
 }
 
 }  // namespace

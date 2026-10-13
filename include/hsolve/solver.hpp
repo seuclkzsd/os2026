@@ -181,9 +181,12 @@ struct SolverConfig {
 
 /// The automatic budget (resolve_memory_budget) of a run whose smallest memory limit is L GiB:
 ///   budget = max(kAutoBudgetFloorGb, min(kAutoBudgetFraction * L, L - kAutoBudgetHeadroomGb)).
-/// The plan (DESIGN §3.6-3) keeps its predictions - resident memory at planning time, Krylov
+/// The plan (DESIGN §3.6-3) keeps its predictions - the memory in use at planning time, Krylov
 /// basis, MUMPS' estimate under the ICNTL(23) cap - within the budget; the rest of L covers what
-/// it does not predict (calibration: results/p7_membudget.md).
+/// it does not predict (calibration: results/p7_membudget.md). The budget is charged in the
+/// measure of L (MemoryBudget::measure); an address-space (or VmData) limit first sets aside what
+/// the process reserves there without using it, and the formula applies to the rest of L
+/// (MemoryBudget::reserved_gb).
 inline constexpr double kAutoBudgetFraction = 0.85;
 inline constexpr double kAutoBudgetHeadroomGb = 1.0;
 /// Below this no automatic budget goes, whatever the limit (tiny machines: a plan needs room).
@@ -203,12 +206,25 @@ struct MemoryBudget {
   double limit_gb = -1.0;
   std::string limit_source;               ///< MemoryLimits::source
   std::vector<MemoryLimitSource> limits;  ///< every source probed (detect_memory_limits)
+  /// What the budget is charged with: the measure of the limit an automatic budget derives from
+  /// (measure_of(source): the address space for RLIMIT_AS, VmData for RLIMIT_DATA), resident
+  /// memory otherwise - a configured budget states resident memory.
+  MemoryMeasure measure = MemoryMeasure::Resident;
+  /// Address-space / VmData budget: what the process held in that measure beyond its resident
+  /// memory when the budget was resolved, GiB - reserved, never touched: BLAS buffers, malloc
+  /// arenas, thread stacks (3.4 GB at 16 threads). It does not grow with the problem, so the
+  /// formula's share applies to the rest of the limit: budget = reserved + share(L - reserved).
+  /// 0 for a resident budget.
+  double reserved_gb = 0.0;
 };
 
-/// configured_gb > 0: that budget; kMemoryBudgetAuto: from the limits (formula above). Throws
-/// InvalidInput for a negative or non-finite configured_gb.
-MemoryBudget resolve_memory_budget(double configured_gb, const MemoryLimits& limits);
-/// The same with the limits of this process (detect_memory_limits()).
+/// configured_gb > 0: that budget; kMemoryBudgetAuto: from the limits (formula above), where an
+/// address-space or VmData limit first sets aside `reserved_gib` (MemoryBudget::reserved_gb).
+/// Throws InvalidInput for a negative or non-finite configured_gb.
+MemoryBudget resolve_memory_budget(double configured_gb, const MemoryLimits& limits,
+                                   double reserved_gib = 0.0);
+/// The same with the limits of this process (detect_memory_limits()) and, for an address-space
+/// or VmData limit, its current reservation beyond resident memory.
 MemoryBudget resolve_memory_budget(double configured_gb);
 
 /// The memory budget of a solve, as resolved (SolveReport::memory).
@@ -218,6 +234,8 @@ struct MemoryReport {
   double limit_gb = -1.0;                 ///< MemoryBudget::limit_gb
   std::string limit_source;               ///< MemoryBudget::limit_source
   std::vector<MemoryLimitSource> limits;  ///< MemoryBudget::limits
+  MemoryMeasure measure = MemoryMeasure::Resident;  ///< MemoryBudget::measure
+  double reserved_gb = 0.0;                         ///< MemoryBudget::reserved_gb
 };
 
 /// The arithmetic of the factorizations (SolverConfig::factor_precision) and its checks

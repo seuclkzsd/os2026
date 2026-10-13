@@ -104,7 +104,7 @@ constexpr index_t kMaxConfiguredBlock = 64;
 /// Runs with at most this many wanted pairs (the side probes, nev = 2) stay single-vector whatever
 /// is configured: they only locate a shift, and a block would multiply their basis for nothing.
 constexpr index_t kMaxProbeNev = 2;
-/// Share of the memory left in the budget (memory_budget_gb - current RSS) a run's block basis may
+/// Share of the memory left in the budget (memory_budget_gb - memory in use) a run's block basis may
 /// take (fit_block_size); the rest is headroom for the solves' own workspace.
 constexpr double kBlockMemoryShare = 0.9;
 
@@ -175,8 +175,7 @@ index_t fit_block_size(Ctx& c, index_t n, KrylovSchurOptions<T> ko, bool refinem
   const index_t wanted = ko.block_size;
   if (wanted <= 1) return wanted;
   const double vec = static_cast<double>(n) * static_cast<double>(sizeof(T));
-  const double avail = c.cfg.memory_budget_gb * 1073741824.0 -
-                       static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  const double avail = budget_left(c);
   auto bytes = [&](index_t q) {
     ko.block_size = q;
     return vec * static_cast<double>(krylov_schur_general_peak_columns<T>(n, ko) + (refinement ? 2 * q : 0));

@@ -71,6 +71,21 @@ int icntl23(double max_memory_mb) {
   return max_memory_mb > 0.0 ? static_cast<int>(std::clamp(std::floor(max_memory_mb), 1.0, double(INT_MAX))) : 0;
 }
 
+// Added to the relaxed estimate of the workspace reservation: tiny factorizations have fixed
+// overheads (buffers) that a relative margin does not cover.
+constexpr double kReservationSlackMb = 32.0;
+
+// The workspace MUMPS may reserve (ICNTL(23), MB) for a factorization whose estimate is
+// `estimate_mb` under the cap `cap_mb` with relaxation `relax_pct` (factor.hpp header comment):
+// MUMPS sizes its workspace from ICNTL(23), so the cap itself is given only when the relaxed
+// estimate reaches it. 0 = no cap.
+double workspace_reservation_mb(double cap_mb, double estimate_mb, int relax_pct) {
+  if (!(cap_mb > 0.0)) return 0.0;
+  if (!(estimate_mb > 0.0)) return cap_mb;
+  const double relaxed = std::ceil(estimate_mb * (1.0 + relax_pct / 100.0)) + kReservationSlackMb;
+  return std::min(cap_mb, relaxed);
+}
+
 // ICNTL(14) for the next workspace retry: doubled, at least kMinRelaxIncrease points more,
 // saturating at INT_MAX.
 int grown_relaxation(int pct) {
@@ -123,7 +138,7 @@ void MumpsFactorization<T, U>::configure_static_controls() {
   mumps_.icntl(18) = 0;                 // centralized matrix on the host
   mumps_.icntl(20) = 0;                 // dense right-hand sides
   mumps_.icntl(21) = 0;                 // centralized solution, overwrites the right-hand sides
-  mumps_.icntl(23) = icntl23(options_.max_memory_mb);
+  mumps_.icntl(23) = icntl23(options_.max_memory_mb);  // factorize() sets the reservation
   // Null-pivot detection: needs ICNTL(24)=1 AND CNTL(3) > 0 (threshold relative to the norm of
   // the scaled/permuted matrix); with CNTL(3)=0 exactly singular matrices "factorize". The
   // threshold depends on the arithmetic: float rounding alone moves eigenvalues by ~1e-7*||K||,
@@ -270,19 +285,30 @@ bool MumpsFactorization<T, U>::factorize(double alpha, double beta) {
   for (;;) {
     mumps_.icntl(22) = options_.out_of_core ? 1 : 0;
     mumps_.icntl(14) = relax_pct_;
+    // The workspace reservation: the relaxed estimate of this mode, at most the cap; the last
+    // retry gets the whole cap.
+    const double cap = options_.max_memory_mb;
+    const double need = options_.out_of_core ? stats_.estimate.ooc_mb : stats_.estimate.incore_mb;
+    const double reserve =
+        retries == kMaxWorkspaceRetries ? cap : workspace_reservation_mb(cap, need, relax_pct_);
+    mumps_.icntl(23) = icntl23(reserve);
+    stats_.workspace_reserved_mb = reserve;
     info1 = mumps_.run(mumps::kFactorize);
+    // INFO -19 below the cap means that the reservation was too small, not the cap: grow it.
+    const bool too_small =
+        mumps::is_workspace_error(info1) || (info1 == -19 && reserve < cap);
     // Out of memory in core - MUMPS' verdict, or a workspace that the retries could not make
     // big enough under the ICNTL(23) cap: the factors do not fit in core after all (the estimate
     // the in-core decision was made on was too low). Out of core from now on, with fresh retries.
-    const bool no_room = mumps::is_memory_error(info1) ||
-                         (mumps::is_workspace_error(info1) && retries == kMaxWorkspaceRetries);
+    const bool no_room = (mumps::is_memory_error(info1) && !too_small) ||
+                         (too_small && retries == kMaxWorkspaceRetries);
     if (no_room && !options_.out_of_core && options_.ooc_on_memory_error) {
       options_.out_of_core = true;
       ++stats_.ooc_switches;
       retries = 0;
       continue;
     }
-    if (!mumps::is_workspace_error(info1) || retries == kMaxWorkspaceRetries) break;
+    if (!too_small || retries == kMaxWorkspaceRetries) break;
     relax_pct_ = grown_relaxation(relax_pct_);
     ++retries;
     ++stats_.workspace_retries;
@@ -328,8 +354,7 @@ template <class T, class U>
 void MumpsFactorization<T, U>::set_max_memory_mb(double mb) {
   if (!(mb >= 0.0) || !std::isfinite(mb))
     HS_THROW(InvalidInput, "SparseFactorization::set_max_memory_mb: must be finite and >= 0, got " << mb);
-  options_.max_memory_mb = mb;
-  mumps_.icntl(23) = icntl23(mb);  // read by MUMPS at the factorization
+  options_.max_memory_mb = mb;  // factorize() derives ICNTL(23) from it
 }
 
 template <class T, class U>

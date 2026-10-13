@@ -1483,8 +1483,7 @@ Solution<T> WindowSolver<T>::solve() {
   // ---- 2. Memory: the n x required output plus one slice's working set must fit the budget.
   {
     const double vec = static_cast<double>(n_) * sizeof(T);
-    const double avail =
-        cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+    const double avail = budget_left(c_);
     // + up to 4 pairs per slice found just outside it (see step 3)
     const double out_bytes =
         vec * static_cast<double>(required + 4 * (total / std::max<index_t>(c_target_, 1) + 2) + 8);
@@ -1518,8 +1517,7 @@ Solution<T> WindowSolver<T>::solve() {
     // slice (counts cannot split it), whose output and working set must fit the budget.
     Slice& s = slices_[i];
     const double need_bytes = 8.0 * static_cast<double>(n_) * sizeof(T) * static_cast<double>(s.count());
-    const double avail =
-        cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+    const double avail = budget_left(c_);
     if (need_bytes > 0.9 * avail)
       HS_THROW(OutOfMemoryBudget, "the target ends inside a cluster of " << s.count() << " eigenvalues in [" << s.lo.s
                                                                          << ", " << s.hi.s

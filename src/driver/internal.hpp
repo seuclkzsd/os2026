@@ -95,6 +95,13 @@ void warn(Ctx& c, const std::string& msg);
 void event(Ctx& c, const std::string& name, std::initializer_list<LogField> fields);
 std::string fmt(double x);
 
+/// The memory of this process the budget is charged with (DESIGN §3.6-3): resident memory, or the
+/// address space / VmData when the budget derives from RLIMIT_AS / RLIMIT_DATA
+/// (report.memory.measure). Bytes; 0 when unreadable.
+double memory_in_use(const Ctx& c);
+/// What the budget leaves now: memory_budget_gb - memory_in_use(c), bytes (< 0: exceeded).
+double budget_left(const Ctx& c);
+
 // ------------------------------------------------------------------------------ pair blocks
 
 /// Pairs being refined: eigenvalues with their vectors and A*X, B*X kept in sync.

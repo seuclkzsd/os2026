@@ -58,6 +58,12 @@ std::string fmt(double x) {
   return os.str();
 }
 
+double memory_in_use(const Ctx& c) {
+  return static_cast<double>(std::max<std::int64_t>(memory_in_use_bytes(c.rep.memory.measure), 0));
+}
+
+double budget_left(const Ctx& c) { return c.cfg.memory_budget_gb * 1073741824.0 - memory_in_use(c); }
+
 template <class T>
 void recompute_products(const CsrMatrix<T>& a, const CsrMatrix<T>* b, Block<T>& blk) {
   driver::apply_block(&a, blk.x, blk.ax);
@@ -1101,8 +1107,7 @@ template <class T>
 index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p,
                        index_t warn_below) {
   const double vec = static_cast<double>(n) * sizeof(T);
-  const double avail =
-      c.cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  const double avail = budget_left(c);
   const auto bytes = [&](index_t q) {
     return vec * static_cast<double>(lanczos_basis_columns(n, d, nev, c.cfg.ncv, q) + extra_columns);
   };
