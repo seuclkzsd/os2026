@@ -84,8 +84,8 @@ const SingleCountRule& NearestCertifier<T>::single_rule(bool prove) {
       inv_sqrt_bmin_ = b_diagonal_ && bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
     }
   }
-  if (prove && !b_diagonal_ && !b_bounds_) {
-    const ConditionBound& cb = b_bounds();
+  if (prove && !b_diagonal_) {
+    const ConditionBound& cb = b_bounds();  // computed once (also by scaling()), applied here every time
     rule_.b_min_proven = cb.proven ? cb.b_min : 0.0;
     inv_sqrt_bmin_ = cb.proven ? 1.0 / std::sqrt(cb.b_min) : std::numeric_limits<double>::infinity();
   }

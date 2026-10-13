@@ -247,6 +247,21 @@ TYPED_TEST(DriverConditionBoundTyped, RandomizedAndSingleCountsCertifyOnAGeneral
   // ... and the randomized check through the certifier is rigorous with a finite proven kappa.
   const auto ch = certifier.choose(win, {all});
   EXPECT_TRUE(ch.kappa_rigorous);
+
+  // The bounds computed first for the randomized check's kappa (scaling) serve single counts later
+  // in the same solve.
+  ASSERT_TRUE(fac->factorize(1.0, -kSigma));
+  hs::SolverConfig rcfg = nearest_cfg(hs::CertificateMode::Randomized);
+  hs::SolveReport rrep;
+  hs::driver::PhaseClock rclock;
+  hs::driver::Ctx rctx{rcfg, nullptr, rrep, rclock};
+  rctx.held = hs::driver::FactorHeld{kSigma, false};
+  hs::driver::NearestCertifier<T> rc(rctx, pencil, *fac, kSigma, false, ex.report.scale, ex.report.norm2_a,
+                                     ex.report.norm2_b, {});
+  EXPECT_TRUE(rc.choose(win, {all}).kappa_rigorous);
+  EXPECT_EQ(rc.run(hs::CertificateMethod::ExactSingle, win, {all}, 0).verdict,
+            hs::driver::CheckOutcome::Verdict::Passed)
+      << rrep.certificate.statement;
 }
 
 }  // namespace
