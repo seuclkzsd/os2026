@@ -90,6 +90,31 @@ TEST(AnaintFixOrdering, ScotchEndsTheLoop) {
   EXPECT_EQ(t.released, (std::vector<std::size_t>{0}));
 }
 
+// hsolve's nested dissection against SCOTCH (ss-tem152078): until analysed, its score carries
+// kNdAnalysisRisk of its predicted analysis; against AMD, and once analysed, it does not.
+TEST(AnaintFixOrdering, NestedDissectionAnalysisRiskAgainstScotch) {
+  using hs::driver::choose_ordering;
+  using hs::driver::kNdAnalysisRisk;
+  using hs::driver::kOrderingMargin;
+  std::vector<OrderingCandidate> c(3);
+  c[0].ordering = 0;
+  c[0].analysed = true;
+  c[0].score_s = 10.0;
+  c[1].ordering = kScotch;
+  c[1].score_s = 5.0;
+  c[2].ordering = kOrderingNestedDissection;
+  c[2].analysis_s = 1.0;
+  c[2].score_s = (1.0 - 2.0 * kOrderingMargin) * 5.0;  // beats SCOTCH by twice the margin ...
+  ASSERT_GT(c[2].score_s + kNdAnalysisRisk * c[2].analysis_s, (1.0 - kOrderingMargin) * 5.0);  // ... not with the risk
+  EXPECT_EQ(choose_ordering(c), 1u);
+  c[1].score_s = 20.0;  // SCOTCH out of the race: ND against AMD, no risk
+  EXPECT_EQ(choose_ordering(c), 2u);
+  c[1].score_s = 5.0;
+  c[2].analysed = true;  // its analysis is paid: compared on its numeric score
+  c[2].analysis_s = 0.0;
+  EXPECT_EQ(choose_ordering(c), 2u);
+}
+
 // Random scores: whatever the sequence, the choice is analysed, never released, every other
 // analysed candidate is released exactly once, and the same script gives the same choice.
 TEST(AnaintFixOrdering, RandomScriptsKeepTheChoiceAlive) {

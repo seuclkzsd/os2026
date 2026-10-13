@@ -690,10 +690,28 @@ std::pair<double, double> predicted_shape(int ordering, const FactorEstimate& am
   return {anchor.flops * r.first / ra.first, static_cast<double>(anchor.factor_entries) * r.second / ra.second};
 }
 
+// hsolve's nested dissection against SCOTCH (P5c fix, ss-tem152078): both are priced from the same
+// anchor by shape fits that tell them apart only beyond fill ~150, so what decides is mostly their
+// analyses - and ND's 16-thread analysis is the model's least certain prediction: its serial
+// fraction, fitted as the median 0.38, ranges 0.13..0.86 over the 41 analysed data cases
+// (quartiles 0.26, 0.47; at 0.80, ss-tem152078's ND analysis took 1.35 s, SCOTCH's 0.71 s, the
+// model said 0.80 and 1.11 s, and the run took 1.15x main's with SCOTCH). Until analysed, ND's
+// score therefore carries kNdAnalysisRisk times its predicted analysis when it competes with
+// SCOTCH. Replayed on the measured components of the 35 data cases with all five orderings (fit as
+// in steps.cpp; bench/anaint_fix_fit.cpp), the mean excess over the best ordering drops from 5.8%
+// to 5.2%, in-sample and leave-one-out alike: ss-tem152078 (18% -> 0) and syn-zero-cluster-real-1e5
+// (37% -> 13%) take SCOTCH, syn-lap3d-aniso-1e5 (9%), syn-mem27-46 (5%) and
+// syn-ghep-multiplicity-real-1e4 (9% -> 14%) lose a little. 0.25 changed nothing, 1.5 sent
+// syn-ghep-zero-cluster-complex-1e4 to SCOTCH (50%).
 std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates) {
   std::size_t best = 0;
-  for (std::size_t i = 1; i < candidates.size(); ++i)
-    if (candidates[i].score_s < (1.0 - kOrderingMargin) * candidates[best].score_s) best = i;
+  for (std::size_t i = 1; i < candidates.size(); ++i) {
+    double score = candidates[i].score_s;
+    if (candidates[best].ordering == kOrderingScotch && candidates[i].ordering == kOrderingNestedDissection &&
+        !candidates[i].analysed)
+      score += kNdAnalysisRisk * candidates[i].analysis_s;
+    if (score < (1.0 - kOrderingMargin) * candidates[best].score_s) best = i;
+  }
   return best;
 }
 
