@@ -54,6 +54,9 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
   "out_of_core": "auto",
   "inertia_check": "auto",
   "inertia_counter": "auto",
+  "certificate": "exact",
+  "certificate_delta": 1e-12,
+  "certificate_fault_drop": 0,
   "zero_filter_tol": -1.0,
   "complex_tol": 1e-8,
   "max_shift_retries": 5
@@ -63,16 +66,19 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 枚举取值：`target.mode ∈ {nearest, interval, smallest, largest}`（interval 用 `lower`/`upper`）；
 `problem ∈ {auto, standard, generalized_definite, generalized_indefinite}`；
 `method ∈ {auto, shift_invert_lanczos, shift_invert_krylov_schur, lanczos}`；
-`factor_precision ∈ {double, single}`；`blr / out_of_core / inertia_check / inertia_counter ∈ {auto, on, off}`。
+`factor_precision ∈ {double, single}`；`blr / out_of_core / inertia_check / inertia_counter ∈ {auto, on, off}`；
+`certificate ∈ {exact, randomized, auto, off}`。
 
 取值与语义（校验见 `parse_config`；算法见 `docs/DESIGN.md` §3.6）：
 - `tol ∈ (0, 1)`；`inner_tol_factor ∈ (0, 1]`；`ncv, block_size, slice_size, threads, max_shift_retries ≥ 0`；
-  `max_restarts ≥ 1`；`memory_budget_gb > 0`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
+  `max_restarts ≥ 1`；`memory_budget_gb > 0`；`certificate_delta ∈ (0, 1)`；`certificate_fault_drop ≥ 0`；
+  `ordering ∈ {−1, 0, 2..7, 10}`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
 - `block_size`（P4）：整数 ≥ 0，位移反演 Krylov 运行的块宽 p；0（默认）= 自动，1 = 单向量。
-  HEP/GHEP：自动时需求 ≥ 8 对的运行（含切片、单边运行）p = 4，否则 1；配置 > 0 时直接使用；证书收缩
-  重跑缺 m 对时用 max(p, min(4, m 上取偶))。GHIEP：自动时 n ≥ 2e4 且 nev ≥ 4 的运行 p = 2，否则 1；
-  配置值被限到 min(p, nev, 64, n/16)，探测运行（nev ≤ 2）恒为 1。两条路径都会在块基放不下内存预算时
-  把 p 减半（告警）。规则与依据见 DESIGN §3.6-5。
+  HEP/GHEP：配置 > 0 时直接使用；自动时 nearest 的运行用块宽规则（P5c，`recommended_block_size`：由 n、
+  需求对数、σ 处主分解的因子条目、nnz(B) 与标量类型在 {1, 2, 4, 8} 中选，需求 ≥ 8 对时至少 4），切片与
+  单边运行需求 ≥ 8 对时 p = 4、否则 1；证书收缩重跑缺 m 对时用 max(p, min(4, m 上取偶))。GHIEP：自动时
+  n ≥ 2e4 且 nev ≥ 4 的运行 p = 2，否则 1；配置值被限到 min(p, nev, 64, n/16)，探测运行（nev ≤ 2）恒为 1。
+  两条路径都会在块基放不下内存预算时把 p 减半（告警）。规则与依据见 DESIGN §3.5、§3.6-5。
 - `inertia_counter`（P4）：证书的 Sylvester 计数是否在 InertiaCounter（只计惯性的分解，复用主分析的
   主元顺序）上做。auto（默认）= nearest 证书在代价模型判定划算时、以及主分解为单精度/BLR 时一律；
   on = 总是（含窗口/切片的计数）；off = 在主分解对象上计数（主分解为单精度/BLR 时仍用计数器——其自身
@@ -80,17 +86,36 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 - `slice_size`：整数 ≥ 0，默认 0 = 自动（代价模型）。interval / smallest / largest 目标（B 正定或
   B = I）以及零带干扰时的窗口化 nearest：每个位移至多求这么多个特征值（谱切片）；内存预算可能把它
   再压低（报告中有告警）。
-- `ordering`：−1（默认）= 自适应：AMD 或嵌套剖分（由确定性代价模型选择；嵌套剖分为 SCOTCH，
-  `deterministic = true` 时为 METIS）；0..7 = MUMPS ICNTL(7)（7 自动、5 METIS、3 SCOTCH、0 AMD、
-  4 PORD、6 QAMD、2 AMF）。hsolve 自研的并行嵌套剖分（factor 层的 10）目前**不**是合法配置值。
+- `ordering`：−1（默认）= 自适应：AMD 探测后由 16 线程代价模型在 AMD、SCOTCH、hsolve 自研嵌套剖分、
+  METIS、PORD 中选择（P5c，DESIGN §3.6-3b；选择是确定量的函数，相同运行选相同排序）；
+  `deterministic = true` 时沿用 P4 规则，AMD 或 METIS。0、2..7 = MUMPS ICNTL(7)（7 自动、5 METIS、
+  3 SCOTCH、0 AMD、4 PORD、6 QAMD、2 AMF）；10 = hsolve 自研的多线程嵌套剖分，作为主元顺序交给 MUMPS
+  （排列与线程数、运行次数无关）；1（ICNTL(7) 的「调用方给定顺序」）被拒绝（config 无法给出顺序）。
 - `deterministic`：false（默认）= MUMPS L0-OpenMP，回代更快，结果在容差内可复现；true = 同线程数下
-  分解与回代逐位可复现，自适应排序随之用 METIS（SCOTCH 的排序逐次运行都会变，显式 `ordering = 3`
-  亦然，逐位复现时不要用）。
+  分解与回代逐位可复现，自适应排序随之只在 AMD 与 METIS 之间选（SCOTCH 的排序逐次运行都会变，显式
+  `ordering = 3` 亦然，逐位复现时不要用）。
 - `zero_filter_tol`：< 0（默认）关闭；否则 |λ| ≤ zero_filter_tol·scale 为非物理零模，靠位移放置排除
   （HEP/GHEP 由惯性在两个计数点间切掉零带，计入报告 `zero_modes_filtered`；GHIEP 零簇本来就不被
   需要，零带取 max(zero_filter_tol, 1e-8)·scale）。用于零附近密集谱 / 低频击穿场景。
 - `inertia_check`：off 关闭 nearest 的证书；interval / smallest / largest 本身由惯性计数构成，off 被
   忽略（告警）。
+- `certificate`（P5）：nearest 目标（HEP/GHEP）的完备性检验方法，DESIGN §3.6-8。
+  - `exact`（默认）：证书窗口两端的双精度 Sylvester 计数（P4 的惯性证书）。
+  - `randomized`：在 σ 处已持有的分解上做随机排除检验（块 Lanczos，失败概率上界 `certificate_delta`）；
+    不能下结论（谱隙太窄、计划超出内存预算）时改用精确计数。只在 B 的 κ 有证明（B = I、对角 B、对角占优
+    B）时运行：一般 B（非对角、不对角占优）的 κ 只能估计，通过只是筛查结果，因此不运行、由精确计数出证书
+    （告警）——报告从不把筛查结果当作结论。
+  - `auto`：按本次运行实测的分解与回代时间预测，选能认证且最便宜者：精确计数、单精度计数（只在单精度
+    计数规则——B = I 或对角 B——带 10 倍余量成立时）或随机检验（只在 κ 有证明、且比最好的精确方案快 1.2 倍
+    时）。
+  - `off`：不检验（`inertia_check = off` 同样关闭）。
+  各方法发现缺对都触发带 deflation 的重跑并再检；单精度计数多于找到数或与 σ 处的精确计数矛盾时先以
+  双精度计数复核；选中的对少于 k 时即使检验通过也重跑。interval / smallest / largest（以及零带干扰时
+  转交窗口的 nearest）总是精确计数，`randomized` / `off` 对它们被忽略（告警）。
+- `certificate_delta`（P5）：∈ (0, 1)，默认 1e-12；随机检验失败概率的上界 δ（在运行前决定块步数）。
+- `certificate_fault_drop`（P5）：整数 ≥ 0，默认 0；**只用于测试与测量的故障注入**：nearest 目标第一次
+  Krylov 运行后、完备性检验之前删掉这么多已找到的对（先删最大重特征值的副本、留一个，再删最远的选中对），
+  检验须发现它们缺失、重跑须找回。
 - 当前限制：B 不定（GHIEP）只支持 `mode = nearest`（其余抛 Unsupported）；`method = lanczos`
   （免分解）抛 Unsupported。
 
@@ -98,9 +123,11 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 中的对应键，合并后整体再校验）：`--sigma S`（nearest）、`--k K`、`--interval LO HI`、
 `--smallest K`、`--largest K`、`--tol`、`--threads`（0 = 全部）、`--memory-budget-gb`、
 `--precision double|single`、`--slice-size N`（→ `slice_size`）、`--block-size N`（→ `block_size`，
-0 = 自动，1 = 单向量）、`--zero-filter-tol TOL`
-（→ `zero_filter_tol`，< 0 关闭）；另有 `--log FILE`（JSON-lines 事件日志）、`-v/--verbose`、
-`-q/--quiet`、`--version`。退出码：0 = 全部达标（且证书通过），1 = 完成但未达标，2 = 错误。
+0 = 自动，1 = 单向量；HEP/GHEP 的 Lanczos 与 GHIEP 的 Krylov-Schur 都用）、`--zero-filter-tol TOL`
+（→ `zero_filter_tol`，< 0 关闭）、`--certificate exact|randomized|auto|off`（P5，→ `certificate`）；
+另有 `--log FILE`（JSON-lines 事件日志）、`-v/--verbose`、`-q/--quiet`、`--version`。stdout 摘要的证书行
+注明方法（计数时为窗口、两个计数与结论；随机检验时为找到数、结论与失败概率）。退出码：0 = 全部达标
+（且证书通过），1 = 完成但未达标，2 = 错误。
 
 ## 3. 求解结果目录（`hsolve --out DIR`，scipy 基线同格式）
 
@@ -118,29 +145,45 @@ sigma_requested, sigma_used, shift_retries, block_size, factor_options{...}, fac
 op_applies, time_total_s, time_setup_s, time_factor_s, time_iterate_s, time_verify_s,
 time_certificate_s, peak_rss_bytes, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
 backward_error, accepted}], certificate{performed, lower, upper, count_inertia, count_found,
-endpoint_moves, passed, note}, slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
+endpoint_moves, passed, note, method, rigorous, failure_probability, solves, seconds, statement},
+slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
 `pairs` 先列实特征对（与 `eigenvalues.npy` 同序），再列复特征对。
 
 - `solver`（P4）：恒为 `"hsolve"`（评测在调用方未指名时用它作求解器名，§4）；`version`：`hs::version()`。
   Python 接口的 `report` 是同一份 JSON。
-- `block_size`（P4）：HEP/GHEP 第一次位移反演运行实际使用的块宽（配置解析 + 内存适配之后，DESIGN
-  §3.6-5）。GHIEP 的报告目前恒为 1（driver 未写入），各次运行的实际块宽见事件日志的 `krylov_schur`
-  事件。
+- `block_size`（P4）：第一次位移反演运行实际使用的块宽（配置解析 + 内存适配之后，DESIGN §3.6-5）。
+  GHIEP（P5 起写入；P4 恒报 1）为普通运行、或 σ 在零带内时第一次单边运行的块宽，各次运行的实际块宽见
+  事件日志的 `krylov_schur` 事件。
 - `factor_stats` 只统计主分解对象（分析、分解、回代次数与时间、估计）；InertiaCounter 的分析与计数
   不在其中，只计入 `time_certificate_s`（事件日志：`inertia_counter`、`main_factors_released`）。
 - **计时**（五个互斥阶段，`docs/DESIGN.md` §3.6-0）：
   `time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s + time_certificate_s`，
   各项 ≥ 0。`time_setup_s`：输入检查、范数估计、问题类型判定、规划；`time_factor_s`：**每一次**符号
-  分析（含自适应排序的 AMD 探测）与位移、B（正定性检测）、A（GHIEP 零主元计数）的数值分解；
+  分析（含自适应排序的 AMD 探测与其它候选的分析）与位移、B（正定性检测）、A（GHIEP 零主元计数）的数值分解；
   `time_iterate_s`：Krylov 求解（回代、正交化、重启）；`time_verify_s`：Rayleigh–Ritz、残差、补救、
   选择与证书簿记；`time_certificate_s`（P4）：HEP/GHEP 的全部 Sylvester 惯性计数（证书端点、窗口端点、
-  切点、簇检查；主对象上的重分解或 InertiaCounter 的计数，含计数器的分析），GHIEP 与关闭证书的
-  nearest 为 0。P3 的报告没有此键，惯性计数在 `time_factor_s` 中。时间只覆盖 `hs::solve`（CLI 读矩阵
-  不计入）。
+  切点、簇检查；主对象上的重分解或 InertiaCounter 的计数，含计数器的分析），P5 起还有 nearest 的其它
+  完备性检验（随机检验、单精度计数及其双精度复核、auto 的选择）；GHIEP 与关闭证书的 nearest 为 0。
+  P3 的报告没有此键，惯性计数在 `time_factor_s` 中。P5 起 B 正定性的严格证明计入 `time_factor_s`，分析
+  之前的廉价检验计入 `time_setup_s`。时间只覆盖 `hs::solve`（CLI 读矩阵不计入）。
 - `certificate.lower / upper`：±∞ 写作 `null`（smallest：lower = null；largest：upper = null）。
   `count_inertia` 是按 Sylvester 惯性**要求**的个数（smallest/largest 结束于数值相等的大簇内时为簇前
   个数加仍需的副本数）；`count_found` 是窗口内不同 B-正交向量数。GHIEP：`performed = false`，
-  note 说明不可用。
+  note 说明不可用；关闭证书的 nearest：`performed = false`，note 为 "disabled by configuration"。
+  `passed`：计数时 count_inertia == count_found；随机检验时检验通过（声称半径内没有未找到的特征值，κ 有
+  证明）。`passed` 总是证明：筛查结果从不作为结论报告（DESIGN §3.6-8）。P5 新增（最后下结论的检验）：
+  - `method`：`"exact"`（双精度 Sylvester 计数；窗口目标恒为此）、`"exact_single"`（单精度计数，依单精度
+    计数规则）、`"randomized"`（随机排除检验）、`"none"`（未做：GHIEP、关闭证书）。
+  - `rigorous`：`passed` 是否为证明——计数通过时 true（exact_single 在规则假定的单精度 LDLᵀ 后向误差之下，
+    陈述写明，与双精度计数假定 LDLᵀ 向后稳定同等地位）；随机检验在 κ 有证明（B = I、对角或对角占优 B）
+    或其 Krylov 空间覆盖整个补空间时 true；未通过时 false。
+  - `failure_probability`：P(通过却漏了声称半径内的对) 的上界：计数为 0；随机检验为达到的 δ(s)
+    （≤ `certificate_delta`）；1 = 没有陈述（未通过、未做）。
+  - 随机检验下结论时 `count_inertia = −1`（不计数），[lower, upper] 为 σ 两侧的声称半径，`count_found` 为
+    其中找到的对数。
+  - `solves`：随机检验的单列回代次数（算子作用，所有轮次）；`seconds`：所有轮次完备性检验的墙钟时间
+    （certificate 阶段，即 `time_certificate_s` 的一部分）；`statement`：证明了什么的文字陈述（auto 时前缀
+    为各方法的预测秒数与选择；选中对少于 k 时注明窗口只覆盖找到的对）。
 - `slices`：切片 / 单边求解中每次位移反演 Krylov 运行一条（单位移 nearest 为空数组）：
   `{lower, upper (±∞ 为 null), sigma, which ∈ {largest_magnitude, smallest_algebraic,
   largest_algebraic}, count_inertia（GHIEP 为 −1）, count_found, nev, reruns, restarts, op_applies,
