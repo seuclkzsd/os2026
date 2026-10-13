@@ -14,7 +14,10 @@ script.  It enforces the project's resource policy:
             mem_gb/4)), so small builds/tests of parallel sessions are never
             collateral damage.  The reported peak is the max of the sampled sum,
             the summed kernel high-water marks (VmHWM) and ru_maxrss, so short
-            spikes between samples are not missed.
+            spikes between samples are not missed.  The cap is exported to the
+            child as HSOLVE_MEMORY_LIMIT_GB (GiB; the smaller of --mem-gb and
+            a value inherited from an enclosing guard or the caller), from which
+            hsolve's automatic memory budget is derived (docs/DESIGN.md §3.6-3).
   * Time:   optional wall-clock timeout; SIGTERM / SIGHUP to the guard kill
             the process tree as well (a SIGHUP ignored by nohup stays ignored).
   * Mutual exclusion: ``--exclusive`` takes a machine-wide flock so that
@@ -44,6 +47,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import resource
 import signal
@@ -53,6 +57,7 @@ import time
 from pathlib import Path
 
 DEFAULT_CORES = os.environ.get("HS_CORES", "24-30,33-41")
+MEMORY_LIMIT_ENV = "HSOLVE_MEMORY_LIMIT_GB"  # hs::kMemoryLimitEnv: the cap the child may plan with
 DEFAULT_MEM_GB = float(os.environ.get("HS_MEM_GB", "30"))
 DEFAULT_MIN_AVAIL_GB = float(os.environ.get("HS_MIN_AVAIL_GB", "12"))
 # During parallel multi-agent phases set HS_MAX_SHARED_MEM_GB (e.g. 8): larger --mem-gb then
@@ -118,6 +123,19 @@ def with_siblings(cpus: list[int]) -> list[int]:
         except OSError:
             pass
     return sorted(out)
+
+
+def child_memory_limit(mem_gb: float, inherited: str | None) -> float:
+    """The memory limit the child is told (MEMORY_LIMIT_ENV, GiB): this guard's cap, or a smaller
+    one declared by an enclosing guard or the caller (a malformed inherited value is ignored)."""
+    limit = mem_gb
+    try:
+        outer = float(inherited) if inherited else math.inf
+    except ValueError:
+        outer = math.inf
+    if 0 < outer < limit:
+        limit = outer
+    return limit
 
 
 def mem_available_gb() -> float:
@@ -337,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     for var in THREAD_VARS:
         env[var] = str(nthreads)
     env["HS_GUARDED"] = "1"
+    env[MEMORY_LIMIT_ENV] = f"{child_memory_limit(mem_gb, os.environ.get(MEMORY_LIMIT_ENV)):g}"
     if slot:
         env["HS_SLOT_HELD"] = LOCK_PATH
     else:
