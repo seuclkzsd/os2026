@@ -239,11 +239,12 @@ class NearestCertifier {
 
  private:
   /// The single-count window of w: the found pairs of `all` in [lower, upper] with their residual
-  /// bounds ||A x - lambda B x||_{B^{-1}} (diagonal B or B = I), the wanted region the selected
-  /// pairs' disc.
-  SingleWindow single_window(const NearestWindow& w, const Block<T>& all);
-  /// The single-count rule with the pencil's ||A||_1 (computed at the first call).
-  const SingleCountRule& single_rule();
+  /// bounds ||A x - lambda B x||_{B^{-1}} <= ||r||_2 inv_sqrt_bmin (1 / sqrt of a lower bound on
+  /// lambda_min(B)), the wanted region the selected pairs' disc.
+  SingleWindow single_window(const NearestWindow& w, const Block<T>& all, double inv_sqrt_bmin);
+  /// The single-count rule with the pencil's ||A||_1 (computed at the first call); prove: for a
+  /// general B also its proven lambda_min (b_bounds(); SingleCountRule::b_min_proven).
+  const SingleCountRule& single_rule(bool prove);
   /// Columns of the randomized check's deflation block X (RoundPairs comment), pointers into
   /// `pairs`; deflation_block copies them.
   std::vector<const T*> deflation_columns(const NearestWindow& w, const RoundPairs<T>& pairs) const;
@@ -273,14 +274,16 @@ class NearestCertifier {
   double sigma_;
   bool detection_off_;
   double scale_, n2a_, n2b_;
-  /// 1 / sqrt(min b_ii) (1 for B = I, +inf without a positive diagonal): turns ||r||_2 into a bound
-  /// on ||r||_{B^{-1}} for a diagonal B (the single-count rule's error bars); set by single_rule().
+  /// 1 / sqrt(lambda_min(B) bound): min b_ii of a diagonal B, 1 for B = I, a general B's proven
+  /// b_min, +inf without one: turns ||r||_2 into a bound on ||r||_{B^{-1}} (the single-count rule's
+  /// error bars); set by single_rule().
   double inv_sqrt_bmin_ = 1.0;
   SingleCountRule rule_;  ///< a_norm_1 < 0 until single_rule() computed it
   CertificateTimings timings_;
   std::unique_ptr<StartScaling> proven_scaling_, estimated_scaling_;
   std::unique_ptr<ConditionBound> b_bounds_;  ///< see b_bounds()
   bool b_diagonal_ = true;                    ///< B = I or diagonal (set by single_rule())
+  double b_diag_min_ = 1.0;                   ///< min b_ii (set by single_rule())
   std::unique_ptr<InertiaCounter<T>> counter_;  ///< single counts (created at the first one; its
                                                 ///< double instance deferred to the first double count)
   /// exact_counts' last window [a, b] (counted) and its counts (valid: both nonsingular)

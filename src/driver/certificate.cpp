@@ -63,14 +63,14 @@ template <class T>
 NearestCertifier<T>::~NearestCertifier() = default;
 
 // The pencil's ||A||_1 and min b_ii, computed once (O(nnz)), and only when the single-count rule
-// is evaluated at all.
+// is evaluated at all; with prove, a general B's proven lambda_min(B) (b_bounds(), P8).
+// ||r||_{B^{-1}} <= ||r||_2 / sqrt(lambda_min(B)) for B-normalized x gives the found pairs' error
+// bars: min b_ii for a diagonal B, ||r||_2 for B = I, a general B's proven b_min, else no bound (the
+// rule then does not apply anyway).
 template <class T>
-const SingleCountRule& NearestCertifier<T>::single_rule() {
+const SingleCountRule& NearestCertifier<T>::single_rule(bool prove) {
   if (rule_.a_norm_1 < 0.0) {
     rule_.a_norm_1 = norm_one(pencil_.a());
-    // ||r||_{B^{-1}} <= ||r||_2 / sqrt(lambda_min(B)) for B-normalized x: min b_ii for a diagonal
-    // B, B = I: ||r||_2; a general B's proven b_min (b_bounds(), P8), else no bound (the rule then
-    // does not apply anyway).
     if (const CsrMatrix<T>* b = pencil_.b()) {
       double bmin = std::numeric_limits<double>::infinity();
       for (index_t i = 0; i < b->nrows; ++i)
@@ -80,13 +80,14 @@ const SingleCountRule& NearestCertifier<T>::single_rule() {
           else if (b->values[q] != T(0))
             b_diagonal_ = false;
         }
-      if (!b_diagonal_) {
-        const ConditionBound& cb = b_bounds();
-        rule_.b_min_proven = cb.proven ? cb.b_min : 0.0;
-        bmin = cb.proven ? cb.b_min : 0.0;
-      }
-      inv_sqrt_bmin_ = bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
+      b_diag_min_ = bmin;
+      inv_sqrt_bmin_ = b_diagonal_ && bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
     }
+  }
+  if (prove && !b_diagonal_ && !b_bounds_) {
+    const ConditionBound& cb = b_bounds();
+    rule_.b_min_proven = cb.proven ? cb.b_min : 0.0;
+    inv_sqrt_bmin_ = cb.proven ? 1.0 / std::sqrt(cb.b_min) : std::numeric_limits<double>::infinity();
   }
   return rule_;
 }
@@ -122,8 +123,7 @@ const ConditionBound& NearestCertifier<T>::b_bounds() {
 }
 
 template <class T>
-SingleWindow NearestCertifier<T>::single_window(const NearestWindow& w, const Block<T>& all) {
-  (void)single_rule();  // inv_sqrt_bmin_
+SingleWindow NearestCertifier<T>::single_window(const NearestWindow& w, const Block<T>& all, double inv_sqrt_bmin) {
   SingleWindow sw;
   sw.lower = w.lower;
   sw.upper = w.upper;
@@ -135,7 +135,7 @@ SingleWindow NearestCertifier<T>::single_window(const NearestWindow& w, const Bl
     if (!std::isfinite(l) || l < w.lower || l > w.upper) continue;
     const PairMetrics pm = pair_metrics(all.ax.col(j), all.bx.col(j), all.x.col(j), n, l, n2a_, n2b_);
     sw.found.push_back(l);
-    sw.found_error.push_back(pm.abs_residual * inv_sqrt_bmin_);
+    sw.found_error.push_back(pm.abs_residual * inv_sqrt_bmin);
   }
   return sw;
 }
@@ -311,14 +311,33 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
     in.single_valid = false;
     ch.single_reason = "predicted no cheaper than the exact counts";
   } else {
-    const SingleWindow sw = single_window(w, pairs.all);  // wanted region: the selected pairs' disc
+    // auto demands the safety margin over the rule's assumed backward error (kAutoSingleSafety)
+    const double safety = cfg.certificate == CertificateMode::Auto ? kAutoSingleSafety : 1.0;
+    SingleCountRule rule = single_rule(/*prove=*/false);
+    const SingleWindow sw = single_window(w, pairs.all, inv_sqrt_bmin_);  // wanted: the selected pairs' disc
     if (sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper) {
-      // auto demands the safety margin over the rule's assumed backward error (kAutoSingleSafety)
-      SingleCountRule rule = single_rule();
-      if (cfg.certificate == CertificateMode::Auto) rule.backward_factor *= kAutoSingleSafety;
-      const SingleCountValidity v = single_count_validity(pencil_, sw, rule);
-      in.single_valid = v.valid();
-      ch.single_reason = v.reason;
+      rule.backward_factor *= safety;
+      std::string optimistic_reason;
+      if (!b_diagonal_ && !b_bounds_) {
+        // A general B: no proof can give lambda_min(B) above min b_ii (a Rayleigh quotient), so the
+        // rule is first tried with that value - when even it does not hold the window, the proof
+        // (b_bounds(), up to kBoundsProofShare of the exact counts' time) is not worth running.
+        SingleCountRule best = rule;
+        best.b_min_proven = b_diag_min_;
+        const SingleWindow swb = single_window(w, pairs.all, 1.0 / std::sqrt(b_diag_min_));
+        const SingleCountValidity vb = single_count_validity(pencil_, swb, best);
+        if (!vb.valid()) optimistic_reason = "even lambda_min(B) = min b_ii would not do: " + vb.reason;
+      }
+      if (!optimistic_reason.empty()) {
+        in.single_valid = false;
+        ch.single_reason = optimistic_reason;
+      } else {
+        rule = single_rule(/*prove=*/true);
+        rule.backward_factor *= safety;
+        const SingleCountValidity v = single_count_validity(pencil_, single_window(w, pairs.all, inv_sqrt_bmin_), rule);
+        in.single_valid = v.valid();
+        ch.single_reason = v.reason;
+      }
     } else {
       in.single_valid = false;
       ch.single_reason = "window does not strictly contain the wanted region";
@@ -535,12 +554,12 @@ template <class T>
 CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>& all, double safety) {
   InertiaCertificate& cert = c_.rep.certificate;
   single_failed_ = true;  // reset below on a verdict
-  const SingleWindow sw = single_window(w, all);
+  SingleCountRule rule = single_rule(/*prove=*/true);  // a general B: its proven lambda_min (P8)
+  const SingleWindow sw = single_window(w, all, inv_sqrt_bmin_);
   if (!(sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper)) {
     fallback_note_ = "single counts: the window does not strictly contain the wanted region";
     return {};
   }
-  SingleCountRule rule = single_rule();
   rule.backward_factor *= safety;
   const SingleCountValidity v = single_count_validity(pencil_, sw, rule);
   if (!v.valid()) {
