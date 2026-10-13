@@ -83,8 +83,14 @@ constexpr double kClaimFraction = 0.01;
 /// assumed backward error (SingleCountRule::backward_factor): 1e4 u_s ||K||_1 against the 2.96e3
 /// or more of the miscount measured on yee-pec-box-1e5 (header comment). Margins of the rule on
 /// the P5 3-D cases at 16 threads (largest factor that still holds the window): yee-pec-box-1e5
-/// 2.96e3, yee-photonic-rods-1e4 5.7e3, yee-pec-box-1e4 6.9e3 (now exact counts or randomized),
-/// yee-pec-cube-32 1.0e4, yee-bloch-1e4 1.3e4, yee-pec-cube-16 3.9e4.
+/// 2.96e3, yee-photonic-rods-1e4 5.7e3, yee-pec-box-1e4 6.9e3, yee-pec-cube-32 1.0e4,
+/// yee-bloch-1e4 1.3e4, yee-pec-cube-16 3.9e4. Measured with the margin (bench_certint_e2e, gpu02
+/// measurement slot, 16 threads, 5 interleaved repetitions, medians; every run certified, tools/eval
+/// 96/96 pass): auto now takes the exact counts on yee-pec-box-1e5 / -1e4, yee-photonic-rods-1e4
+/// and yee-bloch-1e4 (auto/exact 0.99-1.00x; single counts had given yee-pec-box-1e5 3.20 -> 2.87 s,
+/// against tuned SLEPc now 1.02x instead of 1.15x: tools/bench/compare.py, 5 repetitions),
+/// the randomized check on yee-pec-cube-32 (1.09x), syn-mem27-46 (1.29x) and syn-mem125-46 (1.19x),
+/// single counts only on yee-pec-cube-16 (1.05x); elsewhere it matches exact within noise.
 constexpr double kAutoSingleSafety = 10.0;
 
 /// What the nearest path measured before its certificate (inputs of the auto choice). Zero
