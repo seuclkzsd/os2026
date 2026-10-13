@@ -16,8 +16,10 @@
 // per repetition). A run with T threads is pinned to the first T CPUs of this process' affinity
 // mask (start the bench through tools/run/guard.py --cores ...) and gets --threads T and
 // OMP_NUM_THREADS=T. Per case and thread count the table gives, per configuration, the medians of
-// the report's phase times (total, factor, iterate, certificate; DESIGN §3.6-0), the speedup of
-// the median total against the first configuration, the largest backward error over all runs,
+// the report's phase times (total, factor, iterate, certificate; DESIGN §3.6-0) and MUMPS phase
+// times (factor_stats: numeric factorizations incl. inertia counts with their number, solves with
+// the number of right-hand sides, solve time per right-hand side), the speedup of the median total
+// against the first configuration, the largest backward error over all runs,
 // whether every run succeeded with a passed certificate (or none performed), and the largest
 // relative difference of the sorted eigenvalues against the first configuration's first run
 // (equal accuracy check), and the range of the main factorization's factor entries over the runs
@@ -58,6 +60,9 @@ struct Run {
   double total = 0, setup = 0, factor = 0, iterate = 0, verify = 0, cert = 0;
   double max_eta = 0;
   double entries = 0;  // factor entries of the main factorization (equal work check)
+  // MUMPS phase times from the report's factor_stats: numeric factorizations (incl. the
+  // certificate's inertia counts) and solves, with their counts.
+  double numeric = 0, solve = 0, factorizations = 0, rhs = 0;
   bool cert_ok = true;
   std::vector<double> lambdas;
 };
@@ -174,7 +179,14 @@ Run run_once(const std::string& cli, const fs::path& case_dir, int threads, cons
   r.iterate = j.value("time_iterate_s", 0.0);
   r.verify = j.value("time_verify_s", 0.0);
   r.cert = j.value("time_certificate_s", 0.0);
-  if (j.contains("factor_stats")) r.entries = j["factor_stats"].value("factor_entries", 0.0);
+  if (j.contains("factor_stats")) {
+    const json& st = j["factor_stats"];
+    r.entries = st.value("factor_entries", 0.0);
+    r.numeric = st.value("factorize_s", 0.0);
+    r.factorizations = st.value("factorizations", 0.0);
+    r.solve = st.value("solve_s", 0.0);
+    r.rhs = st.value("rhs_solved", 0.0);
+  }
   for (const auto& p : j.at("pairs")) {
     r.max_eta = std::max(r.max_eta, p.value("backward_error", 0.0));
     r.lambdas.push_back(p.value("lambda_re", 0.0));
@@ -258,7 +270,9 @@ int main(int argc, char** argv) {
                      {"rep", r},            {"ok", run.ok},          {"total", run.total},
                      {"setup", run.setup},  {"factor", run.factor},  {"iterate", run.iterate},
                      {"verify", run.verify}, {"certificate", run.cert}, {"max_eta", run.max_eta},
-                     {"cert_ok", run.cert_ok}, {"factor_entries", run.entries}}
+                     {"cert_ok", run.cert_ok}, {"factor_entries", run.entries},
+                     {"numeric", run.numeric}, {"factorizations", run.factorizations},
+                     {"solve", run.solve},     {"rhs", run.rhs}}
                     .dump()
              << "\n";
           jl.flush();
@@ -267,8 +281,9 @@ int main(int argc, char** argv) {
         }
       }
   std::printf("| case | threads | config | total s | factor s | iterate s | certificate s | "
+              "MUMPS numeric s (#) | MUMPS solve s (rhs) | ms per rhs | "
               "speedup | max eta | all ok | eig rel diff | factor entries min..max |\n"
-              "|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
   for (const std::string& cs : cases)
     for (int t : threads) {
       const auto& slot = res[cs][t];
@@ -279,7 +294,7 @@ int main(int argc, char** argv) {
       }();
       const std::vector<double>& base_l = slot[0].empty() ? std::vector<double>{} : slot[0][0].lambdas;
       for (std::size_t ci = 0; ci < nc; ++ci) {
-        std::vector<double> tot, fac, it, ce;
+        std::vector<double> tot, fac, it, ce, num, sol, per_rhs, nfac, nrhs;
         double emin = INFINITY, emax = 0;
         double eta = 0, diff = 0;
         bool ok = true;
@@ -288,6 +303,11 @@ int main(int argc, char** argv) {
           fac.push_back(x.factor);
           it.push_back(x.iterate);
           ce.push_back(x.cert);
+          num.push_back(x.numeric);
+          sol.push_back(x.solve);
+          nfac.push_back(x.factorizations);
+          nrhs.push_back(x.rhs);
+          if (x.rhs > 0) per_rhs.push_back(1e3 * x.solve / x.rhs);
           eta = std::max(eta, x.max_eta);
           ok = ok && x.ok && x.cert_ok;
           emin = std::min(emin, x.entries);
@@ -300,9 +320,12 @@ int main(int argc, char** argv) {
                                         std::max(1e-300, std::abs(base_l[i])));
           }
         }
-        std::printf("| %s | %d | %s | %.3f | %.3f | %.3f | %.3f | %.3f | %.1e | %s | %.1e | %.4g..%.4g |\n",
+        std::printf("| %s | %d | %s | %.3f | %.3f | %.3f | %.3f | %.3f (%.0f) | %.3f (%.0f) | %.2f | "
+                    "%.3f | %.1e | %s | %.1e | %.4g..%.4g |\n",
                     cs.c_str(), t, configs[ci].name.c_str(), median(tot), median(fac), median(it),
-                    median(ce), base_total / median(tot), eta, ok ? "yes" : "NO", diff, emin, emax);
+                    median(ce), median(num), median(nfac), median(sol), median(nrhs),
+                    median(per_rhs), base_total / median(tot), eta, ok ? "yes" : "NO", diff, emin,
+                    emax);
       }
     }
   return 0;
