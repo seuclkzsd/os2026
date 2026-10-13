@@ -235,40 +235,44 @@ Schedule make_schedule(const LowerMatrix<T>& p) {
   return s;
 }
 
+/// Jacobi weights w_i = 1 / sqrt(b_ii) of a Hermitian b; false when some diagonal entry is missing
+/// or not a positive real number (no proof possible). O(nnz), parallel over rows.
+template <class T>
+bool jacobi_weights(const CsrMatrix<T>& b, std::vector<double>& w) {
+  const index_t n = b.nrows;
+  w.assign(static_cast<std::size_t>(n), 0.0);
+  bool bad = false;
+#pragma omp parallel for reduction(|| : bad) schedule(static)
+  for (index_t i = 0; i < n; ++i) {
+    double d = 0.0;
+    bool found = false;
+    for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p)
+      if (b.colind[p] == i) {
+        found = true;
+        d = std::real(b.values[p]);
+        if (std::imag(b.values[p]) != 0.0) bad = true;
+      }
+    const double wi = 1.0 / std::sqrt(d);
+    w[i] = wi;
+    if (!found || !(d > 0.0) || !std::isfinite(wi) || !(wi > 0.0)) bad = true;
+  }
+  return !bad;
+}
+
 /// The proof's state for one B (see norms.hpp): the scaled lower triangle S of B, the patterns of
 /// the fill levels and their schedules, built once and reused by the attempts.
 template <class T>
 class IcProver {
  public:
-  /// ok() == false: some diagonal entry is missing or not a positive real number (no proof).
-  explicit IcProver(const CsrMatrix<T>& b) : n_(b.nrows) {
+  /// w: jacobi_weights of b (all positive).
+  IcProver(const CsrMatrix<T>& b, const std::vector<double>& w) : n_(b.nrows), w_(w) {
     s_.n = n_;
     s_.ptr.assign(static_cast<std::size_t>(n_) + 1, 0);
-    w_.assign(static_cast<std::size_t>(n_), 0.0);
-    bool bad = false;
-#pragma omp parallel for reduction(|| : bad) schedule(static)
+#pragma omp parallel for schedule(static)
     for (index_t i = 0; i < n_; ++i) {
       index_t lower = 0;
-      double d = 0.0;
-      bool found = false;
-      for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p) {
-        const index_t j = b.colind[p];
-        if (j < i) {
-          ++lower;
-        } else if (j == i) {
-          found = true;
-          d = std::real(b.values[p]);
-          if (std::imag(b.values[p]) != 0.0) bad = true;
-        }
-      }
-      const double wi = 1.0 / std::sqrt(d);
-      w_[i] = wi;
+      for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1] && b.colind[p] < i; ++p) ++lower;
       s_.ptr[i + 1] = lower + 1;
-      if (!found || !(d > 0.0) || !std::isfinite(wi) || !(wi > 0.0)) bad = true;
-    }
-    if (bad) {
-      ok_ = false;
-      return;
     }
     prefix_sum(s_.ptr);
     s_.col.resize(static_cast<std::size_t>(s_.ptr[n_]));
@@ -288,20 +292,6 @@ class IcProver {
     }
     s_.build_columns();
     s_.gather(s_.val, s_cval_);
-  }
-
-  bool ok() const { return ok_; }
-
-  /// y = S x (S Hermitian, from its stored lower triangle and its columns).
-  void apply(const T* x, T* y) const {
-#pragma omp parallel for schedule(static)
-    for (index_t i = 0; i < n_; ++i) {
-      T acc(0);
-      for (index_t p = s_.ptr[i]; p < s_.ptr[i + 1]; ++p) acc += s_.val[p] * x[s_.col[p]];
-      // strict upper part of row i = conjugated strict lower part of column i (diagonal first)
-      for (index_t q = s_.cptr[i] + 1; q < s_.cptr[i + 1]; ++q) acc += conj_if(s_cval_[q]) * x[s_.crow[q]];
-      y[i] = acc;
-    }
   }
 
   index_t order() const { return n_; }
@@ -563,8 +553,7 @@ class IcProver {
   }
 
   index_t n_ = 0;
-  bool ok_ = true;
-  std::vector<double> w_;
+  const std::vector<double>& w_;
   LowerMatrix<T> s_;
   std::vector<T> s_cval_;  ///< S's lower values in column order
   LowerMatrix<T> l1_;
@@ -578,8 +567,9 @@ class IcProver {
 
 template <class T>
 IcBound incomplete_cholesky_bound(const CsrMatrix<T>& b, int level, double shift) {
-  IcProver<T> prover(b);
-  if (!prover.ok()) HS_THROW(InvalidInput, "incomplete_cholesky_bound: the diagonal of B is not positive");
+  std::vector<double> w;
+  if (!jacobi_weights(b, w)) HS_THROW(InvalidInput, "incomplete_cholesky_bound: the diagonal of B is not positive");
+  IcProver<T> prover(b, w);
   return prover.attempt(level, shift);
 }
 
@@ -607,17 +597,24 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
   Timer timer;
   HpdProof r;
   const index_t n = b.nrows;
-  IcProver<T> prover(b);
-  r.setup_s = timer.seconds();
-  if (n == 0 || !prover.ok()) {
+  std::vector<double> w;
+  if (n == 0 || !jacobi_weights(b, w)) {
     r.outcome = "nonpositive_diagonal";
     r.seconds = timer.seconds();
     return r;
   }
-  Timer tl;
-  const NormEstimate est = lanczos_ends<T>(
-      n, [&](const T* x, T* y) { prover.apply(x, y); }, opt.lanczos_steps, opt.seed, /*stream=*/0x68706470ULL);
-  r.lanczos_s = tl.seconds();
+  // Lanczos on S = W B W applied as w .* (B (w .* x)): no copy of S before theta says whether an
+  // attempt is worth building it.
+  std::vector<T> wx(static_cast<std::size_t>(n));
+  auto apply = [&](const T* x, T* y) {
+#pragma omp parallel for schedule(static)
+    for (index_t i = 0; i < n; ++i) wx[i] = w[i] * x[i];
+    spmv(b, wx.data(), y);
+#pragma omp parallel for schedule(static)
+    for (index_t i = 0; i < n; ++i) y[i] *= w[i];
+  };
+  const NormEstimate est = lanczos_ends<T>(n, apply, opt.lanczos_steps, opt.seed, /*stream=*/0x68706470ULL);
+  r.lanczos_s = timer.seconds();
   r.theta_min = est.ritz_min;
   r.theta_max = est.ritz_max;
   if (est.steps > 0 && est.ritz_min < -kIndefiniteRitzScaled * est.norm2) {
@@ -632,6 +629,9 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
     return r;
   }
   const double theta = est.ritz_min;
+  Timer ts;
+  IcProver<T> prover(b, w);
+  r.setup_s = ts.seconds();
   const int threads = std::max(1, max_threads());
   double left = opt.max_seconds;
   // One attempt if its memory and predicted time fit the limits; false: not run.

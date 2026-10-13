@@ -55,9 +55,10 @@ NormEstimate estimate_pencil_spectrum(const CsrMatrix<T>& a, const CsrMatrix<T>&
 // 2 of slack; complex products), so a positive bound is a proof for the stored B, not an
 // estimate - unlike an inertia count, it does not rest on the growth factor of a pivoted
 // factorization. A failed proof says nothing about B (the caller then counts its inertia).
-// Lanczos on S (no reorthogonalization) sets the shifts: its smallest Ritz value theta lies above
-// lambda_min(S) (up to rounding), and one below -kIndefiniteRitzScaled proves S - hence B -
-// indefinite (Paige: Ritz values stay inside the spectrum's hull up to O(eps ||S||_2)).
+// Lanczos on S (no reorthogonalization; S applied as w .* (B (w .* x)), w = diag(B)^{-1/2}, so
+// that S is stored only when an attempt follows) sets the shifts: its smallest Ritz value theta
+// lies above lambda_min(S) (up to rounding), and one below -kIndefiniteRitzScaled proves S - hence
+// B - indefinite (Paige: Ritz values stay inside the spectrum's hull up to O(eps ||S||_2)).
 
 /// Options of prove_positive_definite.
 struct HpdProofOptions {
@@ -114,8 +115,8 @@ struct HpdProof {
   int attempts = 0;            ///< incomplete factorizations computed
   index_t factor_entries = 0;  ///< of the last attempt
   double seconds = 0.0;        ///< all of it; the parts:
-  double setup_s = 0.0;        ///< the scaled S (rows and columns)
-  double lanczos_s = 0.0;      ///< the Lanczos run on S
+  double lanczos_s = 0.0;      ///< the diagonal check and the Lanczos run on S
+  double setup_s = 0.0;        ///< the stored S (rows and columns; only when theta >= min_theta)
   double pattern_s = 0.0;      ///< the level-1 pattern (when built)
   double attempts_s = 0.0;     ///< the attempts (factorizations and checks)
   /// "proven", "indefinite", "nonpositive_diagonal", "nearly_singular" (theta < min_theta),
@@ -128,12 +129,13 @@ struct HpdProof {
 /// B) indefinite (same rule as kIndefiniteRitz for B itself, internal.hpp).
 constexpr double kIndefiniteRitzScaled = 1e-10;
 
-/// The proof above for a Hermitian b (only its lower triangle is read: b must be exactly
-/// Hermitian, as hs::solve's working copies are). O(lanczos_steps nnz(b)) plus, per attempt, the
-/// incomplete factorization (sequential) and the check (OpenMP over rows; per-thread workspace of
-/// ~5 n scalars, threads reduced to keep it under 256 MB). The outcome is a deterministic function
-/// of b, the options and the thread count (the budget's time model divides the check's work by
-/// the threads; the check's bound itself does not depend on them). Does not modify b.
+/// The proof above for an exactly Hermitian b (as hs::solve's working copies are: the attempts
+/// read its lower triangle, the Lanczos run all of it). O(lanczos_steps nnz(b)), then S and the
+/// level-1 pattern (parallel over rows) and per attempt the incomplete factorization (parallel over
+/// the rows of a level) and the check (parallel over rows); per-thread workspaces of ~5 n scalars,
+/// threads reduced to keep them under 256 MB. The outcome is a deterministic function of b, the
+/// options and the thread count (the budget's time model divides the work by the threads; the
+/// bound itself does not depend on them). Does not modify b.
 template <class T>
 HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& opt = {});
 
