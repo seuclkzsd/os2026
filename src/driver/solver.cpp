@@ -236,7 +236,9 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   if (b && cfg.problem == ProblemType::Standard) HS_THROW(InvalidInput, "problem 'standard' requested but B was given");
   if (!b && (cfg.problem == ProblemType::GeneralizedDefinite || cfg.problem == ProblemType::GeneralizedIndefinite))
     HS_THROW(InvalidInput, "a generalized problem type was requested but no B was given");
-  if (cfg.method == Method::Lanczos) HS_THROW(Unsupported, "factorization-free Lanczos is roadmap P3");
+  if (cfg.method == Method::Lanczos)
+    HS_THROW(Unsupported, "method 'lanczos' (factorization-free) is not implemented; use 'auto', "
+                          "'shift_invert_lanczos' or 'shift_invert_krylov_schur'");
 
   // 2. Problem type as far as it is known before the analysis: given, B = I, or B's definiteness
   //    proven without a factorization (test_b_definiteness). Auto here: B's inertia on the main
