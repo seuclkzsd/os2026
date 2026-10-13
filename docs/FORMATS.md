@@ -141,8 +141,8 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 
 `report.json` 主要键（按 `SolveReport::to_json` 源码中的顺序列出；文件中的键按字母序）：`schema_version,
 solver, version, n, nnz_a, nnz_b, complex_scalars, problem, norm2_a, norm2_b, scale, hermitian_defect_a,
-hermitian_defect_b, method, sigma_requested, sigma_used, shift_retries, block_size, factor_options{...}, factor_stats{...}, restarts,
-op_applies, time_total_s, time_setup_s, time_factor_s, time_iterate_s, time_verify_s,
+hermitian_defect_b, method, sigma_requested, sigma_used, shift_retries, block_size, factor_options{...},
+factor_stats{...}, restarts, op_applies, time_total_s, time_setup_s, time_factor_s, time_iterate_s, time_verify_s,
 time_certificate_s, peak_rss_bytes, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
 backward_error, accepted}], certificate{performed, lower, upper, count_inertia, count_found,
 endpoint_moves, passed, note, method, rigorous, failure_probability, solves, seconds, statement},
