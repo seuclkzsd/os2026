@@ -14,6 +14,8 @@
 # $HOME/src; the checksums are verified):
 #   spral-2025.09.18.tar.gz  https://github.com/ralna/spral/archive/refs/tags/v2025.09.18.tar.gz
 #   meson-1.11.1.pyz         https://github.com/mesonbuild/meson/releases/download/1.11.1/meson.pyz
+# plus upstream commit 836dc3e "Fix SSIDS on GPU" as a patch (tools/dev/patches/): the GPU path of
+# the 2025.09.18 release (the latest) corrupts the heap in every GPU solve and fails on delayed pivots.
 # Toolchain: the conda env's gcc / g++ / gfortran 13.4, ninja, OpenBLAS 0.3.34 (BLAS and LAPACK),
 # METIS 5.1 (32-bit idx_t); CUDA $CUDA_HOME (default /usr/local/cuda-12.2) nvcc for sm_70 (V100).
 # nvcc's host compiler: $SPRAL_CUDA_HOST_CXX, else the first g++ on PATH of version 7..12 - nvcc
@@ -26,9 +28,9 @@
 # (bench/gpu_ssids.cpp passes its topology explicitly anyway). C, C++ and Fortran are compiled with
 # -O3 -march=native, like hsolve (HSOLVE_NATIVE).
 # Output: $SPRAL_PREFIX (default $HOME/opt/spral-2025.09.18-cuda12.2, -cpu with --cpu-only):
-#   lib/libspral.so (RPATH: the conda lib and CUDA lib64), include/spral*.h, bin/spral_ssids,
-#   BUILDINFO (versions, checksums, compilers, flags); the C examples stay in the build tree
-#   ($SPRAL_BUILD_DIR/build/examples/C). The build never touches a GPU: meson's CUDA sanity check
+#   lib/libspral.so (RPATH: the conda lib and CUDA lib64), include/spral*.h, bin/spral_ssids, the
+#   examples (examples/C/ssidss_c: SSIDS on a 5x5 matrix, the smoke test), BUILDINFO (versions,
+#   checksums, patches, compilers, flags). The build never touches a GPU: meson's CUDA sanity check
 #   program runs with CUDA_VISIBLE_DEVICES="".
 set -euo pipefail
 SPRAL_VERSION=2025.09.18
@@ -36,6 +38,9 @@ SPRAL_SHA256=1358168ac95297049e4fc810e54a16e0c765796cfbaa156e09979e2620b7dae7
 MESON_VERSION=1.11.1
 MESON_SHA256=05f25d74eab0d1a9b26f1d2fe482677b9c2b9543f974016c8102a5f96b2b73f5
 CUDA_ARCH=70
+# Upstream fixes newer than the release, applied in this order (tools/dev/patches/README).
+SPRAL_PATCHES=(spral-836dc3e-fix-ssids-gpu.patch)
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 gpu=true
 smoke=0
@@ -43,7 +48,7 @@ case "${1:-}" in
   "") ;;
   --cpu-only) gpu=false ;;
   --smoke) smoke=1 ;;
-  *) sed -n '2,32p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,34p' "$0" >&2; exit 2 ;;
 esac
 [ -n "${CONDA_PREFIX:-}" ] || { echo "build_spral: run inside the project environment (env/run.sh)" >&2; exit 2; }
 src_dir="${SPRAL_SRC_DIR:-$HOME/src}"
@@ -78,6 +83,10 @@ rm -rf "$build_root"
 mkdir -p "$build_root"
 tar -xzf "$tarball" -C "$build_root"
 srcdir="$build_root/spral-$SPRAL_VERSION"
+for patch_file in "${SPRAL_PATCHES[@]}"; do
+  patch -d "$srcdir" -p1 --quiet -i "$here/patches/$patch_file" ||
+    { echo "build_spral: patch $patch_file failed" >&2; exit 1; }
+done
 # One-line patch: meson links a library containing .cu objects with nvcc, i.e. through nvcc's host
 # g++ (gcc 9 here), which then follows the conda sysroot's libm.so linker script to glibc 2.27+ files
 # CentOS 7 lacks (libmvec). Link libspral.so with the conda g++ instead, as a CPU-only build does
@@ -159,6 +168,7 @@ python3 "$meson_pyz" install -C "$build_root/build" > "$build_root/install.log" 
 {
   echo "spral $SPRAL_VERSION sha256 $SPRAL_SHA256"
   echo "meson $MESON_VERSION sha256 $MESON_SHA256"
+  echo "patches: ${SPRAL_PATCHES[*]} (tools/dev/patches)"
   echo "gpu $gpu  cuda_home $cuda_home  arch sm_$CUDA_ARCH"
   echo "cc/cxx/fc: $("$CXX" --version | head -1); $("$FC" --version | head -1)"
   if [ "$gpu" = true ]; then
