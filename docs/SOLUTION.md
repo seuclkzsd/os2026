@@ -414,7 +414,7 @@ PYTHONPATH=build/release/python python -c "import hsolve; print(hsolve.version()
 ./build/release/hsolve --A A.npz --B B.npz --sigma 0.5 --k 10 --certificate auto --out out/  # 完备性检验方法（默认 exact）
 HS_BLAS_ROUTE=off ./build/release/hsolve --A A.npz --sigma 0.5 --k 10 --out out/          # 关闭 BLAS hook 的路由（纯 OpenBLAS）
 python3 tools/run/guard.py --exclusive --timeout 2700 -- python3 tools/bench/compare.py --tag mytag --cores 16-31 \
-    --solvers hsolve,hsolve-auto,slepc --slepc-profile best --reps 5 case1 ...  # 测量槽内对比调优 SLEPc（hsolve-auto = certificate auto）
+    --solvers hsolve,hsolve-auto,slepc --slepc-profile best --reps 5 case1 ...  # 测量槽内对比调优 SLEPc
 python3 tools/run/guard.py -- python -m tools.eval.sweep results/raw/mytag                                     # 独立评测
 tools/dev/cluster_run.sh gpu01 -- tools/dev/build.sh release                                                   # 在集群节点上运行
 ```

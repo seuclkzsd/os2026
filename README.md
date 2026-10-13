@@ -73,7 +73,7 @@ res.eigenvalues, res.eigenvectors, res.report["success"]
 
 ```bash
 python3 tools/run/guard.py --exclusive --timeout 2700 -- python3 tools/bench/compare.py --tag mytag \
-    --cores 16-31 --slepc-profile best --reps 5 case1 case2 ...                 # 测量槽内；结果在 results/mytag.md（--out-dir 可改）
+    --cores 16-31 --slepc-profile best --reps 5 case1 case2 ...    # 结果在 results/mytag.md（--out-dir 可改）
 python3 tools/run/guard.py -- python -m tools.eval.sweep results/raw/mytag      # 评测汇总 results/eval_mytag.md
 ```
 
@@ -85,8 +85,8 @@ compare.py 对每次运行都用 `tools/eval` 判定有效性，只在双方每�
 所有运行都经过资源看门狗（共享机器；集群节点上的两条道见下）：
 
 ```bash
-python3 tools/run/guard.py --exclusive --timeout 2700 -- ./build/release/hsolve ...       # 计时：测量槽（16 核、32 GiB）
-python3 tools/run/guard.py --skip-busy-check --timeout 600 -- ./build/release/hsolve ...  # 冒烟：构建/测试道（≤ 12 GiB）
+python3 tools/run/guard.py --exclusive --timeout 2700 -- ./build/release/hsolve ...      # 计时：测量槽
+python3 tools/run/guard.py --skip-busy-check --timeout 600 -- ./build/release/hsolve ... # 冒烟：构建/测试道
 ```
 
 ## 集群节点（gpu01 / gpu02，空闲时 c001–c005）

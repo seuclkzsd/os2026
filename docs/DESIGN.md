@@ -361,8 +361,8 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     倍数）；给定 ncv 时即为基数，自动时再加 4p（受 n − d ≥ 2(ncv + p) 限制）。每次重启保留
     k = nev + (ncv − nev)/2 下取整到 p 的倍数，至少 s（留一个备用 Ritz 对）、至多 ncv − p。
   - **提前停止探测**：在块边界也做 Rayleigh–Ritz（第一轮从基数处起，之后从 k + p 起），nev 个全部
-    （或 `lead_nev` 个最前者，见上）收敛即结束本轮。块运行因此恰好达到 tol，而 p = 1 只在轮末检查、通常超出 tol 几个量级——两者
-    须在相同残差下比较，不能在相同 tol 下比较。
+    （或 `lead_nev` 个最前者，见上）收敛即结束本轮。块运行因此恰好达到 tol，而 p = 1 只在轮末检查、
+    通常超出 tol 几个量级——两者须在相同残差下比较，不能在相同 tol 下比较。
   - 自由空间不足（n − d < 2(ncv + p)），或 p 大到放不下一个块基，则用一轮覆盖整个自由空间的单向量
     循环精确求解（n − d 次作用）。
   - 重数 ≤ p 的特征值的全部副本一轮内找到；超出 p 的副本只能靠舍入进入（同 p = 1）。
@@ -722,11 +722,11 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      是为主运行的 k 对选的（gpu01 测量槽 16 线程，5 次交错，`certificate_fault_drop = 1`，主运行用规则的 8；
      重跑阶段 = σ 处重分解 + 重跑迭代，宽度 8 → 4：ss-2cubes_sphere 1.301 → 1.197 s（作用 168 → 100）、
      yee-pec-cube-32 0.788 → 0.735 s、syn-mem27-46（auto）0.235 → 0.185 s、yee-bloch-1e4（auto）0.165 →
-     0.131 s，范围不重叠；整次求解比集成树（重跑用 8、无 lead）快 1.05–1.33×）。P4 规则的依据（30 个 HEP/GHEP 数据测例，4 线程，p = 1/4/8，`results/p4_measurements.md`
-     §3）：三维 1e5 测例迭代阶段快 1.4–2.5×，重特征值测例总时间快 1.4–2.2×（不再需要重跑）；k = 6、7
-     （cav2d）块更慢（22 → 60 次作用；P5c 的块步快路径与规则使 p = 2 在这两例上也划算，§3.5），p = 8 只在
-     重特征值主导时胜过 4。小而低填充的复数 1e4 测例最多慢 0.1 s；切片代价模型（§3.6-8b）仍按 p = 1 标定，
-     窗口目标的块运行未做性能测量。
+     0.131 s，范围不重叠；整次求解比集成树（重跑用 8、无 lead）快 1.05–1.33×）。P4 规则的依据（30 个
+     HEP/GHEP 数据测例，4 线程，p = 1/4/8，`results/p4_measurements.md` §3）：三维 1e5 测例迭代阶段快
+     1.4–2.5×，重特征值测例总时间快 1.4–2.2×（不再需要重跑）；k = 6、7（cav2d）块更慢（22 → 60 次作用；
+     P5c 的块步快路径与规则使 p = 2 在这两例上也划算，§3.5），p = 8 只在重特征值主导时胜过 4。小而低填充的
+     复数 1e4 测例最多慢 0.1 s；切片代价模型（§3.6-8b）仍按 p = 1 标定，窗口目标的块运行未做性能测量。
    - GHIEP（`ghiep_block_size`，indefinite.cpp）：配置 > 0 时取 min(p, nev, 64, n/16)，探测运行
      （nev ≤ 2）恒为 1；自动时 n ≥ 2e4 且 nev ≥ 4 的运行 p = 2，否则 1。依据（2 线程，
      `results/p4_measurements.md` §4）：p = 2 在九个测例上从未慢于 p = 1（1.06–1.58×），p = 4 最多慢
@@ -841,8 +841,9 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      被判奇异的端点（其上有特征值，如用户端点）不作锚点——有限片改取中心，开放片取该端旁谱隙中点。
    - 每片收敛恰好其计数个对；离切点 δ = 1e-9·max(scale, |cut|) 以内的片外对也保留（这么近的特征值
      可能算到另一侧），交给去重。缺对时以已得对作 deflation 重跑（不用 `lead_nev`：片内缺的对不一定是排名
-     最前的），只要还有新对（至多 缺数 + 4 轮、上限 32 轮、连续 2 轮无新对即停）；已得对中有重特征值时，重跑位移放在离它 1% 谱隙处（重根主导
-     算子约 100 倍，舍入补出其余副本；正放在重根上会把数值重簇拆成逐个收敛的 θ）。
+     最前的），只要还有新对（至多 缺数 + 4 轮、上限 32 轮、连续 2 轮无新对即停）；已得对中有重特征值时，
+     重跑位移放在离它 1% 谱隙处（重根主导算子约 100 倍，舍入补出其余副本；正放在重根上会把数值重簇拆成
+     逐个收敛的 θ）。
    - P4：计数默认在主对象上（§3.6-8）；每片的块宽为 `block_size_for`(该片 nev)（≥ 8 对时 p = 4），
      片大小的代价模型未按块运行重新标定，窗口目标的性能未重测。
    - 合并：来自不同片、特征值相差 ≤ 2e-9 相对的对成组，以 B-Gram 秩（1e-4）+ Rayleigh–Ritz 去重；
@@ -979,7 +980,8 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
   `DriverGhiepBlock`；P5 新增如 `DriverCertificate`、`DriverHpdProof`、`DriverBDefiniteness`、
   `DriverAdaptiveOrdering`、`DriverOrderingModel`、`LanczosBlockRule`、`VerifyStartScaling`，blas 模块为
   `BlasHook*`；P5c 修复轮的 `AnaintFix*`、`AsmkernFix*`、`CertintFix*` 与 P5c 集成的 `BlocktuneDriver`
-  （driver）、`CounterDeferred`（factor）、`P5cIntFix*`（eigen 与 driver）以子任务代号开头，是本规则的例外）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
+  （driver）、`CounterDeferred`（factor）、`P5cIntFix*`（eigen 与 driver）以子任务代号开头，是本规则的
+  例外）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
   `<可执行文件>.<套件>.<用例>`，`tools/dev/test.sh release test_factor` 只跑该文件，匹配不到测试即
   报错。共享夹具在 `tests/cpp/support/`（`hsolve_test_support`），只追加不改签名。
   数值测试尽量用有解析解的问题。Python 工具与 Python 接口的测试在 `tests/py/`（pytest；
