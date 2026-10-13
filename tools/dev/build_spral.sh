@@ -18,7 +18,8 @@
 # 12.2 cannot parse gcc 13's <type_traits> (__is_convertible, __remove_cv builtins), so the conda
 # g++ does not work there even with -allow-unsupported-compiler; on the cluster nodes PATH gives
 # $HOME/local/usr/gcc_9.2.0/bin/g++. nvcc links libspral.so through that g++; the conda lib
-# directory comes first on its library path, so libstdc++ / libgfortran are the conda ones.
+# directory comes first on its library path. libspral.so itself is linked by the conda g++ (one-line
+# patch of meson.build below).
 # No hwloc: SSIDS then treats the machine as one region of omp_get_max_threads() threads
 # (bench/gpu_ssids.cpp passes its topology explicitly anyway). C, C++ and Fortran are compiled with
 # -O3 -march=native, like hsolve (HSOLVE_NATIVE).
@@ -57,6 +58,14 @@ rm -rf "$build_root"
 mkdir -p "$build_root"
 tar -xzf "$tarball" -C "$build_root"
 srcdir="$build_root/spral-$SPRAL_VERSION"
+# One-line patch: meson links a library containing .cu objects with nvcc, i.e. through nvcc's host
+# g++ (gcc 9 here), which then follows the conda sysroot's libm.so linker script to glibc 2.27+ files
+# CentOS 7 lacks (libmvec). Link libspral.so with the conda g++ instead, as a CPU-only build does
+# (no relocatable device code in SPRAL, so nvcc's device link step is not needed).
+if [ "$gpu" = true ]; then
+  sed -i "s/^libspral = library('spral',\$/libspral = library('spral', link_language : 'cpp',/" "$srcdir/meson.build"
+  grep -q "link_language : 'cpp'" "$srcdir/meson.build" || { echo "build_spral: patching meson.build failed" >&2; exit 1; }
+fi
 # The generated build files call meson by the path it was started from: an executable copy.
 install -m 755 "$meson_pyz" "$build_root/meson.pyz"
 meson_pyz="$build_root/meson.pyz"
