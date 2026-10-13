@@ -88,7 +88,9 @@ def main() -> int:
         if not line.strip():
             continue
         r = json.loads(line)
-        key = (r["case"], r["variant"])
+        # Runs with extra bench arguments / SSIDS environment (tuning) form variants of their own.
+        extra = " ".join(x for x in (r.get("bench_args", ""), r.get("ssids_env", "")) if x)
+        key = (r["case"], r["variant"] + (f" [{extra}]" if extra else ""))
         if r["case"] not in order:
             order.append(r["case"])
         runs[key].append(r)
@@ -99,7 +101,7 @@ def main() -> int:
           "| GPU peak MiB | runs |")
     print("|" + "---|" * 17)
     for case in order:
-        ref = summ.get((case, REF_VARIANT), {})
+        ref = next((s for (c, v), s in summ.items() if c == case and v.split(" ")[0] == REF_VARIANT), {})
         negs_all = sorted({n for (c, _), s in summ.items() if c == case for n in s.get("negs", [])})
         for (c, v), s in sorted(summ.items(), key=lambda kv: kv[0][1]):
             if c != case:
@@ -118,12 +120,15 @@ def main() -> int:
                   f"| {fmt(ratio(ref.get('solveP'), s['solveP']), 2)}x | {s['negs'][0] if len(s['negs']) == 1 else s['negs']} "
                   f"| {inertia} | {fmt(s['resid'])} | {fmt(s['rss'], 2)} | {fmt(s['gpu_peak'], 0)} "
                   f"| {s['ok_runs']}/{s['runs']} |")
-    gpu_rows = [(c, s) for (c, v), s in summ.items() if v.startswith("ssids-gpu") and s.get("cuda_init") is not None]
+    gpu_rows = [(c, v, s) for (c, v), s in summ.items() if v.startswith("ssids-gpu") and s.get("cuda_init") is not None]
     if gpu_rows:
+        inits = [s["cuda_init"] for _, _, s in gpu_rows]
+        firsts = [s["cold"] - s["warm"] for _, _, s in gpu_rows]
         print()
-        print("CUDA context creation (cuda_init_s, median per case): " +
-              ", ".join(f"{c} {fmt(s['cuda_init'])}" for c, s in gpu_rows if s) + "; GPU memory after the "
-              "context: " + ", ".join(sorted({fmt(s['gpu_ctx'], 0) for _, s in gpu_rows})) + " MiB")
+        print(f"CUDA context creation (cuda_init_s, medians of {len(gpu_rows)} case/variant groups): "
+              f"{fmt(min(inits))}..{fmt(max(inits))} s; first-factorization extra (cold - warm): "
+              f"{fmt(min(firsts))}..{fmt(max(firsts))} s; GPU memory after the context: "
+              + ", ".join(sorted({fmt(s['gpu_ctx'], 0) for _, _, s in gpu_rows})) + " MiB")
 
     if not args.ref.exists():
         return 0
@@ -136,7 +141,7 @@ def main() -> int:
     print("|" + "---|" * 11)
     for row in ref["rows"]:
         case = row["case"]
-        m = summ.get((case, REF_VARIANT))
+        m = next((s for (c, v), s in summ.items() if c == case and v.split(" ")[0] == REF_VARIANT), None)
         if not m or not m.get("ok_runs"):
             continue
         h, hn = row["solvers"]["hsolve"], row["solvers"]["hsolve-nocert"]

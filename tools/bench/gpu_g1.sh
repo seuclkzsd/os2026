@@ -14,7 +14,9 @@
 # runs (CUDA_VISIBLE_DEVICES=""), ssids-cpu with OMP_CANCELLATION=TRUE OMP_PROC_BIND=TRUE and no GPU,
 # ssids-gpu the same on GPU IDX (default 7: gpu02's GPU on the slot's socket). Before each ssids-gpu
 # process that GPU must be idle (no compute process, < 16 MiB used), else the script stops with
-# status 3. --lane: the build/test lane instead of the slot (smoke runs, no timings). --bench-args:
+# status 3. Variants FILE already holds for a (repetition, case) with the same --ssids-env and
+# --bench-args are skipped, so an interrupted run resumes when started again with the same
+# arguments. --lane: the build/test lane instead of the slot (smoke runs, no timings). --bench-args:
 # extra arguments for every process (word-split), e.g. "--factorizations 3"; --ssids-env: extra
 # environment of the ssids-* processes (word-split), e.g. "OMP_PLACES=cores".
 # Output: one JSON line per process - the bench's line plus "rep", "variant", "ssids_env" and
@@ -44,11 +46,11 @@ while [ $# -gt 0 ]; do
     --bench-args) bench_args="$2"; shift 2 ;;
     --ssids-env) ssids_env="$2"; shift 2 ;;
     --batch) batch_rep="$2"; shift 2 ;;  # internal: one (repetition, case) inside the guard
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) cases+=("$1"); shift ;;
   esac
 done
-[ ${#cases[@]} -gt 0 ] || { sed -n '2,23p' "$0" >&2; exit 2; }
+[ ${#cases[@]} -gt 0 ] || { sed -n '2,25p' "$0" >&2; exit 2; }
 bench="$root/build/spral/bench_gpu_ssids"
 [ -x "$bench" ] || { echo "gpu_g1: $bench missing (tools/dev/build.sh spral)" >&2; exit 2; }
 IFS=, read -r -a vlist <<< "$variants"
@@ -62,12 +64,31 @@ gpu_idle() {
   [ "${used// /}" -lt 16 ] && ! nvidia-smi --query-compute-apps=gpu_uuid --format=csv,noheader | grep -q "$uuid"
 }
 
+# Variants of (case directory, repetition) that FILE does not hold yet (same --ssids-env and
+# --bench-args, not failed), in the order of --variants: the script resumes where it stopped.
+missing_variants() {
+  python3 -c '
+import json, os, sys
+path, case, rep, variants, env, args = sys.argv[1:]
+have = set()
+if os.path.exists(path):
+    for line in open(path):
+        d = json.loads(line)
+        if d.get("failed") or d.get("case") != case or d.get("rep") != int(rep) or d.get("bench_args") != args:
+            continue
+        if d["variant"].startswith("ssids") and d.get("ssids_env") != env:
+            continue
+        have.add(d["variant"])
+print(",".join(v for v in variants.split(",") if v not in have))' "$out" "$(basename "$1")" "$2" "$variants" "$ssids_env" "$bench_args"
+}
+
 if [ -n "$batch_rep" ]; then
-  # All variants of one case, rotated by the repetition so that no variant always runs first.
+  # The missing variants of one case, rotated by the repetition so that no variant always runs first.
   dir="${cases[0]}"
-  n=${#vlist[@]}
+  IFS=, read -r -a todo <<< "$(missing_variants "$dir" "$batch_rep")"
+  n=${#todo[@]}
   for ((i = 0; i < n; i++)); do
-    v="${vlist[$(((i + batch_rep) % n))]}"
+    v="${todo[$(((i + batch_rep) % n))]}"
     backend="${v%%:*}" ordering="${v#*:}"
     case "$backend" in
       mumps) env_args=(CUDA_VISIBLE_DEVICES=) ;;
@@ -96,6 +117,7 @@ for ((rep = 1; rep <= reps; rep++)); do
   for c in "${cases[@]}"; do
     dir="$c"; [ -d "$dir" ] || dir="data/cases/$c"
     [ -d "$dir" ] || { echo "gpu_g1: no case $c" >&2; exit 2; }
+    [ -n "$(missing_variants "$dir" "$rep")" ] || { echo "gpu_g1: rep $rep/$reps $c already in $out" >&2; continue; }
     echo "gpu_g1: rep $rep/$reps $c" >&2
     status=0
     "${guard[@]}" "$self" --batch "$rep" --variants "$variants" --out "$out" --gpu "$gpu" \
