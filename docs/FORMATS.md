@@ -29,8 +29,8 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 ## 2. 求解配置 `config.json`
 
 一个 JSON 对象，键名与 `SolverConfig` / `Target` 字段名**逐字一致**，枚举用 snake_case 字符串；
-未知键报错。省略的键取 `SolverConfig` 默认值（下例除 `target` 外即全部默认值，键序同
-`config_to_json`）。
+未知键报错。省略的键取 `SolverConfig` 默认值（下例除 `target` 外即全部默认值，按 `config_to_json` 源码中
+的顺序列出；它写出的 JSON 键按字母序，nlohmann::json 的对象是有序映射）。
 
 ```json
 {
@@ -139,9 +139,9 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 | `complex_eigenvectors.npy` | 同上，形状 (n, c) |
 | `report.json` | `SolveReport` 的全部字段（键名同 C++ 字段名），外加 `schema_version: 1` |
 
-`report.json` 主要键（键序同 `SolveReport::to_json`）：`schema_version, solver, version, n, nnz_a,
-nnz_b, complex_scalars, problem, norm2_a, norm2_b, scale, hermitian_defect_a, hermitian_defect_b, method,
-sigma_requested, sigma_used, shift_retries, block_size, factor_options{...}, factor_stats{...}, restarts,
+`report.json` 主要键（按 `SolveReport::to_json` 源码中的顺序列出；文件中的键按字母序）：`schema_version,
+solver, version, n, nnz_a, nnz_b, complex_scalars, problem, norm2_a, norm2_b, scale, hermitian_defect_a,
+hermitian_defect_b, method, sigma_requested, sigma_used, shift_retries, block_size, factor_options{...}, factor_stats{...}, restarts,
 op_applies, time_total_s, time_setup_s, time_factor_s, time_iterate_s, time_verify_s,
 time_certificate_s, peak_rss_bytes, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
 backward_error, accepted}], certificate{performed, lower, upper, count_inertia, count_found,
