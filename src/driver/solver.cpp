@@ -320,16 +320,21 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     po.max_seconds = driver::kBProofBudget * driver::factorization_s(driver::mumps_input_size(pencil), est.flops,
                                                                     static_cast<double>(est.factor_entries),
                                                                     fopts.threads);
-    if (fopts.max_memory_mb > 0) po.max_bytes = fopts.max_memory_mb * 1e6;
+    // Its memory: what the budget leaves beside the process now (the proof's arrays are freed
+    // before anything else is allocated), and at most the factorization cap.
+    po.max_bytes = std::max(0.0, budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)));
+    if (fopts.max_memory_mb > 0) po.max_bytes = std::min(po.max_bytes, fopts.max_memory_mb * 1e6);
     po.seed = cfg.seed;
     const driver::HpdProof proof = driver::prove_positive_definite(*b, po);
     event(c, "b_proof", {{"outcome", proof.outcome}, {"proven", proof.proven}, {"indefinite", proof.indefinite},
                          {"lower_bound", proof.lower_bound}, {"theta_min", proof.theta_min},
                          {"theta_max", proof.theta_max}, {"level", static_cast<std::int64_t>(proof.level)},
                          {"shift", proof.shift}, {"attempts", static_cast<std::int64_t>(proof.attempts)},
-                         {"budget_s", po.max_seconds}, {"seconds", proof.seconds}, {"setup_s", proof.setup_s},
-                         {"lanczos_s", proof.lanczos_s}, {"pattern_s", proof.pattern_s},
-                         {"attempts_s", proof.attempts_s}});
+                         {"budget_s", po.max_seconds}, {"max_bytes", po.max_bytes}, {"seconds", proof.seconds},
+                         {"setup_s", proof.setup_s}, {"lanczos_s", proof.lanczos_s}, {"pattern_s", proof.pattern_s},
+                         {"pattern_predicted_s", proof.pattern_predicted_s}, {"attempts_s", proof.attempts_s},
+                         {"stored_bytes", proof.stored_bytes}, {"level1_bound", proof.level1_bound},
+                         {"level1_entries", static_cast<std::int64_t>(proof.level1_entries)}});
     if (proof.proven) {
       Inertia ib;
       ib.neg = ib.zero = 0;

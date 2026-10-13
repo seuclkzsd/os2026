@@ -131,6 +131,18 @@ constexpr double kProofSecondsPerCheckWork = 4.5e-9;
 constexpr double kProofSecondsPerRow = 8e-8;
 constexpr double kProofSecondsPerLevel = 5e-6;
 constexpr double kRowsPerBusyThread = 8.0;
+// Time model of the level-1 pattern, in its two stages: the first pass (row sizes; parallel over
+// rows, O(n) memory) t_count = (c_v visits + c_n n) (16 / threads)^g_c, from the O(n) bounds; the
+// rest (second pass, sorted rows, the sequential CSC structure) t_fill = c_e entries
+// (16 / threads)^g_e, from the first pass' exact count. bench/anaint_fix_bproof.cpp in the gpu02
+// measurement slot (P5c), 16 threads, medians of 3..5 constructions, nonnegative least squares on
+// the relative error over the 8 data-case B's with a positive diagonal, arrowheads of order
+// 1e3..2e4 and 27-point stencils of order 8e3..5.1e5: t_count [0.31, 1.58], t_fill [0.57, 1.84]
+// (predicted / measured; a visits term or entries x log(row length) did not narrow it). Medians of
+// the 1- and 4-thread over the 16-thread times on 10 of them: first pass 9.1x and 2.8x (g_c 0.8),
+// the rest 1.75x and 1.1x (g_e 0.2). The first pass costs 1/50..1/10 of the whole.
+constexpr double kCountSecondsPerVisit = 1.51e-10, kCountSecondsPerRow = 4.63e-9, kCountThreadGamma = 0.8;
+constexpr double kFillSecondsPerEntry = 1.18e-8, kFillThreadGamma = 0.2;
 /// Per-thread workspaces (pattern construction, factorization, check) stay within this many bytes
 /// in all (fewer threads otherwise).
 constexpr double kWorkspaceBytes = 268435456.0;
@@ -259,6 +271,39 @@ bool jacobi_weights(const CsrMatrix<T>& b, std::vector<double>& w) {
   return !bad;
 }
 
+/// Entries of the strict lower triangle of b (sorted columns). O(nnz), parallel over rows.
+template <class T>
+index_t strict_lower_entries(const CsrMatrix<T>& b) {
+  index_t count = 0;
+#pragma omp parallel for reduction(+ : count) schedule(static)
+  for (index_t i = 0; i < b.nrows; ++i)
+    for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1] && b.colind[p] < i; ++p) ++count;
+  return count;
+}
+
+/// Bytes of the stored S of an order-n B whose lower triangle (with the diagonal) holds `entries`:
+/// CSR and CSC structure (int32 columns / rows, the CSC -> CSR positions), the values in both
+/// orders, the row and column pointers and build_columns' cursor.
+template <class T>
+double stored_s_bytes(index_t n, double entries) {
+  const double nn = static_cast<double>(n);
+  return entries * (2.0 * sizeof(T) + 2.0 * sizeof(std::int32_t) + sizeof(index_t)) + 3.0 * (nn + 1.0) * sizeof(index_t);
+}
+
+/// Bytes an attempt on `level` allocates beyond the stored S, on a pattern of `entries` (lower
+/// triangle with the diagonal): level 1's own pattern (CSR and CSC structure, values, pointers),
+/// the factor's values in row and column order, and the larger of the per-thread workspaces (at
+/// most kWorkspaceBytes).
+template <class T>
+double attempt_bytes(index_t n, int level, double entries) {
+  const double nn = static_cast<double>(n);
+  const double structure = entries * (sizeof(T) + 2.0 * sizeof(std::int32_t) + sizeof(index_t)) +
+                           3.0 * (nn + 1.0) * sizeof(index_t);
+  const double factor = 2.0 * entries * sizeof(T);
+  const double ws = static_cast<double>(std::max(1, max_threads())) * nn * (2.0 * sizeof(T) + 20.0);
+  return (level <= 0 ? 0.0 : structure) + factor + std::min(kWorkspaceBytes, ws);
+}
+
 /// The proof's state for one B (see norms.hpp): the scaled lower triangle S of B, the patterns of
 /// the fill levels and their schedules, built once and reused by the attempts.
 template <class T>
@@ -307,17 +352,56 @@ class IcProver {
     return sched_[k];
   }
 
-  /// Bytes an attempt on `level` allocates beyond the stored S: the level's pattern (level 1: CSR
-  /// and CSC structure, values), the factor's values (row and column order) and the larger of the
-  /// per-thread workspaces (at most kWorkspaceBytes). Builds the level's pattern.
-  double attempt_bytes(int level) {
-    const LowerMatrix<T>& p = pattern(level);
-    const double entries = static_cast<double>(p.nnz()), nn = static_cast<double>(n_);
-    const double structure = entries * (sizeof(T) + 2.0 * sizeof(std::int32_t) + sizeof(index_t)) +
-                             2.0 * (nn + 1.0) * sizeof(index_t);
-    const double factor = 2.0 * entries * sizeof(T);
-    const double ws = static_cast<double>(std::max(1, max_threads())) * nn * (2.0 * sizeof(T) + 20.0);
-    return (level <= 0 ? 0.0 : structure) + factor + std::min(kWorkspaceBytes, ws);
+  /// O(n) bounds of the level-1 pattern from the column counts c_k of S's strict lower part,
+  /// before any of it is built: a pass of level1_row over all rows visits sum_k c_k (c_k + 1) / 2
+  /// column entries (row i scans column k up to row i), and every fill entry (i, j) comes from a
+  /// pair of rows i > j of some column k: entries <= nnz(S) + sum_k c_k (c_k - 1) / 2, and <=
+  /// n (n + 1) / 2. Dense columns make both quadratic (an arrowhead B: n^2 / 2). Sequential sums:
+  /// exact integers below 2^53, and independent of the thread count.
+  Level1Size level1_bound() const {
+    Level1Size s;
+    double visits = 0.0, fill = 0.0;
+    for (index_t k = 0; k < n_; ++k) {
+      const double c = static_cast<double>(s_.cptr[k + 1] - s_.cptr[k] - 1);
+      visits += 0.5 * c * (c + 1.0);
+      fill += 0.5 * c * (c - 1.0);
+    }
+    const double nn = static_cast<double>(n_);
+    s.visits = visits;
+    s.entries_bound = std::min(static_cast<double>(s_.nnz()) + fill, 0.5 * nn * (nn + 1.0));
+    return s;
+  }
+
+  /// Entries of the level-1 pattern: the first pass of its construction (row sizes only; O(visits)
+  /// time, per-thread workspaces of O(n)). Nothing else of the pattern is allocated yet.
+  index_t level1_count() {
+    if (l1_counted_) return l1_.ptr[n_];
+    Timer t;
+    l1_.n = n_;
+    l1_.ptr.assign(static_cast<std::size_t>(n_) + 1, 0);
+    const int threads = workspace_threads(static_cast<double>(n_) * sizeof(std::int32_t) * 2.0);
+#pragma omp parallel num_threads(threads)
+    {
+      std::vector<std::int32_t> mark(static_cast<std::size_t>(n_), -1), row;
+#pragma omp for schedule(dynamic, 256)
+      for (index_t i = 0; i < n_; ++i) {
+        level1_row(i, mark, row);
+        l1_.ptr[i + 1] = static_cast<index_t>(row.size()) + 1;
+      }
+    }
+    prefix_sum(l1_.ptr);
+    l1_counted_ = true;
+    pattern_s_ += t.seconds();
+    return l1_.ptr[n_];
+  }
+
+  bool level1_built() const { return l1_built_; }
+  /// Frees the level-1 pattern (counted or built) and its schedule.
+  void release_level1() {
+    l1_ = LowerMatrix<T>{};
+    l1_counted_ = l1_built_ = false;
+    sched_[1] = Schedule{};
+    sched_built_[1] = false;
   }
 
   /// One attempt: incomplete factor of S - shift I on the fill level, then the check.
@@ -369,24 +453,13 @@ class IcProver {
     }
   }
 
-  /// Pattern of fill level 1 (rows in parallel: sizes, then the sorted rows). Values: S on its own
-  /// pattern, 0 on the fill.
+  /// Pattern of fill level 1 (rows in parallel: sizes - level1_count -, then the sorted rows).
+  /// Values: S on its own pattern, 0 on the fill.
   const LowerMatrix<T>& level1() {
     if (l1_built_) return l1_;
+    level1_count();
     Timer t;
-    l1_.n = n_;
-    l1_.ptr.assign(static_cast<std::size_t>(n_) + 1, 0);
     const int threads = workspace_threads(static_cast<double>(n_) * sizeof(std::int32_t) * 2.0);
-#pragma omp parallel num_threads(threads)
-    {
-      std::vector<std::int32_t> mark(static_cast<std::size_t>(n_), -1), row;
-#pragma omp for schedule(dynamic, 256)
-      for (index_t i = 0; i < n_; ++i) {
-        level1_row(i, mark, row);
-        l1_.ptr[i + 1] = static_cast<index_t>(row.size()) + 1;
-      }
-    }
-    prefix_sum(l1_.ptr);
     l1_.col.resize(static_cast<std::size_t>(l1_.ptr[n_]));
     l1_.val.resize(static_cast<std::size_t>(l1_.ptr[n_]));
 #pragma omp parallel num_threads(threads)
@@ -557,6 +630,7 @@ class IcProver {
   LowerMatrix<T> s_;
   std::vector<T> s_cval_;  ///< S's lower values in column order
   LowerMatrix<T> l1_;
+  bool l1_counted_ = false;  ///< l1_.ptr holds the row sizes
   bool l1_built_ = false;
   Schedule sched_[2];
   bool sched_built_[2] = {false, false};
@@ -582,6 +656,40 @@ double hpd_attempt_seconds(index_t n, const IcWork& w, int threads) {
          kProofSecondsPerRow * nn + (parallel ? kProofSecondsPerLevel * levels : 0.0);
 }
 
+double hpd_count_seconds(index_t n, double visits, int threads) {
+  return (kCountSecondsPerVisit * visits + kCountSecondsPerRow * static_cast<double>(n)) *
+         std::pow(16.0 / static_cast<double>(std::max(1, threads)), kCountThreadGamma);
+}
+
+double hpd_fill_seconds(double entries, int threads) {
+  return kFillSecondsPerEntry * entries * std::pow(16.0 / static_cast<double>(std::max(1, threads)), kFillThreadGamma);
+}
+
+template <class T>
+double hpd_stored_bytes(index_t n, double entries) {
+  return stored_s_bytes<T>(n, entries);
+}
+
+template <class T>
+double hpd_attempt_bytes(index_t n, int level, double entries) {
+  return attempt_bytes<T>(n, level, entries);
+}
+
+template <class T>
+Level1Size level1_pattern_size(const CsrMatrix<T>& b, bool build) {
+  std::vector<double> w;
+  if (!jacobi_weights(b, w)) HS_THROW(InvalidInput, "level1_pattern_size: the diagonal of B is not positive");
+  IcProver<T> prover(b, w);
+  Level1Size s = prover.level1_bound();
+  if (build) {
+    s.entries = prover.level1_count();
+    s.count_seconds = prover.pattern_seconds();
+    prover.pattern(1);
+    s.seconds = prover.pattern_seconds();
+  }
+  return s;
+}
+
 // The attempts (norms.hpp): fill level 1 first - on every data case the proof succeeded at, level
 // 1 proved it with the first shift (fraction 0.9), while level 0 failed on two of the four
 // (ss-qa8fk-qa8fm, syn-ghep-zero-cluster-complex-1e4: dropped fill above the shift in some rows)
@@ -592,6 +700,16 @@ double hpd_attempt_seconds(index_t n, const IcWork& w, int threads) {
 // by its predicted time (hpd_attempt_seconds) before it runs. A retry raising only the failing
 // rows' shifts to 1.5 times their deficit was tried and dropped: it never turned a failure into a
 // proof (ss-qa8fk-qa8fm level 0, ss-tem27623 level 1: breakdown).
+// The limits hold before anything is allocated or built (P5c fix: a B with one dense column -
+// an arrowhead - has a level-1 pattern of n^2 / 2 entries, which used to be built before the
+// limits were consulted: 4.3 s and 4.5 GiB for n = 2e4 against a 0.005 s budget and 1 GB):
+//   * S is stored only when it fits opt.max_bytes together with the smallest attempt (level 0);
+//   * level 1: each stage of its construction must fit the time left together with the cheapest
+//     attempt it could lead to (level 0's work is a lower bound: the level-1 pattern contains it)
+//     and is charged before it runs - the first pass (hpd_count_seconds, from the O(n) bounds of
+//     IcProver::level1_bound; O(n) memory), then the rest (hpd_fill_seconds, from the first
+//     pass' exact count), which is allocated only if S, the pattern and the attempt also fit
+//     opt.max_bytes.
 template <class T>
 HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& opt) {
   Timer timer;
@@ -614,6 +732,7 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
     for (index_t i = 0; i < n; ++i) y[i] *= w[i];
   };
   const NormEstimate est = lanczos_ends<T>(n, apply, opt.lanczos_steps, opt.seed, /*stream=*/0x68706470ULL);
+  std::vector<T>().swap(wx);
   r.lanczos_s = timer.seconds();
   r.theta_min = est.ritz_min;
   r.theta_max = est.ritz_max;
@@ -629,14 +748,50 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
     return r;
   }
   const double theta = est.ritz_min;
+  const double s_entries = static_cast<double>(strict_lower_entries(b) + n);
+  r.stored_bytes = stored_s_bytes<T>(n, s_entries);
+  if (r.stored_bytes + attempt_bytes<T>(n, 0, s_entries) > opt.max_bytes) {
+    r.outcome = "too_large";
+    r.stored_bytes = 0.0;
+    r.seconds = timer.seconds();
+    return r;
+  }
   Timer ts;
   IcProver<T> prover(b, w);
   r.setup_s = ts.seconds();
   const int threads = std::max(1, max_threads());
   double left = opt.max_seconds;
+  // The level-1 pattern within the limits (see above); false: not built (outcome set).
+  auto build_level1 = [&]() {
+    if (prover.level1_built()) return true;
+    const Level1Size bound = prover.level1_bound();
+    r.level1_bound = bound.entries_bound;
+    const double attempt_min = hpd_attempt_seconds(n, prover.schedule(0).work, threads);
+    const double count = hpd_count_seconds(n, bound.visits, threads);
+    r.pattern_predicted_s = count;
+    if (count + attempt_min > left) {
+      r.outcome = "too_expensive";
+      return false;
+    }
+    left -= count;
+    r.level1_entries = prover.level1_count();
+    const auto entries = static_cast<double>(r.level1_entries);
+    const double fill = hpd_fill_seconds(entries, threads);
+    r.pattern_predicted_s += fill;
+    const bool slow = fill + attempt_min > left;
+    if (slow || r.stored_bytes + attempt_bytes<T>(n, 1, entries) > opt.max_bytes) {
+      r.outcome = slow ? "too_expensive" : "too_large";
+      prover.release_level1();
+      return false;
+    }
+    left -= fill;
+    prover.pattern(1);
+    return true;
+  };
   // One attempt if its memory and predicted time fit the limits; false: not run.
   auto run = [&](int level, double shift, IcBound& ib) {
-    if (prover.attempt_bytes(level) > opt.max_bytes) {
+    if (level >= 1 && !build_level1()) return false;
+    if (r.stored_bytes + attempt_bytes<T>(n, level, static_cast<double>(prover.pattern(level).nnz())) > opt.max_bytes) {
       r.outcome = "too_large";
       return false;
     }
@@ -684,7 +839,10 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
   template NormEstimate estimate_pencil_spectrum<T>(const CsrMatrix<T>&, const CsrMatrix<T>&,       \
                                                     const SolveFn<T>&, int, std::uint64_t);  \
   template HpdProof prove_positive_definite<T>(const CsrMatrix<T>&, const HpdProofOptions&);         \
-  template IcBound incomplete_cholesky_bound<T>(const CsrMatrix<T>&, int, double);
+  template IcBound incomplete_cholesky_bound<T>(const CsrMatrix<T>&, int, double);                   \
+  template Level1Size level1_pattern_size<T>(const CsrMatrix<T>&, bool);                            \
+  template double hpd_stored_bytes<T>(index_t, double);                                             \
+  template double hpd_attempt_bytes<T>(index_t, int, double);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_NORMS)
 #undef HS_INSTANTIATE_NORMS
 

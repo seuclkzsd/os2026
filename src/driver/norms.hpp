@@ -69,12 +69,15 @@ struct HpdProofOptions {
   /// Uniform shift c = fraction * theta of a level's first attempt, and the smaller fractions
   /// tried after a breakdown (a pivot of the incomplete factorization not positive).
   std::vector<double> fractions{0.9, 0.5, 0.2};
-  /// Time budget (seconds, predicted by hpd_attempt_seconds before each attempt): an attempt beyond
-  /// what is left is not run (outcome too_expensive). The driver passes a fraction of the predicted
-  /// time of the factorization of B that a proof saves.
+  /// Time budget (seconds) of the attempts and of the level-1 pattern, each paid by its predicted
+  /// time (hpd_attempt_seconds, hpd_pattern_seconds) before it runs: one beyond what is left is not
+  /// run (outcome too_expensive). The driver passes a fraction of the predicted time of the
+  /// factorization of B that a proof saves.
   double max_seconds = 1e300;
-  /// Memory limit (bytes) of an attempt beyond the stored lower triangle of S (IcProver: pattern,
-  /// factor, workspaces); a level beyond it is not tried (outcome too_large).
+  /// Memory limit (bytes) of what the proof allocates beyond b: the stored S plus one attempt
+  /// (level 1: its pattern; the factor; workspaces). Checked before anything is allocated - S
+  /// against the smallest attempt (level 0), the level-1 pattern by its exact size from a first
+  /// pass that allocates O(n) only; a level beyond it is not tried (outcome too_large).
   double max_bytes = 1e300;
   /// No attempt when theta < this. The check needs the fill an attempt drops below the shift
   /// c < theta in every row; with theta < 0.1 that held on none of the data cases (bench/
@@ -117,8 +120,12 @@ struct HpdProof {
   double seconds = 0.0;        ///< all of it; the parts:
   double lanczos_s = 0.0;      ///< the diagonal check and the Lanczos run on S
   double setup_s = 0.0;        ///< the stored S (rows and columns; only when theta >= min_theta)
-  double pattern_s = 0.0;      ///< the level-1 pattern (when built)
+  double pattern_s = 0.0;      ///< the level-1 pattern (when counted / built)
   double attempts_s = 0.0;     ///< the attempts (factorizations and checks)
+  double stored_bytes = 0.0;   ///< of the stored S (0: not stored)
+  double level1_bound = 0.0;   ///< O(n) bound of the level-1 pattern's entries (0: not considered)
+  index_t level1_entries = -1; ///< its exact entries (-1: not counted)
+  double pattern_predicted_s = 0.0;  ///< its predicted construction time, charged to max_seconds
   /// "proven", "indefinite", "nonpositive_diagonal", "nearly_singular" (theta < min_theta),
   /// "breakdown" / "gershgorin" / "too_expensive" / "too_large" (why the last attempt did not
   /// prove it).
@@ -142,6 +149,31 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
 /// Predicted seconds of one attempt on an order-n matrix of the given size on `threads` threads
 /// (model fitted with bench/anaint_bproof.cpp, see norms.cpp).
 double hpd_attempt_seconds(index_t n, const IcWork& w, int threads);
+
+/// Size of the fill-level-1 pattern of the proof (lower triangle of S with the diagonal).
+struct Level1Size {
+  double visits = 0.0;         ///< column entries one pass of its construction scans: sum_k c_k (c_k + 1) / 2
+  double entries_bound = 0.0;  ///< O(n) upper bound of its entries: nnz(S) + sum_k c_k (c_k - 1) / 2
+  index_t entries = -1;        ///< exact entries (-1: not built)
+  double count_seconds = 0.0;  ///< time of the first pass (row sizes; when built)
+  double seconds = 0.0;        ///< construction time, the first pass included (when built)
+};
+/// Predicted seconds of the level-1 pattern's construction on `threads` threads (fitted with
+/// bench/anaint_fix_bproof.cpp, see norms.cpp): its first pass (row sizes) on an order-n B from
+/// Level1Size::visits, and the rest from its exact entries.
+double hpd_count_seconds(index_t n, double visits, int threads);
+double hpd_fill_seconds(double entries, int threads);
+/// The O(n) bounds of b's level-1 pattern, and with build = true the pattern built (exposed for
+/// tests and bench/anaint_fix_bproof.cpp). Requires a positive diagonal (InvalidInput).
+template <class T>
+Level1Size level1_pattern_size(const CsrMatrix<T>& b, bool build);
+/// The memory prove_positive_definite charges against HpdProofOptions::max_bytes (exposed for
+/// tests): the stored S of an order-n B whose lower triangle with the diagonal holds `entries`, and
+/// an attempt on `level` whose pattern holds `entries` (on max_threads() threads).
+template <class T>
+double hpd_stored_bytes(index_t n, double entries);
+template <class T>
+double hpd_attempt_bytes(index_t n, int level, double entries);
 
 /// One attempt with a uniform shift (exposed for tests and bench/anaint_bproof.cpp): level 0 or 1,
 /// shift c >= 0 (absolute: S has a unit diagonal). Requires a positive diagonal (InvalidInput).
