@@ -6,7 +6,12 @@
 // exactly as tools/bench/compare.py does (--threads = hs::max_threads(), --memory-budget-gb =
 // 0.9 * --mem-gb, -q) plus --block-size, with the result directory RUN/<case>/<label>-r<rep>/
 // (docs/FORMATS.md §3; an earlier one is removed first). Entries of --p:
-//   0     label "auto": --block-size 0, the driver's auto width (P4 rule: 4 for k >= 8, else 1);
+//   0     label "auto": --block-size 0, the driver's auto width - the P4 rule (4 for k >= 8, else
+//         1) in the binaries this file was written for; since the P5c integration (driver
+//         block_size_for(cfg, ShiftInvertShape)) the rule's pick itself. The case record's
+//         auto_block_size and the "rule" de-duplication below still use the P4 width
+//         (block_size_for(cfg, k)): with such a CLI, compare the rule against P4 with --p 0,4
+//         (cases with k >= 8) or --p 0,1 (k < 8);
 //   p>0   label "p<p>": --block-size p;
 //   rule  label "rule": eigen_detail::recommended_block_size for the case's shape, from an untimed
 //         warm-up CLI run per case (--block-size 1 --log, result in RUN-warmup/<case>/): n, k,
