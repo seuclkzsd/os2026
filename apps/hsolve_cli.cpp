@@ -120,8 +120,9 @@ int main(int argc, char** argv) {
   auto* o_zero = app.add_option("--zero-filter-tol", zero_filter, "drop |lambda| <= TOL*scale (zero modes); < 0 off");
   auto* o_cert = app.add_option("--certificate", certificate,
                                 "completeness check of nearest HEP/GHEP targets: exact (double Sylvester counts) | "
-                                "randomized (exclusion check on the held factorization) | auto (the cheapest that "
-                                "certifies, predicted from measured times) | off")
+                                "randomized (exclusion check on the held factorization; exact counts where kappa of "
+                                "B is not proven) | auto (the cheapest that certifies, predicted from measured "
+                                "times) | off")
                      ->check(CLI::IsMember({"exact", "randomized", "auto", "off"}));
   app.add_option("--log", log_path, "JSON-lines event log file");
   app.add_flag("-v,--verbose", verbose, "debug output");
