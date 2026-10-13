@@ -968,10 +968,16 @@ index_t block_size_for(const SolverConfig& cfg, index_t nev) {
 
 // Nearest targets (P5c blocktune): the rule prices each width's block step from the shift's
 // factor entries, n, nnz(B) and the scalar type at 16 threads and keeps p >= 4 from nev >= 8 on
-// (block_rule.hpp). End to end against the P4 width (bench/blocktune_fix_e2e.cpp, 12 data cases,
-// 16 threads in the measurement slot, 5 interleaved runs, all valid): 0.98x .. 1.19x, gains where
-// it moves 4 -> 8 (3-D, multiple eigenvalues, complex) or 1 -> 2 (low fill, k = 6, 7), the one
-// loss ss-2cubes_sphere (8 instead of 4, 1.6 %); never slower than p = 1 (1.03x .. 2.45x).
+// (block_rule.hpp; calibrated without the BLAS hook: 0.98x .. 1.19x against the P4 width there).
+// In the P5c integration tree (BLAS hook, route all) the wired default against the P4 width, one
+// binary, bench/blocktune_fix_e2e.cpp --p 0,4 / --p 0,1 on its 12 cases, 16 threads in the
+// measurement slot, three campaigns of 3 - 5 interleaved runs, pooled medians, every run valid by
+// tools/eval: gains where it moves 4 -> 8 on multiple eigenvalues (yee-pec-cube-32 1.08x,
+// syn-mem27-46 1.05x) or 1 -> 2 at k = 6, 7 (cav2d-square-1e4 1.08x, cav2d-rect-pert-1e5 1.02x);
+// losses where it moves 4 -> 8 on distinct ones (ss-2cubes_sphere 0.96x, yee-pec-box-1e5 0.97x,
+// yee-bloch-1e4 0.98x; with HS_BLAS_ROUTE=off 1.00x, 0.98x, 1.03x: the hook's narrow kernels made
+// the p <= 4 solves cheaper than the rule's step model assumes); the six cases where both widths
+// are 4 within +-1 %; geometric mean 1.01x. Never slower than p = 1 (blocktune: 1.03x .. 2.45x).
 index_t block_size_for(const SolverConfig& cfg, const eigen_detail::ShiftInvertShape& shape) {
   if (cfg.block_size > 0) return cfg.block_size;
   return eigen_detail::recommended_block_size(shape);

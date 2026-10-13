@@ -40,6 +40,9 @@
 //      on memory-tight runs;
 //   3. the rule is calibrated on nearest-target runs (k wanted pairs next to sigma); spectrum
 //      slicing (per-slice nev, definite.cpp) keeps the P4 rule until measured.
+// End to end with the driver and the BLAS hook (src/blas, route all; steps.cpp): the 4 -> 8 moves
+// on distinct eigenvalues lose 2 - 4 % there (the hook's narrow kernels speed up the p <= 4
+// solves the calibration timed without it): the step model wants a recalibration with the hook.
 // Scalar-independent; thread-safe (pure functions).
 #pragma once
 
