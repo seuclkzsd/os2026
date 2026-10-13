@@ -2,9 +2,11 @@
 // configuration parser, the router (dgemm N = 1 / M = 1 -> dgemv, dtrsm N = 1 -> dtrsv, narrow
 // kernels, parallel splits) against the real BLAS for every routed shape class - edge sizes,
 // transposes, padded leading dimensions, alpha / beta special values, NaN propagation and the
-// beta = 0 rule (C not read) -, the narrow kernels (portable and AVX-512) against a long-double
-// reference, bitwise independence of the thread count, the forced fallback without AVX-512
-// (HS_BLAS_NO_AVX512), concurrent use from many threads, and the profiler's helpers.
+// beta = 0 rule (C not read) -, the narrow kernels and the small triangular solve on every
+// instruction set the CPU has (portable, AVX2, AVX-512) against a long-double reference / the real
+// dtrsm, bitwise independence of the thread count, the forced fallbacks without AVX-512 / AVX2
+// (HS_BLAS_NO_AVX512, HS_BLAS_NO_AVX2), concurrent use from many threads, and the profiler's
+// helpers.
 // The real BLAS is the test executable's (OpenBLAS), found by the hook through dlsym(RTLD_NEXT).
 #include <gtest/gtest.h>
 #include <omp.h>
