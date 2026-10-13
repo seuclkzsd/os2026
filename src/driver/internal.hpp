@@ -307,9 +307,11 @@ double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_
 double factorization_s(const MumpsInputSize& in, double flops, double entries, int threads);
 /// Predicted time of the planned numeric work with factors of `flops` and `entries` on `threads`:
 /// factorizations, certificate counts (on an InertiaCounter when counter_pays, which then adds the
-/// counter's analysis) and the solve calls of width w.block.
+/// counter's analysis) and the solve calls of width w.block. amd_fill > 0: the factors are AMD's,
+/// with this fill ratio (entries / nnz of the pencil) - at low fill its numeric phases parallelize
+/// worse (steps.cpp); 0 for a nested dissection.
 double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
-                         double entries, int threads);
+                         double entries, int threads, double amd_fill = 0.0);
 /// Predicted (flops, entries) of `ordering` on an input whose AMD analysis estimated `amd`
 /// (pencil_nnz: upper entries of the pencil), scaled from the actual estimate `anchor` of the
 /// analysed ordering `anchor_ordering` (AMD itself, or a nested dissection: the relative

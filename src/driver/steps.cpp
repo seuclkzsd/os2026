@@ -468,28 +468,31 @@ PlannedWork plan_work(const SolverConfig& cfg, ProblemType type, index_t n, doub
 namespace {
 
 // The ordering cost model, fitted on bench/anaint_orderings.cpp over the 40 data cases of MUMPS
-// order >= 5000 (gpu02: 2x Xeon Silver 4314, cores 28-31, 4 threads; medians of 3 interleaved
-// one-process runs per case and ordering; one run for the 1-thread time of hsolve ND, for AMD and
-// PORD on ss-ge87h76 / ss-si34h36 and for ss-3dspectralwave2; nonnegative least squares on the
-// relative error; the commands are in bench/anaint_orderings.cpp, the fit script accompanies the
-// module report). Inputs: the MUMPS input size (mumps_input_size: order, upper entries), the graph
-// hsolve's nested dissection orders (OrderingInput::nd) and the factor entries fe / flops of an
-// analysis estimate. In brackets: the range of predicted / measured over the fitted cases.
+// order >= 5000 at the judging configuration: gpu02 (2x Xeon Silver 4314) measurement slot, cores
+// 16-31, 16 threads, one one-process run per case and ordering (P5c); the 1-thread work of hsolve's
+// nested dissection and the shape fits come from the P5 campaign (cores 28-31, 4 threads, medians
+// of 3 interleaved runs, --nd-serial 1). Nonnegative least squares on the relative error; the
+// commands are in bench/anaint_orderings.cpp (the fit script accompanies the module report).
+// Inputs: the MUMPS input size (mumps_input_size: order, upper entries), the graph hsolve's nested
+// dissection orders (OrderingInput::nd) and the factor entries fe / flops of an analysis estimate.
+// In brackets: the range of predicted / measured over the fitted cases.
 //
 // Given-order analysis (MUMPS analysis with PERM_IN: hsolve's nested dissection hands its order
-// over, the InertiaCounter reuses the main one), the floor of every analysis [0.38, 1.55]:
-constexpr double kFloorOrder = 2.1e-7, kFloorEntry = 4.14e-8, kFloorFe = 0.0;
+// over, the InertiaCounter reuses the main one), the floor of every analysis [0.58, 1.54]:
+constexpr double kFloorOrder = 2.25e-7, kFloorEntry = 3.44e-8, kFloorFe = 0.0;
 // hsolve's nested dissection on one thread: W = w_v * vertices + w_e * edges + w_fe * fe of its
 // graph [0.47, 1.38]; on p threads W (kNdSerial + (1 - kNdSerial) / p), kNdSerial the median over
-// the measured 1- and 4-thread times [0.06, 0.35]. 2 threads scaled less than this predicts
-// (median t2 / t4 = 1.28 against 1.52); beyond 4 threads it is an extrapolation.
-constexpr double kNdWorkVertex = 7.03e-6, kNdWorkEdge = 6.54e-8, kNdWorkFe = 3.85e-9, kNdSerial = 0.186;
+// the cases with W > 0.05 s of the measured 16-thread ordering times (quartiles 0.26, 0.47; whole
+// analysis [0.57, 2.04]). It does not scale like Amdahl's law with one serial fraction: 4 threads
+// gave 0.19 (P5), 16 threads 0.38 - the 16-thread analysis is only 1.14x faster than at 4 threads
+// (median over the 29 cases measured at both).
+constexpr double kNdWorkVertex = 7.03e-6, kNdWorkEdge = 6.54e-8, kNdWorkFe = 3.85e-9, kNdSerial = 0.383;
 // MUMPS orderings are serial, on the full input graph: METIS, PORD and SCOTCH cost rho * W (W of
-// the MUMPS input with their own fe; medians; whole analysis [0.5, 1.0], except the disconnected
-// block graphs of the syn-*-real low-fill cases, which they order 3-8x faster - those take AMD
-// anyway); AMD's ordering a_order * order + a_entry * entries [0.28, 1.40].
-constexpr double kRhoMetis = 0.993, kRhoPord = 0.869, kRhoScotch = 1.017;
-constexpr double kAmdOrder = 5.07e-8, kAmdEntry = 4.95e-9;
+// the MUMPS input with their own fe; medians; whole analysis [0.45, 1.0], except the low-fill block
+// graphs of the syn-* cases, which they order 3-8x faster); AMD's ordering a_order * order +
+// a_entry * entries [0.25, 1.31].
+constexpr double kRhoMetis = 1.033, kRhoPord = 1.126, kRhoScotch = 0.626;
+constexpr double kAmdOrder = 3.26e-8, kAmdEntry = 5.32e-9;
 
 // Factorization flops and entries of an ordering relative to AMD's on the same input, as functions
 // of AMD's fill ratio f = fe(AMD) / nnz(pencil): ln r piecewise linear in ln f between the knots
@@ -509,19 +512,29 @@ constexpr ShapeFit kShapeFits[] = {
     {3, {0.88, 1.01, -0.49, -1.03, -1.43, -1.87}, {0.44, 0.52, -0.12, -0.39, -0.66, -0.98}},
 };
 
-// Numeric phases at 4 threads: factorization t_f = f_order * order + f_entry * entries + f_fe * fe +
-// f_flops * flops [0.36, 1.40] (input assembly and scaling, front assembly, dense kernels); a
+// Numeric phases at 16 threads: factorization t_f = f_order * order + f_entry * entries + f_fe * fe +
+// f_flops * flops [0.23, 1.79] (input assembly and scaling, front assembly, dense kernels); a
 // refactorization of the same object kRefactor t_f, an InertiaCounter count kCount t_f (no factors
-// kept); a 1-RHS solve t_s = s_order * order + s_fe * fe [0.36, 1.47], p right-hand sides in one
-// call (1 + kSolvePerRhs (p - 1)) t_s (medians: 1.05 t_s for p = 2, 1.36 t_s for p = 4).
-constexpr double kFacOrder = 4.1e-7, kFacEntry = 5.54e-8, kFacFe = 9.56e-9, kFacFlops = 6.22e-12;
-constexpr double kRefactor = 0.906, kCount = 0.793;
-constexpr double kSolveOrder = 1.08e-7, kSolveFe = 8.12e-10, kSolvePerRhs = 0.121;
-// Other thread counts: (4 / threads)^gamma, the medians of log2(t(2) / t(4)) over 13 cases with AMD
-// and hsolve ND at 2 threads (cores 28-29): factorizations 0.68 [0.40, 1.20], solves 0.58
-// [-0.25, 1.36]. Extrapolated beyond 4 threads.
-constexpr double kFacThreadGamma = 0.68, kSolveThreadGamma = 0.58;
-constexpr double kFitThreads = 4.0;
+// kept); a 1-RHS solve t_s = s_order * order + s_fe * fe [0.30, 1.44], p right-hand sides in one
+// call (1 + kSolvePerRhs (p - 1)) t_s (medians: 0.97 t_s for p = 2, 1.19 t_s for p = 4).
+constexpr double kFacOrder = 1.91e-7, kFacEntry = 3.21e-8, kFacFe = 5.95e-9, kFacFlops = 2.74e-12;
+constexpr double kRefactor = 0.962, kCount = 0.886;
+constexpr double kSolveOrder = 5.16e-8, kSolveFe = 7.10e-10, kSolvePerRhs = 0.062;
+// Other thread counts: (16 / threads)^gamma, from the medians of t(16) / t(4) over the same cases and
+// orderings (P5 campaign at 4 threads): factorizations 0.529 (150 pairs, gamma 0.46), solves 0.735
+// (57 pairs, gamma 0.22). Below 4 threads an extrapolation (2 against 4 threads measured 0.68 and
+// 0.58 in P5).
+constexpr double kFacThreadGamma = 0.46, kSolveThreadGamma = 0.22;
+constexpr double kFitThreads = 16.0;
+// AMD at low fill (fe / nnz(pencil) <= kAmdLowFill: the block / banded syn-* cases): its numeric
+// phases take far longer than their size predicts at 16 threads - deep, narrow elimination trees
+// without separators leave the threads of the tree-parallel L0 layer idle. AMD's measured /
+// predicted time over a nested dissection's on the same case, medians over the 13 data cases with
+// fill <= 4: factorization 1.86 (1.37..2.26), 4-RHS solve 3.15 (2.50..3.81, 10 cases); at fill
+// 5.1..10.8 (2-D grids) 1.05..1.25, so the factor falls to 1 at kAmdFillEnd (ln-linear between).
+// Measured at 16 threads only: scaled by ln(threads) / ln(16), none on one thread.
+constexpr double kAmdLowFill = 4.0, kAmdFillEnd = 5.0;
+constexpr double kAmdLowFillFactorization = 1.86, kAmdLowFillSolve = 3.15;
 
 // Expected gain of analysing a candidate rather than trusting its prediction, as a fraction of its
 // predicted numeric time: from AMD's estimate the nested dissections' fill is known to within
@@ -540,6 +553,14 @@ const ShapeFit* shape_fit(int ordering) {
 
 double thread_factor(int threads, double gamma) {
   return std::pow(kFitThreads / static_cast<double>(std::max(1, threads)), gamma);
+}
+
+/// AMD's low-fill factor (see kAmdLowFill) at fill ratio `fill` on `threads` threads.
+double amd_low_fill_factor(double factor, double fill, int threads) {
+  const double share = std::clamp(std::log(static_cast<double>(std::max(1, threads))) / std::log(kFitThreads), 0.0, 1.0);
+  const double lf = std::log(std::max(fill, 1.0)), lo = std::log(kAmdLowFill), hi = std::log(kAmdFillEnd);
+  const double weight = lf <= lo ? 1.0 : lf >= hi ? 0.0 : (hi - lf) / (hi - lo);
+  return 1.0 + (factor - 1.0) * weight * share;
 }
 
 double given_order_analysis_s(const MumpsInputSize& in, double fe) {
@@ -609,9 +630,13 @@ double factorization_s(const MumpsInputSize& in, double flops, double entries, i
 }
 
 double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
-                         double entries, int threads) {
-  const double t_f = factorization_s(in, flops, entries, threads);
-  const double t_s = (kSolveOrder * in.order + kSolveFe * entries) * thread_factor(threads, kSolveThreadGamma);
+                         double entries, int threads, double amd_fill) {
+  double t_f = factorization_s(in, flops, entries, threads);
+  double t_s = (kSolveOrder * in.order + kSolveFe * entries) * thread_factor(threads, kSolveThreadGamma);
+  if (amd_fill > 0.0) {
+    t_f *= amd_low_fill_factor(kAmdLowFillFactorization, amd_fill, threads);
+    t_s *= amd_low_fill_factor(kAmdLowFillSolve, amd_fill, threads);
+  }
   double s = t_f + std::max(0.0, w.factorizations - 1.0) * kRefactor * t_f;
   if (w.counts > 0) {
     // As the driver will count: on an InertiaCounter when counter_pays (its analysis on the given
@@ -704,7 +729,8 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     cand[i].analysis_s = 0.0;
     cand[i].flops = e.flops;
     cand[i].entries = static_cast<double>(e.factor_entries);
-    cand[i].numeric_s = planned_numeric_s(c.cfg, work, in, cand[i].flops, cand[i].entries, threads);
+    cand[i].numeric_s = planned_numeric_s(c.cfg, work, in, cand[i].flops, cand[i].entries, threads,
+                                          orderings[i] == 0 ? cand[i].entries / std::max(1.0, nnz) : 0.0);
     cand[i].score_s = cand[i].numeric_s;
     // Factors beyond the in-core cap (DESIGN §3.6-3) only run out of core, or not at all: any
     // candidate that fits is preferred, and among those that do not, the smallest.
@@ -727,7 +753,8 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
       cand[i].flops = flops;
       cand[i].entries = entries;
       cand[i].analysis_s = ordering_analysis_s(orderings[i], oin, entries, threads);
-      cand[i].numeric_s = planned_numeric_s(c.cfg, work, in, flops, entries, threads);
+      cand[i].numeric_s = planned_numeric_s(c.cfg, work, in, flops, entries, threads,
+                                            orderings[i] == 0 ? entries / std::max(1.0, nnz) : 0.0);
       const double gain = nested_dissection(orderings[anchor]) ? kGainFromNd : kGainFromAmd;
       cand[i].score_s = cand[i].analysis_s + (1.0 - gain) * cand[i].numeric_s;
     }

@@ -178,6 +178,29 @@ TEST(DriverOrderingModel, NumericWorkGrowsWithTheFactorsAndTheWork) {
   EXPECT_GT(base, planned_numeric_s(cfg, more, in, 7e10, 5e7, 4));
 }
 
+// AMD at low fill (block / banded graphs): its numeric phases get the low-fill factors of the
+// 16-thread fit, fading out between fill 4 and 5, and not at all on one thread.
+TEST(DriverOrderingModel, AmdLowFillParallelizesWorse) {
+  using hs::driver::planned_numeric_s;
+  const auto cfg = nearest_cfg(0.0, 12);
+  const hs::driver::MumpsInputSize in{100000.0, 500000.0};
+  const auto w = hs::driver::plan_work(cfg, hs::ProblemType::Standard, 100000, 1.0);
+  const double nd = planned_numeric_s(cfg, w, in, 1e8, 2e6, 16);
+  const double low = planned_numeric_s(cfg, w, in, 1e8, 2e6, 16, 1.5);
+  EXPECT_GT(low, 1.8 * nd);  // factorization x 1.86, solves x 3.15
+  EXPECT_LT(low, 3.2 * nd);
+  EXPECT_DOUBLE_EQ(planned_numeric_s(cfg, w, in, 1e8, 2e6, 16, 4.0), low);
+  const double mid = planned_numeric_s(cfg, w, in, 1e8, 2e6, 16, 4.5);
+  EXPECT_LT(mid, low);
+  EXPECT_GT(mid, nd);
+  EXPECT_DOUBLE_EQ(planned_numeric_s(cfg, w, in, 1e8, 2e6, 16, 5.0), nd);
+  EXPECT_DOUBLE_EQ(planned_numeric_s(cfg, w, in, 1e8, 2e6, 16, 40.0), nd);
+  EXPECT_DOUBLE_EQ(planned_numeric_s(cfg, w, in, 1e8, 2e6, 1, 1.5), planned_numeric_s(cfg, w, in, 1e8, 2e6, 1));
+  const double four = planned_numeric_s(cfg, w, in, 1e8, 2e6, 4, 1.5) / planned_numeric_s(cfg, w, in, 1e8, 2e6, 4);
+  EXPECT_GT(four, 1.0);
+  EXPECT_LT(four, low / nd);
+}
+
 TEST(DriverOrderingModel, ShapePredictions) {
   using hs::driver::predicted_shape;
   hs::FactorEstimate amd;
