@@ -32,6 +32,38 @@
 // contracts C++ by default and would turn the register path's mul + add (vector arithmetic in
 // the intrinsics) into an FMA while the chunked path's finish_block (baseline ISA, no FMA) rounds
 // both products - test_asmkern_fix checks it with inexact alpha and beta.
+//
+// License of the parts adapted from OpenBLAS (the NN column-group update, the TN block and its
+// REDUCE_4-style reduction, also in narrow_kernels.cpp: V512 / V256 reduce4), reproduced as its
+// clause 1 requires (OpenBLAS 0.3.34: the first copyright line is that of
+// kernel/x86_64/dgemv_n_microk_skylakex-4.c, the second that of
+// kernel/x86_64/dgemm_small_kernel_{nn,tn}_skylakex.c; the rest is the same in all three files):
+//
+//   Copyright (c) 2014, The OpenBLAS Project
+//   Copyright (c) 2021, The OpenBLAS Project
+//   All rights reserved.
+//   Redistribution and use in source and binary forms, with or without
+//   modification, are permitted provided that the following conditions are
+//   met:
+//   1. Redistributions of source code must retain the above copyright
+//   notice, this list of conditions and the following disclaimer.
+//   2. Redistributions in binary form must reproduce the above copyright
+//   notice, this list of conditions and the following disclaimer in
+//   the documentation and/or other materials provided with the
+//   distribution.
+//   3. Neither the name of the OpenBLAS project nor the names of
+//   its contributors may be used to endorse or promote products
+//   derived from this software without specific prior written permission.
+//   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+//   AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+//   ARE DISCLAIMED. IN NO EVENT SHALL THE OPENBLAS PROJECT OR CONTRIBUTORS BE
+//   LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//   DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+//   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+//   CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+//   OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
+//   USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 using reg = typename V::reg;
 
