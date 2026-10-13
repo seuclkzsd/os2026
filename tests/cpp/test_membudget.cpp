@@ -6,6 +6,7 @@
 // when the in-core attempt itself fails for memory (FactorOptions::ooc_on_memory_error).
 #include <gtest/gtest.h>
 
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -500,11 +501,14 @@ TEST(DriverMemoryBudget, ABudgetBelowTheInCoreFactorsGivesAValidOutOfCoreRun) {
 // ------------------------------------------------------------------------------ RLIMIT_AS
 
 // The child of AnAddressSpaceLimitIsHonoured: a 3-D solve (syn-mem27-46 under `ulimit -v 8`, scaled
-// down) under RLIMIT_AS = its address space + 1.25 GiB. Before the fix the budget derived from that
-// limit was planned against RSS and MUMPS reserved the whole factorization cap: with the BLAS
-// buffers and malloc arenas already mapped (~0.15 GB per thread) the address space ran out
-// (INFO -13, or OpenBLAS failing to allocate and the process crashing). Exits 0 on a valid result
-// planned in the address space, 1 on a wrong one, 2 when the solve throws.
+// down) in a process that holds 4 GiB of address space it never uses - as OpenBLAS' buffers, malloc
+// arenas and stacks hold 3.4 GB at 16 threads; held here explicitly, because the CPU affinity caps
+// OpenBLAS' threads on a small test lane - under RLIMIT_AS = that address space + 2 GiB. The
+// reviewed P7 code (d693e46) planned the budget derived from the limit against RSS and gave MUMPS
+// the whole cap, which reserved half of it: OpenBLAS then failed to allocate and the child died
+// ("Memory allocation still failed after 10 retries", 3 of 3 runs on gpu02), as syn-mem27-46 /
+// -80 did under `ulimit -v 8`. Exits 0 on a valid result planned in the address space, 1 on a wrong
+// one, 2 when the solve throws.
 [[noreturn]] void solve_under_an_address_space_limit() {
   ::unsetenv(hs::kMemoryLimitEnv);  // RLIMIT_AS must be the smallest limit (the guard declares one)
   const index_t m = 30;
@@ -516,10 +520,13 @@ TEST(DriverMemoryBudget, ABudgetBelowTheInCoreFactorsGivesAValidOutOfCoreRun) {
   const double sigma = w[j] + 0.3 * (w[j + 1] - w[j]);
   auto cfg = nearest(sigma, 8);
   cfg.threads = 4;
+  void* held = ::mmap(nullptr, static_cast<std::size_t>(4.0 * kGiB), PROT_NONE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (held == MAP_FAILED) std::_Exit(3);
   const auto vm = hs::memory_in_use_bytes(hs::MemoryMeasure::AddressSpace);
   struct rlimit rl {};
   ::getrlimit(RLIMIT_AS, &rl);
-  rl.rlim_cur = static_cast<rlim_t>(vm + static_cast<std::int64_t>(1.25 * kGiB));
+  rl.rlim_cur = static_cast<rlim_t>(vm + static_cast<std::int64_t>(2.0 * kGiB));
   if (vm <= 0 || ::setrlimit(RLIMIT_AS, &rl) != 0) {
     std::fprintf(stderr, "cannot set RLIMIT_AS\n");
     std::_Exit(3);
