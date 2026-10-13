@@ -57,6 +57,9 @@ rm -rf "$build_root"
 mkdir -p "$build_root"
 tar -xzf "$tarball" -C "$build_root"
 srcdir="$build_root/spral-$SPRAL_VERSION"
+# The generated build files call meson by the path it was started from: an executable copy.
+install -m 755 "$meson_pyz" "$build_root/meson.pyz"
+meson_pyz="$build_root/meson.pyz"
 
 echo "[2/4] configure (gpu=$gpu)"
 export CC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc"
