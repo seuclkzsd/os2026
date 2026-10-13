@@ -6,6 +6,9 @@ option(HSOLVE_BUILD_TESTS "Build unit tests" ON)
 option(HSOLVE_BUILD_APPS "Build command-line applications" ON)
 option(HSOLVE_WERROR "Treat compiler warnings as errors" OFF)
 option(HSOLVE_BUILD_BENCH "Build benchmark/measurement programs (bench/*.cpp)" ON)
+# Experiment G1 only (bench/gpu_ssids.cpp, results/gpu_g1.md): SPRAL SSIDS vs MUMPS. Needs SPRAL
+# (tools/dev/build_spral.sh; SPRAL_ROOT = its install prefix) and the CUDA toolkit (driver API, NVML).
+option(HSOLVE_WITH_SPRAL "Build bench_gpu_ssids against SPRAL (experiment only, needs CUDA)" OFF)
 set(HSOLVE_SANITIZE "" CACHE STRING "Sanitizers for debug builds, e.g. address,undefined")
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -68,12 +71,23 @@ endif()
 # ---- benchmarks: one executable per bench/*.cpp (reproducible measurements, run via guard.py) ----
 if(HSOLVE_BUILD_BENCH)
   file(GLOB HSOLVE_BENCH_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/bench/*.cpp")
+  list(FILTER HSOLVE_BENCH_SOURCES EXCLUDE REGEX "/gpu_ssids\\.cpp$")  # HSOLVE_WITH_SPRAL below
   foreach(src IN LISTS HSOLVE_BENCH_SOURCES)
     get_filename_component(name "${src}" NAME_WE)
     add_executable(bench_${name} "${src}")
     target_include_directories(bench_${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp")
     target_link_libraries(bench_${name} PRIVATE hsolve LAPACK::LAPACK BLAS::BLAS MUMPS::MUMPS nlohmann_json::nlohmann_json)
   endforeach()
+  if(HSOLVE_WITH_SPRAL)
+    set(SPRAL_ROOT "$ENV{SPRAL_ROOT}" CACHE PATH "SPRAL install prefix (tools/dev/build_spral.sh)")
+    find_path(SPRAL_INCLUDE_DIR spral_ssids.h HINTS "${SPRAL_ROOT}/include" REQUIRED)
+    find_library(SPRAL_LIBRARY spral HINTS "${SPRAL_ROOT}/lib" REQUIRED)
+    find_package(CUDAToolkit REQUIRED)
+    add_executable(bench_gpu_ssids "${CMAKE_CURRENT_SOURCE_DIR}/bench/gpu_ssids.cpp")
+    target_include_directories(bench_gpu_ssids PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${SPRAL_INCLUDE_DIR}")
+    target_link_libraries(bench_gpu_ssids PRIVATE hsolve MUMPS::MUMPS nlohmann_json::nlohmann_json
+                                                  "${SPRAL_LIBRARY}" CUDA::cuda_driver CUDA::nvml)
+  endif()
 endif()
 
 # ---- Python package (python/, docs/PYTHON.md): ON by default when pybind11 is found ----

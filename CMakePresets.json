@@ -29,12 +29,26 @@
       "inherits": "base",
       "displayName": "Release without -march=native (for distribution)",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "HSOLVE_NATIVE": "OFF" }
+    },
+    {
+      "name": "spral",
+      "inherits": "base",
+      "displayName": "Release + bench_gpu_ssids (experiment G1: SPRAL from tools/dev/build_spral.sh, CUDA 12.2)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "HSOLVE_BUILD_TESTS": "OFF",
+        "HSOLVE_BUILD_PYTHON": "OFF",
+        "HSOLVE_WITH_SPRAL": "ON",
+        "SPRAL_ROOT": "$env{HOME}/opt/spral-2025.09.18-cuda12.2",
+        "CUDAToolkit_ROOT": "/usr/local/cuda-12.2"
+      }
     }
   ],
   "buildPresets": [
     { "name": "release", "configurePreset": "release", "jobs": 4 },
     { "name": "debug", "configurePreset": "debug", "jobs": 4 },
-    { "name": "portable", "configurePreset": "portable", "jobs": 4 }
+    { "name": "portable", "configurePreset": "portable", "jobs": 4 },
+    { "name": "spral", "configurePreset": "spral", "jobs": 4 }
   ],
   "testPresets": [
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true }, "execution": { "jobs": 4, "noTestsAction": "error" } },
