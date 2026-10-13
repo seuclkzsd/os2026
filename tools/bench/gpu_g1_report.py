@@ -114,7 +114,7 @@ def main() -> int:
                 continue
             inertia = "ok" if len(negs_all) == 1 and s["zeros"] == [0] and s["oks"] else \
                 f"neg {s['negs']} zero {s['zeros']} (case: {negs_all})"
-            ordering = v.split(":")[1]
+            ordering = v.split(" ")[0].split(":")[1]
             if s.get("mumps_ordering"):
                 ordering += f" ({s['mumps_ordering']})"
             print(f"| {case} | {v} | {ordering} | {fmt(s['analyse'])} | {fmt(s['cold'])} | {fmt(s['warm'])} "
