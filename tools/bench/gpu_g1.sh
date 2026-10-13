@@ -17,8 +17,9 @@
 # status 3. --lane: the build/test lane instead of the slot (smoke runs, no timings). --bench-args:
 # extra arguments for every process (word-split), e.g. "--factorizations 3"; --ssids-env: extra
 # environment of the ssids-* processes (word-split), e.g. "OMP_PLACES=cores".
-# Output: one JSON line per process - the bench's line plus "rep" and "variant" ("failed": true if
-# it exited non-zero) - appended to FILE (default results/gpu_g1.jsonl); stderr goes to FILE.log.
+# Output: one JSON line per process - the bench's line plus "rep", "variant", "ssids_env" and
+# "bench_args" ("failed": true if it exited non-zero) - appended to FILE (default
+# results/gpu_g1.jsonl); stderr goes to FILE.log.
 # Report: python3 tools/bench/gpu_g1_report.py FILE
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -78,8 +79,8 @@ if [ -n "$batch_rep" ]; then
     esac
     if line="$(env "${env_args[@]}" "$bench" --case "$dir" --backend "$backend" --ordering "$ordering" \
                  ${extra[@]+"${extra[@]}"} 2>>"$out.log")"; then
-      python3 -c 'import json, sys; d = json.loads(sys.argv[1]); d.update(rep=int(sys.argv[2]), variant=sys.argv[3], ssids_env=sys.argv[4]); print(json.dumps(d))' \
-        "$line" "$batch_rep" "$v" "$([ "$backend" = mumps ] || echo "$ssids_env")" >> "$out"
+      python3 -c 'import json, sys; d = json.loads(sys.argv[1]); d.update(rep=int(sys.argv[2]), variant=sys.argv[3], ssids_env=sys.argv[4], bench_args=sys.argv[5]); print(json.dumps(d))' \
+        "$line" "$batch_rep" "$v" "$([ "$backend" = mumps ] || echo "$ssids_env")" "$bench_args" >> "$out"
     else
       echo "gpu_g1: $v on $dir failed (see $out.log)" >&2
       printf '{"case": "%s", "variant": "%s", "rep": %d, "failed": true}\n' "$(basename "$dir")" "$v" "$batch_rep" >> "$out"
