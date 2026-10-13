@@ -14,8 +14,8 @@ tolerance). Two variants were projected from measured costs:
 * **V2:** a single factor without refinement during the Krylov phase, with a final refinement of
   the Ritz pairs. Its final refinement reaches the tolerance on only 3 of 8 cases.
 
-Even if that refinement cost nothing, V2 would give 1.15-1.19x on the three 3-D head-to-head cases
-and 0.95-0.99x on the two 2-D ones. **Recommendation: keep `factor_precision = double` as the only
+Even if that refinement cost nothing, V2 would give 1.12-1.19x on the three 3-D head-to-head cases
+and 0.90-0.99x on the two 2-D ones. **Recommendation: keep `factor_precision = double` as the only
 default.**
 
 What single precision does buy is memory: the factors take 0.51-0.67x of the double storage. On
@@ -109,9 +109,12 @@ default 14 GB budget, where the double path goes out of core and takes 2.2x long
   * B's definiteness factorization and the certificate counts stay double and are unchanged.
   * A V2 that does not reach the tolerance within 12 steps is marked "fails": it would need a double
     refactorization and rerun, which is a loss.
+  * V2 bound = T_base - n_sigma * (numeric_double - numeric_single) + (Krylov_V2 - Krylov_double) + c,
+    with the faster of V2's two Krylov tolerances. It sets the Ritz-pair refinement and the extra
+    Rayleigh-Ritz to zero and keeps c, like the two projected columns.
   * GHIEP (wg-square-1e5) has no Lanczos simulation. For it, V1 = base + solve time *
     (refined / double application cost), and the V2 bound = base with every solve at the plain
-    single speed and free refinement.
+    single speed and free refinement. Its certificate is not performed (indefinite B), so c = 0.
 * **Gate (from the task).** A variant must be projected >= 1.10x on at least three of the five
   head-to-head cases, with no loss above 3% on any.
 
@@ -228,20 +231,22 @@ Eigenvalue agreement with the double arm, |lambda - mu| / (scale + |mu|):
 ## 6. Projection and gate
 
 Projected 16-core totals in seconds; the speedup is base / projected. "V2 bound" assumes that the
-Ritz-pair refinement and the extra Rayleigh-Ritz cost nothing.
+Ritz-pair refinement and the extra Rayleigh-Ritz cost nothing. Like the projected columns, it
+includes c: 0.04, 0.02, 0.14 and 0.10 s on ss-qa8fk-qa8fm, cav2d-rect-pert-1e5, ss-tem152078 and
+syn-ghep-near-singular-real-1e5, whose certificates counted on the main object.
 
 | case | base | numeric saved | V1 projected | V1 measured end to end (sec. 6.1) | V2 projected | V2 bound | V2 detail |
 |---|---|---|---|---|---|---|---|
 | **syn-mem27-46** | 2.53 | 0.20 | 4.67 (0.54x), not accepted | invalid (0/3) | **2.27 (1.11x)** | 2.13 (1.19x) | 28 appl. 0.19 s + refine 0.14 s vs 44 / 0.40 s; final eta 5e-11..9e-11 (no margin) |
 | **yee-pec-box-1e5** | 2.95 | 0.22 | 5.14 (0.57x) | 5.01 (0.59x) | fails | 2.52 (1.17x) | eta 1-2e-8 after 12 steps |
 | **wg-square-1e5** (GHIEP) | 0.48 | 0.01 | 1.22 (0.39x) | 1.39 (0.35x) | <= 0.48 (0.99x) | 0.48 (0.99x) | single solves not faster (2-D) |
-| **ss-qa8fk-qa8fm** | 1.70 | 0.08 | 3.17 (0.54x) | 2.89 (0.59x) | fails | 1.47 (1.15x) | eta 1-2e-8 after 12 steps |
-| **cav2d-rect-pert-1e5** | 0.31 | 0.005 | 0.80 (0.38x) | 0.76 (0.40x) | fails | 0.32 (0.95x) | eta 1e-9 after 12 steps; single solve 0.79x |
+| **ss-qa8fk-qa8fm** | 1.70 | 0.08 | 3.17 (0.54x) | 2.89 (0.59x) | fails | 1.51 (1.12x) | eta 1-2e-8 after 12 steps |
+| **cav2d-rect-pert-1e5** | 0.31 | 0.005 | 0.80 (0.38x) | 0.76 (0.40x) | fails | 0.34 (0.90x) | eta 1e-9 after 12 steps; single solve 0.79x |
 | syn-mem125-46 | 12.31 | 1.09 | 25.93 (0.47x) | 25.27 (0.49x) | fails | 9.31 (1.32x) | eta 4-6e-10 after 12 steps (1.2 s) |
-| ss-tem152078 | 5.46 | 0.17 | 13.65 (0.40x) | 15.24 (0.36x) | 5.01 (1.09x)* | 4.87 (1.12x) | *passes eta, but eigenvalues 2e-8 off double's |
+| ss-tem152078 | 5.46 | 0.17 | 13.65 (0.40x) | 15.24 (0.36x) | 5.01 (1.09x)* | 5.01 (1.09x) | *passes eta, but eigenvalues 2e-8 off double's |
 | yee-bloch-1e4 | 0.82 | 0.06 | 1.42 (0.58x) | 1.42 (0.58x) | fails | 0.72 (1.14x) | eta 2e-8 after 12 steps |
 | syn-near-singular-complex-1e5 | 2.47 | - | - | error, no fallback (0/3) | fails | - | single factor unusable at sigma |
-| syn-ghep-near-singular-real-1e5 | 1.29 | 0.01 | 2.76 (0.47x), not accepted | invalid (0/3) | 1.39 (0.93x) | 1.22 (1.06x) | low fill: nothing to gain |
+| syn-ghep-near-singular-real-1e5 | 1.29 | 0.01 | 2.76 (0.47x), not accepted | invalid (0/3) | 1.39 (0.93x) | 1.32 (0.97x) | low fill: nothing to gain |
 
 **Gate: FAILED. Stage B was not started.**
 * V1 loses on every case.
@@ -250,9 +255,10 @@ Ritz-pair refinement and the extra Rayleigh-Ritz cost nothing.
   wg-square-1e5.
 * An "auto" rule using single only on 3-D cases cannot rescue it: yee-pec-box-1e5 and
   ss-qa8fk-qa8fm fail the refinement.
-* Even with a free refinement, only the three 3-D cases reach 1.15-1.19x. A refinement would have to
-  cost at most 0.16 s (yee-pec-box-1e5) or 0.07 s (ss-qa8fk-qa8fm), i.e. 3 inverse-iteration steps.
-  The measured rate needs 15-25.
+* Even with a free refinement, only the three 3-D cases reach 1.12-1.19x. For 1.10x a refinement
+  would have to cost at most 0.16 s on yee-pec-box-1e5 and 0.03 s on ss-qa8fk-qa8fm. At the
+  measured 0.044 and 0.024 s per step, that is about 3 steps and 1 step. The measured rate needs
+  15-25.
 
 ### 6.1 V1 end to end (the existing `--precision single`)
 
@@ -302,7 +308,7 @@ These were run with the committed bench, on the baseline reports, `--reps 1 --no
 Making V2 work would take a Krylov-accelerated refinement. One option is a few restarts of the
 refined-operator Lanczos from the V2 basis, but each refined application costs 2.7-16.6x a double
 one (section 4). The other is the existing Jacobi-Davidson with the single factor as
-preconditioner, which P3 measured at 3-4x the double solves. Neither fits in the 0.07-0.16 s budget
+preconditioner, which P3 measured at 3-4x the double solves. Neither fits in the 0.03-0.16 s budget
 above.
 
 ## 8. The 1e6 case: memory (syn-mem27-100, n = 1e6, 27-point, sigma = 0, k = 12)
