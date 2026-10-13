@@ -44,7 +44,8 @@ BLAS 调用改用自带的 AVX-512 / AVX2 窄核、L0 层之上的大调用并�
 常用覆盖参数（覆盖 config.json 中的同名键，见 `docs/FORMATS.md` §2）：`--tol`、`--threads`、
 `--memory-budget-gb`、`--precision double|single`、`--slice-size N`（每个位移至多 N 个特征值，0 = 自动）、
 `--block-size N`（Krylov 块宽，0 = 自动：HEP/GHEP 的 nearest 运行由块宽规则按 σ 处分解的因子条目等在
-1/2/4/8 中选、需求 ≥ 8 对时至少 4，切片需求 ≥ 8 对时 4；GHIEP n ≥ 2e4 且 ≥ 4 对时 2；1 = 单向量）、
+1/2/4/8 中选、需求 ≥ 8 对时至少 4、8 须比 4 有 10% 的模型收益，切片需求 ≥ 8 对时 4；GHIEP n ≥ 2e4 且
+≥ 4 对时 2；1 = 单向量）、
 `--zero-filter-tol TOL`（|λ| ≤ TOL·scale 视为非物理零模，按惯性排除；< 0 关闭）、
 `--certificate exact|randomized|auto|off`（nearest 的完备性检验：exact = 双精度惯性计数（默认）；randomized =
 在已有分解上的随机排除检验，失败概率 ≤ `certificate_delta`（默认 1e-12），只在 B 的条件数有证明时（B = I、
@@ -71,17 +72,21 @@ res.eigenvalues, res.eigenvectors, res.report["success"]
 有效配置，存于 `tools/bench/slepc_profiles.json`，方法见 `results/baseline_tuning.md`）与独立评测：
 
 ```bash
-python3 tools/run/guard.py -- python tools/bench/compare.py --tag mytag --cores 24-30,33-41 \
-    --slepc-profile best --reps 5 case1 case2 ...                                # 结果在 results/mytag.md（--out-dir 可改）
+python3 tools/run/guard.py --exclusive --timeout 2700 -- python3 tools/bench/compare.py --tag mytag \
+    --cores 16-31 --slepc-profile best --reps 5 case1 case2 ...                 # 测量槽内；结果在 results/mytag.md（--out-dir 可改）
 python3 tools/run/guard.py -- python -m tools.eval.sweep results/raw/mytag      # 评测汇总 results/eval_mytag.md
 ```
 
-compare.py 对每次运行都用 `tools/eval` 判定有效性，只在双方每次重复都有效时给加速比，因此须在 guard 下运行。
+compare.py 对每次运行都用 `tools/eval` 判定有效性，只在双方每次重复都有效时给加速比，因此须在 guard 下运行；
+计时时外层 guard 持有测量槽（`--exclusive`，每次 ≤ 2700 s，长的对比分几次），compare.py 自己不加 `--exclusive`。
+`--solvers`（逗号分隔、交错运行；默认 `hsolve,hsolve-nocert,slepc`）可选 `hsolve`（默认配置，certificate = exact）、
+`hsolve-auto`（certificate = auto）、`hsolve-nocert`（关闭证书）与 `slepc`，未知名称在任何运行之前被拒绝。
 
-所有运行都经过资源看门狗（共享机器）：
+所有运行都经过资源看门狗（共享机器；集群节点上的两条道见下）：
 
 ```bash
-python3 tools/run/guard.py --mem-gb 30 --timeout 3600 -- ./build/release/hsolve ...
+python3 tools/run/guard.py --exclusive --timeout 2700 -- ./build/release/hsolve ...       # 计时：测量槽（16 核、32 GiB）
+python3 tools/run/guard.py --skip-busy-check --timeout 600 -- ./build/release/hsolve ...  # 冒烟：构建/测试道（≤ 12 GiB）
 ```
 
 ## 集群节点（gpu01 / gpu02，空闲时 c001–c005）
