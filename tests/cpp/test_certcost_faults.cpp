@@ -1,10 +1,12 @@
 // Robustness of the certificate's factorizations (P8 "certcost", src/driver/steps.cpp CountSource,
 // src/driver/certificate.*, src/driver/definite.cpp): a count that fails - an InertiaCounter whose
 // MUMPS factorization runs out of memory (INFO -19 under its ICNTL(23) cap), a count on the main
-// factorization object, a counter predicted not to fit the memory left, the refactorization of a
-// deflated rerun - never ends the solve. Each path is forced by SolverConfig::certificate_fault_count
-// (its bits: internal.hpp kFault*), real and complex: counts move to the other source; with no
-// source left the converged pairs are returned with the certificate performed but not completed.
+// factorization object, a counter or a main object predicted not to fit the memory left, the
+// refactorization at sigma of a deflated rerun or a randomized check; out of memory, another MUMPS
+// error or std::bad_alloc - never ends the solve. Each path is forced by
+// SolverConfig::certificate_fault_count (its bits: internal.hpp kFault*), real and complex: counts
+// move to the other source; with no source left a nearest target returns its converged pairs with
+// the certificate performed but not completed, a window target the pairs of its completed slices.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -21,6 +23,7 @@
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
 #include "hsolve/solver.hpp"
+#include "hsolve/util.hpp"
 #include "support/fixtures.hpp"
 
 namespace {
@@ -166,14 +169,16 @@ void expect_not_completed(const hs::Solution<T>& sol) {
 TEST(DriverCountFailureConfig, ParseValidateRoundTrip) {
   EXPECT_EQ(hs::SolverConfig{}.certificate_fault_count, 0);
   EXPECT_EQ(hs::parse_config(R"({"certificate_fault_count": 13})").certificate_fault_count, 13);
-  const auto j = nlohmann::json::parse(hs::config_to_json(hs::parse_config(R"({"certificate_fault_count": 5})")));
-  EXPECT_EQ(j["certificate_fault_count"], 5);
-  for (const char* bad : {R"({"certificate_fault_count": -1})", R"({"certificate_fault_count": 16})",
-                          R"({"certificate_fault_count": 1.5})"})
-    EXPECT_THROW(hs::parse_config(bad), hs::Error) << bad;
+  EXPECT_EQ(hs::parse_config(R"({"certificate_fault_count": 95})").certificate_fault_count, 95);  // 64+16+15
+  const auto j = nlohmann::json::parse(hs::config_to_json(hs::parse_config(R"({"certificate_fault_count": 37})")));
+  EXPECT_EQ(j["certificate_fault_count"], 37);
+  for (const char* bad : {R"({"certificate_fault_count": -1})", R"({"certificate_fault_count": 128})",
+                          R"({"certificate_fault_count": 48})", R"({"certificate_fault_count": 1.5})"})
+    EXPECT_THROW(hs::parse_config(bad), hs::Error) << bad;  // 48: two kinds at once
   EXPECT_EQ(hs::driver::kFaultCountMask,
             hs::driver::kFaultCounterCounts | hs::driver::kFaultMainCounts | hs::driver::kFaultCountAllowance |
-                hs::driver::kFaultRefactorization);
+                hs::driver::kFaultRefactorization | hs::driver::kFaultOtherError | hs::driver::kFaultBadAlloc |
+                hs::driver::kFaultLate);
 }
 
 // ---------------------------------------------------------------------- end to end, typed
@@ -289,6 +294,264 @@ TYPED_TEST(DriverCountFailureTyped, WindowCountsFallBackOrFail) {
   } catch (const hs::Error& e) {
     EXPECT_EQ(e.code(), hs::Error::Code::OutOfMemoryBudget);
     EXPECT_NE(std::string(e.what()).find("no inertia count possible"), std::string::npos) << e.what();
+  }
+}
+
+// The error code of "no count possible" names the kind of failure: out of memory only when every
+// source failed for memory (an estimate over the allowance, MUMPS -19, std::bad_alloc), else
+// factorization_failed - whichever source was tried first. (A window target before its first
+// slice: the error ends the solve, so the code is what the caller sees.)
+TYPED_TEST(DriverCountFailureTyped, NoCountErrorCodeNamesTheKindOfFailure) {
+  using T = TypeParam;
+  namespace d = hs::driver;
+  const auto a = matrix<T>();
+  struct Case {
+    hs::Toggle counter;
+    index_t faults;
+    hs::Error::Code code;
+  };
+  const Case cases[] = {
+      // counter over the allowance (memory), main object out of memory / std::bad_alloc
+      {hs::Toggle::On, d::kFaultCountAllowance | d::kFaultMainCounts, hs::Error::Code::OutOfMemoryBudget},
+      {hs::Toggle::On, d::kFaultCountAllowance | d::kFaultMainCounts | d::kFaultBadAlloc,
+       hs::Error::Code::OutOfMemoryBudget},
+      // the last failure (main object) is another MUMPS error
+      {hs::Toggle::On, d::kFaultCountAllowance | d::kFaultMainCounts | d::kFaultOtherError,
+       hs::Error::Code::FactorizationFailed},
+      // the first failure (main object) is another MUMPS error, the last (counter) one of memory
+      {hs::Toggle::Off, d::kFaultCountAllowance | d::kFaultMainCounts | d::kFaultOtherError,
+       hs::Error::Code::FactorizationFailed},
+      // both sources: another MUMPS error
+      {hs::Toggle::On, d::kFaultCounterCounts | d::kFaultMainCounts | d::kFaultOtherError,
+       hs::Error::Code::FactorizationFailed},
+  };
+  for (const Case& k : cases) {
+    auto cfg = nearest_cfg(k.counter, k.faults);
+    cfg.target.mode = hs::TargetMode::Interval;
+    cfg.target.lower = 0.85;
+    cfg.target.upper = 0.95;
+    try {
+      (void)hs::solve(a, nullptr, cfg);
+      ADD_FAILURE() << "expected the count failure, faults " << k.faults;
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), k.code) << "faults " << k.faults << ": " << e.what();
+      EXPECT_NE(std::string(e.what()).find("no inertia count possible"), std::string::npos) << e.what();
+    }
+  }
+}
+
+// A count failure that is not one of memory - another MUMPS error, std::bad_alloc thrown by a
+// count - moves the counts to the other source as a memory failure does.
+TYPED_TEST(DriverCountFailureTyped, FailuresOfEveryKindMoveTheCountsToTheOtherSource) {
+  using T = TypeParam;
+  namespace d = hs::driver;
+  const auto a = matrix<T>();
+  for (const index_t kind : {d::kFaultOtherError, d::kFaultBadAlloc}) {
+    const std::string what = kind == d::kFaultOtherError ? "factorization_failed" : "std::bad_alloc";
+    const auto on_main = hs::solve(a, nullptr, nearest_cfg(hs::Toggle::On, d::kFaultCounterCounts | kind));
+    expect_certified(on_main, "main factorization");
+    EXPECT_TRUE(has_warning(on_main.report, "the InertiaCounter could not count")) << warnings(on_main.report);
+    EXPECT_TRUE(has_warning(on_main.report, what)) << warnings(on_main.report);
+    const auto on_counter = hs::solve(a, nullptr, nearest_cfg(hs::Toggle::Off, d::kFaultMainCounts | kind));
+    expect_certified(on_counter, "InertiaCounter");
+    EXPECT_TRUE(has_warning(on_counter.report, "the main factorization could not count")) << warnings(on_counter.report);
+    EXPECT_TRUE(has_warning(on_counter.report, what)) << warnings(on_counter.report);
+  }
+}
+
+// The randomized check cannot refactorize at sigma (memory, another MUMPS error, std::bad_alloc):
+// the exact counts give the verdict, and the statement says why the check did not.
+TYPED_TEST(DriverCountFailureTyped, RandomizedCheckRefactorizationFailureLeavesTheVerdictToTheCounts) {
+  using T = TypeParam;
+  namespace d = hs::driver;
+  const auto a = matrix<T>();
+  for (const index_t kind : {index_t{0}, d::kFaultOtherError, d::kFaultBadAlloc}) {
+    auto cfg = nearest_cfg(hs::Toggle::Auto, d::kFaultRefactorization | kind);
+    cfg.certificate = hs::CertificateMode::Randomized;
+    const auto sol = hs::solve(a, nullptr, cfg);
+    const auto& c = sol.report.certificate;
+    EXPECT_TRUE(sol.report.success) << warnings(sol.report);
+    EXPECT_EQ(c.method, "exact") << c.statement;
+    EXPECT_TRUE(c.passed && c.rigorous) << c.statement;
+    EXPECT_EQ(c.count_inertia, kK);
+    EXPECT_NE(c.statement.find("randomized check could not run: the refactorization at sigma failed"),
+              std::string::npos)
+        << c.statement;
+    expect_same_set(sol.eigenvalues, nearest(spectrum(), kSigma, kK), 1e-10);
+  }
+}
+
+// The certifier's own InertiaCounter (single counts) fails with another MUMPS error: unlike a
+// memory failure, that says nothing about another counter's working memory, so the CountSource
+// still tries its own counter (and here, failing too, the main object); after a memory failure it
+// skips its counter (avoid_counter). The pencil on which auto picks single counts: blockdiag(3-D
+// Laplacian 20 x 21 x 22 (fill), a prescribed block holding the 8 eigenvalues nearest -5 with
+// margins the single-count rule holds at 10x its backward factor) - test_certint_fix.cpp's
+// fill_pencil.
+std::vector<double> fill_block_spectrum() {
+  std::vector<double> w{-5.1, -5.1, -4.9, -5.5, -4.5, -5.8, -6.0, -4.0};
+  for (int i = 0; i < 25; ++i) {
+    w.push_back(-6.08 - 0.08 * i);
+    w.push_back(-3.92 + 0.08 * i);
+  }
+  return w;
+}
+
+hs::CsrMatrix<double> fill_matrix() {
+  const index_t nx = 20, ny = 21, nz = 22, nl = nx * ny * nz;
+  const hs::CsrMatrix<double> p = hs::test::prescribed_spectrum<double>(fill_block_spectrum(), 3, 41);
+  std::vector<index_t> rows, cols;
+  std::vector<double> vals;
+  auto id = [&](index_t i, index_t j, index_t l) { return i + nx * (j + ny * l); };
+  auto add = [&](index_t r, index_t c, double x) {
+    rows.push_back(r);
+    cols.push_back(c);
+    vals.push_back(x);
+  };
+  for (index_t l = 0; l < nz; ++l)
+    for (index_t j = 0; j < ny; ++j)
+      for (index_t i = 0; i < nx; ++i) {
+        const index_t r = id(i, j, l);
+        add(r, r, 6.0);
+        if (i > 0) add(r, id(i - 1, j, l), -1.0);
+        if (i + 1 < nx) add(r, id(i + 1, j, l), -1.0);
+        if (j > 0) add(r, id(i, j - 1, l), -1.0);
+        if (j + 1 < ny) add(r, id(i, j + 1, l), -1.0);
+        if (l > 0) add(r, id(i, j, l - 1), -1.0);
+        if (l + 1 < nz) add(r, id(i, j, l + 1), -1.0);
+      }
+  for (index_t i = 0; i < p.nrows; ++i)
+    for (index_t q = p.rowptr[i]; q < p.rowptr[i + 1]; ++q) add(nl + i, nl + p.colind[q], p.values[q]);
+  return hs::csr_from_coo<double>(nl + p.nrows, nl + p.nrows, rows, cols, vals);
+}
+
+TEST(DriverCountFailure, CertifierCounterFailureOfAnotherKindLetsTheCountsTryTheirCounter) {
+  namespace d = hs::driver;
+  const auto a = fill_matrix();
+  const std::vector<double> want = nearest(fill_block_spectrum(), -5.0, 8);
+  hs::SolverConfig cfg = nearest_cfg(hs::Toggle::On, 0);
+  cfg.target.sigma = -5.0;
+  cfg.target.k = 8;
+  cfg.certificate = hs::CertificateMode::Auto;
+  const auto plain = hs::solve(a, nullptr, cfg);
+  ASSERT_EQ(plain.report.certificate.method, "exact_single") << plain.report.certificate.statement;
+  const std::string skipped = "the certifier's InertiaCounter on the same pivot order failed";
+  auto expect_exact = [&](const hs::Solution<double>& sol) {
+    const auto& c = sol.report.certificate;
+    EXPECT_TRUE(sol.report.success) << warnings(sol.report);
+    EXPECT_EQ(c.method, "exact") << c.statement;
+    EXPECT_TRUE(c.passed && c.rigorous) << c.statement;
+    EXPECT_EQ(c.count_inertia, 8);
+    EXPECT_NE(c.statement.find("double-precision Sylvester counts (main factorization)"), std::string::npos)
+        << c.statement;
+    expect_same_set(sol.eigenvalues, want, 1e-10);
+  };
+  cfg.certificate_fault_count = d::kFaultCounterCounts | d::kFaultOtherError;
+  const auto other = hs::solve(a, nullptr, cfg);
+  expect_exact(other);
+  EXPECT_NE(other.report.certificate.statement.find("single counts failed (single counts: factorization_failed"),
+            std::string::npos)
+      << other.report.certificate.statement;
+  EXPECT_FALSE(has_warning(other.report, skipped)) << warnings(other.report);
+  EXPECT_TRUE(has_warning(other.report, "the InertiaCounter could not count (factorization_failed"))
+      << warnings(other.report);
+  cfg.certificate_fault_count = d::kFaultCounterCounts;  // the genuine MUMPS -19: a memory failure
+  const auto memory = hs::solve(a, nullptr, cfg);
+  expect_exact(memory);
+  EXPECT_TRUE(has_warning(memory.report, skipped)) << warnings(memory.report);
+}
+
+// The main object standing in for a failed counter counts only if the working memory of its last
+// factorization fits what the budget leaves (count_allowance_mb): its own ICNTL(23) cap dates from
+// the analysis. Its factors are released first.
+TYPED_TEST(DriverCountFailureTyped, MainObjectStandingInForTheCounterMustFitTheBudget) {
+  using T = TypeParam;
+  const auto a = matrix<T>();
+  const hs::ShiftedPencil<T> pencil(a, nullptr);
+  hs::FactorOptions fo;
+  fo.threads = 2;
+  fo.ordering = 0;
+  auto fac = hs::make_mumps_factorization<T>(fo);
+  fac->analyze(pencil, 1.0, -kSigma);
+  ASSERT_TRUE(fac->factorize(1.0, -kSigma));
+  const double used_mb = fac->stats().factor_mb_used;
+  ASSERT_GT(used_mb, 0.0);
+  hs::SolverConfig cfg = nearest_cfg(hs::Toggle::On, hs::driver::kFaultCountAllowance);  // no counter fits
+  hs::SolveReport rep;
+  hs::driver::PhaseClock clock;
+  hs::driver::Ctx ctx{cfg, nullptr, rep, clock};
+  constexpr double kGiB = 1073741824.0;
+  {  // the process already holds more than the budget: nothing is left for the count
+    cfg.memory_budget_gb = 0.5 * static_cast<double>(hs::current_rss_bytes()) / kGiB;
+    ctx.held = hs::driver::FactorHeld{kSigma, false};
+    hs::driver::CountSource<T> src(*fac, pencil, /*prefer_counter=*/true, hs::driver::MainFactors::Release);
+    try {
+      (void)src.count(ctx, 0.5, true);
+      ADD_FAILURE() << "expected no count";
+    } catch (const hs::driver::CountFailure& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::OutOfMemoryBudget);
+      EXPECT_NE(std::string(e.what()).find("main factorization: the working memory of its last factorization"),
+                std::string::npos)
+          << e.what();
+    }
+    EXPECT_FALSE(fac->inertia().valid);  // released before the check
+    EXPECT_TRUE(std::isnan(ctx.held.shift));
+  }
+  {  // room for it: the main object counts
+    cfg.memory_budget_gb = (static_cast<double>(hs::current_rss_bytes()) + 1e9 + 4e6 * used_mb) / kGiB;
+    hs::driver::CountSource<T> src(*fac, pencil, /*prefer_counter=*/true, hs::driver::MainFactors::Release);
+    const hs::Inertia in = src.count(ctx, 0.5, true);
+    ASSERT_TRUE(in.valid);
+    const auto w = spectrum();
+    EXPECT_EQ(in.neg, std::count_if(w.begin(), w.end(), [](double l) { return l < 0.5; }));
+    EXPECT_FALSE(src.uses_counter());
+    EXPECT_EQ(ctx.held.shift, 0.5);
+  }
+}
+
+// From its first slice on, a window target loses only the slice whose count fails (kFaultLate: the
+// window end and the cut are counted, the counts of the partial cluster's verification fail): the
+// completed slice's pairs are returned, the certificate is not completed.
+TYPED_TEST(DriverCountFailureTyped, WindowSliceCountFailureReturnsTheCompletedSlices) {
+  using T = TypeParam;
+  namespace d = hs::driver;
+  // The 5 smallest end inside 100 copies of 1.0: a slice (-inf, cut] with 0.1, 0.2, 0.3, then a
+  // partial cluster window asking for 2 copies, verified by two counts (DriverTargets tests).
+  std::vector<double> lam = {0.1, 0.2, 0.3};
+  lam.insert(lam.end(), 100, 1.0);
+  for (int i = 1; i <= 300; ++i) lam.push_back(2.0 + 0.01 * i);
+  const auto a = hs::test::prescribed_spectrum<T>(lam, 4, 61);
+  auto cfg = nearest_cfg(hs::Toggle::Auto, 0);
+  cfg.target.mode = hs::TargetMode::Smallest;
+  cfg.target.k = 5;
+  const auto ok = hs::solve(a, nullptr, cfg);
+  ASSERT_TRUE(ok.report.success) << warnings(ok.report);
+  ASSERT_TRUE(has_warning(ok.report, "numerically equal")) << warnings(ok.report);  // the partial cluster
+  expect_same_set(ok.eigenvalues, {0.1, 0.2, 0.3, 1.0, 1.0}, 1e-10);
+  for (const index_t faults : {d::kFaultLate | d::kFaultMainCounts | d::kFaultCountAllowance,
+                               d::kFaultLate | d::kFaultMainCounts | d::kFaultCounterCounts | d::kFaultOtherError}) {
+    cfg.certificate_fault_count = faults;
+    const auto sol = hs::solve(a, nullptr, cfg);
+    const auto& r = sol.report;
+    const auto& c = r.certificate;
+    EXPECT_FALSE(r.success) << faults;
+    EXPECT_TRUE(c.performed);
+    EXPECT_FALSE(c.passed);
+    EXPECT_FALSE(c.rigorous);
+    EXPECT_EQ(c.method, "exact");
+    EXPECT_EQ(c.failure_probability, 1.0);
+    EXPECT_EQ(c.count_inertia, 5);
+    EXPECT_EQ(c.count_found, 3);
+    EXPECT_EQ(c.note.rfind("not completed", 0), 0u) << c.note;
+    EXPECT_NE(c.statement.find("NOT completed"), std::string::npos) << c.statement;
+    EXPECT_TRUE(has_warning(r, "not completed: no inertia count possible")) << warnings(r);
+    EXPECT_FALSE(has_warning(r, "certificate failed")) << warnings(r);
+    expect_same_set(sol.eigenvalues, {0.1, 0.2, 0.3}, 1e-10);
+    for (const auto& p : r.pairs) EXPECT_TRUE(p.accepted);
+    ASSERT_EQ(r.slices.size(), 2u);
+    EXPECT_TRUE(r.slices[0].passed);
+    EXPECT_FALSE(r.slices[1].passed);
+    EXPECT_EQ(r.slices[1].count_found, 0);
   }
 }
 
@@ -453,7 +716,7 @@ hs::FactorEstimate est(double incore, double ooc) {
 // A SCOTCH analysis (orderings differ from run to run) that fits the budget neither in core nor out
 // of core is analysed again, at most twice; a reproducible ordering, or a third miss, ends with the
 // error.
-TEST(DriverAnalysisRetry, NonReproducibleOrderingIsAnalysedAgainOnce) {
+TEST(DriverAnalysisRetry, NonReproducibleOrderingIsAnalysedAgainUpToTwice) {
   const auto a = hs::identity<double>(1);
   const hs::ShiftedPencil<double> pencil(a, nullptr);
   hs::SolverConfig cfg;
