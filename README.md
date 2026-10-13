@@ -3,13 +3,15 @@
 面向电磁仿真（微波器件、天线、电磁兼容、光子晶体、波导模式分析）的特征值求解器：
 支持 `A x = λ x` 与 `A x = λ B x`（B 正定或**不定**），矩阵为实对称或复厄密、规模 ~1e5、
 非正定；求目标位移 σ 附近 / 区间内 / 谱两端的特征对。核心为 C++17 + MUMPS（对称不定
-LDLᵀ、惯性计数）+ 自研 Krylov-Schur（含块模式）、LOBPCG、Jacobi-Davidson；命令行与 Python 两种接口。
+LDLᵀ、惯性计数）+ 自研 Krylov-Schur（含块模式）、LOBPCG、Jacobi-Davidson；B 正定（或无 B）时结果带完备性证书
+（Sylvester 惯性计数，或在已有分解上的随机排除检验 / 单精度计数）；命令行与 Python 两种接口。
 
 - 赛题：`商飞赛题_非正定厄密稀疏矩阵特征值求解.md`
 - 设计与模块契约：`docs/DESIGN.md`
-- 依赖与许可证：`docs/DEPENDENCIES.md`
+- 依赖与许可证：`docs/DEPENDENCIES.md`、`THIRD_PARTY_NOTICES`
 - 方案说明（交付物 a）：`docs/SOLUTION.md`；文件格式：`docs/FORMATS.md`
 - Python 接口（scipy/numpy 进出）：`docs/PYTHON.md`
+- MUMPS 之下的稠密 BLAS（剖析、替换库、BLAS hook）：`docs/BLAS.md`
 - 实测汇总：`results/p3_measurements.md`、`results/p4_measurements.md`；SLEPc 调优与公平对比：
   `results/baseline_tuning.md`；测量程序：`bench/README.md`
 
@@ -24,6 +26,12 @@ tools/dev/test.sh release                    # C++ 单元测试 + Python 测试�
 
 开发服务器自 P4 收尾起只做编辑与 git，编译、测试与实验都在集群节点上运行（见下「集群节点」）。
 
+构建出的 `hsolve` 默认链入 BLAS hook（`src/blas`，CMake `HSOLVE_BLAS_HOOK=ON`、route `all`）：MUMPS 回代中的窄
+BLAS 调用改用自带的 AVX-512 / AVX2 窄核、L0 层之上的大调用并行切分，其余原样交给 OpenBLAS（指令集运行时检测）。
+运行时 `HS_BLAS_ROUTE=off` 关闭（纯转发），构建时 `-DHSOLVE_BLAS_HOOK=OFF` 去掉；已有构建目录要
+`-UHSOLVE_BLAS_HOOK -UHSOLVE_BLAS_ROUTE_DEFAULT` 重新配置才取新默认值。Python 模块不带 hook，可预加载
+`build/release/libhsolve_blashook.so`（`docs/PYTHON.md` §1，`docs/BLAS.md`）。
+
 求解（结果格式见 `docs/FORMATS.md`）：
 
 ```bash
@@ -35,13 +43,20 @@ tools/dev/test.sh release                    # C++ 单元测试 + Python 测试�
 
 常用覆盖参数（覆盖 config.json 中的同名键，见 `docs/FORMATS.md` §2）：`--tol`、`--threads`、
 `--memory-budget-gb`、`--precision double|single`、`--slice-size N`（每个位移至多 N 个特征值，0 = 自动）、
-`--block-size N`（Krylov 块宽，0 = 自动：HEP/GHEP 需求 ≥ 8 对时 4、GHIEP n ≥ 2e4 且 ≥ 4 对时 2；1 = 单向量）、
-`--zero-filter-tol TOL`（|λ| ≤ TOL·scale 视为非物理零模，按惯性排除；< 0 关闭）、`--log FILE`。
-只在 config.json 中的 P4 新键：`"inertia_counter": "auto"|"on"|"off"`（证书计数是否用只计惯性的
-InertiaCounter；auto 由代价模型决定）。
+`--block-size N`（Krylov 块宽，0 = 自动：HEP/GHEP 的 nearest 运行由块宽规则按 σ 处分解的因子条目等在
+1/2/4/8 中选、需求 ≥ 8 对时至少 4，切片需求 ≥ 8 对时 4；GHIEP n ≥ 2e4 且 ≥ 4 对时 2；1 = 单向量）、
+`--zero-filter-tol TOL`（|λ| ≤ TOL·scale 视为非物理零模，按惯性排除；< 0 关闭）、
+`--certificate exact|randomized|auto|off`（nearest 的完备性检验：exact = 双精度惯性计数（默认）；randomized =
+在已有分解上的随机排除检验，失败概率 ≤ `certificate_delta`（默认 1e-12），只在 B 的条件数有证明时（B = I、
+对角或对角占优）出结论，否则改用计数；auto = 按实测时间选能认证的最便宜者，含单精度计数（带 10 倍余量）；
+off = 不检验）、`--log FILE`。
+只在 config.json 中的键：`"inertia_counter": "auto"|"on"|"off"`（证书计数是否用只计惯性的
+InertiaCounter；auto 由代价模型决定）、`"certificate_delta"`、`"ordering"`（−1 = 自适应（默认，16 线程代价
+模型在 AMD / SCOTCH / 自研嵌套剖分 / METIS / PORD 中选）；0、2..7 = MUMPS ICNTL(7)；10 = 自研多线程嵌套剖分）。
 
-输出 `eigenvalues.npy`、`eigenvectors.npy`（n×m，Fortran 序）、`report.json`（残差、完备性证书、每片记录、
-分解统计、块宽、五个互斥阶段的计时（含证书 `time_certificate_s`）、峰值内存、`solver` / `version`），
+输出 `eigenvalues.npy`、`eigenvectors.npy`（n×m，Fortran 序）、`report.json`（残差、完备性证书（方法、是否
+严格、失败概率与文字陈述）、每片记录、分解统计、块宽、五个互斥阶段的计时（含证书 `time_certificate_s`）、
+峰值内存、`solver` / `version`），
 退出码 0 = 全部达标，1 = 未达标，2 = 错误。B 不定（GHIEP）时只支持「σ 附近最近 k 个」。
 
 Python（构建时找到 pybind11 即生成 `build/release/python/hsolve`，详见 `docs/PYTHON.md`）：
@@ -92,7 +107,8 @@ tools/dev/cluster_run.sh gpu02 --wip -- tools/dev/test.sh release     # 连同�
 | 路径 | 内容 |
 |---|---|
 | `include/hsolve/` | 公共接口头文件（模块契约） |
-| `src/{io,sparse,linalg,factor,ops,eigen,verify,driver,util}/` | 各模块实现（`verify`：用回代代替分解的完备性检验，尚未接入 driver） |
+| `src/{io,sparse,linalg,factor,ops,eigen,verify,driver,util}/` | 各模块实现（`verify`：用回代代替分解的完备性检验，由 driver 的 `certificate` 模式调用） |
+| `src/blas/` | BLAS hook（不属于 libhsolve；默认链入 `hsolve`，或 `libhsolve_blashook.so` 预加载） |
 | `apps/` | 命令行程序 `hsolve` |
 | `python/` | Python 接口（pybind11 扩展 `hsolve._hsolve` + `hsolve` 包；`python/bench` 开销测量） |
 | `tests/cpp`, `tests/py` | GoogleTest 单元测试；Python 工具与接口测试（pytest） |
@@ -102,5 +118,6 @@ tools/dev/cluster_run.sh gpu02 --wip -- tools/dev/test.sh release     # 连同�
 | `bench/` | 可复现的 C++ 性能/内存测量程序（`bench_<name>`） |
 | `tools/run/guard.py` | 资源看门狗（绑核、内存上限、互斥） |
 | `tools/dev` | 构建、测试、集群部署与集群运行脚本 |
+| `tools/deps` | 实验用 BLAS 替换库（OpenBLAS / BLIS / LIBXSMM）的源码构建脚本 |
 | `env/` | conda 环境、激活脚本与按主机的设置 `env/hosts/` |
 | `results/` | 实验汇总（原始输出在 `results/raw/`，不入库） |
