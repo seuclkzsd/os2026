@@ -941,7 +941,13 @@ index_t rerun_block_size(index_t p, index_t missing) {
 
 // An auto width enters capped at the P4 width: a rerun wants missing + 2 pairs, the regime in
 // which the P4 measurements below found 8 slower than 4, whereas the blocktune rule picks 8 for
-// the main run's k = 10..12 pairs.
+// the main run's k = 10..12 pairs. Measured (gpu01 slot, 16 threads, 5 interleaved runs,
+// certificate_fault_drop = 1, rule width 8 in the main run; rerun phase = refactorization at
+// sigma + rerun iterations, both ending with the missing pair): rerun at 8 -> 4 on
+// ss-2cubes_sphere 1.301 -> 1.197 s (168 -> 100 applications), yee-pec-cube-32 0.788 -> 0.735 s,
+// syn-mem27-46 (certificate auto) 0.235 -> 0.185 s, yee-bloch-1e4 (auto) 0.165 -> 0.131 s; no
+// overlap of the ranges. Against the integration tree (rerun at 8, no lead_nev) the whole solve
+// is 1.05x, 1.09x, 1.33x and 1.14x faster there.
 index_t rerun_block_size(const SolverConfig& cfg, index_t p, index_t missing) {
   return rerun_block_size(cfg.block_size > 0 ? p : std::min(p, kMaxAutoBlockSize), missing);
 }

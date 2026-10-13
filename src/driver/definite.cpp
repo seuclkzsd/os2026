@@ -533,7 +533,9 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     // 35475-fold curl-curl null space (|theta| = 1/sigma, its Ritz values at lambda ~ 4e-9),
     // whose estimate stalled at 3e-10 |theta| against the inner tolerance 1e-11 at widths 4 and
     // 8 (deterministic run, 4 threads, max_restarts 60: 1236 / 1976 applications; with lead 40 /
-    // 72); reruns of width 2 got under it after 154 and 218 applications (with lead: 20).
+    // 72); reruns of width 2 got under it after 154 and 218 applications (with lead: 20). In the
+    // measurement slot (16 threads, 5 interleaved runs per width) the rerun now ends after one
+    // restart at widths 4 and 8, whole solve 4.65 .. 4.81 s (the review: 1000 restarts, ~200 s).
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
     if (nev_rerun < 1) break;
     refactorize_at(c, fac, sigma, detection_off);
