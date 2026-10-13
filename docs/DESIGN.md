@@ -224,12 +224,12 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   FactorizationFailed；−13/−19（分配失败 / 预留已是 cap 仍超）抛 OutOfMemoryBudget；其它负 INFO 抛
   FactorizationFailed（消息含 INFO(1)/INFO(2)）。
 - **工作区预留**（P7 评审修正）：ICNTL(23) > 0 时 MUMPS 按 ICNTL(23) 而不是按估计确定工作区，地址空间
-  随之增长约整个上限（虚拟预留，常驻只增 INFOG(21)；syn-mem27-46 16 线程、cap 10125 MB：VmPeak
+  随之增长上限的一半到大部分（虚拟预留，常驻只增 INFOG(21)；syn-mem27-46 16 线程、cap 10125 MB：VmPeak
   10.1 GiB 而峰值 RSS 0.85 GiB）。RLIMIT_AS（`ulimit -v`）把预留全额计入，P7 时 cap 取到上限的约 0.8
   就失败（INFO −13，或 OpenBLAS 分配不到缓冲而段错误）。所以 `factorize` 给 MUMPS 的 ICNTL(23) 是
-  min(cap, (1 + ICNTL(14)/100)·估计 + 32 MB)——内存内用 INFOG(16)、外存用 INFOG(26)，即 MUMPS 无上限
-  时自己的定额，cap 只作上限（`FactorStats::workspace_reserved_mb`；InertiaCounter 的计数实例同样按其
-  自己的估计）。
+  min(cap, (1 + ICNTL(14)/100)·估计 + 32 MB)——内存内用 INFOG(16)、外存用 INFOG(26)，按估计定额，
+  cap 只作上限；重试时随 ICNTL(14) 增长，最后一次给满 cap（`FactorStats::workspace_reserved_mb`；
+  InertiaCounter 的计数实例同样按其自己的估计）。
 - `scaling` 默认 ICNTL(8)=7（每次分解重算缩放），使一次分析服务不同位移。
 - `FactorEstimate`：INFOG(20)（因子条目估计）、INFOG(16/17) 内存、INFOG(26/27) 外存、
   INFOG(36/38) BLR 估计（仅当分析时启用 BLR，否则 −1）、RINFOG(1) flops。

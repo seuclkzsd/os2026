@@ -28,20 +28,21 @@
 //     analysis can be switched off for the factorization; ICNTL(22) (out-of-core) can change
 //     between factorizations, and JOB=-2 deletes the factor files.
 //   * ICNTL(23) > 0 makes MUMPS size its workspace from the cap, not from the estimate:
-//     INFOG(18) (allocated) then approaches cap/2, and the address space grows by about the whole
-//     cap. That is a virtual reservation; resident memory only grows by INFOG(21) (effectively
-//     used). 100x100 Laplacian, cap 3000 MB: INFOG(18) = 1503, INFOG(21) = 6, VmPeak +1.37 GB;
-//     syn-mem27-46 at 16 threads, cap 10125 MB: VmPeak 10.1 GiB, peak RSS 0.85 GiB (P7 review).
-//     Under an address-space limit (RLIMIT_AS) the reservation counts in full: with a cap of 0.8
-//     of the limit, MUMPS failed with INFO -13 and OpenBLAS could not allocate its buffers (P7
-//     review: syn-mem27-46 / -80 / -100 under ulimit -v 8 / 8 / 14.9 GiB). factorize() therefore
-//     gives MUMPS min(cap, (1 + ICNTL(14)/100) * estimate) as ICNTL(23) - INFOG(16) in core,
-//     INFOG(26) out of core - and grows it with ICNTL(14) on a workspace error or INFO -19,
-//     up to the cap (FactorStats::workspace_reserved_mb). A cap equal to the INFOG(16) estimate
-//     can still fail with INFO -19: the smallest caps that worked were 0.96 .. 1.01 x INFOG(16)
-//     (+1..2 MB) for Laplacians, random and saddle-point matrices, and 1.29 x INFOG(16) when
-//     delayed pivots forced a workspace retry (which grows the workspace beyond the estimate).
-//     So "estimate <= cap" does not guarantee success: leave a margin.
+//     INFOG(18) (allocated) then approaches cap/2, and the address space grows by half the cap
+//     or more. That is a virtual reservation; resident memory only grows by INFOG(21)
+//     (effectively used). 100x100 Laplacian, cap 3000 MB: INFOG(18) = 1503, INFOG(21) = 6,
+//     VmPeak +1.37 GB; syn-mem27-46 at 16 threads, cap 10125 MB: VmPeak 10.1 GiB, peak RSS
+//     0.85 GiB (P7 review). Under an address-space limit (RLIMIT_AS) the reservation counts in
+//     full: with a cap of 0.8 of the limit MUMPS failed with INFO -13, or OpenBLAS could not
+//     allocate its buffers (P7 review: syn-mem27-46 / -80 / -100 under ulimit -v 8 / 8 / 14.9
+//     GiB). factorize() therefore gives MUMPS min(cap, (1 + ICNTL(14)/100) * estimate + 32 MB)
+//     as ICNTL(23) - INFOG(16) in core, INFOG(26) out of core - and grows it with ICNTL(14) on a
+//     workspace error or INFO -19, the last retry with the whole cap
+//     (FactorStats::workspace_reserved_mb). A cap equal to the INFOG(16) estimate can still fail
+//     with INFO -19: the smallest caps that worked were 0.96 .. 1.01 x INFOG(16) (+1..2 MB) for
+//     Laplacians, random and saddle-point matrices, and 1.29 x INFOG(16) when delayed pivots
+//     forced a workspace retry (which grows the workspace beyond the estimate). So
+//     "estimate <= cap" does not guarantee success: leave a margin.
 //   * With L0-OpenMP tree parallelism (ICNTL(48)=1, the MUMPS default) and more than one thread,
 //     repeated factorizations and solves of the same data differ in the last bits from call to
 //     call (dynamic assembly order). ICNTL(48)=0 makes them bitwise reproducible for a fixed
