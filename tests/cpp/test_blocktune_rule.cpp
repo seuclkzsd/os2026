@@ -115,8 +115,9 @@ TEST(LanczosBlockRule, WidthsWhoseLayoutDoesNotFitAreSkipped) {
         EXPECT_TRUE(block_dimensions(s, p, true).feasible);
       }
       for (std::size_t i = 0; i < kRuleWidthCount; ++i) {
-        if (kRuleWidths[i] > p && relative_block_steps(kRuleWidths[i], nev) < 1.0)
+        if (kRuleWidths[i] > p && relative_block_steps(kRuleWidths[i], nev) < 1.0) {
           EXPECT_FALSE(block_dimensions(s, kRuleWidths[i], true).feasible) << kRuleWidths[i];
+        }
       }
     }
   }
