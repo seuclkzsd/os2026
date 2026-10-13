@@ -2,21 +2,24 @@
 //
 // For each case: load A (and B) with hs::load_matrix, parse its config.json (hs::parse_config,
 // the CLI's path), set threads = hs::max_threads() and the memory budget (--budget-gb), then run
-// hs::solve once per block size of --p (SolverConfig::block_size; 0 = the driver's auto rule),
-// --reps times, interleaved (repetitions outside, the order of the block sizes rotating by one
-// per repetition). One "run" record per solve: the resolved block size, success, certificate
-// (performed / passed / inertia count), the largest backward error of the returned pairs, operator
-// applications, restarts, the report's time split (total / setup / factor / iterate / verify /
-// certificate), the MUMPS solve time and right-hand sides, and the largest difference of the
-// sorted eigenvalues to the first run of the case, |lambda - mu| / (|mu| + scale) (tools/eval's
+// hs::solve once per block size of --p (SolverConfig::block_size; 0 = the driver's auto rule,
+// "rule" = the width eigen_detail::recommended_block_size picks for the case's shape, taken from
+// the report of an untimed p = 1 warm-up solve: n, k, the main factorization's entries, nnz(B),
+// scalar type), --reps times, interleaved (repetitions outside, the order of the block sizes
+// rotating by one per repetition). One "run" record per solve: the resolved block size, success,
+// certificate (performed / passed / inertia count), the largest backward error of the returned
+// pairs, operator applications, restarts, the report's time split (total / setup / factor / iterate
+// / verify / certificate), the MUMPS solve time and right-hand sides, and the largest difference of
+// the sorted eigenvalues to the first run of the case, |lambda - mu| / (|mu| + scale) (tools/eval's
 // yardstick). The first record of a case ("case") holds the factorization shape the block-size
-// rule reads (n, factor entries, nnz(B), threads, scalar type).
+// rule reads (n, factor entries, nnz(B), threads, scalar type) and, with "rule" in --p, the
+// rule's pick.
 // This is the CLI's computation after loading (apps/hsolve_cli.cpp calls hs::solve the same way);
 // output files and tools/eval are left out.
 //
-// Usage (via the resource guard):
-//   python3 tools/run/guard.py --skip-busy-check --cores 24-31 --mem-gb 16 --timeout 3600 --
-//     build/release/bench_blocktune_e2e [--data DIR] [--p 1,0,4,8] [--reps 5] [--budget-gb 14]
+// Usage (timed: the measurement slot, 16 threads = the judging configuration):
+//   python3 tools/run/guard.py --exclusive --timeout 2700 --
+//     build/release/bench_blocktune_e2e [--data DIR] [--p 1,rule,0] [--reps 5] [--budget-gb 28.8]
 //     CASE...
 // DIR defaults to $HS_DATA_ROOT or ./data; CASE is a directory name under DIR/cases.
 #include <algorithm>
@@ -31,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "eigen/block_rule.hpp"
 #include "hsolve/io.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
@@ -43,11 +47,14 @@ using hs::CsrMatrix;
 using hs::index_t;
 using json = nlohmann::json;
 
+/// --p value standing for the rule's pick.
+constexpr index_t kRule = -1;
+
 struct Args {
   std::filesystem::path data;
-  std::vector<index_t> p = {1, 0};
+  std::vector<index_t> p = {1, kRule};
   int reps = 5;
-  double budget_gb = 14.0;
+  double budget_gb = 28.8;  // 0.9 * 32 GiB, as tools/bench/compare.py gives the CLI
   std::vector<std::string> cases;
 };
 
@@ -67,7 +74,7 @@ Args parse_args(int argc, char** argv) {
       a.p.clear();
       std::stringstream ss(value());
       std::string item;
-      while (std::getline(ss, item, ',')) a.p.push_back(std::stoll(item));
+      while (std::getline(ss, item, ',')) a.p.push_back(item == "rule" ? kRule : std::stoll(item));
     } else if (s == "--reps") {
       a.reps = std::stoi(value());
     } else if (s == "--budget-gb") {
@@ -99,11 +106,24 @@ void run_case(const Args& args, const std::string& name, const hs::SolverConfig&
   const CsrMatrix<T>* b = b_store ? &*b_store : nullptr;
   std::vector<double> ref;
   bool head = false;
+  index_t rule_p = 0;
+  if (std::find(args.p.begin(), args.p.end(), kRule) != args.p.end()) {
+    hs::SolverConfig cfg = base;
+    cfg.block_size = 1;
+    const hs::SolveReport r = hs::solve<T>(a, b, cfg).report;  // untimed warm-up
+    hs::eigen_detail::ShiftInvertShape shape;
+    shape.n = r.n;
+    shape.nev = std::min<index_t>(r.n, cfg.target.k);
+    shape.factor_entries = static_cast<double>(r.factor_stats.factor_entries);
+    shape.nnz_b = static_cast<double>(r.nnz_b);
+    shape.complex_scalars = r.complex_scalars;
+    rule_p = hs::eigen_detail::recommended_block_size(shape);
+  }
   for (int rep = 0; rep < args.reps; ++rep) {
     for (std::size_t i = 0; i < args.p.size(); ++i) {
       const index_t p = args.p[(i + static_cast<std::size_t>(rep)) % args.p.size()];
       hs::SolverConfig cfg = base;
-      cfg.block_size = p;
+      cfg.block_size = p == kRule ? rule_p : p;
       hs::Timer wall;
       const hs::Solution<T> sol = hs::solve<T>(a, b, cfg);
       const double wall_s = wall.seconds();
@@ -121,7 +141,8 @@ void run_case(const Args& args, const std::string& name, const hs::SolverConfig&
                   {"estimate_entries", r.factor_stats.estimate.factor_entries},
                   {"estimate_flops", r.factor_stats.estimate.flops},
                   {"ordering", r.factor_options.ordering},
-                  {"scale", r.scale}};
+                  {"scale", r.scale},
+                  {"rule_block_size", rule_p}};
         std::cout << h.dump() << std::endl;
         head = true;
       }

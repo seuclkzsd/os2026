@@ -5,7 +5,8 @@
 // K = A - sigma B as the driver does (MUMPS LDL^T, L0-OpenMP i.e. FactorOptions::deterministic =
 // false, the adaptive ordering: AMD probe and driver::decide_ordering with the driver's expected
 // factorizations / solves, SCOTCH when nested dissection pays; --ordering N forces ICNTL(7) = N),
-// then
+// print the "case" record (sizes, factor entries and estimate, and the block width the rule
+// eigen_detail::recommended_block_size picks for this shape with its modelled step costs), then
 //   1. "apply" records: one ShiftInvertOperator application to a block of p columns (spmm with B
 //      + one multi-RHS MUMPS solve), median over --apply-reps, per block and per column, for every
 //      p of --p and --apply-p;
@@ -13,7 +14,8 @@
 //      tol = --tol, default 1e-11 = the driver's tol * inner_tol_factor) per configuration:
 //      p = 1 with each requested ncv of --ncv1 (0 = auto, the driver's setting), and every p > 1 of
 //      --p with every block setting of --extra x --min-ncv x --keep x --fast
-//      (eigen_detail::BlockTuning; ncv auto as in the driver). Recorded: operator applications, restarts, the convergence
+//      (eigen_detail::BlockTuning; ncv auto as in the driver; --fast 1 = try_fast first, the
+//      solver's default, 0 = the two-pass kernel alone). Recorded: operator applications, restarts, the convergence
 //      history (applications and converged wanted pairs per Rayleigh-Ritz step), the time split
 //      (operator / solve / orthogonalization / Rayleigh-Ritz / restart / total), the largest
 //      relative residual ||A x - lambda B x|| / (|lambda| ||B x||), the largest relative difference
@@ -22,12 +24,16 @@
 //      order of the configurations rotates by one per repetition.
 // Output: one JSON object per line on stdout.
 //
-// Usage (via the resource guard):
-//   python3 tools/run/guard.py --skip-busy-check --cores 24-31 --mem-gb 16 --timeout 3600 --
-//     build/release/bench_blocktune_sweep [--data DIR] [--p 1,2,4,8,16] [--apply-p 32]
-//     [--ncv1 0] [--extra 4] [--min-ncv 0] [--keep 0.5] [--fast 0] [--reps 3] [--apply-reps 5]
+// Usage (timed: the measurement slot, 16 threads = the judging configuration; one case per call
+// keeps a failing case from ending the others):
+//   python3 tools/run/guard.py --exclusive --timeout 2700 --
+//     build/release/bench_blocktune_sweep [--data DIR] [--p 1,2,4,8,16] [--apply-p 3,6,12,32]
+//     [--ncv1 0] [--extra 4] [--min-ncv 0] [--keep 0.5] [--fast 1] [--reps 3] [--apply-reps 5]
 //     [--ordering auto|N] [--tol 1e-11] CASE...
 // DIR defaults to $HS_DATA_ROOT or ./data; CASE is a directory name under DIR/cases.
+// The calibration of src/eigen/block_rule.cpp used --p 1,2,4,8,16 --apply-p 3,6,12,32 --fast 0,1
+// --reps 3 on 17 cases and --p 1,2,4,8 --apply-p 3,6,12,16 --fast 1 --reps 3 on 14 more
+// (validation), each case in the slot of gpu01 (cores 16-31).
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -44,6 +50,7 @@
 
 #include "driver/internal.hpp"
 #include "eigen/block_lanczos.hpp"
+#include "eigen/block_rule.hpp"
 #include "eigen/lanczos_detail.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/factor.hpp"
@@ -69,7 +76,7 @@ struct Args {
   std::vector<index_t> extra = {4};
   std::vector<index_t> min_ncv = {0};
   std::vector<double> keep = {0.5};
-  std::vector<index_t> fast = {0};
+  std::vector<index_t> fast = {1};
   int reps = 3;
   int apply_reps = 5;
   int ordering = -1;  // -1 = the driver's adaptive choice
@@ -273,6 +280,16 @@ void run_case(const Args& args, const std::string& name, hs::LoadedMatrix&& la,
   head["factor_entries"] = fac->stats().factor_entries;
   head["estimate_entries"] = fac->stats().estimate.factor_entries;
   head["estimate_flops"] = fac->stats().estimate.flops;
+  // The rule's pick for this shape (the driver's auto width once block_size_for calls the rule).
+  hs::eigen_detail::ShiftInvertShape shape;
+  shape.n = n;
+  shape.nev = std::min(n, k);
+  shape.factor_entries = static_cast<double>(fac->stats().factor_entries);
+  shape.nnz_b = b ? static_cast<double>(b->nnz()) : 0.0;
+  shape.complex_scalars = hs::is_complex_v<T>;
+  head["rule_block_size"] = hs::eigen_detail::recommended_block_size(shape);
+  const auto modelled = hs::eigen_detail::modelled_step_seconds(shape);
+  head["rule_step_s"] = std::vector<double>(modelled.begin(), modelled.end());
   std::cout << head.dump() << std::endl;
   hs::ShiftInvertOperator<T> op(*fac, pencil, sigma);
   std::unique_ptr<hs::CsrOperator<T>> bop;
