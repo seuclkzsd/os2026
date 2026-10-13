@@ -114,9 +114,10 @@ struct SolverConfig {
   /// Arithmetic of the shift factorizations (DESIGN §3.4b, §3.6-3; its purpose is memory, not
   /// speed). double (default): always. single: single-precision factors (0.51-0.67x the memory of
   /// double) refined in double precision in every operator application - slower (P6: 0.35-0.59x
-  /// end to end). A single run is checked: every refined application must converge, a single
-  /// factor flagged singular is not used, and the result must be accepted (every pair within tol,
-  /// the certificate passed); otherwise the solve starts again with double factors on the same
+  /// end to end). A single run is checked: every refined application must converge (to within
+  /// tol * inner_tol_factor), a single factor that is singular even without null-pivot detection
+  /// is not used, and the result must be accepted (every pair within tol, the certificate
+  /// passed); otherwise the solve starts again with double factors on the same
   /// pivot order (report.precision: fallback and why). The same holds for blr = on. auto: double,
   /// unless its factors do not fit in core within the budget while single ones do - then single,
   /// with the same checks and fallback (measured trade-off: results/p7_membudget.md).
@@ -229,8 +230,8 @@ struct PrecisionReport {
   /// otherwise empty.
   std::string decision;
   bool fallback = false;        ///< an inexact attempt (single / BLR) was abandoned for double
-  std::string fallback_reason;  ///< why (refinement that did not converge, a single factor
-                                ///< flagged singular, pairs not accepted, certificate failed)
+  std::string fallback_reason;  ///< why (refinement that did not converge, a singular single
+                                ///< factor, pairs not accepted, certificate failed)
   double attempt_s = 0.0;       ///< wall time of the abandoned attempt (inside the phase times)
 };
 

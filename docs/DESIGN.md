@@ -297,7 +297,9 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   停滞或发散（实测 syn-mem27-46、σ = 0：10 步后 ‖r‖/‖Bx‖ ≈ 5e-6）。`last_apply_converged()`（P7）
   报告上一次 apply 的每列是否以「达到 rel_tol 或舍入水平」结束（false：某列因修正被拒或步数用尽而
   停下，返回的是扰动矩阵的算子）。driver 用 `DriverShiftInvert` 包装它：非精确因子的每次 apply 都
-  检查，未收敛即放弃该次尝试、改用双精度因子重解（§3.6-3「非精确因子」）。修正工作区 2·n·p 标量。
+  检查，未收敛且相对残差仍高于 Krylov 容差 tol·inner_tol_factor（修正目标的 10 倍：在可达精度处停滞
+  只是略差，wg-square-1e5 1.08e-12 对 1e-12；eps·cond(K) ≥ 1 时残差停在 1e-5 以上，syn-mem27-46
+  2.4e-5）即放弃该次尝试、改用双精度因子重解（§3.6-3「非精确因子」）。修正工作区 2·n·p 标量。
 - `FactorSolveOperator(factor)`（P4）：y = K⁻¹x，一次 p 列回代（任意精度的因子，不乘 B、不修正），
   如 LOBPCG / JD 的预条件子；构造检查与重分解防护同 ShiftInvertOperator。测试与 bench 中的局部副本
   （`test_jacobi_davidson.cpp`、`bench/lobpcg_jd_memory.cpp`）尚未换成它。
@@ -492,8 +494,10 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    外存工作内存与证书的只计惯性计数（InertiaCounter 总在内存内，工作内存与外存估计相当：
    syn-mem27-100 7.2 GB 对 7.3 GB）都 ≤ cap。
    **非精确因子**（P7）：`factor_precision = single`（或 `blr = on`）的因子每次算子 apply 都经双精度
-   修正，且受检查——修正未收敛（`DriverShiftInvert`）、非精确因子在某位移被判奇异（`factorize_near`
-   不对它做扰动或关检测），或结果不被接受（有对超 tol、证书失败）时，`driver::InexactFactorFailure`
+   修正，且受检查——修正未收敛（`DriverShiftInvert`，§3.4b）、非精确因子在某位移关掉零主元检测后
+   仍奇异（单精度的检测阈值 1e-4‖K‖ 也会标出单精度分辨不了的近邻特征值：cav2d-rect-pert-1e5 有 16 个
+   零主元，修正仍 3 步收敛；所以 `factorize_near` 对非精确因子不做扰动，而是关检测在 σ 处重分解，由
+   每次 apply 的检查裁决），或结果不被接受（有对超 tol、证书失败）时，`driver::InexactFactorFailure`
    放弃这次尝试，从诊断之后以双精度、同一主元顺序（`set_pivot_order`，免第二次排序）重解；报告
    `precision{requested, used, blr, decision, fallback, fallback_reason, attempt_s}`，放弃的尝试时间
    计入各阶段。单精度因此只用于省内存（因子 0.51–0.67 倍），从不返回错误结果；它本身更慢（P6：端到端

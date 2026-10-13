@@ -77,7 +77,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
   外存 / 拒绝（OutOfMemoryBudget，未分配），以及 Krylov 块宽与切片大小（DESIGN §3.6-3）；报告
   `memory` 记录结果与来源（§3）。
 - `factor_precision`（P7）：`double`（默认）；`single` = 单精度因子（因子内存 0.51–0.67 倍）、每次算子
-  apply 双精度修正，更慢；运行受检查（修正须收敛、单精度因子不得被判奇异、结果须被接受），否则以双精度
+  apply 双精度修正，更慢；运行受检查（修正须收敛、单精度因子关检测后不得奇异、结果须被接受），否则以双精度
   同一主元顺序重解，不会返回错误结果；`auto` = 双精度因子在预算内放不进内存而单精度放得进时才用单精度
   （同样受检查与回退）。报告 `precision` 记录请求、实际与回退（§3）；BLR（`blr = on`）同样受检查与回退。
 - `block_size`（P4）：整数 ≥ 0，位移反演 Krylov 运行的块宽 p；0（默认）= 自动，1 = 单向量。

@@ -212,7 +212,8 @@ struct Diagnosis {
   driver::BDefiniteness bdef;
 };
 
-void b_inertia_event(Ctx& c, const Inertia& ib, const std::string& how, const driver::NormEstimate& nb, double seconds) {
+void b_inertia_event(Ctx& c, const Inertia& ib, const std::string& how, const driver::NormEstimate& nb,
+                     double seconds) {
   event(c, "b_inertia", {{"neg", static_cast<std::int64_t>(ib.neg)}, {"zero", static_cast<std::int64_t>(ib.zero)},
                          {"pos", static_cast<std::int64_t>(ib.pos)}, {"valid", ib.valid},
                          {"screened", how != "diagonal" && how != "factorization" && how != "compute_inertia"},
@@ -493,7 +494,7 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
 
   // 3-11 (solve_with_factors). Inexact factors - single precision (requested, or chosen by auto)
   // or BLR - are checked (DESIGN §3.4b): a refined application that does not converge, an inexact
-  // factor flagged singular (driver::InexactFactorFailure) or a result that is not accepted
+  // factor singular without detection (driver::InexactFactorFailure) or a result that is not accepted
   // abandons the attempt, and the solve starts again from the diagnosis with double factors on
   // the same pivot order. The abandoned attempt's time stays in the phases.
   const SolveReport diagnosed = rep;
@@ -521,7 +522,9 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     rep.precision.fallback = true;
     rep.precision.fallback_reason = fallback;
     rep.precision.attempt_s = attempt_s;
-    const std::string what = was_blr ? std::string("BLR") : was == FactorPrecision::Single ? "single-precision" : "inexact";
+    const std::string what = was_blr                            ? std::string("BLR")
+                             : was == FactorPrecision::Single ? "single-precision"
+                                                              : "inexact";
     warn(c, what + " factors abandoned after " + driver::fmt(attempt_s) + " s: " + fallback +
                 "; solved again with double factors");
     event(c, "precision_fallback", {{"reason", fallback}, {"attempt_s", attempt_s}, {"blr", was_blr}});
