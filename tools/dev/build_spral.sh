@@ -53,7 +53,8 @@ prefix="${SPRAL_PREFIX:-$HOME/opt/spral-$SPRAL_VERSION-$suffix}"
 build_root="${SPRAL_BUILD_DIR:-$HOME/build/spral-$SPRAL_VERSION-$suffix}"
 if [ "$smoke" = 1 ]; then
   example="$prefix/examples/C/ssidss_c"
-  export OMP_CANCELLATION=TRUE OMP_PROC_BIND=TRUE
+  # The installed examples have no RPATH to libspral.so.
+  export OMP_CANCELLATION=TRUE OMP_PROC_BIND=TRUE LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   echo "== $example, no GPU"
   CUDA_VISIBLE_DEVICES="" "$example"
   if [ -n "${2:-}" ]; then
