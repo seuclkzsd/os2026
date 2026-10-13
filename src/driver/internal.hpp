@@ -278,8 +278,10 @@ struct OrderingCandidate {
   double flops = 0.0;       ///< factorization flops (RINFOG(1))
   double entries = 0.0;     ///< factor entries (INFOG(20))
   double numeric_s = 0.0;   ///< predicted time of the planned factorizations, counts and solves
+  double incore_mb = 0.0;   ///< in-core MB of the factors (estimate; predicted for the others)
   /// What the choice compares: the analysed candidates' numeric_s; for the others their analysis
   /// plus numeric_s less the expected gain of knowing their actual estimate (choose_ordering).
+  /// Factors beyond the in-core cap score kOverCapScore-scaled by their size (steps.cpp).
   double score_s = 0.0;
 };
 

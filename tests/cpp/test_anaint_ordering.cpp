@@ -350,9 +350,11 @@ TEST(DriverAdaptiveOrdering, FactorsBeyondTheCapLoseToOnesThatFit) {
   EXPECT_EQ(free.choice, 0) << free.candidates;
   const auto capped = run_adaptive(cube, cfg, w, "cap_between", 0.5 * (amd + nd));
   EXPECT_NE(capped.choice, 0) << capped.candidates;
-  // Nothing fits: the smallest estimate is taken (the budget check then decides about out-of-core).
+  // Nothing fits: the smallest estimate is taken (the budget check then decides about out-of-core),
+  // and the candidates predicted beyond the cap as well are not all analysed in turn.
   const auto none = run_adaptive(cube, cfg, w, "cap_tiny", 0.01 * nd);
   EXPECT_NE(none.choice, 0) << none.candidates;
+  EXPECT_LT(analysed_count(none.candidates), 5) << none.candidates;
 }
 
 // End to end: the solve takes the adaptive choice (a nested dissection on 3-D fill) and succeeds.

@@ -725,6 +725,7 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     return fac_nd;
   }
   const std::vector<int> orderings = candidate_orderings(c.cfg);
+  const double cap = fopts.max_memory_mb;
   std::vector<OrderingCandidate> cand(orderings.size());
   std::vector<std::unique_ptr<SparseFactorization<T>>> obj(orderings.size());
   std::vector<double> seconds(orderings.size(), 0.0);
@@ -742,10 +743,10 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     cand[i].entries = static_cast<double>(e.factor_entries);
     cand[i].numeric_s = planned_numeric_s(c.cfg, work, in, cand[i].flops, cand[i].entries, threads,
                                           orderings[i] == 0 ? cand[i].entries / std::max(1.0, nnz) : 0.0);
+    cand[i].incore_mb = e.incore_mb;
     cand[i].score_s = cand[i].numeric_s;
     // Factors beyond the in-core cap (DESIGN §3.6-3) only run out of core, or not at all: any
     // candidate that fits is preferred, and among those that do not, the smallest.
-    const double cap = fopts.max_memory_mb;
     if (cap > 0 && e.incore_mb > cap) cand[i].score_s = kOverCapScore * (e.incore_mb / cap);
   };
   for (std::size_t i = 0; i < orderings.size(); ++i) cand[i].ordering = orderings[i];
@@ -768,6 +769,12 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
                                             orderings[i] == 0 ? entries / std::max(1.0, nnz) : 0.0);
       const double gain = nested_dissection(orderings[anchor]) ? kGainFromNd : kGainFromAmd;
       cand[i].score_s = cand[i].analysis_s + (1.0 - gain) * cand[i].numeric_s;
+      // In-core size in proportion to the factor entries, from the anchor's estimate: a candidate
+      // predicted beyond the cap is scored like an analysed one beyond it, so that, when nothing
+      // fits (out-of-core runs), candidates are not analysed one after the other for nothing
+      // (ss-3dspectralwave2: all four were, 50 s of analyses).
+      cand[i].incore_mb = cand[anchor].incore_mb * entries / std::max(1.0, cand[anchor].entries);
+      if (cap > 0 && cand[i].incore_mb > cap) cand[i].score_s = kOverCapScore * (cand[i].incore_mb / cap);
     }
   };
   // The choice among the analysed candidates; their other analyses are freed.
