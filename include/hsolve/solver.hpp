@@ -84,8 +84,10 @@ struct SolverConfig {
                                     ///< A deflated certificate rerun missing m pairs uses
                                     ///< max(p, min(4, m rounded up to even)) (rerun_block_size), so
                                     ///< it gets all missing copies of a multiple eigenvalue by
-                                    ///< construction only up to that width. p is halved (warning)
-                                    ///< while the block basis does not fit the memory budget.
+                                    ///< construction only up to that width; it asks for m + 2
+                                    ///< pairs but ends once the m nearest have converged. p is
+                                    ///< halved (warning) while the block basis does not fit the
+                                    ///< memory budget.
                                     ///< GHIEP (src/driver/indefinite.cpp): auto p = 2 for n >= 2e4
                                     ///< and nev >= 4, else 1; a configured p is capped at nev, 64
                                     ///< and n/16, probes (nev <= 2) stay single-vector, and p is

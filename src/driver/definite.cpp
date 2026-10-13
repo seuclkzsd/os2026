@@ -117,10 +117,11 @@ const char* which_name(Which w) {
 // One shift-invert Lanczos run at the shift the factorization currently holds, optionally deflated,
 // with Krylov blocks of p vectors (KrylovSchurOptions::block_size; p = 1: single vector).
 // theta = 1/(lambda - sigma): LargestMagnitude = nearest sigma, SmallestAlgebraic = the eigenvalues
-// just below sigma, LargestAlgebraic = just above.
+// just below sigma, LargestAlgebraic = just above. lead > 0: the run may end once the lead best
+// ranked of the nev pairs have converged (KrylovSchurOptions::lead_nev).
 template <class T>
 void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma, Which which,
-                 index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out) {
+                 index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out, index_t lead = 0) {
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
   SolveRefinement refine;
@@ -139,6 +140,7 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   ko.seed = c.cfg.seed + static_cast<std::uint64_t>(out.restarts);  // fresh start for reruns
   ko.deflation = deflation;
   ko.block_size = std::max<index_t>(p, 1);
+  ko.lead_nev = lead < nev ? lead : 0;
   HermitianEigResult<T> res;
   {
     PhaseScope phase(c.clock, Phase::Iterate);
@@ -149,6 +151,7 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   out.converged = res.converged;
   event(c, "lanczos", {{"sigma", sigma}, {"which", std::string(which_name(which))},
                        {"nev", static_cast<std::int64_t>(nev)},
+                       {"lead", static_cast<std::int64_t>(ko.lead_nev)},
                        {"block_size", static_cast<std::int64_t>(ko.block_size)},
                        {"nconv", static_cast<std::int64_t>(res.nconv)},
                        {"restarts", static_cast<std::int64_t>(res.restarts)},
@@ -519,13 +522,22 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       }
     }
     keep_converged(run, n2a, n2b, cfg.tol);
+    // The missing pairs are the nearest sigma beyond the deflated ones: the rerun asks for two
+    // more, which shape its basis and are kept when they converge, but it ends once the missing
+    // ones have (lead; the next round checks the window again). A pair beyond them may lie in a
+    // cluster wider than the inner tolerance and never converge: yee-pec-box-1e5, k = 10, one
+    // copy of the double eigenvalue 59.986 removed - the rerun's third pair is a vector of the
+    // 35475-fold curl-curl null space (|theta| = 1/sigma, its Ritz values at lambda ~ 4e-9),
+    // whose estimate stalled at 3e-10 |theta| against the inner tolerance 1e-11 at widths 4 and
+    // 8 (deterministic run, 4 threads, max_restarts 60: 1236 / 1976 applications; with lead 40 /
+    // 72); reruns of width 2 got under it after 154 and 218 applications (with lead: 20).
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
     if (nev_rerun < 1) break;
     refactorize_at(c, fac, sigma, detection_off);
     DenseMatrix<T> defl = run.all.x;
     const index_t d = defl.cols();
     const index_t p_rerun = fit_block_size<T>(c, n, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, missing));
-    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run);
+    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run, missing);
     select_and_verify();
   }
   if (cert.performed && cert.passed && sel.size() < std::min<index_t>(k, n))
