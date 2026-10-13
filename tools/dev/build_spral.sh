@@ -101,8 +101,10 @@ if [ "$gpu" = true ]; then
   for d in "${libdirs[@]}"; do cuda_link+=" -Xlinker=-rpath=$d"; done
   cuda_opts=("-Dcuda_args=-gencode=arch=compute_$CUDA_ARCH,code=sm_$CUDA_ARCH" "-Dcuda_link_args=$cuda_link")
 fi
+# -rpath-link too: the conda ld (--sysroot) does not follow libspral.so's RPATH when linking the
+# executables against it.
 host_link="-L$CONDA_PREFIX/lib"
-for d in "${libdirs[@]}"; do host_link+=" -Wl,-rpath,$d"; done
+for d in "${libdirs[@]}"; do host_link+=" -Wl,-rpath,$d -Wl,-rpath-link,$d"; done
 # With link_language 'cpp' meson no longer adds the Fortran runtime to libspral.so's link.
 cpp_link="$host_link"
 [ "$gpu" = true ] && cpp_link+=" -lgfortran -lm"
