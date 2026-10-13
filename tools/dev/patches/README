@@ -1,0 +1,10 @@
+Patches applied by tools/dev/build_spral.sh to the pinned SPRAL 2025.09.18 release (the last
+release; nothing newer exists as of 2026-10):
+
+spral-836dc3e-fix-ssids-gpu.patch
+    Upstream commit 836dc3e6e088 "Fix SSIDS on GPU" (2026-07-17, https://github.com/ralna/spral/
+    commit/836dc3e6e088), unchanged. Without it the GPU path of 2025.09.18 is unusable: every GPU
+    solve passes the empty array section x(r*ldx+1:r*ldx:n) to the GPU solve kernels' host code
+    (heap corruption, "free(): invalid next size" in gpu_subtree solve_fwd), the factorization
+    fails with CUDA error 700 when delayed pivots occur (missing __syncthreads in reorder.cu), and
+    a missing __threadfence in assemble.cu can give wrong results on Volta and later.

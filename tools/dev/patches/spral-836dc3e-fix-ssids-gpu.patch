@@ -1,0 +1,138 @@
+diff --git a/meson.build b/meson.build
+index 86a024af..6bdce5c2 100644
+--- a/meson.build
++++ b/meson.build
+@@ -109,6 +109,16 @@ endif
+ # HAVE_NVCC
+ if build_gpu and nvcc_available and libcuda.found()
+      add_global_arguments('-DHAVE_NVCC', language : 'cpp')
++     # Target GPU architecture. The SSIDS GPU kernels are arch-sensitive and
++     # must be built for the target GPU's native architecture: relying on a
++     # mismatched virtual arch JIT'd at runtime can silently produce wrong
++     # results. Set -Dgpu_arch=sm_XX to match your GPU (e.g. sm_80 A100,
++     # sm_86 A4000/RTX30xx, sm_90 H100, sm_61 GTX10xx; "native" on CUDA>=12).
++     # Empty leaves the nvcc default.
++     gpu_arch = get_option('gpu_arch')
++     if gpu_arch != ''
++       add_global_arguments('-arch=' + gpu_arch, language : 'cuda')
++     endif
+ endif
+ 
+ # OpenMP
+diff --git a/meson_options.txt b/meson_options.txt
+index 2edd0bb3..25415534 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -8,6 +8,11 @@ option('gpu',
+        value : true,
+        description : 'option to compile SPRAL with GPU support')
+ 
++option('gpu_arch',
++       type : 'string',
++       value : '',
++       description : 'CUDA architecture passed to nvcc via -arch (e.g. sm_80 for A100, sm_86 for A4000/RTX30xx, sm_90 for H100, sm_61 for GTX10xx, or native on CUDA>=12). Empty leaves the nvcc default. The SSIDS GPU kernels are arch-sensitive and should be built for the native architecture of the target GPU.')
++
+ option('examples',
+        type : 'boolean',
+        value : false,
+diff --git a/src/ssids/fkeep.F90 b/src/ssids/fkeep.F90
+index 29547c4e..9af3a17c 100644
+--- a/src/ssids/fkeep.F90
++++ b/src/ssids/fkeep.F90
+@@ -30,7 +30,12 @@ module spral_ssids_fkeep
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+ 
+    type numeric_subtree_ptr
+-      class(numeric_subtree_base), pointer :: ptr
++      ! Default-initialise to null: fkeep%subtree is allocated before the
++      ! subtrees are assigned, and the free path tests associated(ptr). Without
++      ! this initialiser an early termination leaves ptr undefined, so
++      ! associated() is UB and deallocate() may crash (mirrors akeep's
++      ! symbolic_subtree_ptr, which already nullifies by default).
++      class(numeric_subtree_base), pointer :: ptr => null()
+    end type numeric_subtree_ptr
+ 
+    !
+@@ -380,6 +385,8 @@ subroutine enquire_indef_cpu(akeep, fkeep, inform, piv_order, d)
+          inform%flag = SSIDS_ERROR_ALLOCATION
+          return
+       endif
++      po = -1 ! avoid returning garbage for entries enquire_indef leaves unset
++              ! (e.g. singular / missing-diagonal matrices)
+    endif
+ 
+    ! FIXME: should probably return nelim from each part, due to delays passing
+diff --git a/src/ssids/gpu/kernels/assemble.cu b/src/ssids/gpu/kernels/assemble.cu
+index 887026cf..777dee5c 100644
+--- a/src/ssids/gpu/kernels/assemble.cu
++++ b/src/ssids/gpu/kernels/assemble.cu
+@@ -227,6 +227,12 @@ void __global__ assemble(
+    // Record that we're done
+    __syncthreads();
+    if(threadIdx.x==0 && threadIdx.y==0) {
++      // Release fence: make this block's dest[] += writes visible to other
++      // blocks BEFORE we advertise completion via sync. Without it a block
++      // spin-waiting on sync (above) can observe completion and read dest
++      // before the writes land, giving non-deterministic wrong results on
++      // Volta+ (cf. the equivalent __threadfence in dtrsv.h's trsv kernels).
++      __threadfence();
+       atomicAdd((int*)&(sync[blkdata->cp]), 1);
+    }
+ }
+diff --git a/src/ssids/gpu/kernels/reorder.cu b/src/ssids/gpu/kernels/reorder.cu
+index bcd04484..dbdb02f6 100644
+--- a/src/ssids/gpu/kernels/reorder.cu
++++ b/src/ssids/gpu/kernels/reorder.cu
+@@ -331,6 +331,12 @@ copy_L_LD_perm_shmem(
+          if ( !indr[i] )
+             indr[i] = ++j;
+    }
++   // indr is populated above by thread (0,0) only; without this barrier the
++   // other threads race ahead and read stale/uninitialised indr entries (0),
++   // producing indr[tid]-1 == -1 -> out-of-bounds shared write in
++   // shuffle_perm_shmem (device -51 "illegal memory access"), or a wrong
++   // permutation. Only exposed when delayed pivots are present.
++   __syncthreads();
+ 
+    int off = done*ld;
+ 
+diff --git a/src/ssids/gpu/subtree.f90 b/src/ssids/gpu/subtree.f90
+index 5f81619e..7b618e4b 100644
+--- a/src/ssids/gpu/subtree.f90
++++ b/src/ssids/gpu/subtree.f90
+@@ -573,7 +573,7 @@ subroutine solve_fwd(this, nrhs, x, ldx, inform)
+            this%symbolic%child_list, this%symbolic%n,               &
+            this%symbolic%nnodes, this%nodes, this%symbolic%rptr,    &
+            this%stream_handle, this%stream_data,                    &
+-           x(r*ldx+1:r*ldx:this%symbolic%n), inform%stat, cuda_error)
++           x(r*ldx+1:r*ldx+this%symbolic%n), inform%stat, cuda_error)
+       if (inform%stat .ne. 0) goto 100
+       if (cuda_error .ne. 0) goto 200
+    end do
+@@ -610,7 +610,7 @@ subroutine solve_diag(this, nrhs, x, ldx, inform)
+    do r = 0, nrhs-1
+       call d_solve_gpu(this%symbolic%nnodes, this%symbolic%sptr,    &
+            this%stream_handle, this%stream_data, this%symbolic%n,   &
+-           x(r*ldx+1:r*ldx:this%symbolic%n), inform%stat, cuda_error)
++           x(r*ldx+1:r*ldx+this%symbolic%n), inform%stat, cuda_error)
+       if (inform%stat .ne. 0) goto 100
+       if (cuda_error .ne. 0) goto 200
+    end do
+@@ -646,7 +646,7 @@ subroutine solve_diag_bwd(this, nrhs, x, ldx, inform)
+    do r = 0, nrhs-1
+       call bwd_solve_gpu(SSIDS_SOLVE_JOB_DIAG_BWD, this%posdef,     &
+            this%symbolic%n, this%stream_handle, this%stream_data,   &
+-           x(r*ldx+1:r*ldx:this%symbolic%n), inform%stat, cuda_error)
++           x(r*ldx+1:r*ldx+this%symbolic%n), inform%stat, cuda_error)
+       if (inform%stat .ne. 0) goto 100
+       if (cuda_error .ne. 0) goto 200
+    end do
+@@ -682,7 +682,7 @@ subroutine solve_bwd(this, nrhs, x, ldx, inform)
+    do r = 0, nrhs-1
+       call bwd_solve_gpu(SSIDS_SOLVE_JOB_BWD, this%posdef, this%symbolic%n, &
+            this%stream_handle, this%stream_data,                            &
+-           x(r*ldx+1:r*ldx:this%symbolic%n), inform%stat, cuda_error)
++           x(r*ldx+1:r*ldx+this%symbolic%n), inform%stat, cuda_error)
+       if (inform%stat .ne. 0) goto 100
+       if (cuda_error .ne. 0) goto 200
+    end do

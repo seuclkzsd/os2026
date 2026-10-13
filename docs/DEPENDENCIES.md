@@ -44,6 +44,21 @@ CUDA（若引入）为 NVIDIA 闭源但免费，赛题明确允许；仅作可�
   PETSc/SLEPc 环境才能补全）。
 - `tools/bench/slepc_profiles.json` 存放调优配置（`results/baseline_tuning.md`，目前只有 2 核）。
 
+## GPU 实验 G1（可选，只用于 `bench/gpu_ssids.cpp`，不进入 hsolve，不随其分发）
+
+| 依赖 | 版本 | 许可证 | 用途 | 调用方式 |
+|---|---|---|---|---|
+| SPRAL（SSIDS） | 2025.09.18（GitHub release，源码包 sha256 `1358168a…7dae7`） | BSD-3-Clause | 多波前 LDLᵀ + 惯性（OpenMP CPU 路径与 CUDA 路径），与 hsolve 的 MUMPS 后端对比（`results/gpu_g1.md`） | C 接口 `spral_ssids_*`；CMake 选项 `HSOLVE_WITH_SPRAL`（默认关）/ 预设 `spral` |
+| meson | 1.11.1（`meson.pyz`，sha256 `05f25d74…b73f5`） | Apache-2.0 | 构建 SPRAL | 构建工具 |
+| CUDA Toolkit | 12.2（节点自带 `/usr/local/cuda-12.2`，驱动 535） | NVIDIA EULA（闭源、免费） | SSIDS 的 GPU 路径（cuBLAS、静态 cudart）；bench 的驱动 API（上下文）与 NVML（显存采样） | 仅实验 |
+| GCC | 9.2.0（节点上 `$HOME/local/usr/gcc_9.2.0`） | GPL-3.0 + 运行库例外 | nvcc 12.2 的主机编译器（nvcc 12.2 解析不了 gcc 13 的 `<type_traits>`） | 构建工具 |
+
+`tools/dev/build_spral.sh` 在节点上离线构建（源码与 meson 先下载到 `$HOME/src`，校验 sha256），装到
+`$HOME/opt/spral-2025.09.18-cuda12.2`：sm_70（V100），conda 的 gcc/gfortran 13.4、OpenBLAS、METIS 5（32 位），
+不用 hwloc；`libspral.so` 由 conda g++ 链接（对 SPRAL 的 meson.build 打一行补丁），Fortran 不做循环向量化（否则
+glibc 2.28 sysroot 引入 CentOS 7 没有的 libmvec），脚本检查结果不依赖 glibc 2.17 以上的符号。
+`tools/dev/build_spral.sh --smoke 7` 在无 GPU 与 GPU 7 上跑 SPRAL 的 SSIDS 示例。
+
 ## 集群节点部署（gpu01 / gpu02 / c001）
 
 节点为 CentOS 7（glibc 2.17）、无外网。`tools/dev/deploy_cluster.sh HOST` 由开发服务器的 conda 包缓存
