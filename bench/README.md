@@ -56,6 +56,14 @@ P4 programs:
 | `bench_ghiep_fix_ortho` | the block step's fast path (`block_cgs_cholqr2`) vs the two-pass `BlockOrthonormalizer` on the same inputs | `bench_ghiep_fix_ortho [--n 100000] [--k 24,48,72] [--p 2,4,8,16,64] [--input krylov\|random]` |
 | `bench_certfast_measure` | exact certificate counts (driver path, InertiaCounter double / single pair) vs `exclusion_check` (delta x block size x pass radius), detection of removed copies, with hsolve's CLI solution as X | `bench_certfast_measure --case DIR --solution SOL [--reps 5] [--deltas 1e-6,1e-12] [--blocks 1,4]` |
 
+GPU experiment G1 (not built by default: CMake option `HSOLVE_WITH_SPRAL`, preset `spral`; SPRAL from
+`tools/dev/build_spral.sh`; driver `tools/bench/gpu_g1.sh`, tables `tools/bench/gpu_g1_report.py`,
+results `results/gpu_g1.md`):
+
+| program | measures | run |
+|---|---|---|
+| `bench_gpu_ssids` | SPRAL SSIDS (CPU-only / CUDA on one GPU) vs the driver's MUMPS backend on K = A - sigma B: analysis, cold / warm factorizations, inertia, 1- and p-RHS solves, backward error, host peak RSS, GPU memory (NVML), CUDA context time | `bench_gpu_ssids --case DIR --backend mumps\|ssids-cpu\|ssids-gpu [--ordering driver\|metis\|mumps] [--u 0.01] [--scaling 4] [--analyze-only 1]` |
+
 Measurement scripts outside `bench/`: `python/bench/overhead.py` (Python API vs CLI wall time and
 peak), `python/bench/load_memory.py` (`hsolve.load_matrix` vs `scipy.sparse.load_npz` memory),
 `tools/eval/bench_norms.py` (the evaluator's norm-estimate settings).

@@ -7,7 +7,7 @@
 //   bench_gpu_ssids --case DIR --backend mumps|ssids-cpu|ssids-gpu [--ordering O] [--sigma s]
 //       [--threads t] [--factorizations F] [--solves S] [--block p] [--block-solves P]
 //       [--u 0.01] [--scaling 4] [--pivot-method 2] [--nemin 32] [--min-gpu-work 5e9]
-//       [--gpu-perf-coeff 1] [--max-load-inbalance 1.2] [--analyze-only 1]
+//       [--gpu-perf-coeff 1] [--max-load-inbalance 1.2] [--memory-budget-gb 14] [--analyze-only 1]
 //
 // DIR holds A.npz (and B.npz) and config.json (sigma = target.sigma unless --sigma; k = target.k).
 // K is assembled exactly as the driver's MUMPS input: ShiftedPencil::assemble(1, -sigma) on the
@@ -16,7 +16,8 @@
 // One backend per process, so that the host peak RSS belongs to it:
 //   mumps      MumpsFactorization with the driver's FactorOptions (factor_options_from: t threads,
 //              L0-OpenMP, ICNTL(8)=7 scaling, null-pivot detection CNTL(3)=1e-8, the driver's
-//              ICNTL(23) cap for the default 14 GB budget). --ordering driver (default): the
+//              ICNTL(23) cap for SolverConfig::memory_budget_gb = --memory-budget-gb, default 14
+//              GB like the driver; the 1e6 3-D case needs 30). --ordering driver (default): the
 //              driver's adaptive choice (src/driver/steps.cpp adaptive_analysis: AMD probe,
 //              decide_ordering with the work the driver plans - 1 + 2 certificate (+1 B test)
 //              factorizations, max(40, 3k) solves - and SCOTCH when nested dissection pays);
@@ -102,6 +103,7 @@ struct Args {
   int block = 8;
   int block_solves = 5;
   bool analyze_only = false;
+  double memory_budget_gb = 0.0;  // 0: SolverConfig's default (14 GB)
   // SSIDS options
   double u = 0.01;
   int scaling = 4;
@@ -301,10 +303,11 @@ std::unique_ptr<hs::SparseFactorization<double>> driver_analysis(const hs::Shift
 class Mumps final : public Backend {
  public:
   Mumps(const hs::ShiftedPencil<double>& pencil, double sigma, index_t k, bool has_b, int threads,
-        std::string ordering, json& out)
+        double budget_gb, std::string ordering, json& out)
       : pencil_(pencil), sigma_(sigma), k_(k), has_b_(has_b), ordering_(std::move(ordering)), out_(out) {
     hs::SolverConfig cfg;
     cfg.threads = threads;
+    if (budget_gb > 0) cfg.memory_budget_gb = budget_gb;
     const double cap_mb =
         (cfg.memory_budget_gb * kGiB - static_cast<double>(hs::current_rss_bytes())) * 0.95 / 1e6;
     fo_ = hs::driver::factor_options_from(cfg, cap_mb);
@@ -505,7 +508,7 @@ int run(const Args& a0, const hs::CsrMatrix<double>& am, const hs::CsrMatrix<dou
   std::vector<int> user_order;
   if (ssids && a.ordering == "mumps") {
     json mo;
-    Mumps ref(pencil, a.sigma, k, bm != nullptr, a.threads, "driver", mo);
+    Mumps ref(pencil, a.sigma, k, bm != nullptr, a.threads, a.memory_budget_gb, "driver", mo);
     hs::Timer t;
     ref.analyse();
     out["order_source"] = {{"mumps_ordering", mo["mumps_ordering"]}, {"analyse_s", t.seconds()}};
@@ -526,7 +529,7 @@ int run(const Args& a0, const hs::CsrMatrix<double>& am, const hs::CsrMatrix<dou
   if (ssids)
     be = std::make_unique<Ssids>(km, a.backend == "ssids-gpu", a.threads, a, std::move(user_order));
   else
-    be = std::make_unique<Mumps>(pencil, a.sigma, k, bm != nullptr, a.threads, a.ordering, out);
+    be = std::make_unique<Mumps>(pencil, a.sigma, k, bm != nullptr, a.threads, a.memory_budget_gb, a.ordering, out);
   hs::Timer t;
   be->analyse();
   out["analyse_s"] = t.seconds();
@@ -621,6 +624,7 @@ int main(int argc, char** argv) {
       else if (key == "--block") args.block = std::stoi(v);
       else if (key == "--block-solves") args.block_solves = std::stoi(v);
       else if (key == "--analyze-only") args.analyze_only = std::stoi(v) != 0;
+      else if (key == "--memory-budget-gb") args.memory_budget_gb = std::stod(v);
       else if (key == "--u") args.u = std::stod(v);
       else if (key == "--scaling") args.scaling = std::stoi(v);
       else if (key == "--pivot-method") args.pivot_method = std::stoi(v);
