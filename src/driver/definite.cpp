@@ -457,13 +457,24 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     if (zero_tol >= 0 && a_end <= zero_tol && b_end >= -zero_tol) return hand_over();  // window meets the band
     index_t missing = 0;
     index_t zd = 0;
+    // Fewer than k selected pairs (fault injection, pairs left unconverged, a rescue merging
+    // columns): every check covers only the found pairs' window / disc, which may end before the
+    // k-th nearest eigenvalue - a passed check then still reruns for the pairs short.
+    const index_t short_by = std::min<index_t>(k, n) - sel.size();
+    auto rerun_short = [&]() {
+      warn(c, "certificate: only " + std::to_string(sel.size()) + " of " + std::to_string(k) +
+                  " pairs selected; deflated rerun for the nearest ones beyond");
+      return short_by;
+    };
     const RoundPairs<T> pairs{run.all, &sel, select_nearest(run.all.lambda, t.sigma, k, zero_tol, zd)};
     const CheckOutcome quick = fast.check({t.sigma, r, a_end, b_end}, pairs, round);
-    if (quick.verdict == CheckOutcome::Verdict::Passed) break;
-    // Still missing after the last rerun: the exact counts give the final verdict.
-    if (quick.verdict == CheckOutcome::Verdict::Missing && round < 2) {
-      missing = quick.missing;
-      warn(c, "certificate: the " + cert.method + " check finds " + std::to_string(missing) +
+    if (quick.verdict == CheckOutcome::Verdict::Passed) {
+      if (short_by == 0 || round == 2) break;
+      missing = rerun_short();
+    } else if (quick.verdict == CheckOutcome::Verdict::Missing && round < 2) {
+      // Still missing after the last rerun: the exact counts give the final verdict (below).
+      missing = std::max(quick.missing, short_by);
+      warn(c, "certificate: the " + cert.method + " check finds " + std::to_string(quick.missing) +
                   " eigenvalue(s) missing near sigma; deflated rerun");
     } else {
       const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
@@ -481,10 +492,17 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       fast.record_exact(counts.uses_counter());
       event(c, "certificate", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end}, {"upper", b_end},
                                {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
-                               {"count_found", static_cast<std::int64_t>(found)}, {"passed", cert.passed}});
-      if (cert.passed || cert.count_inertia < cert.count_found || round == 2) break;
-      missing = cert.count_inertia - cert.count_found;
-      warn(c, "certificate: " + std::to_string(missing) + " eigenvalue(s) missing in the window; deflated rerun");
+                               {"count_found", static_cast<std::int64_t>(found)}, {"passed", cert.passed},
+                               {"short_by", static_cast<std::int64_t>(short_by)}});
+      if (cert.count_inertia < cert.count_found || round == 2) break;
+      if (cert.passed) {
+        if (short_by == 0) break;
+        missing = rerun_short();
+      } else {
+        missing = std::max(cert.count_inertia - cert.count_found, short_by);
+        warn(c, "certificate: " + std::to_string(cert.count_inertia - cert.count_found) +
+                    " eigenvalue(s) missing in the window; deflated rerun");
+      }
     }
     keep_converged(run, n2a, n2b, cfg.tol);
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
@@ -496,6 +514,9 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run);
     select_and_verify();
   }
+  if (cert.performed && cert.passed && sel.size() < std::min<index_t>(k, n))
+    cert.statement += "; but only " + std::to_string(sel.size()) + " of " + std::to_string(k) +
+                      " pairs were found: the window covers the found pairs, not the k-th nearest eigenvalue";
   if (cert.performed && !cert.passed) {
     if (cert.count_inertia < 0)
       warn(c, "certificate failed: the " + cert.method + " check still finds eigenvalues missing near sigma");

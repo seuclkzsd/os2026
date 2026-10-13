@@ -124,7 +124,8 @@ struct SolverConfig {
   ///              randomized check (only with a proven kappa), from measured times of this run
   ///              (main factorization, solve calls of the Krylov run at its block width);
   ///   off        none (inertia_check = off also turns it off).
-  /// A check that detects a missing pair triggers the deflated rerun and checks again. Window
+  /// A check that detects a missing pair triggers the deflated rerun and checks again; fewer than
+  /// k selected pairs rerun even after a passed check (it covers the found pairs only). Window
   /// targets (interval / smallest / largest, and nearest targets handed to the windows by the
   /// zero band) always count exactly: their count points are slice cuts and shifts. The report
   /// states what was proven (method, rigorous, failure_probability, statement).
@@ -133,7 +134,8 @@ struct SolverConfig {
   /// FAULT INJECTION, for tests and measurements only (0 = off): after the first Krylov run of a
   /// nearest target, remove this many found pairs before the completeness check - copies of the
   /// largest multiple eigenvalue among the selected pairs (one copy always stays), then the
-  /// farthest ones - so that the check must detect them and the deflated rerun recover them.
+  /// farthest selected ones with their Ritz hints - so that the solve must find them missing (a
+  /// check detecting a copy, or fewer than k selected pairs) and the deflated rerun recover them.
   index_t certificate_fault_drop = 0;
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
