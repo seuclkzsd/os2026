@@ -1,0 +1,196 @@
+{
+ "tag": "cmp-p8-best-interval",
+ "cores": "16-31",
+ "ncores": 16,
+ "solvers": [
+  "hsolve",
+  "hsolve-auto",
+  "hsolve-nocert",
+  "slepc"
+ ],
+ "slepc_profile": "best",
+ "slepc_ranks": 1,
+ "reps": 5,
+ "target_override": {
+  "mode": "interval",
+  "lower": 40,
+  "upper": 200
+ },
+ "evaluated": true,
+ "rows": [
+  {
+   "case": "yee-pec-box-1e5",
+   "n": 109744,
+   "problem": "GHEP",
+   "target": {
+    "mode": "interval",
+    "lower": 40,
+    "upper": 200
+   },
+   "target_desc": "[40, 200]",
+   "k": null,
+   "norms": {
+    "norm2_a": 568.3983920770473,
+    "norm2_b": 0.023699562469615958,
+    "scale": 23983.49728210227,
+    "time_s": 0.6596268150024116
+   },
+   "solvers": {
+    "hsolve": {
+     "reps": 5,
+     "valid_runs": 5,
+     "ok": true,
+     "solver_s": 3.8382910529999994,
+     "solver_s_min": 3.740130141,
+     "solver_s_max": 3.9063568639999997,
+     "solver_s_all": [
+      3.9063568639999997,
+      3.8382910529999994,
+      3.790461334,
+      3.850764261,
+      3.740130141
+     ],
+     "solver_s_scope": "report time_total_s",
+     "wall_s": 3.994,
+     "peak_rss_gib": 1.211,
+     "solver_peak_gib": 1.2111740112304688,
+     "max_eta": 7.146690826216108e-12,
+     "completeness": [
+      "complete"
+     ],
+     "pairs": 37,
+     "phases": {
+      "analysis_s": 0.573721133,
+      "numeric_s": 1.4698557929999998,
+      "factorizations": 3.0,
+      "solves": 144.0,
+      "solve_s": 1.198672635,
+      "ortho_s": null,
+      "iterate_s": 1.5066472229999999,
+      "verify_s": 0.13312032099999993
+     },
+     "errors": [],
+     "invalid_reasons": [],
+     "set_err_vs_ref": 4.236288567848491e-17,
+     "set_diff_vs_slepc": 2.425420485273352e-14
+    },
+    "hsolve-auto": {
+     "reps": 5,
+     "valid_runs": 5,
+     "ok": true,
+     "solver_s": 3.863179582,
+     "solver_s_min": 3.761203066,
+     "solver_s_max": 3.894284444,
+     "solver_s_all": [
+      3.875800643,
+      3.79089854,
+      3.894284444,
+      3.863179582,
+      3.761203066
+     ],
+     "solver_s_scope": "report time_total_s",
+     "wall_s": 4.048,
+     "peak_rss_gib": 1.155,
+     "solver_peak_gib": 1.1554908752441406,
+     "max_eta": 2.916864967078396e-11,
+     "completeness": [
+      "complete"
+     ],
+     "pairs": 37,
+     "phases": {
+      "analysis_s": 0.558291092,
+      "numeric_s": 1.495737892,
+      "factorizations": 3.0,
+      "solves": 144.0,
+      "solve_s": 1.218900563,
+      "ortho_s": null,
+      "iterate_s": 1.5273901959999998,
+      "verify_s": 0.13157662700000017
+     },
+     "errors": [],
+     "invalid_reasons": [],
+     "set_err_vs_ref": 4.236288567848491e-17,
+     "set_diff_vs_slepc": 2.4255683551268657e-14
+    },
+    "hsolve-nocert": {
+     "reps": 5,
+     "valid_runs": 5,
+     "ok": true,
+     "solver_s": 3.8690215510000003,
+     "solver_s_min": 3.751101471,
+     "solver_s_max": 3.907519158,
+     "solver_s_all": [
+      3.751101471,
+      3.87021448,
+      3.8690215510000003,
+      3.907519158,
+      3.8053692349999997
+     ],
+     "solver_s_scope": "report time_total_s",
+     "wall_s": 4.02,
+     "peak_rss_gib": 1.187,
+     "solver_peak_gib": 1.1865692138671875,
+     "max_eta": 2.23710556417334e-11,
+     "completeness": [
+      "complete"
+     ],
+     "pairs": 37,
+     "phases": {
+      "analysis_s": 0.566460469,
+      "numeric_s": 1.485731746,
+      "factorizations": 3.0,
+      "solves": 144.0,
+      "solve_s": 1.1934641119999998,
+      "ortho_s": null,
+      "iterate_s": 1.501369499,
+      "verify_s": 0.1331497189999994
+     },
+     "errors": [],
+     "invalid_reasons": [],
+     "set_err_vs_ref": 3.9980368659538725e-17,
+     "set_diff_vs_slepc": 2.425450059244055e-14
+    },
+    "slepc": {
+     "reps": 5,
+     "valid_runs": 5,
+     "ok": true,
+     "solver_s": 10.875280799999999,
+     "solver_s_min": 10.3239631,
+     "solver_s_max": 12.5041535,
+     "solver_s_all": [
+      12.4342282,
+      12.5041535,
+      10.7541783,
+      10.875280799999999,
+      10.3239631
+     ],
+     "solver_s_scope": "log_view setup+solve+vectors",
+     "wall_s": 13.593,
+     "peak_rss_gib": 1.942,
+     "solver_peak_gib": 1.8729972839355469,
+     "max_eta": 2.9301219801619e-12,
+     "completeness": [
+      "complete"
+     ],
+     "pairs": 37,
+     "phases": {
+      "analysis_s": 1.2807,
+      "numeric_s": 1.3291,
+      "factorizations": 2.0,
+      "solves": 194.0,
+      "solve_s": 7.1055,
+      "ortho_s": 0.93547,
+      "iterate_s": null,
+      "verify_s": null
+     },
+     "errors": [],
+     "invalid_reasons": [],
+     "config": "4x4 eps_krylovschur_nev=60",
+     "config_source": "case profile yee-pec-box-1e5",
+     "config_scope": "case",
+     "set_err_vs_ref": 1.233797047631605e-13
+    }
+   }
+  }
+ ]
+}
