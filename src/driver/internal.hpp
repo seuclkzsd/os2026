@@ -412,9 +412,14 @@ enum class Definiteness { Positive, NotPositive, Unknown };
 /// (test_b_definiteness).
 constexpr double kIndefiniteRitz = 1e-10;
 
-/// hs::solve gives prove_positive_definite (norms.hpp) at most this fraction of the predicted time
-/// of the factorization of B it saves (factorization_s of the main analysis' estimate): a failed
-/// proof then costs at most half a factorization, a proof saves at least the other half.
+/// hs::solve gives the attempts of prove_positive_definite (norms.hpp) at most this fraction of the
+/// predicted time of the factorization of B a proof saves (factorization_s of the main analysis'
+/// estimate, against hpd_attempt_seconds). Beyond the attempts a proof costs its Lanczos run and,
+/// once theta passes the gate, the stored S and the level-1 pattern. At 16 threads (bench/
+/// anaint_bproof.cpp, P5c) a failed proof cost 0.054 s on ss-tem27623 against a 0.058 s
+/// factorization of B (the worst ratio; theta passed the gate, the attempt failed), 0.001..0.09 s
+/// elsewhere (ss-tem152078 0.09 s against 0.6 s, before the Lanczos ran on the implicitly scaled B);
+/// a successful one 0.004..0.08 s against 0.026..0.20 s.
 constexpr double kBProofBudget = 0.5;
 
 /// Whether B is HPD, as far as decided before the analysis, without a factorization.
