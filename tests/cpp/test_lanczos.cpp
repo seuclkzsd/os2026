@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "eigen/block_lanczos.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/sparse.hpp"
@@ -1229,6 +1230,67 @@ TYPED_TEST(LanczosBlockTyped, DeflationInBInnerProduct) {
       expect_values(second.theta, std::vector<double>(expect.begin() + 4, expect.end()),
                     1e-10 * std::abs(expect[0]));
       EXPECT_LT(gram_deviation<T>(first.vectors, &bop, second.vectors, false), 1e-12);
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, FastAndTwoPassBlockOrthogonalizationAgree) {
+  // The block steps' default kernel (BlockOrthonormalizer::try_fast first) and the two-pass
+  // kernel alone (BlockTuning::fast_ortho = false) return the same pairs, both satisfying the
+  // contract, in the Euclidean and the B inner product and over restarts (nev 6 of a basis of a
+  // few blocks); next to a deflation block both take the two-pass kernel (try_fast needs a basis
+  // orthonormal to working precision, see BreakdownAgainstADeflationBlockOrthonormalOnlyToDelta).
+  using T = TypeParam;
+  const index_t n = 200;
+  const auto a = hs::test::random_hermitian<T>(n, 0.05, 141);
+  const auto b = hs::test::random_hpd<T>(n, 0.05, 142);
+  const double sigma = 0.1;
+  const auto bd = hs::test::to_dense(b);
+  for (bool with_b : {false, true}) {
+    hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), with_b ? &bd : nullptr, sigma);
+    DenseOperator<T> bop(bd);
+    LinearOperator<T>* m = with_b ? &bop : nullptr;
+    std::vector<double> theta_exact;
+    for (double l : hs::test::dense_eigenvalues(a, with_b ? &b : nullptr))
+      theta_exact.push_back(1.0 / (l - sigma));
+    const auto expect = wanted(theta_exact, Which::LargestMagnitude, 12);
+    const double kappa = condition_number(with_b ? hs::add(T(1), a, T(-sigma), b)
+                                                 : hs::add(T(1), a, T(-sigma), hs::identity<T>(n)));
+    KrylovSchurOptions<T> first_opt;
+    first_opt.nev = 6;
+    first_opt.block_size = 2;
+    const auto first = hs::lanczos_krylov_schur<T>(op, m, Which::LargestMagnitude, first_opt);
+    ASSERT_TRUE(first.converged);
+    for (bool deflate : {false, true}) {
+      for (index_t p : {2, 3, 4}) {
+        SCOPED_TRACE(std::string(with_b ? "B" : "Euclidean") + (deflate ? ", deflation" : "") +
+                     ", p = " + std::to_string(p));
+        KrylovSchurOptions<T> opt;
+        opt.nev = 6;
+        opt.ncv = 3 * p + 10;  // a few blocks: several restarts
+        opt.tol = 1e-11;
+        opt.block_size = p;
+        if (deflate) opt.deflation = &first.vectors;
+        const std::vector<double> want(expect.begin() + (deflate ? 6 : 0),
+                                       expect.begin() + (deflate ? 12 : 6));
+        HermitianEigResult<T> r[2];
+        for (int fast = 0; fast < 2; ++fast) {
+          hs::eigen_detail::BlockTuning tuning;
+          tuning.fast_ortho = fast == 1;
+          hs::eigen_detail::LanczosTimings tm;
+          r[fast] = hs::eigen_detail::block_lanczos_krylov_schur_timed<T>(
+              op, m, Which::LargestMagnitude, opt, tm, tuning);
+          EXPECT_TRUE(r[fast].converged) << "fast " << fast;
+          EXPECT_GT(r[fast].restarts, 0) << "fast " << fast;
+          check_contract<T>(op, m, r[fast], Which::LargestMagnitude, opt, kappa);
+          expect_values(r[fast].theta, want, 1e-10 * std::abs(expect[0]));
+          if (deflate) {
+            EXPECT_LT(gram_deviation<T>(first.vectors, m, r[fast].vectors, false), 1e-12);
+          }
+        }
+        for (index_t i = 0; i < opt.nev; ++i)
+          EXPECT_NEAR(r[1].theta[i], r[0].theta[i], 1e-10 * std::abs(r[0].theta[0])) << i;
+      }
     }
   }
 }

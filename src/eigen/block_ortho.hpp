@@ -90,11 +90,14 @@ class BlockOrthonormalizer {
   /// Returns false, with basis(:, k:k+p) restored to the input W (= W1 + V C, up to rounding),
   /// when it refuses (then call run()). On success coef, r, before() and deficient() (all 0) are
   /// set as by run(), and used_fallback() is false.
-  /// two_passes: always project twice (Reorth::Always), required when V is M-orthonormal only to
-  /// more than rounding (a deflation block accepted at 1e-8): one DGKS pass would leave
-  /// V^H M W1 = O(that loss).
-  bool try_fast(T* basis, T* mbasis, index_t k, double ratio, bool two_passes,
-                DenseMatrix<T>& coef, DenseMatrix<T>& r);
+  /// Precondition beyond run()'s: V M-orthonormal to working precision (the DGKS test's, see
+  /// linalg::Reorth). For a V orthonormal only to delta >> eps (a deflation block accepted at
+  /// 1e-8) even two projections leave V^H M W1 = O(delta^2 ||W||), which the normalization
+  /// amplifies by ||W|| / ||W1||: near an invariant subspace (W1 ~ delta W) the new columns lose
+  /// orthogonality to V at the delta level (measured: 2.6e-8 for delta = 1e-10, p = 4). run()
+  /// projects the normalized block again and keeps it at rounding level; use run() there.
+  bool try_fast(T* basis, T* mbasis, index_t k, double ratio, DenseMatrix<T>& coef,
+                DenseMatrix<T>& r);
   /// Largest accepted 2-norm condition number of the column-scaled W1 in try_fast.
   static constexpr double kMaxFastCond = 64.0;
 

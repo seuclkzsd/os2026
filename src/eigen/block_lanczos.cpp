@@ -23,7 +23,19 @@
 // block CGS2 coefficients vanish in exact arithmetic.
 //
 // Block steps. W = Op V_j (one op.apply of p columns) is orthonormalized against [D V] and within
-// itself by BlockOrthonormalizer (block CGS2 + Cholesky-QR, BLAS3): W = [D V] C + V_{j+1} R_j.
+// itself by BlockOrthonormalizer (BLAS3): W = [D V] C + V_{j+1} R_j. Without a deflation block a
+// step first tries the one-projection path try_fast (row-blocked block CGS with the DGKS test,
+// then Cholesky-QR twice inside the block); a block it refuses (ill-conditioned, a column losing
+// more than its share, store_bv) and every step next to a deflation block (M-orthonormal only to
+// 1e-8, see BlockOrthonormalizer::try_fast) take run() (two block CGS passes each followed by
+// Cholesky-QR, column-wise fallback). Measured
+// (bench/blocktune_sweep.cpp, 16 threads, 17 HEP/GHEP data cases, medians of 3 interleaved
+// runs, p = 2..8): the orthogonalization time of block runs falls by 28..76 % (e.g.
+// ss-qa8fk-qa8fm p = 4 0.159 -> 0.090 s, cav2d-rect-pert-1e5 p = 2 0.068 -> 0.028 s,
+// syn-near-singular-complex-1e5 p = 4 0.416 -> 0.175 s), the iteration time by 3..24 % (p = 2 on
+// cav2d-rect-pert-1e5: from 1.20x the time of p = 1 to 0.92x), with residuals of the same size
+// and the same operator applications up to the run-to-run variation of the (non-deterministic,
+// L0-OpenMP) solves, +-1 block step on 2 of the 51 case/width pairs.
 // A column that is dependent on [D V] and the block's earlier columns to working precision,
 // ||new part||_M <= kBreakdownTol * ||Op v||_M after both passes (the local test of the
 // single-vector solver applied per column), gets R_j(i, i) = 0 and a deterministic random
@@ -228,9 +240,9 @@ bool BlockThickRestartLanczos<T>::expand(index_t first) {
     }
     {
       ScopedTimer t(time_.orthogonalization);
-      // A deflation block is M-orthonormal only to 1e-8: always two projections (as p = 1).
-      if (!fast_ortho_ || !ortho_.try_fast(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol,
-                                           d_ > 0, coef_, rblk_))
+      // A deflation block is M-orthonormal only to 1e-8, outside try_fast's precondition: run().
+      if (!fast_ortho_ || d_ > 0 ||
+          !ortho_.try_fast(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol, coef_, rblk_))
         ortho_.run(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol, opt_.seed, next_stream_,
                    coef_, rblk_);
       // A_j: Op is M-self-adjoint, so the diagonal block is Hermitian up to rounding.

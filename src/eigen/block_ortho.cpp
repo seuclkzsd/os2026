@@ -266,7 +266,7 @@ void BlockOrthonormalizer<T>::run(T* basis, T* mbasis, index_t k, double ratio, 
 
 template <class T>
 bool BlockOrthonormalizer<T>::try_fast(T* basis, T* mbasis, index_t k, double ratio,
-                                       bool two_passes, DenseMatrix<T>& coef, DenseMatrix<T>& r) {
+                                       DenseMatrix<T>& coef, DenseMatrix<T>& r) {
   HS_ASSERT(store_m_ == (mbasis != nullptr),
             "BlockOrthonormalizer: mbasis must be given exactly in store mode");
   if (store_m_) {  // stored M*Q must come from a fresh M application: run()
@@ -285,9 +285,9 @@ bool BlockOrthonormalizer<T>::try_fast(T* basis, T* mbasis, index_t k, double ra
   std::vector<double> after(static_cast<std::size_t>(p));
   const linalg::ApplyBlockFn<T> apply = [this](const T* x, index_t ldx, T* y, index_t ldy,
                                                index_t q) { m_->apply(x, ldx, y, ldy, q); };
-  const linalg::OrthoOptions passes{two_passes ? linalg::Reorth::Always : linalg::Reorth::Auto};
+  // Reorth::Auto: the DGKS test (V is M-orthonormal to working precision, see block_ortho.hpp).
   linalg::orthogonalize_block_cgs2<T>(n, k, p, basis, n, nullptr, 0, w, n, mw, n, coef.data(), k,
-                                      before_.data(), after.data(), m_ ? &apply : nullptr, passes);
+                                      before_.data(), after.data(), m_ ? &apply : nullptr);
   auto refuse = [&]() {
     if (k > 0)  // W = W1 + V C: the input block (up to rounding) for run()
       lapack::gemm('N', 'N', nn, pp, kk, T(1), basis, nn, coef.data(), kk, T(1), w, nn);

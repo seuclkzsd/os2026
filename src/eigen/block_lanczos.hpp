@@ -131,19 +131,21 @@ struct BlockDimensions {
 /// Free space needed by a block run, in units of its basis plus residual block (see above).
 constexpr index_t kFreeSpaceFactor = 2;
 
-/// Layout parameters of the block solver that the measurements behind its defaults vary
-/// (bench/blocktune_sweep.cpp). A default-constructed BlockTuning is the solver's layout.
+/// Parameters of the block solver that the measurements behind its defaults vary
+/// (bench/blocktune_sweep.cpp). A default-constructed BlockTuning is what lanczos_krylov_schur
+/// runs.
 ///   extra_blocks:  blocks added to base for the automatic ncv;
 ///   min_auto_ncv:  the automatic ncv is at least this (rounded up to a multiple of p);
 ///   keep_fraction: a restart keeps nev + keep_fraction * (ncv - nev) Ritz pairs (rounded down to
 ///                  a multiple of p, clamped to [spare, ncv - p]).
 /// Requested ncv values (setup from options.ncv > 0) use only keep_fraction.
-///   fast_ortho:    block steps try BlockOrthonormalizer::try_fast first.
+///   fast_ortho:    block steps try BlockOrthonormalizer::try_fast first (false: run() only, the
+///                  P3/P4 kernel). See "Block steps" in block_lanczos.cpp for the measurements.
 struct BlockTuning {
   index_t extra_blocks = 4;
   index_t min_auto_ncv = 0;
   double keep_fraction = 0.5;
-  bool fast_ortho = false;
+  bool fast_ortho = true;
 };
 BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv,
                                  const BlockTuning& tuning = BlockTuning{});

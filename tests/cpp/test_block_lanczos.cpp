@@ -114,7 +114,7 @@ OrthoOutcome run_kernel(Mode mode, LinearOperator<T>* m_op, index_t k, const Den
   DenseMatrix<T> coef, r;
   T* mb = mode == Mode::Stored ? mbasis.data() : nullptr;
   OrthoOutcome out;
-  out.fast = fast && ortho.try_fast(basis.data(), mb, k, ratio, false, coef, r);
+  out.fast = fast && ortho.try_fast(basis.data(), mb, k, ratio, coef, r);
   if (fast) {
     EXPECT_EQ(ortho.fast_runs(), out.fast ? 1 : 0);
     EXPECT_EQ(ortho.fast_refusals(), out.fast ? 0 : 1);
@@ -279,14 +279,16 @@ TYPED_TEST(LanczosBlockOrthoTyped, BlockInsideANearlyOrthonormalBasisIsReplaced)
   // remainder of size ~loss made of V components, far above the rounding threshold, so the
   // Cholesky-QR path normalizes it and the second pass removes it again. Every column must come
   // out dependent and replaced by a random direction (the first-pass-only test used to throw
-  // InvalidInput "b_inner is not Hermitian positive definite" here). The fast path, called with
-  // two_passes as the solver does next to a deflation block, sees the dependence and refuses.
+  // InvalidInput "b_inner is not Hermitian positive definite" here). Outside the precondition of
+  // try_fast (V orthonormal to working precision): the solver never calls it next to a deflation
+  // block.
   using T = TypeParam;
   const index_t n = 200, k = 40, p = 4;
   DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.05, 9)));
-  for (const auto& [mode, fast] : kModesAndPaths) {
+  for (Mode mode : kModes) {
     for (double loss : {3e-14, 1e-12, 1e-10}) {
-      SCOPED_TRACE(trace(mode, fast) + ", loss " + std::to_string(loss));
+      SCOPED_TRACE("mode " + std::to_string(static_cast<int>(mode)) + ", loss " +
+                   std::to_string(loss));
       LinearOperator<T>* mm = mode == Mode::Euclidean ? nullptr : &m;
       DenseMatrix<T> basis = basis_with_block<T>(mm, n, k, DenseMatrix<T>(n, p));
       const DenseMatrix<T> noise = random_block<T>(n, k, 62);
@@ -302,11 +304,8 @@ TYPED_TEST(LanczosBlockOrthoTyped, BlockInsideANearlyOrthonormalBasisIsReplaced)
       BlockOrthonormalizer<T> ortho(n, p, mm, mode == Mode::Stored);
       std::uint64_t stream = 100;
       DenseMatrix<T> coef, r;
-      T* mb = mode == Mode::Stored ? mbasis.data() : nullptr;
-      if (fast) {
-        EXPECT_FALSE(ortho.try_fast(basis.data(), mb, k, 64 * kEps, true, coef, r));
-      }
-      ortho.run(basis.data(), mb, k, 64 * kEps, 7, stream, coef, r);
+      ortho.run(basis.data(), mode == Mode::Stored ? mbasis.data() : nullptr, k, 64 * kEps, 7,
+                stream, coef, r);
       EXPECT_TRUE(ortho.used_fallback());
       for (char c : ortho.deficient()) EXPECT_EQ(c, 1);
       EXPECT_EQ(stream, 100u + static_cast<std::uint64_t>(p));
@@ -330,7 +329,7 @@ TYPED_TEST(LanczosBlockOrthoTyped, BlockInsideANearlyOrthonormalBasisIsReplaced)
           res = std::max(res, std::abs(w(i, j) - vc(i, j) - qr(i, j)));
         }
       }
-      EXPECT_LT(res / wmax, fast ? 1e-12 : 1e-13);  // + the rounding of the fast path's restore
+      EXPECT_LT(res / wmax, 1e-13);
       if (mode == Mode::Stored) {
         double dmax = 0.0;
         for (index_t j = 0; j < p; ++j)
