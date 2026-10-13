@@ -468,11 +468,13 @@ index_t block_size_for(const SolverConfig& cfg, index_t nev);
 index_t block_size_for(const SolverConfig& cfg, const eigen_detail::ShiftInvertShape& shape);
 
 /// Block width whose Lanczos basis the memory plan reserves before the analysis (solver.cpp step
-/// 3), so that the width chosen after the factorization fits beside the factors: an explicit
-/// cfg.block_size up to kMaxAutoBlockSize (a wider one is not reserved - the factorization has
-/// priority, fit_block_size halves it when needed); the auto width of a nearest target up to the
-/// blocktune rule's widest, eigen_detail::kRuleWidths.back(); that of a window target (spectrum
-/// slicing: P4 rule) kMaxAutoBlockSize.
+/// 3): the P4 width, min(cfg.block_size or kMaxAutoBlockSize when 0, kMaxAutoBlockSize), for every
+/// target. The factorization has priority: a wider width - an explicit one, or the blocktune
+/// rule's 8 for a nearest target (block_size_for(cfg, shape)) - is not reserved; after the
+/// factorization fit_block_size takes it only where the factors leave room for its basis, and
+/// otherwise halves it (an auto width down to the reserved one without a warning). Reserving the
+/// p = 8 basis instead shrank the factorization cap by its extra columns (27 n-vectors at k =
+/// 10..12), so factors that fit beside the P4 basis went out of core or failed the budget.
 index_t reserved_block_size(const SolverConfig& cfg);
 
 /// The Krylov part of the memory plan (solver.cpp step 3): n-vectors of T the solve path keeps
@@ -485,18 +487,19 @@ struct KrylovReservation {
 /// Reservation for problem type `type` (Auto: the larger of both paths) and order n: definite
 /// path the Lanczos basis of reserved_block_size(cfg) (lanczos_basis_columns, at least the
 /// single-vector basis of 2 (k + 16) + 1 vectors) plus 6 k candidate / result columns, k =
-/// target.k or min(n, 64) for intervals; GHIEP ghiep_reserve_columns. When the basis of a width
-/// above kMaxAutoBlockSize does not fit `free_bytes` (budget minus resident memory), the width is
-/// halved down to kMaxAutoBlockSize, the P4 plan: a budget that held that plan still holds.
+/// target.k or min(n, 64) for intervals; GHIEP ghiep_reserve_columns. The P4 plan for every
+/// width: a budget that held it before P5c still holds.
 template <class T>
-KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, index_t n,
-                                     double free_bytes);
+KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, index_t n);
 
 /// p, halved while the basis of a run of width p (lanczos_basis_columns, plus `extra_columns`
 /// n-vectors the caller keeps, e.g. the candidate block X, AX, BX) would not fit the memory left
-/// in the budget (warning when reduced).
+/// in the budget. A reduction below `warn_below` (0: p, i.e. any reduction) warns; one that stops
+/// at or above it only logs the event block_size_fit (an auto width beyond the reserved one,
+/// reserved_block_size).
 template <class T>
-index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p);
+index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p,
+                       index_t warn_below = 0);
 
 /// Block width of a deflated rerun that misses `missing` pairs after a run with width p:
 /// max(p, min(kMaxAutoBlockSize, missing rounded up to even)), so that a random start block has

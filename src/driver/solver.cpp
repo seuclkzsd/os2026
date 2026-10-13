@@ -267,16 +267,14 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   //    Krylov-Schur peak plus the bases held for the union refinement (indefinite); both while the
   //    type is still open.
   const double budget = cfg.memory_budget_gb * 1073741824.0;
-  // Definite path: the block Lanczos basis of the widest auto block width (reserved_block_size:
-  // 8 for nearest targets, whose width the blocktune rule picks after the factorization; DESIGN
-  // §3.6-3; block layout of eigen.hpp), or - when that basis does not fit beside the matrices -
-  // of the P4 width kMaxAutoBlockSize, the reservation before P5c (krylov_reservation). A wider
-  // explicit block_size than the P4 width is not reserved either: the factorization has
-  // priority, and fit_block_size() halves the width (with a warning) when its basis does not fit
-  // what the factors leave.
+  // Definite path: the block Lanczos basis of the P4 width (reserved_block_size; DESIGN §3.6-3;
+  // block layout of eigen.hpp). A wider width - an explicit block_size, or the blocktune rule's
+  // 8 for a nearest target, picked after the factorization - is not reserved: the factorization
+  // has priority, and fit_block_size() takes the wider width only where the factors leave room
+  // for its basis.
   const double free_bytes =
       budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
-  const driver::KrylovReservation reserve = driver::krylov_reservation<T>(cfg, type, n, free_bytes);
+  const driver::KrylovReservation reserve = driver::krylov_reservation<T>(cfg, type, n);
   const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(reserve.columns);
   const double cap_mb = (free_bytes - krylov_bytes) * 0.95 / 1e6;
   event(c, "memory_plan", {{"reserved_block_size", static_cast<std::int64_t>(reserve.block_size)},

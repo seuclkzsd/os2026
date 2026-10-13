@@ -990,13 +990,20 @@ index_t block_size_for(const SolverConfig& cfg, const eigen_detail::ShiftInvertS
   return eigen_detail::recommended_block_size(shape);
 }
 
+// The memory plan reserves the P4 width (internal.hpp). The p = 8 basis reserved for nearest
+// targets in the P5c integration shrank the factorization cap by 27 n-vectors at k = 10..12: on
+// syn-near-singular-complex-1e5 (AMD, 4 threads; factors in core 142 MB, out of core 74 MB)
+// budgets of 0.3692 and 0.3706 GiB held the factors in core beside the P4 basis (cap 143..145 MB)
+// but sent them out of core beside the p = 8 one (cap 102 / 105 MB; out_of_core = off:
+// OutOfMemoryBudget), where the rule then picked 4 anyway. With the P4 plan the auto width runs
+// in core there like --block-size 4.
 index_t reserved_block_size(const SolverConfig& cfg) {
-  if (cfg.block_size > 0) return std::min(cfg.block_size, kMaxAutoBlockSize);
-  return cfg.target.mode == TargetMode::Nearest ? eigen_detail::kRuleWidths.back() : kMaxAutoBlockSize;
+  return std::min(cfg.block_size > 0 ? cfg.block_size : kMaxAutoBlockSize, kMaxAutoBlockSize);
 }
 
 template <class T>
-index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p) {
+index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p,
+                       index_t warn_below) {
   const double vec = static_cast<double>(n) * sizeof(T);
   const double avail =
       c.cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
@@ -1006,15 +1013,19 @@ index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_
   const index_t wanted = std::max<index_t>(p, 1);
   p = wanted;
   while (p > 1 && bytes(p) > 0.9 * avail) p /= 2;
-  if (p < wanted)
-    warn(c, "Krylov block size reduced from " + std::to_string(wanted) + " to " + std::to_string(p) +
-                " by the memory budget");
+  if (p < wanted) {
+    if (p < (warn_below > 0 ? warn_below : wanted))
+      warn(c, "Krylov block size reduced from " + std::to_string(wanted) + " to " + std::to_string(p) +
+                  " by the memory budget");
+    else
+      event(c, "block_size_fit", {{"wanted", static_cast<std::int64_t>(wanted)},
+                                  {"used", static_cast<std::int64_t>(p)}, {"avail_mb", avail / 1e6}});
+  }
   return p;
 }
 
 template <class T>
-KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, index_t n,
-                                     double free_bytes) {
+KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, index_t n) {
   const index_t k =
       cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
   const index_t indefinite = ghiep_reserve_columns<T>(cfg, n);
@@ -1027,19 +1038,15 @@ KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, 
            : type == ProblemType::Auto                ? std::max(definite, indefinite)
                                                       : definite;
   };
-  const double vector_bytes = static_cast<double>(n) * sizeof(T);
   KrylovReservation r;
   r.block_size = reserved_block_size(cfg);
-  while (r.block_size > kMaxAutoBlockSize &&
-         vector_bytes * static_cast<double>(columns(r.block_size)) >= free_bytes)
-    r.block_size /= 2;
   r.columns = columns(r.block_size);
   return r;
 }
 
 #define HS_INSTANTIATE_DRIVER_BLOCKS(T)                                                                     \
-  template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t);                  \
-  template KrylovReservation krylov_reservation<T>(const SolverConfig&, ProblemType, index_t, double);
+  template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t, index_t);         \
+  template KrylovReservation krylov_reservation<T>(const SolverConfig&, ProblemType, index_t);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_BLOCKS)
 #undef HS_INSTANTIATE_DRIVER_BLOCKS
 

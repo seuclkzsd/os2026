@@ -373,8 +373,11 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   shape.factor_entries = static_cast<double>(fs.factor_entries);
   shape.nnz_b = pencil.b() ? static_cast<double>(pencil.b()->nnz()) : 0.0;
   shape.complex_scalars = is_complex_v<T>;
-  // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis.
-  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c.cfg, shape));
+  // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis. The memory
+  // plan reserved the P4 width: an auto width beyond it is halved back to it without a warning.
+  const index_t p_rule = block_size_for(c.cfg, shape);
+  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, p_rule,
+                                      c.cfg.block_size > 0 ? p_rule : std::min(p_rule, reserved_block_size(c.cfg)));
   rep.block_size = p;
   DefiniteRun<T> run;
   const FactorStats before_run = fac.stats();

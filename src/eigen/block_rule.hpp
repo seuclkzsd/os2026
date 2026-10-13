@@ -35,9 +35,10 @@
 //      SolverConfig::block_size == 0 this rule on {n, nev, FactorStats::factor_entries of the
 //      main shift's factorization, nnz(B), scalar type};
 //   2. the memory plan before the factorization (krylov_reservation) reserves the basis of the
-//      widest width the rule returns (kRuleWidths.back() = 8) for nearest targets, falling back
-//      to the P4 width when that does not fit; fit_block_size still halves 8 -> 4 with a warning
-//      on memory-tight runs;
+//      P4 width 4 only: the factorization has priority (reserving the p = 8 basis shrank the
+//      factorization cap and sent factors out of core that fit beside the P4 basis);
+//      fit_block_size takes 8 after the factorization only where the factors leave room for its
+//      basis, and otherwise halves it to 4 without a warning;
 //   3. the rule is calibrated on nearest-target runs (k wanted pairs next to sigma); spectrum
 //      slicing (per-slice nev, definite.cpp) keeps the P4 rule until measured.
 // End to end with the driver and the BLAS hook (src/blas, route all; steps.cpp): the 4 -> 8 moves

@@ -1,8 +1,8 @@
 // Driver hook-up of the blocktune block-size rule (P5c integration, src/driver): nearest-target
 // runs take eigen_detail::recommended_block_size on the shape of their shift's factorization
 // (block_size_for(cfg, ShiftInvertShape)), spectrum slices keep the P4 width
-// (block_size_for(cfg, nev)), and the memory plan reserves the basis of the rule's widest width,
-// falling back to the P4 plan when that does not fit (krylov_reservation).
+// (block_size_for(cfg, nev)), and the memory plan reserves the basis of the P4 width only
+// (krylov_reservation; the factorization has priority, p = 8 is taken where the factors leave room).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -113,16 +113,16 @@ TEST(BlocktuneDriver, NearestAutoWidthIsTheRulesPick) {
   EXPECT_EQ(hs::driver::block_size_for(cfg, box), 1);
 }
 
-// The memory plan reserves the rule's widest width for nearest targets only.
+// The memory plan reserves the P4 width for every target (P5c integration review: the p = 8
+// basis shrank the factorization cap); an explicit width up to that.
 TEST(BlocktuneDriver, ReservedWidth) {
   hs::SolverConfig cfg;
-  cfg.target.mode = hs::TargetMode::Nearest;
-  EXPECT_EQ(hs::driver::reserved_block_size(cfg), hs::eigen_detail::kRuleWidths.back());
-  EXPECT_EQ(hs::driver::reserved_block_size(cfg), 8);
-  for (const auto mode : {hs::TargetMode::Interval, hs::TargetMode::Smallest, hs::TargetMode::Largest}) {
+  for (const auto mode : {hs::TargetMode::Nearest, hs::TargetMode::Interval, hs::TargetMode::Smallest,
+                          hs::TargetMode::Largest}) {
     cfg.target.mode = mode;
     EXPECT_EQ(hs::driver::reserved_block_size(cfg), hs::driver::kMaxAutoBlockSize);
   }
+  ASSERT_EQ(hs::driver::kMaxAutoBlockSize, 4);
   cfg.target.mode = hs::TargetMode::Nearest;
   cfg.block_size = 2;
   EXPECT_EQ(hs::driver::reserved_block_size(cfg), 2);
@@ -130,7 +130,7 @@ TEST(BlocktuneDriver, ReservedWidth) {
   EXPECT_EQ(hs::driver::reserved_block_size(cfg), hs::driver::kMaxAutoBlockSize);
 }
 
-TEST(BlocktuneDriver, KrylovReservationFallsBackToTheP4Plan) {
+TEST(BlocktuneDriver, KrylovReservationIsTheP4Plan) {
   using hs::driver::lanczos_basis_columns;
   hs::SolverConfig cfg;
   cfg.target.mode = hs::TargetMode::Nearest;
@@ -139,42 +139,31 @@ TEST(BlocktuneDriver, KrylovReservationFallsBackToTheP4Plan) {
   const auto definite = [&](index_t p) {
     return std::max<index_t>(2 * (12 + 16) + 1, lanczos_basis_columns(n, 0, 12, 0, p)) + 6 * 12;
   };
-  ASSERT_GT(definite(8), definite(4));  // the wider basis is larger
-  const double vec = static_cast<double>(n) * sizeof(double);
-  const double inf = std::numeric_limits<double>::infinity();
-  auto r = hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n, inf);
-  EXPECT_EQ(r.block_size, 8);
-  EXPECT_EQ(r.columns, definite(8));
-  // Room for the P4 plan but not for the p = 8 one: the P4 plan (no failure where P4 held).
-  const double between = 0.5 * vec * static_cast<double>(definite(4) + definite(8));
-  r = hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n, between);
+  ASSERT_GT(definite(8), definite(4));  // the wider basis is larger: not reserved
+  auto r = hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n);
   EXPECT_EQ(r.block_size, 4);
   EXPECT_EQ(r.columns, definite(4));
-  r = hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n, 0.0);
-  EXPECT_EQ(r.block_size, 4);  // never below the P4 plan: the caller reports the budget error
+  EXPECT_EQ(hs::driver::krylov_reservation<cplx>(cfg, hs::ProblemType::Standard, n).columns, definite(4));
   // GHIEP: its own plan; type open: the larger of both.
   const index_t g = hs::driver::ghiep_reserve_columns<double>(cfg, n);
-  EXPECT_EQ(hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::GeneralizedIndefinite, n, inf).columns, g);
-  EXPECT_EQ(hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Auto, n, inf).columns,
-            std::max(g, definite(8)));
-  // Complex scalars: twice the bytes per vector.
-  const double between_cx = 2.0 * between;
-  EXPECT_EQ(hs::driver::krylov_reservation<cplx>(cfg, hs::ProblemType::Standard, n, between_cx).block_size, 4);
-  EXPECT_EQ(hs::driver::krylov_reservation<cplx>(cfg, hs::ProblemType::Standard, n, 2.0 * between * 1.5).block_size,
-            8);
-  // Window targets reserve the P4 width; an explicit width at most that.
+  EXPECT_EQ(hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::GeneralizedIndefinite, n).columns, g);
+  EXPECT_EQ(hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Auto, n).columns,
+            std::max(g, definite(4)));
+  // Window targets reserve the P4 width too; an explicit width at most that.
   cfg.target.mode = hs::TargetMode::Smallest;
-  EXPECT_EQ(hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n, inf).block_size, 4);
+  EXPECT_EQ(hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n).block_size, 4);
   cfg.target.mode = hs::TargetMode::Nearest;
   cfg.block_size = 2;
-  EXPECT_EQ(hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n, inf).block_size, 2);
+  r = hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, n);
+  EXPECT_EQ(r.block_size, 2);
+  EXPECT_EQ(r.columns, definite(2));
 }
 
 // ------------------------------------------------------------------------------ end to end
 
 // A nearest solve runs the rule's width for the shape of its shift's factorization (entries from
-// the "factorization" event, as bench/blocktune_fix_e2e.cpp reads them), and the memory plan
-// reserved the p = 8 basis. k = 6 on this low-fill pattern: the rule picks 2 where the P4 width
+// the "factorization" event, as bench/blocktune_fix_e2e.cpp reads them); the memory plan
+// reserved the P4 basis. k = 6 on this low-fill pattern: the rule picks 2 where the P4 width
 // was 1 - the test fails if the driver went back to block_size_for(cfg, nev).
 template <class T>
 void nearest_runs_the_rules_width() {
@@ -205,7 +194,7 @@ void nearest_runs_the_rules_width() {
     }
     const auto plan = events(path, "memory_plan");
     ASSERT_EQ(plan.size(), 1u);
-    EXPECT_EQ(plan[0].at("reserved_block_size").get<index_t>(), 8) << k;
+    EXPECT_EQ(plan[0].at("reserved_block_size").get<index_t>(), hs::driver::kMaxAutoBlockSize) << k;
     EXPECT_GT(plan[0].at("cap_mb").get<double>(), 0.0);
     // An explicit width wins and is reserved up to the P4 width.
     auto fixed = cfg;
@@ -221,7 +210,7 @@ void nearest_runs_the_rules_width() {
     const auto plan4 = events(path4, "memory_plan");
     ASSERT_EQ(plan4.size(), 1u);
     EXPECT_EQ(plan4[0].at("reserved_block_size").get<index_t>(), 4);
-    EXPECT_LT(plan4[0].at("reserved_columns").get<index_t>(), plan[0].at("reserved_columns").get<index_t>());
+    EXPECT_EQ(plan4[0].at("reserved_columns").get<index_t>(), plan[0].at("reserved_columns").get<index_t>());
   }
 }
 

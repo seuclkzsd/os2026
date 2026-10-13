@@ -4,11 +4,15 @@
 //     deflated certificate reruns use it - they ask for missing + 2 pairs but end with the
 //     missing ones (yee-pec-box-1e5: the third pair of a rerun, a curl-curl null-space vector,
 //     held the rerun until max_restarts);
-//   * a deflated rerun after an auto width takes at most the P4 width (rerun_block_size(cfg, ...)).
+//   * a deflated rerun after an auto width takes at most the P4 width (rerun_block_size(cfg, ...));
+//   * the memory plan reserves the P4 basis for nearest targets, so factors that fit beside it
+//     stay in core (the p = 8 reservation sent them out of core or over the budget), and an auto
+//     width beyond the reserved one is halved back without a warning.
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -21,6 +25,7 @@
 #include "hsolve/log.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
+#include "hsolve/util.hpp"
 #include "support/fixtures.hpp"
 
 namespace {
@@ -270,6 +275,123 @@ TEST(P5cIntFixRerun, AutoWidthRerunTakesTheP4Width) {
     EXPECT_EQ(runs[0].at("block_size").get<index_t>(), 8) << configured;
     EXPECT_EQ(runs[1].at("block_size").get<index_t>(), configured == 0 ? 4 : 8) << configured;
   }
+}
+
+// --------------------------------------------------------------- the memory plan (solver.cpp)
+
+// A budget whose factorization cap holds the factors beside the P4 basis (by half the 27
+// n-vectors the p = 8 basis adds at k = 10) with out_of_core = off: the run stays in core and
+// succeeds. Reserving the p = 8 basis for the auto width (P5c integration) put the cap that far
+// below the factors' estimate: OutOfMemoryBudget (with out_of_core = auto: out-of-core factors).
+// The factors (2-D, AMD) are larger than the 27 vectors, so the p = 8 basis alone still fit the
+// budget - the case the integration's fallback to the P4 plan did not catch. The resident memory
+// before the plan moves by a few MB from solve to solve in one process, so the budget follows the
+// previous run's (glibc keeps freed factor memory resident after the first solves) and the
+// window is checked on the run's own plan (memory_plan event).
+TEST(P5cIntFixMemory, FactorsThatFitBesideTheP4BasisStayInCore) {
+  const index_t nx = 300, ny = 200, n = nx * ny;
+  auto a = hs::test::laplacian_2d<double>(nx, ny);
+  for (index_t i = 0; i < n; ++i)
+    for (index_t q = a.rowptr[i]; q < a.rowptr[i + 1]; ++q)
+      if (a.colind[q] == i) a.values[q] -= 4.0;
+  auto w = hs::test::laplacian_2d_eigenvalues(nx, ny);
+  for (auto& x : w) x -= 4.0;
+  // Just below the spectrum (-3.99965): K(sigma) is definite (no delayed pivots, so the
+  // factorization needs no more than its estimate plus MUMPS' usual margin, factor.hpp), and the
+  // 10 nearest are well separated relative to their distance.
+  const double sigma = -4.0;
+  auto cfg = nearest_cfg(sigma, 10);
+  cfg.out_of_core = hs::Toggle::Off;
+  cfg.ordering = 0;  // AMD: one analysis, the same estimate in every run
+  const double gib = 1073741824.0;
+  struct Plan {
+    double rss = 0.0, krylov_mb = 0.0, cap_mb = 0.0, incore_mb = 0.0;
+    index_t reserved = 0;
+    bool success = false;
+    std::string error;
+  };
+  hs::Solution<double> sol;
+  auto probe = [&](double budget_gb, const std::string& tag) {
+    const std::string path = ::testing::TempDir() + "/p5cint_fix_mem_" + tag + ".jsonl";
+    auto c = cfg;
+    c.memory_budget_gb = budget_gb;
+    Plan p;
+    try {
+      hs::Logger log(0, path);
+      sol = hs::solve(a, nullptr, c, &log);
+      p.success = sol.report.success;
+    } catch (const hs::Error& e) {
+      p.error = e.what();
+    }
+    const auto plan = events(path, "memory_plan");
+    const auto analysis = events(path, "analysis");
+    if (plan.empty()) return p;
+    p.krylov_mb = plan[0].at("krylov_mb").get<double>();
+    p.cap_mb = plan[0].at("cap_mb").get<double>();
+    p.reserved = plan[0].at("reserved_block_size").get<index_t>();
+    p.rss = budget_gb * gib - p.cap_mb * 1e6 / 0.95 - p.krylov_mb * 1e6;
+    if (!analysis.empty()) p.incore_mb = analysis[0].at("incore_mb").get<double>();
+    return p;
+  };
+  Plan last = probe(4.0, "ref");
+  ASSERT_TRUE(last.success) << last.error;
+  ASSERT_EQ(last.reserved, hs::driver::kMaxAutoBlockSize);
+  const double incore = last.incore_mb;
+  // What the p = 8 basis would add to the reservation at k = 10 (krylov_reservation's definite
+  // columns: 27 n-vectors).
+  const auto definite = [&](index_t p) {
+    return std::max<index_t>(2 * (10 + 16) + 1, hs::driver::lanczos_basis_columns(n, 0, 10, 0, p)) + 6 * 10;
+  };
+  ASSERT_EQ(definite(8) - definite(4), 27);
+  const double extra_mb = static_cast<double>(definite(8) - definite(4)) * static_cast<double>(n) * 8.0 / 1e6;
+  const double headroom_mb = 0.5 * 0.95 * extra_mb;  // 6.2 MB both ways
+  ASSERT_GT(incore, extra_mb) << "the p = 8 basis alone must fit the budget below";
+  bool in_window = false;
+  Plan tight;
+  for (int attempt = 0; attempt < 6 && !in_window; ++attempt) {
+    const double budget_gb = (last.rss + last.krylov_mb * 1e6 + (incore + headroom_mb) * 1e6 / 0.95) / gib;
+    tight = probe(budget_gb, "tight" + std::to_string(attempt));
+    ASSERT_EQ(tight.reserved, hs::driver::kMaxAutoBlockSize) << tight.error;
+    // This run's cap holds the factors with a margin; the p = 8 reservation would not have.
+    in_window = tight.cap_mb >= incore + 0.25 * headroom_mb && tight.cap_mb - 0.95 * extra_mb < incore;
+    last = tight;
+  }
+  ASSERT_TRUE(in_window) << "cap " << tight.cap_mb << " MB, factors " << incore << " MB";
+  EXPECT_TRUE(tight.success) << tight.error << " (factors " << incore << " MB, cap " << tight.cap_mb << " MB)";
+  if (tight.success) {
+    EXPECT_FALSE(has_warning(sol.report, "out-of-core"));
+    expect_same_set(sol.eigenvalues, nearest(w, sigma, 10), 1e-9);
+  }
+}
+
+// An auto width beyond the reserved one is halved back to it without a warning (event
+// block_size_fit); below the reserved width, or for an explicit width, the reduction warns.
+TEST(P5cIntFixMemory, AutoWidthFitsBackToTheReservedOneQuietly) {
+  hs::SolverConfig cfg;
+  hs::SolveReport rep;
+  hs::driver::PhaseClock clock;
+  const std::string path = ::testing::TempDir() + "/p5cint_fix_fit.jsonl";
+  hs::Logger log(0, path);  // flushed per event
+  hs::driver::Ctx c{cfg, &log, rep, clock};
+  const index_t n = 2000000, nev = 12;
+  const auto cols = [&](index_t p) {
+    return static_cast<double>(hs::driver::lanczos_basis_columns(n, 0, nev, 0, p) + 4 * nev);
+  };
+  const double vec = 8.0 * static_cast<double>(n);
+  const double rss = static_cast<double>(std::max<std::int64_t>(hs::current_rss_bytes(), 0));
+  // Room for the p = 4 basis but not the p = 8 one.
+  cfg.memory_budget_gb = (rss + 0.5 * (cols(4) + cols(8)) * vec / 0.9) / 1073741824.0;
+  EXPECT_EQ(hs::driver::fit_block_size<double>(c, n, nev, 0, 4 * nev, 8, 4), 4);
+  EXPECT_TRUE(rep.warnings.empty());
+  EXPECT_EQ(hs::driver::fit_block_size<double>(c, n, nev, 0, 4 * nev, 8), 4);  // explicit: warns
+  ASSERT_EQ(rep.warnings.size(), 1u);
+  EXPECT_NE(rep.warnings[0].find("block size reduced from 8 to 4"), std::string::npos);
+  // Room for p = 2 only: below the reserved width the auto width warns too.
+  cfg.memory_budget_gb = (rss + 0.5 * (cols(2) + cols(4)) * vec / 0.9) / 1073741824.0;
+  EXPECT_EQ(hs::driver::fit_block_size<double>(c, n, nev, 0, 4 * nev, 8, 4), 2);
+  ASSERT_EQ(rep.warnings.size(), 2u);
+  EXPECT_NE(rep.warnings[1].find("block size reduced from 8 to 2"), std::string::npos);
+  EXPECT_EQ(events(path, "block_size_fit").size(), 1u);
 }
 
 }  // namespace
