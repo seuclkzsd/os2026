@@ -67,7 +67,10 @@ void print_summary(const hs::Solution<T>& sol) {
                 p.accepted ? "yes" : "NO");
   }
   const auto& c = r.certificate;
-  if (c.performed && c.count_inertia >= 0)
+  if (c.performed && c.note.rfind("not completed", 0) == 0)  // no count possible: pairs uncertified
+    std::printf("certificate (%s): [%g, %g] found=%lld -> NOT COMPLETED (%s)\n", c.method.c_str(), c.lower, c.upper,
+                static_cast<long long>(c.count_found), c.note.c_str());
+  else if (c.performed && c.count_inertia >= 0)
     std::printf("certificate (%s): [%g, %g] inertia=%lld found=%lld -> %s\n", c.method.c_str(), c.lower, c.upper,
                 static_cast<long long>(c.count_inertia), static_cast<long long>(c.count_found),
                 c.passed ? (c.rigorous ? "passed" : "passed (screening only)") : "FAILED");
