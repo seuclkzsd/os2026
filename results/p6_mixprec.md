@@ -46,7 +46,7 @@ default 14 GB budget, where the double path goes out of core and takes 2.2x long
   applications but 3.9-7.4x the Krylov time.
   * End to end, the existing `--precision single` is 0.35-0.59x on the 7 cases where it is valid.
   * It is invalid on 3 cases:
-    * syn-mem27-46: pairs with eta up to 8e-6 and a failed certificate;
+    * syn-mem27-46: pairs with eta up to 2.8e-5 and a failed certificate in all 3 runs;
     * syn-ghep-near-singular-real-1e5: 1 pair;
     * syn-near-singular-complex-1e5: "exactly singular" error with no fallback.
 * **V2:** the Krylov phase with the plain single operator converges in its own estimates.
@@ -267,8 +267,10 @@ compare.py with a wrapper that appends `--precision single` to the base binary, 
 
 * **Valid on 7 of 10 cases**, at 0.35-0.59x of the base time, with peak RSS 0.76-1.06x of the base
   (smaller factors, plus the refinement workspace).
-* **syn-mem27-46: 0 of 3 valid.** It needed 1070 RHS instead of 44 and 14.7 s. Every pair has eta
-  between 3e-8 and 8e-6, and the certificate fails (6 of 12 found). The run reports success = false.
+* **syn-mem27-46: 0 of 3 valid.** It needed 1063-1075 RHS instead of 44 and 14.6-15.1 s (medians
+  1070 and 14.7 s). Over the 3 runs every returned pair has eta between 9e-9 and 2.8e-5 (tools/eval
+  max_eta 2.82e-5), and the certificate fails: 6, 7 and 8 of 12 found. Every run reports
+  success = false.
 * **syn-ghep-near-singular-real-1e5: 0 of 3 valid.** One pair is returned, with rc = 1.
 * **syn-near-singular-complex-1e5: rc = 2.** The error is "A - sigma B is exactly singular at and
   near sigma = 0.299994": the single factor is flagged singular at both shifts and the driver does
