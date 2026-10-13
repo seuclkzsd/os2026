@@ -74,13 +74,17 @@
 //     syn-multiplicity-complex-1e4, syn-ghep-near-singular-real-1e5) x p in {2, 4, 8} x extra
 //     blocks {2, 4, 8} x keep fraction {0.5, 0.67}, medians of 3 interleaved runs
 //     (bench_blocktune_sweep): a larger basis (8 extra blocks) saves applications where runs
-//     restart often (ss-qa8fk-qa8fm p = 4: 100 -> 92 applications, iteration time -5 %;
-//     ss-tem27623 -5 %; yee-pec-box-1e5 p = 8 -3.5 %) and costs where they converge within one
-//     or two cycles (yee-bloch-1e4 p = 8 +7 %, syn-multiplicity-complex-1e4 p = 8 +16 %,
-//     cav2d-rect-pert-1e5 p = 2 +4 %); 2 extra blocks need as many or more applications
-//     (ss-qa8fk-qa8fm p = 4 112, p = 8 192) and are faster only on cav2d-rect-pert-1e5 p = 4
-//     (-5 %, a width the rule never picks there); keep 0.67 moves times by -5..+4 %. No variant
-//     wins on all cases: the defaults stay (4 extra blocks, keep 0.5).
+//     restart three or four times (ss-qa8fk-qa8fm p = 4: 100 -> 92 applications, iteration
+//     time -5 %; ss-tem27623 -5 %; syn-ghep-near-singular-real-1e5 p = 4 -7 %, -11 % with keep
+//     0.67; yee-pec-box-1e5 p = 8 -3.5 %) and costs where they converge within one or two cycles
+//     (yee-bloch-1e4 p = 8 +7 %, syn-multiplicity-complex-1e4 p = 4 / 8 +5 / +16 %,
+//     yee-pec-cube-32 p = 8 +3 %, cav2d-rect-pert-1e5 p = 2 +4 %): over the widths the rule picks
+//     -0.9 % in geometric mean. 2 extra blocks need as many or more applications (ss-qa8fk-qa8fm
+//     p = 4 112, p = 8 192) and are faster only on cav2d-rect-pert-1e5 p = 4 (-5 %, a width the
+//     rule never picks there); keep 0.67 moves times by -6..+4 %. No variant wins on all cases:
+//     the defaults stay (4 extra blocks, keep 0.5). A basis that grows only while a run keeps
+//     restarting could take the gains of the larger one; not implemented (a few % of the
+//     iteration phase, and the driver's memory estimate would have to cover the largest basis).
 //   * Narrowing the block inside a run (once the wanted pairs turn out distinct) cannot be done
 //     exactly: the residual block V_m couples to every kept Ritz vector through b (p x k, rank p
 //     unless couplings vanish); applying Op to some of its columns creates as many new residual
