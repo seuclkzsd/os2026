@@ -68,17 +68,57 @@ template <class T>
 const SingleCountRule& NearestCertifier<T>::single_rule() {
   if (rule_.a_norm_1 < 0.0) {
     rule_.a_norm_1 = norm_one(pencil_.a());
-    // ||r||_{B^{-1}} <= ||r||_2 / sqrt(min b_ii) for a diagonal B (B-normalized x); B = I: ||r||_2.
-    // For other B the bound only feeds the rule, which then does not apply anyway.
+    // ||r||_{B^{-1}} <= ||r||_2 / sqrt(lambda_min(B)) for B-normalized x: min b_ii for a diagonal
+    // B, B = I: ||r||_2; a general B's proven b_min (b_bounds(), P8), else no bound (the rule then
+    // does not apply anyway).
     if (const CsrMatrix<T>* b = pencil_.b()) {
       double bmin = std::numeric_limits<double>::infinity();
       for (index_t i = 0; i < b->nrows; ++i)
-        for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q)
-          if (b->colind[q] == i) bmin = std::min(bmin, std::real(b->values[q]));
+        for (index_t q = b->rowptr[i]; q < b->rowptr[i + 1]; ++q) {
+          if (b->colind[q] == i)
+            bmin = std::min(bmin, std::real(b->values[q]));
+          else if (b->values[q] != T(0))
+            b_diagonal_ = false;
+        }
+      if (!b_diagonal_) {
+        const ConditionBound& cb = b_bounds();
+        rule_.b_min_proven = cb.proven ? cb.b_min : 0.0;
+        bmin = cb.proven ? cb.b_min : 0.0;
+      }
       inv_sqrt_bmin_ = bmin > 0.0 ? 1.0 / std::sqrt(bmin) : std::numeric_limits<double>::infinity();
     }
   }
   return rule_;
+}
+
+template <class T>
+double NearestCertifier<T>::bounds_budget_s() const {
+  const FactorEstimate est = fac_.estimate();
+  const MumpsInputSize in = mumps_input_size(pencil_);
+  const double t_factor =
+      timings_.factorize_s > 0.0 ? timings_.factorize_s : model_factor_s(est, in.order, fac_.options().threads);
+  // The exact counts: two factorizations' worth (CertificateCostInputs::count_ratio ~ 0.9 each).
+  return kBoundsProofShare * 2.0 * CertificateCostInputs{}.count_ratio * t_factor;
+}
+
+template <class T>
+const ConditionBound& NearestCertifier<T>::b_bounds() {
+  if (!b_bounds_) {
+    HpdProofOptions po;
+    po.max_seconds = bounds_budget_s();
+    po.max_bytes = check_budget_bytes();
+    po.seed = c_.cfg.seed;
+    b_bounds_ = std::make_unique<ConditionBound>();
+    if (const CsrMatrix<T>* b = pencil_.b()) *b_bounds_ = prove_condition_bound(*b, po);
+    const ConditionBound& cb = *b_bounds_;
+    event(c_, "b_condition_bound",
+          {{"proven", cb.proven}, {"outcome", cb.proof.outcome}, {"lower", cb.lower}, {"upper", cb.upper},
+           {"kappa", std::isfinite(cb.kappa) ? cb.kappa : -1.0}, {"b_min", cb.b_min},
+           {"theta_min", cb.proof.theta_min}, {"level", static_cast<std::int64_t>(cb.proof.level)},
+           {"shift", cb.proof.shift}, {"attempts", static_cast<std::int64_t>(cb.proof.attempts)},
+           {"seconds", cb.proof.seconds}, {"budget_s", po.max_seconds}});
+  }
+  return *b_bounds_;
 }
 
 template <class T>
@@ -134,13 +174,32 @@ DenseMatrix<T> NearestCertifier<T>::deflation_block(const NearestWindow& w, cons
   return x;
 }
 
-// The randomized check needs kappa, and only a proven one certifies: the Lanczos estimate of a
-// general B's kappa (~0.1 s at n = 1e5) is computed only for a run() that asks for a screening
-// result (the solve path never runs the check without a proven kappa).
+// The randomized check needs kappa, and only a proven one certifies: B = I, a diagonal or a
+// diagonally dominant B have one at O(nnz(B)) (start_scaling_for); a general B's comes from the
+// incomplete-Cholesky bounds (b_bounds(), P8) with the same Jacobi scaling. The Lanczos estimate
+// of a general B's kappa (~0.1 s at n = 1e5) is computed only for a run() that asks for a
+// screening result where no bound is proven (the solve path never runs the check without one).
 template <class T>
 const StartScaling& NearestCertifier<T>::scaling(bool estimate) {
-  if (!proven_scaling_)
-    proven_scaling_ = std::make_unique<StartScaling>(start_scaling_for<T>(pencil_.b(), 100.0, false));
+  if (!proven_scaling_) {
+    StartScaling s = start_scaling_for<T>(pencil_.b(), 100.0, false);
+    if (!s.rigorous && pencil_.b()) {
+      const ConditionBound& cb = b_bounds();
+      if (cb.proven) {
+        s.scaling = cb.weights;  // the proof's W: the bound is about W B W with exactly these weights
+        s.kappa = cb.kappa;
+        s.rigorous = true;
+        std::ostringstream os;
+        os.precision(4);
+        os << "Jacobi scaling of a general B: kappa <= " << cb.kappa << " proven (lambda_min >= " << cb.lower
+           << " by incomplete Cholesky + Gershgorin, lambda_max <= " << cb.upper << " by Gershgorin)";
+        s.note = os.str();
+      } else {
+        s.note += "; no bound from incomplete Cholesky either (" + cb.proof.outcome + ")";
+      }
+    }
+    proven_scaling_ = std::make_unique<StartScaling>(std::move(s));
+  }
   if (proven_scaling_->rigorous || !estimate) return *proven_scaling_;
   if (!estimated_scaling_)
     estimated_scaling_ = std::make_unique<StartScaling>(start_scaling_for<T>(pencil_.b(), 100.0, true));
@@ -278,14 +337,15 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
   PhaseScope phase(c_.clock, Phase::Certificate);
   fallback_note_.clear();
   if (cfg.certificate == CertificateMode::Randomized && pencil_.b() && !scaling(false).rigorous) {
-    // A general B: kappa can only be estimated, so a pass would be a SCREENING result, not a
-    // certificate - and the check costs more than the counts it cannot replace. Not run (the
-    // note goes into every round's statement).
+    // A general B whose bounds are not proven: kappa can only be estimated, so a pass would be a
+    // SCREENING result, not a certificate - and the check costs more than the counts it cannot
+    // replace. Not run (the note goes into every round's statement).
     fallback_note_ = "randomized check not run: the kappa of B is not proven (" + scaling(false).note +
                      "), so a pass would be a screening result, not a certificate";
     if (!randomized_failed_)
       warn(c_, "certificate=randomized: the kappa of B is not proven (B neither diagonal nor diagonally "
-               "dominant); the exact counts certify instead of a screening-only randomized check");
+               "dominant, and no incomplete-Cholesky bound); the exact counts certify instead of a "
+               "screening-only randomized check");
     randomized_failed_ = true;
     return {};
   }
@@ -572,7 +632,10 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
     os << prefix() << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", "
        << w.upper << "] equal the " << found << " found pairs there"
        << (nu_sigma_ >= 0 ? " (on either side of sigma, with the exact count at sigma)" : "")
-       << "; by the perturbation rule (verify.hpp; B = I or diagonal B, backward error of the single LDL^T assumed <= "
+       << "; by the perturbation rule (verify.hpp; "
+       << (b_diagonal_ ? std::string("B = I or diagonal B")
+                       : "general B with lambda_min(B) >= " + fmt(rule.b_min_proven) + " proven")
+       << ", backward error of the single LDL^T assumed <= "
        << rule.backward_factor
        << " u_s ||K||_1, as double counts assume a backward-stable LDL^T) every eigenvalue in [a + eta_a, b - eta_b) "
           "= ["

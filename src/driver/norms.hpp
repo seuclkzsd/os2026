@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -145,6 +146,41 @@ constexpr double kIndefiniteRitzScaled = 1e-10;
 /// bound itself does not depend on them). Does not modify b.
 template <class T>
 HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& opt = {});
+
+// ------------------------------------------------------------------ proven condition of B
+//
+// The randomized exclusion check (verify.hpp (1)) certifies only with a proven kappa >= cond(S B S)
+// of its start scaling S, and single-precision counts (verify.hpp (2)) only with a proven lower
+// bound on lambda_min(B). For a B that is neither diagonal nor diagonally dominant both come from
+// the proof above: with the Jacobi weights W = diag(w), w_i = fl(1 / sqrt(b_ii)) as the proof stores
+// them (and as the start scaling uses them),
+//   lambda_min(W B W) >= lower = HpdProof::lower_bound  (rigorous for the stored w and B),
+//   lambda_max(W B W) <= upper = max_i sum_j |w_i b_ij w_j| (Gershgorin; each computed row sum
+//                        inflated by 1 + 2 gamma_{N_i + 4}, covering the products and the sum),
+//   cond(W B W) <= kappa = upper / lower (rounded up), and
+//   lambda_min(B) >= b_min = lower / max_i w_i^2 (rounded down): x^H B x = y^H (W B W) y with
+//                        y = W^{-1} x, ||y||_2 >= ||x||_2 / max_i w_i.
+// kappa enters the check's step count only as log(kappa), so a Gershgorin upper bound is enough.
+// The lower bound is about the proof's shift c (0.9, 0.5 or 0.2 times the Lanczos estimate of
+// lambda_min(W B W)) less the fill the incomplete factor dropped. Cost: the proof (its budget in
+// `opt`) plus one O(nnz(B)) pass.
+
+/// What prove_condition_bound proved.
+struct ConditionBound {
+  bool proven = false;          ///< proof.proven, and kappa, b_min finite and positive
+  std::vector<double> weights;  ///< w (the start scaling S = W); empty unless the proof ran
+  double lower = 0.0;           ///< lambda_min(W B W) >= lower
+  double upper = 0.0;           ///< lambda_max(W B W) <= upper
+  double kappa = std::numeric_limits<double>::infinity();  ///< >= cond(W B W)
+  double b_min = 0.0;           ///< lambda_min(B) >= b_min
+  HpdProof proof;               ///< the positive-definiteness proof behind `lower`
+};
+
+/// The bounds above for an exactly Hermitian b (prove_positive_definite's precondition), within
+/// opt's time and memory limits; proven == false says nothing about B. Deterministic for a fixed
+/// thread count (as the proof). Does not modify b.
+template <class T>
+ConditionBound prove_condition_bound(const CsrMatrix<T>& b, const HpdProofOptions& opt = {});
 
 /// Predicted seconds of one attempt on an order-n matrix of the given size on `threads` threads
 /// (model fitted with bench/anaint_bproof.cpp, see norms.cpp).

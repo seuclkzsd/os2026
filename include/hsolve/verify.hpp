@@ -307,6 +307,13 @@ struct SingleCountRule {
   /// |a_ij| are hypot calls: ~10 ms per 1e6 entries, which a caller checking several windows of
   /// one pencil should not pay each time).
   double a_norm_1 = -1.0;
+  /// A PROVEN lower bound on lambda_min(B) (> 0) for a B that is not diagonal (P8; the driver gets
+  /// it from an incomplete-Cholesky proof, src/driver/norms.hpp prove_condition_bound). The rule
+  /// then applies to that general HPD B: the eigenvalues of (A + E, B) lie within
+  /// ||B^{-1/2} E B^{-1/2}||_2 <= ||E||_2 / lambda_min(B) of those of (A, B) (Weyl in the B^{-1/2}
+  /// congruence, as for a diagonal B), so eta(s) = backward_factor u_s ||K(s)||_1 / b_min_proven
+  /// with ||K(s)||_1 <= ||A||_1 + |s| ||B||_1. 0 (default): a general B is not applicable.
+  double b_min_proven = 0.0;
 };
 
 /// One certificate window for single counts.

@@ -15,13 +15,16 @@
 //               block, with a failure-probability bound delta (SolverConfig::certificate_delta).
 // 'auto' predicts each method's seconds with certificate_cost from this run's MEASURED main
 // factorization time and solve-call time (the Krylov run's block width) and runs the cheapest
-// that certifies: randomized only with a proven kappa (B = I, diagonal or diagonally dominant B),
-// single counts only where the rule holds with kAutoSingleSafety times its assumed backward error
+// that certifies: randomized only with a proven kappa (B = I, diagonal or diagonally dominant B at
+// O(nnz(B)); P8: a general HPD B through the incomplete-Cholesky bounds of norms.hpp,
+// prove_condition_bound, which also give single counts the lambda_min(B) their rule needs), single
+// counts only where the rule holds with kAutoSingleSafety times its assumed backward error
 // (below); otherwise, and whenever a fast check cannot decide (gap too small, plan over the memory
 // budget, a count that disagrees), the exact counts. Mode 'randomized' runs the check whenever a
-// plan exists and kappa is proven; with a general B (kappa only estimable) the check could only
-// SCREEN, so it is not run and the exact counts certify (warning, statement). No screening result
-// ever becomes the report's verdict (a pass without proof would read as a certificate downstream).
+// plan exists and kappa is proven; with a general B whose bounds are not proven (kappa only
+// estimable) the check could only SCREEN, so it is not run and the exact counts certify (warning,
+// statement). No screening result ever becomes the report's verdict (a pass without proof would
+// read as a certificate downstream).
 //
 // The randomized claim. sigma = the held shift, target = target.sigma (|sigma - target| > 0 only
 // after a near-singular perturbation), r = max |lambda - target| over the selected pairs, so
@@ -106,6 +109,11 @@ constexpr double kClaimFraction = 0.01;
 /// the randomized check on yee-pec-cube-32 (1.09x), syn-mem27-46 (1.29x) and syn-mem125-46 (1.19x),
 /// single counts only on yee-pec-cube-16 (1.05x); elsewhere it matches exact within noise.
 constexpr double kAutoSingleSafety = 10.0;
+
+/// A general B's condition bounds (b_bounds(): an incomplete-Cholesky proof plus one O(nnz(B))
+/// pass) may take this share of the predicted time of the exact counts they could save; proofs
+/// that succeed cost 0.004-0.08 s at 16 threads on the data cases (bench/anaint_bproof.cpp).
+constexpr double kBoundsProofShare = 0.25;
 
 /// What the nearest path measured before its certificate (inputs of the auto choice). Zero
 /// entries fall back to the run-time models of DESIGN §3.6-3b.
@@ -245,10 +253,17 @@ class NearestCertifier {
   /// safety: multiple of the rule's backward factor the window must hold with (auto:
   /// kAutoSingleSafety; run(): 1).
   CheckOutcome single(const NearestWindow& w, const Block<T>& all, double safety);
-  /// Start scaling and kappa of B: the proven bound (O(nnz(B)), no Lanczos estimate); with
-  /// estimate, a general B's estimated kappa instead (only a randomized check run() asks for it on
-  /// such a B: a screening result). Computed once each.
+  /// Start scaling and kappa of B: the proven bound - B = I, diagonal or diagonally dominant B
+  /// (O(nnz(B))), or a general B's bound from b_bounds() (P8) - or, with estimate, a general B's
+  /// estimated kappa where no bound is proven (only a randomized check run() asks for it on such a
+  /// B: a screening result). Computed once each.
   const StartScaling& scaling(bool estimate);
+  /// A general (non-diagonal) B's proven bounds (norms.hpp prove_condition_bound): kappa of the
+  /// Jacobi-scaled B and lambda_min(B) >= b_min. Computed once, at the first use - only where the
+  /// randomized check or single counts could beat the exact counts (choose()) or the mode asks for
+  /// the randomized check - within kBoundsProofShare of the predicted exact counts' time.
+  const ConditionBound& b_bounds();
+  double bounds_budget_s() const;
   double check_budget_bytes() const;
   std::string prefix() const;
 
@@ -264,6 +279,8 @@ class NearestCertifier {
   SingleCountRule rule_;  ///< a_norm_1 < 0 until single_rule() computed it
   CertificateTimings timings_;
   std::unique_ptr<StartScaling> proven_scaling_, estimated_scaling_;
+  std::unique_ptr<ConditionBound> b_bounds_;  ///< see b_bounds()
+  bool b_diagonal_ = true;                    ///< B = I or diagonal (set by single_rule())
   std::unique_ptr<InertiaCounter<T>> counter_;  ///< single counts (created at the first one; its
                                                 ///< double instance deferred to the first double count)
   /// exact_counts' last window [a, b] (counted) and its counts (valid: both nonsingular)
