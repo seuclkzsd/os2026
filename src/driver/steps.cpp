@@ -486,76 +486,88 @@ PlannedWork plan_work(const SolverConfig& cfg, ProblemType type, index_t n, doub
   return w;
 }
 
-namespace {
-
-// The ordering cost model, fitted on bench/anaint_orderings.cpp over the 40 data cases of MUMPS
-// order >= 5000 at the judging configuration: gpu02 (2x Xeon Silver 4314) measurement slot, cores
-// 16-31, 16 threads, one one-process run per case and ordering (P5c); the 1-thread work of hsolve's
-// nested dissection and the shape fits come from the P5 campaign (cores 28-31, 4 threads, medians
-// of 3 interleaved runs, --nd-serial 1). Nonnegative least squares on the relative error; the
-// commands are in bench/anaint_orderings.cpp (the fit script accompanies the module report).
+// The ordering cost model (OrderingModel, internal.hpp), fitted on the 40 data cases of MUMPS order
+// >= 5000 at the judging configuration: bench/anaint_orderings.cpp in the gpu02 (2x Xeon Silver
+// 4314) measurement slot, cores 16-31, 16 threads, one one-process run per case and ordering (P5c);
+// the 1-thread work of hsolve's nested dissection and the 16 / 4-thread ratios come from the P5
+// campaign (4 threads, medians of 3 interleaved runs, --nd-serial 1; run on cores 28-31 of the
+// slot before the slot lock existed, so other runs may have shared that socket - only the
+// thread exponents and W rest on it, and W only through the 16-thread median kNdSerial, fitted
+// against it). bench/anaint_fix_fit.cpp reproduces every constant below from those raw outputs
+// (nonnegative least squares on the relative error, medians, the shape regression) and replays the
+// driver's choice on the measured components, in-sample and leave-one-case-out (P5c fix).
 // Inputs: the MUMPS input size (mumps_input_size: order, upper entries), the graph hsolve's nested
 // dissection orders (OrderingInput::nd) and the factor entries fe / flops of an analysis estimate.
 // In brackets: the range of predicted / measured over the fitted cases.
-//
-// Given-order analysis (MUMPS analysis with PERM_IN: hsolve's nested dissection hands its order
-// over, the InertiaCounter reuses the main one), the floor of every analysis [0.58, 1.54]:
-constexpr double kFloorOrder = 2.25e-7, kFloorEntry = 3.44e-8, kFloorFe = 0.0;
-// hsolve's nested dissection on one thread: W = w_v * vertices + w_e * edges + w_fe * fe of its
-// graph [0.47, 1.38]; on p threads W (kNdSerial + (1 - kNdSerial) / p), kNdSerial the median over
-// the cases with W > 0.05 s of the measured 16-thread ordering times (quartiles 0.26, 0.47; whole
-// analysis [0.57, 2.04]). It does not scale like Amdahl's law with one serial fraction: 4 threads
-// gave 0.19 (P5), 16 threads 0.38 - the 16-thread analysis is only 1.14x faster than at 4 threads
-// (median over the 29 cases measured at both).
-constexpr double kNdWorkVertex = 7.03e-6, kNdWorkEdge = 6.54e-8, kNdWorkFe = 3.85e-9, kNdSerial = 0.383;
-// MUMPS orderings are serial, on the full input graph: METIS, PORD and SCOTCH cost rho * W (W of
-// the MUMPS input with their own fe; medians; whole analysis [0.45, 1.0], except the low-fill block
-// graphs of the syn-* cases, which they order 3-8x faster); AMD's ordering a_order * order +
-// a_entry * entries [0.25, 1.31].
-constexpr double kRhoMetis = 1.033, kRhoPord = 1.126, kRhoScotch = 0.626;
-constexpr double kAmdOrder = 3.26e-8, kAmdEntry = 5.32e-9;
+//   * Given-order analysis (MUMPS analysis with PERM_IN: hsolve's nested dissection hands its
+//     order over, the InertiaCounter reuses the main one), the floor of every analysis
+//     [0.58, 1.54].
+//   * hsolve's nested dissection on one thread: W = w_v * vertices + w_e * edges + w_fe * fe of
+//     its graph [0.47, 1.38]; on p threads W (nd_serial + (1 - nd_serial) / p), nd_serial the
+//     median over the 40 cases with W > 0.05 s of the measured 16-thread ordering times
+//     (quartiles 0.26, 0.47, range 0.13..0.86; whole analysis [0.57, 2.04]). It does not scale
+//     like Amdahl's law with one serial fraction: 4 threads gave 0.19 (P5), 16 threads 0.38 - the
+//     16-thread analysis is only 1.14x faster than at 4 threads (median over the 29 cases measured
+//     at both). The worst misses are W's own: ss-tem152078's 1-thread ordering took 2.1x and
+//     syn-mem125-46's 1.9x the fitted W (no input statistic tried - degree, fill, separator sizes
+//     - accounts for it), which makes ss-tem152078 take hsolve's nested dissection where SCOTCH's
+//     analysis is twice as fast (P5c review: 1.15x main's time). Pricing ND's analysis risk against
+//     SCOTCH (0.5 of its predicted analysis added while not analysed) fixed that case but, replayed
+//     with bench/anaint_fix_fit.cpp, sent yee-bloch-1e4, yee-photonic-*, syn-lap3d-aniso-1e5,
+//     syn-mem27-46 and ss-qa8fk-qa8fm to SCOTCH as well: mean excess over the best ordering 4.3% ->
+//     5.3% at equal total time - not adopted.
+//   * MUMPS orderings are serial, on the full input graph: METIS, PORD and SCOTCH cost rho * W (W
+//     of the MUMPS input with their own fe; medians; whole analysis [0.45, 1.0], except the
+//     low-fill block graphs of the syn-* cases, which they order 3-8x faster); AMD's ordering
+//     a_order * order + a_entry * entries [0.25, 1.31].
+//   * Factorization flops and entries of an ordering relative to AMD's on the same input, as
+//     functions of AMD's fill ratio f = fe(AMD) / nnz(pencil): ln r piecewise linear in ln f
+//     between the knots kShapeKnotFill (constant beyond), least squares with a ridge of 0.05. Low
+//     fill (block or banded structure, f < 5): nested dissections need 2-3x AMD's flops; 2-D
+//     (f ~ 10): 0.4-0.9x; 3-D (f >= 40): 0.1-0.35x. Flops [0.44, 1.86], entries [0.64, 1.36].
+//   * Numeric phases at 16 threads: factorization t_f = f_order * order + f_entry * entries +
+//     f_fe * fe + f_flops * flops [0.23, 1.79] (input assembly and scaling, front assembly, dense
+//     kernels); a refactorization of the same object `refactor` t_f, an InertiaCounter count
+//     `count` t_f (no factors kept); a 1-RHS solve t_s = s_order * order + s_fe * fe [0.30, 1.44],
+//     p right-hand sides in one call (1 + solve_per_rhs (p - 1)) t_s (medians: 0.97 t_s for p = 2,
+//     1.19 t_s for p = 4).
+//   * Other thread counts: (16 / threads)^gamma, from the medians of t(16) / t(4) over the same
+//     cases and orderings: factorizations 0.529 (150 pairs, gamma 0.46), solves 0.735 (57 pairs,
+//     gamma 0.22). Below 4 threads an extrapolation (2 against 4 threads measured 0.68 and 0.58 in
+//     P5).
+//   * AMD at low fill (fe / nnz(pencil) <= kAmdLowFill: the block / banded syn-* cases): its
+//     numeric phases take far longer than their size predicts at 16 threads - deep, narrow
+//     elimination trees without separators leave the threads of the tree-parallel L0 layer idle.
+//     AMD's measured / predicted time over hsolve's nested dissection's on the same case, medians
+//     over the 13 data cases with fill <= 4: factorization 1.86 (1.37..2.26), 4-RHS solve 3.15
+//     (2.50..3.81, 10 cases); at fill 5.1..10.8 (2-D grids) 1.05..1.25, so the factor falls to 1 at
+//     kAmdFillEnd (ln-linear between). Measured at 16 threads only: scaled by ln(threads) / ln(16),
+//     none on one thread.
+const OrderingModel& ordering_model() {
+  static const OrderingModel m = [] {
+    OrderingModel x{};
+    x.floor_order = 2.25e-7, x.floor_entry = 3.44e-8, x.floor_fe = 0.0;
+    x.nd_work_vertex = 7.03e-6, x.nd_work_edge = 6.54e-8, x.nd_work_fe = 3.85e-9, x.nd_serial = 0.383;
+    x.rho_metis = 1.033, x.rho_pord = 1.126, x.rho_scotch = 0.626;
+    x.amd_order = 3.26e-8, x.amd_entry = 5.32e-9;
+    x.shapes[0] = {kOrderingNestedDissection, {0.81, 1.00, -0.52, -1.03, -1.32, -1.90}, {0.41, 0.51, -0.18, -0.43, -0.63, -1.00}};
+    x.shapes[1] = {5, {0.89, 0.93, -0.58, -1.04, -1.34, -2.00}, {0.45, 0.48, -0.24, -0.45, -0.64, -1.04}};
+    x.shapes[2] = {4, {0.65, 0.83, -0.64, -0.82, -1.07, -1.14}, {0.34, 0.41, -0.24, -0.35, -0.53, -0.65}};
+    x.shapes[3] = {3, {0.88, 1.01, -0.49, -1.03, -1.43, -1.87}, {0.44, 0.52, -0.12, -0.39, -0.66, -0.98}};
+    x.fac_order = 1.91e-7, x.fac_entry = 3.21e-8, x.fac_fe = 5.95e-9, x.fac_flops = 2.74e-12;
+    x.refactor = 0.962, x.count = 0.886;
+    x.solve_order = 5.16e-8, x.solve_fe = 7.10e-10, x.solve_per_rhs = 0.062;
+    x.fac_thread_gamma = 0.46, x.solve_thread_gamma = 0.22;
+    x.amd_low_fill_factorization = 1.86, x.amd_low_fill_solve = 3.15;
+    return x;
+  }();
+  return m;
+}
 
-// Factorization flops and entries of an ordering relative to AMD's on the same input, as functions
-// of AMD's fill ratio f = fe(AMD) / nnz(pencil): ln r piecewise linear in ln f between the knots
-// f = 1, 4, 10, 40, 150, 1000 (constant beyond), least squares with a small ridge. Low fill (block
-// or banded structure, f < 5): nested dissections need 2-3x AMD's flops; 2-D (f ~ 10): 0.4-0.9x;
-// 3-D (f >= 40): 0.1-0.35x. Flops [0.44, 1.86], entries [0.68, 1.36].
-constexpr double kShapeKnots[] = {1.0, 4.0, 10.0, 40.0, 150.0, 1000.0};
-constexpr int kShapeKnotCount = 6;
-struct ShapeFit {
-  int ordering;
-  double flops[kShapeKnotCount], entries[kShapeKnotCount];  ///< ln r at the knots
-};
-constexpr ShapeFit kShapeFits[] = {
-    {kOrderingNestedDissection, {0.81, 1.00, -0.52, -1.03, -1.32, -1.90}, {0.41, 0.51, -0.18, -0.43, -0.63, -1.00}},
-    {5, {0.89, 0.93, -0.58, -1.04, -1.34, -2.00}, {0.45, 0.48, -0.24, -0.45, -0.64, -1.04}},
-    {4, {0.65, 0.83, -0.64, -0.82, -1.07, -1.14}, {0.34, 0.41, -0.24, -0.35, -0.53, -0.65}},
-    {3, {0.88, 1.01, -0.49, -1.03, -1.43, -1.87}, {0.44, 0.52, -0.12, -0.39, -0.66, -0.98}},
-};
+namespace {
 
-// Numeric phases at 16 threads: factorization t_f = f_order * order + f_entry * entries + f_fe * fe +
-// f_flops * flops [0.23, 1.79] (input assembly and scaling, front assembly, dense kernels); a
-// refactorization of the same object kRefactor t_f, an InertiaCounter count kCount t_f (no factors
-// kept); a 1-RHS solve t_s = s_order * order + s_fe * fe [0.30, 1.44], p right-hand sides in one
-// call (1 + kSolvePerRhs (p - 1)) t_s (medians: 0.97 t_s for p = 2, 1.19 t_s for p = 4).
-constexpr double kFacOrder = 1.91e-7, kFacEntry = 3.21e-8, kFacFe = 5.95e-9, kFacFlops = 2.74e-12;
-constexpr double kRefactor = 0.962, kCount = 0.886;
-constexpr double kSolveOrder = 5.16e-8, kSolveFe = 7.10e-10, kSolvePerRhs = 0.062;
-// Other thread counts: (16 / threads)^gamma, from the medians of t(16) / t(4) over the same cases and
-// orderings (P5 campaign at 4 threads): factorizations 0.529 (150 pairs, gamma 0.46), solves 0.735
-// (57 pairs, gamma 0.22). Below 4 threads an extrapolation (2 against 4 threads measured 0.68 and
-// 0.58 in P5).
-constexpr double kFacThreadGamma = 0.46, kSolveThreadGamma = 0.22;
 constexpr double kFitThreads = 16.0;
-// AMD at low fill (fe / nnz(pencil) <= kAmdLowFill: the block / banded syn-* cases): its numeric
-// phases take far longer than their size predicts at 16 threads - deep, narrow elimination trees
-// without separators leave the threads of the tree-parallel L0 layer idle. AMD's measured /
-// predicted time over a nested dissection's on the same case, medians over the 13 data cases with
-// fill <= 4: factorization 1.86 (1.37..2.26), 4-RHS solve 3.15 (2.50..3.81, 10 cases); at fill
-// 5.1..10.8 (2-D grids) 1.05..1.25, so the factor falls to 1 at kAmdFillEnd (ln-linear between).
-// Measured at 16 threads only: scaled by ln(threads) / ln(16), none on one thread.
 constexpr double kAmdLowFill = 4.0, kAmdFillEnd = 5.0;
-constexpr double kAmdLowFillFactorization = 1.86, kAmdLowFillSolve = 3.15;
 
 // Expected gain of analysing a candidate rather than trusting its prediction, as a fraction of its
 // predicted numeric time: from AMD's estimate the nested dissections' fill is known to within
@@ -566,8 +578,8 @@ constexpr double kGainFromAmd = 0.05, kGainFromNd = 0.03;
 /// estimate / cap: above every feasible score, ordered by memory.
 constexpr double kOverCapScore = 1e30;
 
-const ShapeFit* shape_fit(int ordering) {
-  for (const auto& f : kShapeFits)
+const OrderingModel::Shape* shape_fit(const OrderingModel& m, int ordering) {
+  for (const auto& f : m.shapes)
     if (f.ordering == ordering) return &f;
   return nullptr;
 }
@@ -584,27 +596,17 @@ double amd_low_fill_factor(double factor, double fill, int threads) {
   return 1.0 + (factor - 1.0) * weight * share;
 }
 
-double given_order_analysis_s(const MumpsInputSize& in, double fe) {
-  return kFloorOrder * in.order + kFloorEntry * in.entries + kFloorFe * fe;
+double given_order_analysis_s(const OrderingModel& m, const MumpsInputSize& in, double fe) {
+  return m.floor_order * in.order + m.floor_entry * in.entries + m.floor_fe * fe;
 }
 
-double nd_work_s(const MumpsInputSize& g, double fe) {
-  return kNdWorkVertex * g.order + kNdWorkEdge * g.entries + kNdWorkFe * fe;
-}
-
-/// ln r of `ordering` at ln fill (piecewise linear between the knots, constant beyond them).
-double shape_log_ratio(const double (&knots)[kShapeKnotCount], double fill) {
-  const double lf = std::log(std::clamp(fill, kShapeKnots[0], kShapeKnots[kShapeKnotCount - 1]));
-  for (int i = 0; i + 1 < kShapeKnotCount; ++i) {
-    const double a = std::log(kShapeKnots[i]), b = std::log(kShapeKnots[i + 1]);
-    if (lf <= b) return knots[i] + (knots[i + 1] - knots[i]) * (lf - a) / (b - a);
-  }
-  return knots[kShapeKnotCount - 1];
+double nd_work_s(const OrderingModel& m, const MumpsInputSize& g, double fe) {
+  return m.nd_work_vertex * g.order + m.nd_work_edge * g.entries + m.nd_work_fe * fe;
 }
 
 /// (flops, entries) of `ordering` relative to AMD's at AMD fill ratio f.
-std::pair<double, double> shape_ratio(int ordering, double fill) {
-  const ShapeFit* s = shape_fit(ordering);
+std::pair<double, double> shape_ratio(const OrderingModel& m, int ordering, double fill) {
+  const OrderingModel::Shape* s = shape_fit(m, ordering);
   if (!s) return {1.0, 1.0};  // AMD itself (and orderings without a fit)
   return {std::exp(shape_log_ratio(s->flops, fill)), std::exp(shape_log_ratio(s->entries, fill))};
 }
@@ -612,6 +614,16 @@ std::pair<double, double> shape_ratio(int ordering, double fill) {
 bool nested_dissection(int ordering) { return ordering != 0; }
 
 }  // namespace
+
+double shape_log_ratio(const double (&knots)[OrderingModel::kShapeKnots], double fill) {
+  constexpr int k = OrderingModel::kShapeKnots;
+  const double lf = std::log(std::clamp(fill, kShapeKnotFill[0], kShapeKnotFill[k - 1]));
+  for (int i = 0; i + 1 < k; ++i) {
+    const double a = std::log(kShapeKnotFill[i]), b = std::log(kShapeKnotFill[i + 1]);
+    if (lf <= b) return knots[i] + (knots[i + 1] - knots[i]) * (lf - a) / (b - a);
+  }
+  return knots[k - 1];
+}
 
 template <class T>
 OrderingInput ordering_input(const ShiftedPencil<T>& pencil) {
@@ -641,34 +653,43 @@ std::vector<int> candidate_orderings(const SolverConfig& /*cfg*/) {
 
 bool taken_on_prediction(int ordering) { return ordering == kOrderingScotch; }
 
-double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_entries, int threads) {
-  const double floor = given_order_analysis_s(in.mumps, factor_entries);
+double ordering_analysis_s(const OrderingModel& m, int ordering, const OrderingInput& in, double factor_entries,
+                           int threads) {
+  const double floor = given_order_analysis_s(m, in.mumps, factor_entries);
   switch (ordering) {
-    case 0: return floor + kAmdOrder * in.mumps.order + kAmdEntry * in.mumps.entries;
+    case 0: return floor + m.amd_order * in.mumps.order + m.amd_entry * in.mumps.entries;
     case kOrderingNestedDissection: {
       const double p = static_cast<double>(std::max(1, threads));
-      return floor + nd_work_s(in.nd, factor_entries) * (kNdSerial + (1.0 - kNdSerial) / p);
+      return floor + nd_work_s(m, in.nd, factor_entries) * (m.nd_serial + (1.0 - m.nd_serial) / p);
     }
-    case 4: return floor + kRhoPord * nd_work_s(in.mumps, factor_entries);
-    case 3: return floor + kRhoScotch * nd_work_s(in.mumps, factor_entries);
-    default: return floor + kRhoMetis * nd_work_s(in.mumps, factor_entries);  // METIS and the rest
+    case 4: return floor + m.rho_pord * nd_work_s(m, in.mumps, factor_entries);
+    case 3: return floor + m.rho_scotch * nd_work_s(m, in.mumps, factor_entries);
+    default: return floor + m.rho_metis * nd_work_s(m, in.mumps, factor_entries);  // METIS and the rest
   }
+}
+
+double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_entries, int threads) {
+  return ordering_analysis_s(ordering_model(), ordering, in, factor_entries, threads);
+}
+
+double factorization_s(const OrderingModel& m, const MumpsInputSize& in, double flops, double entries, int threads) {
+  return (m.fac_order * in.order + m.fac_entry * in.entries + m.fac_fe * entries + m.fac_flops * flops) *
+         thread_factor(threads, m.fac_thread_gamma);
 }
 
 double factorization_s(const MumpsInputSize& in, double flops, double entries, int threads) {
-  return (kFacOrder * in.order + kFacEntry * in.entries + kFacFe * entries + kFacFlops * flops) *
-         thread_factor(threads, kFacThreadGamma);
+  return factorization_s(ordering_model(), in, flops, entries, threads);
 }
 
-double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
-                         double entries, int threads, double amd_fill) {
-  double t_f = factorization_s(in, flops, entries, threads);
-  double t_s = (kSolveOrder * in.order + kSolveFe * entries) * thread_factor(threads, kSolveThreadGamma);
+double planned_numeric_s(const OrderingModel& m, const SolverConfig& cfg, const PlannedWork& w,
+                         const MumpsInputSize& in, double flops, double entries, int threads, double amd_fill) {
+  double t_f = factorization_s(m, in, flops, entries, threads);
+  double t_s = (m.solve_order * in.order + m.solve_fe * entries) * thread_factor(threads, m.solve_thread_gamma);
   if (amd_fill > 0.0) {
-    t_f *= amd_low_fill_factor(kAmdLowFillFactorization, amd_fill, threads);
-    t_s *= amd_low_fill_factor(kAmdLowFillSolve, amd_fill, threads);
+    t_f *= amd_low_fill_factor(m.amd_low_fill_factorization, amd_fill, threads);
+    t_s *= amd_low_fill_factor(m.amd_low_fill_solve, amd_fill, threads);
   }
-  double s = t_f + std::max(0.0, w.factorizations - 1.0) * kRefactor * t_f;
+  double s = t_f + std::max(0.0, w.factorizations - 1.0) * m.refactor * t_f;
   if (w.counts > 0) {
     // As the driver will count: on an InertiaCounter when counter_pays (its analysis on the given
     // order, then inertia-only factorizations), else refactorizations of the main object.
@@ -676,18 +697,67 @@ double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const Mu
     e.flops = flops;
     e.factor_entries = static_cast<std::int64_t>(entries);
     const auto counts = static_cast<index_t>(std::llround(w.counts));
-    s += counter_pays(cfg, e, in, threads, counts) ? given_order_analysis_s(in, entries) + w.counts * kCount * t_f
-                                                   : w.counts * kRefactor * t_f;
+    s += counter_pays(cfg, e, in, threads, counts) ? given_order_analysis_s(m, in, entries) + w.counts * m.count * t_f
+                                                   : w.counts * m.refactor * t_f;
   }
-  s += w.solve_calls * t_s * (1.0 + kSolvePerRhs * static_cast<double>(std::max<index_t>(w.block, 1) - 1));
+  s += w.solve_calls * t_s * (1.0 + m.solve_per_rhs * static_cast<double>(std::max<index_t>(w.block, 1) - 1));
   return s;
+}
+
+double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
+                         double entries, int threads, double amd_fill) {
+  return planned_numeric_s(ordering_model(), cfg, w, in, flops, entries, threads, amd_fill);
+}
+
+std::pair<double, double> predicted_shape(const OrderingModel& m, int ordering, const FactorEstimate& amd,
+                                          double pencil_nnz, int anchor_ordering, const FactorEstimate& anchor) {
+  const double fill = static_cast<double>(amd.factor_entries) / std::max(1.0, pencil_nnz);
+  const auto r = shape_ratio(m, ordering, fill), ra = shape_ratio(m, anchor_ordering, fill);
+  return {anchor.flops * r.first / ra.first, static_cast<double>(anchor.factor_entries) * r.second / ra.second};
 }
 
 std::pair<double, double> predicted_shape(int ordering, const FactorEstimate& amd, double pencil_nnz,
                                           int anchor_ordering, const FactorEstimate& anchor) {
-  const double fill = static_cast<double>(amd.factor_entries) / std::max(1.0, pencil_nnz);
-  const auto r = shape_ratio(ordering, fill), ra = shape_ratio(anchor_ordering, fill);
-  return {anchor.flops * r.first / ra.first, static_cast<double>(anchor.factor_entries) * r.second / ra.second};
+  return predicted_shape(ordering_model(), ordering, amd, pencil_nnz, anchor_ordering, anchor);
+}
+
+void OrderingPricer::analysed(std::vector<OrderingCandidate>& cand, std::size_t i, const FactorEstimate& e) {
+  if (i == 0) amd = e;  // the probe
+  OrderingCandidate& c = cand[i];
+  c.analysed = true;
+  c.analysis_s = 0.0;
+  c.flops = e.flops;
+  c.entries = static_cast<double>(e.factor_entries);
+  c.numeric_s = planned_numeric_s(model, cfg, work, in.mumps, c.flops, c.entries, threads,
+                                  c.ordering == 0 ? c.entries / std::max(1.0, pencil_nnz) : 0.0);
+  c.incore_mb = e.incore_mb;
+  c.score_s = c.numeric_s;
+  // Factors beyond the in-core cap (DESIGN §3.6-3) only run out of core, or not at all: any
+  // candidate that fits is preferred, and among those that do not, the smallest.
+  if (cap_mb > 0 && e.incore_mb > cap_mb) c.score_s = kOverCapScore * (e.incore_mb / cap_mb);
+}
+
+void OrderingPricer::predict(std::vector<OrderingCandidate>& cand, std::size_t anchor) const {
+  FactorEstimate a;
+  a.flops = cand[anchor].flops;
+  a.factor_entries = static_cast<std::int64_t>(cand[anchor].entries);
+  for (auto& c : cand) {
+    if (c.analysed) continue;
+    const auto [flops, entries] = predicted_shape(model, c.ordering, amd, pencil_nnz, cand[anchor].ordering, a);
+    c.flops = flops;
+    c.entries = entries;
+    c.analysis_s = ordering_analysis_s(model, c.ordering, in, entries, threads);
+    c.numeric_s = planned_numeric_s(model, cfg, work, in.mumps, flops, entries, threads,
+                                    c.ordering == 0 ? entries / std::max(1.0, pencil_nnz) : 0.0);
+    const double gain = nested_dissection(cand[anchor].ordering) ? kGainFromNd : kGainFromAmd;
+    c.score_s = c.analysis_s + (1.0 - gain) * c.numeric_s;
+    // In-core size in proportion to the factor entries, from the anchor's estimate: a candidate
+    // predicted beyond the cap is scored like an analysed one beyond it, so that, when nothing
+    // fits (out-of-core runs), candidates are not analysed one after the other for nothing
+    // (ss-3dspectralwave2: all four were, 50 s of analyses).
+    c.incore_mb = cand[anchor].incore_mb * entries / std::max(1.0, cand[anchor].entries);
+    if (cap_mb > 0 && c.incore_mb > cap_mb) c.score_s = kOverCapScore * (c.incore_mb / cap_mb);
+  }
 }
 
 std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates) {
@@ -783,11 +853,11 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     return fac_nd;
   }
   const std::vector<int> orderings = candidate_orderings(c.cfg);
-  const double cap = fopts.max_memory_mb;
   std::vector<OrderingCandidate> cand(orderings.size());
+  for (std::size_t i = 0; i < orderings.size(); ++i) cand[i].ordering = orderings[i];
   std::vector<std::unique_ptr<SparseFactorization<T>>> obj(orderings.size());
   std::vector<double> seconds(orderings.size(), 0.0);
-  FactorEstimate amd_estimate;  // of the probe (candidate 0)
+  OrderingPricer pricer{ordering_model(), c.cfg, work, oin, nnz, threads, fopts.max_memory_mb, {}};
   auto analyse = [&](std::size_t i) {
     FactorOptions o = fopts;
     o.ordering = orderings[i];
@@ -795,47 +865,13 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     Timer t;
     obj[i]->analyze(pencil, 1.0, -sigma0);
     seconds[i] = t.seconds();
-    const FactorEstimate e = obj[i]->estimate();
-    if (i == 0) amd_estimate = e;
-    cand[i].analysed = true;
-    cand[i].analysis_s = 0.0;
-    cand[i].flops = e.flops;
-    cand[i].entries = static_cast<double>(e.factor_entries);
-    cand[i].numeric_s = planned_numeric_s(c.cfg, work, in, cand[i].flops, cand[i].entries, threads,
-                                          orderings[i] == 0 ? cand[i].entries / std::max(1.0, nnz) : 0.0);
-    cand[i].incore_mb = e.incore_mb;
-    cand[i].score_s = cand[i].numeric_s;
-    // Factors beyond the in-core cap (DESIGN §3.6-3) only run out of core, or not at all: any
-    // candidate that fits is preferred, and among those that do not, the smallest.
-    if (cap > 0 && e.incore_mb > cap) cand[i].score_s = kOverCapScore * (e.incore_mb / cap);
+    pricer.analysed(cand, i, obj[i]->estimate());
   };
-  for (std::size_t i = 0; i < orderings.size(); ++i) cand[i].ordering = orderings[i];
-  // Re-price the candidates not analysed yet from the analysed candidate `anchor`.
-  auto predict = [&](std::size_t anchor) {
-    FactorEstimate a;
-    a.flops = cand[anchor].flops;
-    a.factor_entries = static_cast<std::int64_t>(cand[anchor].entries);
-    for (std::size_t i = 0; i < cand.size(); ++i) {
-      if (cand[i].analysed) continue;
-      const auto [flops, entries] = predicted_shape(orderings[i], amd_estimate, nnz, orderings[anchor], a);
-      cand[i].flops = flops;
-      cand[i].entries = entries;
-      cand[i].analysis_s = ordering_analysis_s(orderings[i], oin, entries, threads);
-      cand[i].numeric_s = planned_numeric_s(c.cfg, work, in, flops, entries, threads,
-                                            orderings[i] == 0 ? entries / std::max(1.0, nnz) : 0.0);
-      const double gain = nested_dissection(orderings[anchor]) ? kGainFromNd : kGainFromAmd;
-      cand[i].score_s = cand[i].analysis_s + (1.0 - gain) * cand[i].numeric_s;
-      // In-core size in proportion to the factor entries, from the anchor's estimate: a candidate
-      // predicted beyond the cap is scored like an analysed one beyond it, so that, when nothing
-      // fits (out-of-core runs), candidates are not analysed one after the other for nothing
-      // (ss-3dspectralwave2: all four were, 50 s of analyses).
-      cand[i].incore_mb = cand[anchor].incore_mb * entries / std::max(1.0, cand[anchor].entries);
-      if (cap > 0 && cand[i].incore_mb > cap) cand[i].score_s = kOverCapScore * (cand[i].incore_mb / cap);
-    }
-  };
+  auto predict = [&](std::size_t anchor) { pricer.predict(cand, anchor); };
   const std::size_t pick = run_ordering_choice(cand, analyse, predict, [&](std::size_t i) { obj[i].reset(); });
   for (std::size_t i = 0; i < cand.size(); ++i)
     if (i != pick) obj[i].reset();
+  const FactorEstimate& amd_estimate = pricer.amd;
   const double fill = cand[0].entries / std::max(1.0, nnz);
   // The log: every candidate's price, which were analysed (with their wall time), the choice.
   std::string summary;

@@ -311,26 +311,79 @@ struct OrderingInput {
 template <class T>
 OrderingInput ordering_input(const ShiftedPencil<T>& pencil);
 
-/// The ordering cost model (steps.cpp: fit and measurements). Predicted wall time of one analysis
-/// with `ordering` (MUMPS orderings are serial, hsolve's nested dissection runs on `threads`) of an
-/// input of sizes `in` whose factors hold `factor_entries`.
+/// The constants of the ordering cost model (steps.cpp: what they are and how they were fitted;
+/// bench/anaint_fix_fit.cpp refits them from the raw measurements and replays the choice).
+struct OrderingModel {
+  static constexpr int kShapeKnots = 6;
+  double floor_order, floor_entry, floor_fe;       ///< given-order analysis (MUMPS, PERM_IN)
+  double nd_work_vertex, nd_work_edge, nd_work_fe;  ///< hsolve's nested dissection, 1 thread: W
+  double nd_serial;                                 ///< its serial fraction on many threads
+  double rho_metis, rho_pord, rho_scotch;           ///< MUMPS' orderings: rho * W of the input
+  double amd_order, amd_entry;                      ///< AMD's ordering
+  /// ln (flops, entries) of an ordering over AMD's at the knots kShapeKnotFill of AMD's fill.
+  struct Shape {
+    int ordering;
+    double flops[kShapeKnots], entries[kShapeKnots];
+  };
+  Shape shapes[4];
+  double fac_order, fac_entry, fac_fe, fac_flops;  ///< first factorization on an analysis, 16 threads
+  double refactor, count;                          ///< refactorization, InertiaCounter count: of it
+  double solve_order, solve_fe, solve_per_rhs;     ///< 1-RHS solve, 16 threads; per extra RHS
+  double fac_thread_gamma, solve_thread_gamma;     ///< (16 / threads)^gamma
+  double amd_low_fill_factorization, amd_low_fill_solve;  ///< AMD's numeric phases at fill <= 4
+};
+/// The fitted model (steps.cpp).
+const OrderingModel& ordering_model();
+/// AMD fill ratios of the shape fits' knots.
+constexpr double kShapeKnotFill[OrderingModel::kShapeKnots] = {1.0, 4.0, 10.0, 40.0, 150.0, 1000.0};
+/// ln r at AMD fill `fill` of a shape fit (piecewise linear in ln fill, constant beyond the knots).
+double shape_log_ratio(const double (&knots)[OrderingModel::kShapeKnots], double fill);
+
+/// Predicted wall time of one analysis with `ordering` (MUMPS orderings are serial, hsolve's nested
+/// dissection runs on `threads`) of an input of sizes `in` whose factors hold `factor_entries`.
+double ordering_analysis_s(const OrderingModel& m, int ordering, const OrderingInput& in, double factor_entries,
+                           int threads);
 double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_entries, int threads);
 /// Predicted seconds of one numeric factorization (the first on its analysis) of an input of sizes
-/// `in` whose factors take `flops` and hold `entries`, on `threads` (the fit of steps.cpp).
+/// `in` whose factors take `flops` and hold `entries`, on `threads`.
+double factorization_s(const OrderingModel& m, const MumpsInputSize& in, double flops, double entries, int threads);
 double factorization_s(const MumpsInputSize& in, double flops, double entries, int threads);
 /// Predicted time of the planned numeric work with factors of `flops` and `entries` on `threads`:
 /// factorizations, certificate counts (on an InertiaCounter when counter_pays, which then adds the
 /// counter's analysis) and the solve calls of width w.block. amd_fill > 0: the factors are AMD's,
 /// with this fill ratio (entries / nnz of the pencil) - at low fill its numeric phases parallelize
 /// worse (steps.cpp); 0 for a nested dissection.
+double planned_numeric_s(const OrderingModel& m, const SolverConfig& cfg, const PlannedWork& w,
+                         const MumpsInputSize& in, double flops, double entries, int threads, double amd_fill = 0.0);
 double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
                          double entries, int threads, double amd_fill = 0.0);
 /// Predicted (flops, entries) of `ordering` on an input whose AMD analysis estimated `amd`
 /// (pencil_nnz: upper entries of the pencil), scaled from the actual estimate `anchor` of the
 /// analysed ordering `anchor_ordering` (AMD itself, or a nested dissection: the relative
 /// prediction between two nested dissections is much tighter than from AMD).
+std::pair<double, double> predicted_shape(const OrderingModel& m, int ordering, const FactorEstimate& amd,
+                                          double pencil_nnz, int anchor_ordering, const FactorEstimate& anchor);
 std::pair<double, double> predicted_shape(int ordering, const FactorEstimate& amd, double pencil_nnz,
                                           int anchor_ordering, const FactorEstimate& anchor);
+
+/// The pricing steps of adaptive_analysis (pure: bench/anaint_fix_fit.cpp replays the driver's
+/// choice on recorded estimates with them). analysed(): candidate i got the analysis estimate e (i
+/// = 0: the AMD probe, whose estimate the predictions scale); predict(): the candidates not
+/// analysed yet re-priced from the analysed candidate `anchor` - predicted analysis plus numeric
+/// time less the expected gain of an actual estimate; factors beyond cap_mb score beyond every
+/// candidate that fits.
+struct OrderingPricer {
+  const OrderingModel& model;
+  const SolverConfig& cfg;
+  PlannedWork work;
+  OrderingInput in;
+  double pencil_nnz = 0.0;
+  int threads = 1;
+  double cap_mb = 0.0;  ///< in-core cap of the factors (0: none)
+  FactorEstimate amd;   ///< the probe's estimate
+  void analysed(std::vector<OrderingCandidate>& cand, std::size_t i, const FactorEstimate& e);
+  void predict(std::vector<OrderingCandidate>& cand, std::size_t anchor) const;
+};
 
 /// The choice step of adaptive_analysis: given the candidates (at least one analysed), the index
 /// of the one to take if it is analysed, or to analyse next. Scores ties go to the earlier

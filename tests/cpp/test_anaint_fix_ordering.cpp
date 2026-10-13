@@ -5,6 +5,7 @@
 // adaptive_analysis then asserted on the released analysis (Internal error from hs::solve).
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -88,6 +89,36 @@ TEST(AnaintFixOrdering, ScotchEndsTheLoop) {
   EXPECT_EQ(t.pick, 1u);
   EXPECT_EQ(t.analysed, (std::vector<std::size_t>{0, 1}));
   EXPECT_EQ(t.released, (std::vector<std::size_t>{0}));
+}
+
+// The cost model is data (OrderingModel): the driver's functions price with ordering_model(), and
+// a refit model (bench/anaint_fix_fit.cpp) prices through the same code.
+TEST(AnaintFixOrdering, ModelIsData) {
+  using namespace hs::driver;
+  const OrderingModel& m = ordering_model();
+  OrderingInput in;
+  in.mumps = {1e5, 1.2e6};
+  in.nd = in.mumps;
+  for (const int o : {0, kOrderingNestedDissection, 5, 4, kScotch})
+    EXPECT_EQ(ordering_analysis_s(m, o, in, 3e7, 16), ordering_analysis_s(o, in, 3e7, 16)) << o;
+  EXPECT_EQ(factorization_s(m, in.mumps, 1e10, 3e7, 16), factorization_s(in.mumps, 1e10, 3e7, 16));
+  OrderingModel slow = m;
+  slow.nd_serial = 2.0 * m.nd_serial;
+  EXPECT_GT(ordering_analysis_s(slow, kOrderingNestedDissection, in, 3e7, 16),
+            ordering_analysis_s(kOrderingNestedDissection, in, 3e7, 16));
+  EXPECT_EQ(ordering_analysis_s(slow, 0, in, 3e7, 16), ordering_analysis_s(0, in, 3e7, 16));
+  // Shapes: AMD itself is the reference; the knots interpolate ln r linearly in ln fill.
+  hs::FactorEstimate amd;
+  amd.flops = 1e10;
+  amd.factor_entries = 40000000;
+  const auto self = predicted_shape(m, 0, amd, 1e6, 0, amd);
+  EXPECT_DOUBLE_EQ(self.first, amd.flops);
+  const auto& nd = m.shapes[0];
+  ASSERT_EQ(nd.ordering, kOrderingNestedDissection);
+  EXPECT_DOUBLE_EQ(shape_log_ratio(nd.flops, kShapeKnotFill[3]), nd.flops[3]);
+  EXPECT_DOUBLE_EQ(shape_log_ratio(nd.flops, 1e6), nd.flops[OrderingModel::kShapeKnots - 1]);
+  const double mid = std::sqrt(kShapeKnotFill[2] * kShapeKnotFill[3]);
+  EXPECT_NEAR(shape_log_ratio(nd.flops, mid), 0.5 * (nd.flops[2] + nd.flops[3]), 1e-12);
 }
 
 // Random scores: whatever the sequence, the choice is analysed, never released, every other
