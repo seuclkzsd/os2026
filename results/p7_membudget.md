@@ -142,15 +142,15 @@ runs because SCOTCH's orderings vary from run to run (factor.hpp).
 * **Where the unpredicted memory is** (event timeline, syn-mem27-80 under 6 GiB, lane): resident
   210 MB when the plan is made, 751 MB after the analysis (MUMPS keeps its symbolic data and a copy
   of the input: 0.54 GB that the plan did not see), +2974 MB during the out-of-core factorization -
-  exactly MUMPS' out-of-core estimate on top of what was there -, 1.5 GB during the Krylov run (the
-  factors are on disk), 4.3 GB peak during the certificate's inertia-only counts (the counter's
+  exactly MUMPS' out-of-core estimate on top of what was there -, 1.1-1.6 GB during the Krylov run
+  (the factors are on disk), 4.3 GB peak during the certificate's inertia-only counts (the counter's
   in-core working memory, 2.95 GB, beside the Krylov basis). At 16 threads the same run peaked at
   4.96 GiB: L0-OpenMP keeps per-thread work areas. Hence the **re-plan** in the final code: after
   the analysis the cap shrinks by what the process grew (`memory_replan`: 0.80-0.82 GB on syn-mem27-80, 1.14-1.19 GB on syn-mem27-100).
 * **The re-plan's price.** It makes the in-core decision honest, and more conservative where MUMPS
   over-estimates: syn-mem27-100 under 24.5 GiB went in core before it (peak 16.2 GiB, 119 s) and
   goes out of core with it (207 s). In core it now needs a cap of about 25 GiB - far below the
-  32 GiB machine (section 4: cap 25.3 GB after the re-plan against an estimate of 18-19 GB).
+  32 GiB machine (section 4: cap 25.2 GB after the re-plan against an estimate of 18.8 GB).
 * **The fraction.** Peak RSS reached 0.66-0.99 of the budget before the re-plan and 0.42-0.89 after
   it, and at most 0.83 of the cap L. The
   budget is a good predictor of the peak, so the rest of L only needs to hold the unpredicted part:
@@ -164,7 +164,7 @@ runs because SCOTCH's orderings vary from run to run (factor.hpp).
   out-of-core retry, never seen in these runs).
 * **Too small for out of core.** syn-mem27-100 under 8 GiB: budget 6.8 GiB, cap 5.6 GB (4.5 GB after
   the re-plan), out-of-core estimate 7.2-8.7 GB - refused after the analysis (exit 2,
-  OutOfMemoryBudget, 8 s, peak 2.6 GiB), never started. It needs a cap of about 11 GiB to run out of
+  OutOfMemoryBudget, 8 s, peak 2.6 GiB); the factorization never started. It needs a cap of about 11 GiB to run out of
   core (valid under 12 GiB, peak 8.4 GiB). A 512000-unknown 3-D case (syn-mem27-80, factors 6.1-6.3 GB)
   runs out of core under 6 GiB and stays valid.
 
