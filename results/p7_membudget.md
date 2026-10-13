@@ -22,7 +22,15 @@ choosing automatically when the double factors do not fit in core?
   factors (syn-mem27-100 under 8 GiB) is refused after the analysis (OutOfMemoryBudget, exit 2,
   peak 2.6 GiB), never started. Three mechanisms keep the plan honest: the cap is re-planned after the
   analysis by what the analysis kept resident (0.5-1 GB at n = 5e5-1e6, unseen before); an in-core
-  factorization that still fails for memory is retried out of core; MUMPS gets the cap as ICNTL(23).
+  factorization that still fails for memory is retried out of core; MUMPS' working memory is capped
+  (ICNTL(23)).
+* **Address-space limits (review fix, section 8).** Under `ulimit -v` (RLIMIT_AS) the budget is now
+  planned in address space, net of what the threads reserve without using it (3.1 GiB at 16
+  threads), and MUMPS reserves 1.35 x its estimate instead of half the cap or more. Every run the
+  review saw crash or fail under RLIMIT_AS now returns a valid result (syn-mem27-46 at 8 GiB,
+  syn-mem27-80 at 10.5, syn-mem27-100 at 14.9 GiB - the "16 GB" machine) or is refused cleanly after
+  the analysis (syn-mem27-80 at 6 and 8 GiB); the peak address space stays at 0.72-0.92 of the
+  limit. Unchanged elsewhere: same times, +0.1 GiB peak RSS on two 1e5 cases.
 * **Single precision is safe.** Every refined application is checked, a single factor that is
   singular even without null-pivot detection ends the attempt, and a result that is not accepted
   too; the solve then starts again with double factors on the same pivot order. All four P6
@@ -304,5 +312,139 @@ when double does not fit even out of core while single fits in core).
 * **Next lever for the 1e6 cases in core:** the certificate's two inertia-only counts take 46-56 s,
   about half of the in-core run (`certificate = auto` / the randomized check were not part of P7).
 * **For the judging machine:** with a cgroup (container) or a VM, the budget comes from the cgroup or
-  MemTotal; a harness that keeps large data in another process can declare a smaller limit through
-  `HSOLVE_MEMORY_LIMIT_GB`.
+  MemTotal; under `ulimit -v` from RLIMIT_AS, planned in address space (section 8); a harness that
+  keeps large data in another process can declare a smaller limit through `HSOLVE_MEMORY_LIMIT_GB`.
+
+## 8. Review fixes (branch p7-membudget-fix)
+
+The P7 review found one major and three minor problems; all four were real and are fixed. Code:
+2055189 (address space), 50a0464 (auto decision), 0687edb (fault injection and tests), cf843de
+(compare.py), 221979d (test); docs fcda214.
+
+### 8.1 RLIMIT_AS (`ulimit -v`): planned in address space, MUMPS reserves its estimate (major)
+
+**The problem, verified.** P7 derived the budget from RLIMIT_AS when it was the smallest limit, but
+planned it against RSS, and gave MUMPS the whole factorization cap as ICNTL(23); MUMPS sizes its
+workspace from ICNTL(23), so the address space grew by half the cap or more, untouched. RLIMIT_AS
+counts that in full, and the process also holds a lot of address space it never uses: at 16
+threads VmSize is 2.2 GB at start (RSS 6 MB: OpenBLAS' thread buffers) and 3.5-3.7 GB once the
+matrices are loaded and the OpenMP pool runs (RSS 0.2-0.4 GB: malloc arenas, stacks). The review's
+runs (16 threads, gpu02) failed: syn-mem27-46 under 8 GiB (INFO -13), syn-mem27-80 under 6 / 8 /
+10.5 GiB (OpenBLAS "Memory allocation still failed", SIGSEGV), syn-mem27-100 under 14.9 GiB
+(16e9 bytes, the "16 GB" machine: INFO -13 in the certificate's InertiaCounter after 174 s). The
+new test (below) reproduces the failure on d693e46 in 3 of 3 runs.
+
+**The fix.**
+* MUMPS gets ICNTL(23) = min(cap, (1 + ICNTL(14)/100) * estimate + 32 MB), 1.35 x the estimate by
+  default - INFOG(16) in core, INFOG(26) out of core, the counter's own estimate for an
+  InertiaCounter - grown with the workspace retries (INFO -19 below the cap is one), the last retry
+  with the whole cap (`factor_stats.workspace_reserved_mb`).
+* The budget is charged in the measure of its limit (`report.memory.measure`): resident memory for
+  the cgroup, `HSOLVE_MEMORY_LIMIT_GB` and MemTotal, the address space (VmSize) for RLIMIT_AS, VmData
+  for RLIMIT_DATA. Under the latter two, what the process reserves without using it when the budget
+  is resolved - after the diagnosis, so the OpenMP pool and its arenas exist - is set aside
+  (`reserved_gb`, 3.1 GiB at 16 threads), and the formula applies to the rest:
+  budget = R + max(0.5, min(0.85 (L - R), L - R - 1)). The plan, the re-plan after the analysis and
+  every "budget - memory in use" (block widths, slices, B's proof, the randomized check) read the same
+  measure. Every event carries `vm_mb` / `peak_vm_mb`.
+* Not done, with the reason: a per-thread address-space reserve (or MALLOC_ARENA_MAX), as the review
+  suggested. The per-thread reservations exist before the plan (OpenBLAS' buffers from the start,
+  the pool's arenas and stacks from the loading on; event timelines of syn-mem27-80 / -100: no growth
+  at the factorization beyond MUMPS' reservation and ~0.5 GB of its own), so they are in the memory
+  in use the plan starts from; reserving them again would only refuse runs that fit.
+
+**Measured** (gpu02 slot, 16 threads, `ulimit -v L` inside a 32 GiB guard so that RLIMIT_AS is the
+smallest limit; a build of the fix's sources - 2055189..0687edb, later commits change tests and
+comments only -; every completed run evaluated with tools/eval: all pass):
+
+| case | L (GiB) | base 9201c2c (review) | P7 d693e46 (review) | fix: outcome | fix: total s | peak address space GiB (P7 / fix) | fix budget GiB (reserved) | fix cap MB / MUMPS ICNTL(23) MB |
+|---|---|---|---|---|---|---|---|---|
+| syn-mem27-46 | 8 | rc 1, OpenBLAS allocation failure | INFO -13, exit 2 | **valid**, in core | 2.5 | - / 5.76 | 7.00 (3.12) | 3735 / 1014 |
+| syn-mem27-80 | 6 | - | SIGSEGV | refused after the analysis (exit 2, 4.4 s) | - | - / 5.44 | 5.00 (3.12) | 1 / - |
+| syn-mem27-80 | 8 | - | SIGSEGV | refused after the analysis (exit 2, 4.4 s) | - | 7.89 / 5.38 | 7.00 (3.12) | 2009 / - |
+| syn-mem27-80 | 10.5 | fails | SIGSEGV | **valid**, out of core | 87.1 | - / 9.23 | 9.39 (3.11) | 4475 / 3729 |
+| wg-square-1e6 | 6 | - | - | valid, out of core | 24.0 | - / 4.85 | 5.00 (3.12) | 672 / 519 |
+| syn-mem27-100 | 14.9 | INFO -13 after 17 s | INFO -13 after 174 s | **valid**, out of core | 198.1 | 14.68 / 13.76 | 13.13 (3.12) | 7525 / 7525 |
+| syn-mem27-100 | 16 | - | valid, 211.3 s | valid, out of core | 194.2 | 15.87 / 14.40 | 14.07 (3.12) | 8527 / 8527 |
+| yee-pec-box-1e6 | 14.9 | - | valid, 159.8 s | valid, out of core | 160.8 | 14.03 / 12.65 | 13.13 (3.12) | 7878 / 7659 |
+
+* Every run that P7 crashed or failed now either returns a valid result or is refused cleanly after
+  the analysis (OutOfMemoryBudget, exit 2, 4 s): syn-mem27-80 under 6 and 8 GiB, where 3.1 GiB of
+  the limit are held by the threads and the out-of-core working memory (2.5-2.8 GB) does not fit
+  what remains. The peak address space of the completed runs stays at 0.72-0.92 of L (P7: up to
+  0.99 where it ran).
+* syn-mem27-100 under 14.9 GiB: the peak (13.76 GiB) is in the certificate's InertiaCounter, whose
+  analysis (+0.7 GB) the plan does not see, and its workspace (the cap) - inside L by 1.1 GiB.
+
+**Test.** `DriverMemoryBudgetDeathTest.AnAddressSpaceLimitIsHonoured` (tests/cpp/test_membudget.cpp)
+solves a 3-D Laplacian (n = 27000) in a child process that holds 4 GiB of address space it never
+uses (as the threads do at 16 threads; held explicitly because the CPU affinity caps OpenBLAS'
+threads on the 8-core test lane) under RLIMIT_AS = that address space + 2 GiB, and requires a valid
+result planned in the address space. d693e46: the child dies ("OpenBLAS error: Memory allocation
+still failed after 10 retries") in 3 of 3 runs; the fix passes 5 of 5. Without the held 4 GiB the
+reviewed code passed it - the test lane's own reservations (8 OpenBLAS threads) leave enough room.
+
+**What the smaller reservation costs** (slot, 16 threads, 32 GiB guard - an RSS budget, 27.2 GiB -,
+3 interleaved repetitions, final P7 code bf4dea8 against the fix 221979d; all valid):
+
+| case | P7 bf4dea8: total s, median [min-max] | fix 221979d | P7 / fix | fix: MUMPS ICNTL(23) MB | peak RSS GiB, P7 / fix |
+|---|---|---|---|---|---|
+| syn-mem27-46 | 2.43 [2.40-2.47] | 2.39 [2.39-2.41] | 1.02 | 1014 | 0.81-0.84 / 0.82-0.86 |
+| yee-pec-box-1e5 | 2.93 [2.92-3.04] | 2.98 [2.96-3.03] | 0.98 | 986-1050 | 0.88-0.92 / 0.89-0.91 |
+| wg-square-1e5 | 0.50 [0.50-0.50] | 0.49 [0.49-0.51] | 1.02 | 163 | 0.21-0.22 / 0.28-0.32 |
+| ss-qa8fk-qa8fm | 1.71 [1.70-1.71] | 1.71 [1.71-1.72] | 1.00 | 492 | 0.58-0.60 / 0.69-0.70 |
+| cav2d-rect-pert-1e5 | 0.31 [0.31-0.32] | 0.32 [0.30-0.33] | 0.97 | 113 | 0.21-0.25 / 0.19-0.24 |
+| yee-pec-box-1e6 (in core) | 90.51 [89.09-91.31] | 88.24 [86.43-91.67] | 1.03 | 20821-21180 (cap ~25800) | 12.70-12.96 / 12.55-12.89 |
+
+One confirmation run under a 16 GiB RSS cap: syn-mem27-100 out of core, 204.2 s (P7 final code:
+204.3 s, section 4), ICNTL(23) 9312 MB of an 11366 MB cap, peak RSS 7.91 GiB (P7: 8.44, section 4).
+
+Where the cap leaves room, MUMPS now reserves 1.35 x its estimate instead of half the cap or more:
+no case got slower (every ratio within the repetitions' spread) and none needed a workspace retry.
+The peak RSS of two 1e5 cases rose by 0.09-0.11 GiB (ss-qa8fk-qa8fm, wg-square-1e5), at 16
+threads only: at 8 threads ss-qa8fk-qa8fm shows no difference (0.43 / 0.43 GiB) - presumably MUMPS'
+L0 threads allocate outside the tighter workspace and glibc keeps that memory (not investigated
+further). The large cases are
+unchanged or lower (yee-pec-box-1e6, syn-mem27-100 under 16 GiB).
+
+### 8.2 precision auto keeps its decision on a fallback (minor)
+
+Verified: solve() restored the diagnosis snapshot (`rep = diagnosed`) after an abandoned attempt,
+which wiped `precision.decision` and the auto warning (the review's yee-pec-box-1e6 auto16p runs:
+decision ""). Fixed: both are carried over. The double attempt also plans after `malloc_trim(0)`:
+glibc kept what the abandoned attempt freed resident (57.6 MB in use at the second plan against
+12.4 MB at the first, n = 27000; 34.5 MB after the trim), and the new plan counted it.
+Test `DriverAutoPrecision.AnAbandonedAutoChoiceKeepsItsDecision`: auto takes single factors under a
+budget between the two in-core estimates, their attempt fails (sigma 1e-8 ||K|| from an eigenvalue
+of a 3-D Laplacian), the double run goes out of core, and the report keeps "single: in-core
+estimates double ... MB, single ... MB, cap ... MB" decision, its warning and the fallback reason.
+
+### 8.3 compare.py runs the automatic budget (minor)
+
+Verified: `tools/bench/compare.py` passed `--memory-budget-gb 0.9 * mem_gb` (a configured budget,
+0.9 L) although section 1 and section 7 describe its runs as planning with the guard's cap. Fixed:
+the flag is gone, hsolve runs its default automatic budget from the cap its guard exports (0.85 L);
+the compare test checks that no budget is configured. Earlier compare.py tables (P5c) planned with
+0.9 L; for their 1e5 cases (factors below 1 GB) either budget decides in core.
+
+### 8.4 Tests of the remaining fallback paths (minor)
+
+Verified: no test reached the third way out of an inexact attempt (a completed attempt whose result
+is not accepted), none used `blr = on`, the GHIEP test asserted nothing about `report.precision`, and
+the P6 zero-cluster failure had no small analogue. Added (tests/cpp/test_membudget_single.cpp):
+* `SolverConfig::inexact_fault_reject` - fault injection for tests, like `certificate_fault_drop`:
+  the first pair of an inexact attempt's result is marked above tol, so the solve takes the real
+  unaccepted-result path. `AnUnacceptedResultFallsBackToDouble` (reason "the result was not
+  accepted (1 of 10 pairs above tol)", double result valid; no effect on double factors; config key).
+* `BlrFactorsAreCheckedAndFallBackToFullRank`: BLR at a well-separated shift serves
+  (`precision.blr`), and an unaccepted BLR attempt falls back to full-rank double factors.
+* `GhiepSingleGivesTheDoubleResult` now asserts that single serves at sigma = 0.3 (used single, no
+  fallback).
+* `SingleInsideAZeroClusterFallsBackToDouble`: 300 eigenvalues spaced 2e-9 around sigma = 0 (as in
+  syn-zero-cluster-real-1e5), mixed into O(1) blocks like the case generator's random grouping: the
+  single factor is flagged, its refinement fails, the double result is valid. (With the cluster's
+  eigenvalues in blocks of their own - the test fixture's default order - it stayed single and
+  valid, at either spacing: single precision's rounding is then relative to those tiny blocks.)
+
+Whole suite at 221979d on gpu02: 940 ctest (937 passed, 3 disabled) + 351 pytest, release build
+warning-free.
