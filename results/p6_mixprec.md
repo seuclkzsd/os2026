@@ -4,15 +4,17 @@
 K = A - sigma B make hsolve faster and leaner at 16 cores, at equal final accuracy and with the
 certificate intact?
 
-**Answer: no, not as a speed option. The gate fails and stage B was not started.** Only one of the
-five head-to-head cases is projected at >= 1.10x (syn-mem27-46, 1.11x, which just meets the
-tolerance). Two variants were projected from measured costs:
+**Answer: no, not as a speed option. The gate fails and stage B was not started.** At most one of
+the five head-to-head cases is projected at >= 1.10x: syn-mem27-46, at 1.11x in stage A and 1.09x
+in a 5-round rerun (section 7.1), with a refinement that just meets the tolerance. Two variants
+were projected from measured costs:
 
 * **V1:** a single factor, refined to double accuracy in every operator application. This is the
   existing `factor_precision: single` path. It is 0.35-0.59x end to end (measured), and it fails
   outright on 3 of 10 cases.
 * **V2:** a single factor without refinement during the Krylov phase, with a final refinement of
-  the Ritz pairs. Its final refinement reaches the tolerance on only 3 of 8 cases.
+  the Ritz pairs. Its final refinement reaches the tolerance on only 3 of 8 cases. Guard vectors
+  add a fourth (yee-bloch-1e4), where V2 is then projected at 0.84x.
 
 Even if that refinement cost nothing, V2 would give 1.12-1.19x on the three 3-D head-to-head cases
 and 0.90-0.99x on the two 2-D ones. **Recommendation: keep `factor_precision = double` as the only
@@ -58,7 +60,14 @@ default 14 GB budget, where the double path goes out of core and takes 2.2x long
   * That rate is the fixed-shift inverse-iteration rate of the contaminating far components, not a
     precision effect: refining with the double factor gives the same 0.69 on yee-pec-box-1e5, where
     0.69 = |89.53 - 52.85| / 52.85 against the curl-curl null space at 0.
-  * Guard vectors leave the rate unchanged and make the single-operator Krylov phase 9-11x longer.
+  * Guard vectors (k + 4 or k + 8 refined pairs, section 7.1) lower the rate only where the
+    contaminating eigenvalues are a few neighbours of the wanted ones.
+    * yee-bloch-1e4: 0.62 to 0.36, then accepted in 11-12 steps, but projected at 0.84x.
+    * ss-qa8fk-qa8fm: 0.66 to 0.51, still not accepted in 12 steps (18-20 steps with g = 8,
+      projected at 0.69x).
+    * Little or no change on yee-pec-box-1e5 (the curl-curl null space, far larger than any small
+      g), syn-mem125-46 and cav2d-rect-pert-1e5.
+    * The single-operator Krylov phase grows by a case-dependent 1.0x (syn-ghep) to 65x (cav2d).
   * A Davidson-type Rayleigh-Ritz over [X, S^-1 R] diverges, also with double corrections.
   * After 12 steps, 5 of 8 cases still miss the tolerance (eta 4e-10 to 3e-8).
 * **Accuracy caveat:** on ss-tem152078 the single Ritz pairs pass eta <= 1e-10 without any refinement,
@@ -70,7 +79,7 @@ default 14 GB budget, where the double path goes out of core and takes 2.2x long
 
 * **Where.** gpu02, measurement slot: cores 16-31, 16 threads, 32 GiB, `guard.py --exclusive`, one
   run at a time. Build and test lane: cores 8-15, used only for the convergence diagnostics of
-  section 7, which quote no times. All runs were on 2026-10-13.
+  section 7, which quote no times (section 7.1 is measured in the slot). All runs were on 2026-10-13.
 * **Base.** p5c-integration 1bd75f9: the BLAS hook linked with route `all`, `certificate = exact`,
   adaptive ordering. The bench is `bench_mixprec_phases`. The stage-A tables come from adf9cc9; the
   1e6 run comes from aa6edb7, which adds only the memory guard. Both are linked with the BLAS hook
@@ -237,28 +246,30 @@ syn-ghep-near-singular-real-1e5, whose certificates counted on the main object.
 
 | case | base | numeric saved | V1 projected | V1 measured end to end (sec. 6.1) | V2 projected | V2 bound | V2 detail |
 |---|---|---|---|---|---|---|---|
-| **syn-mem27-46** | 2.53 | 0.20 | 4.67 (0.54x), not accepted | invalid (0/3) | **2.27 (1.11x)** | 2.13 (1.19x) | 28 appl. 0.19 s + refine 0.14 s vs 44 / 0.40 s; final eta 5e-11..9e-11 (no margin) |
+| **syn-mem27-46** | 2.53 | 0.20 | 4.67 (0.54x), not accepted | invalid (0/3) | **2.27 (1.11x)**; 2.31 (1.09x) in sec. 7.1 | 2.13 (1.19x) | 28 appl. 0.19 s + refine 0.14 s (3 steps) vs 44 / 0.40 s; final eta 5e-11..9e-11 (no margin); 3-4 steps in the 5 rounds of sec. 7.1 |
 | **yee-pec-box-1e5** | 2.95 | 0.22 | 5.14 (0.57x) | 5.01 (0.59x) | fails | 2.52 (1.17x) | eta 1-2e-8 after 12 steps |
 | **wg-square-1e5** (GHIEP) | 0.48 | 0.01 | 1.22 (0.39x) | 1.39 (0.35x) | <= 0.48 (0.99x) | 0.48 (0.99x) | single solves not faster (2-D) |
 | **ss-qa8fk-qa8fm** | 1.70 | 0.08 | 3.17 (0.54x) | 2.89 (0.59x) | fails | 1.51 (1.12x) | eta 1-2e-8 after 12 steps |
 | **cav2d-rect-pert-1e5** | 0.31 | 0.005 | 0.80 (0.38x) | 0.76 (0.40x) | fails | 0.34 (0.90x) | eta 1e-9 after 12 steps; single solve 0.79x |
 | syn-mem125-46 | 12.31 | 1.09 | 25.93 (0.47x) | 25.27 (0.49x) | fails | 9.31 (1.32x) | eta 4-6e-10 after 12 steps (1.2 s) |
 | ss-tem152078 | 5.46 | 0.17 | 13.65 (0.40x) | 15.24 (0.36x) | 5.01 (1.09x)* | 5.01 (1.09x) | *passes eta, but eigenvalues 2e-8 off double's |
-| yee-bloch-1e4 | 0.82 | 0.06 | 1.42 (0.58x) | 1.42 (0.58x) | fails | 0.72 (1.14x) | eta 2e-8 after 12 steps |
+| yee-bloch-1e4 | 0.82 | 0.06 | 1.42 (0.58x) | 1.42 (0.58x) | fails; 0.98 (0.84x) with g = 4 guards (sec. 7.1) | 0.72 (1.14x) | eta 2e-8 after 12 steps; with g = 4 accepted in 11-12 steps |
 | syn-near-singular-complex-1e5 | 2.47 | - | - | error, no fallback (0/3) | fails | - | single factor unusable at sigma |
 | syn-ghep-near-singular-real-1e5 | 1.29 | 0.01 | 2.76 (0.47x), not accepted | invalid (0/3) | 1.39 (0.93x) | 1.32 (0.97x) | low fill: nothing to gain |
 
 **Gate: FAILED. Stage B was not started.**
 * V1 loses on every case.
-* V2 reaches >= 1.10x on 1 of 5 head-to-head cases (syn-mem27-46, 1.11x, with no accuracy
-  margin). It fails on three, which would mean a double fallback and a loss, and is at <= 0.99x on
-  wg-square-1e5.
+* V2 reaches >= 1.10x on at most 1 of 5 head-to-head cases: syn-mem27-46, with no accuracy margin,
+  at 1.11x in stage A (3 refinement steps in each of 3 rounds) and 1.09x in the 5-round rerun of
+  section 7.1 (4 steps in 3 of the 5 rounds). It fails on three, which would mean a double fallback
+  and a loss, and is at <= 0.99x on wg-square-1e5. Guard vectors change none of this (section 7.1).
 * An "auto" rule using single only on 3-D cases cannot rescue it: yee-pec-box-1e5 and
   ss-qa8fk-qa8fm fail the refinement.
 * Even with a free refinement, only the three 3-D cases reach 1.12-1.19x. For 1.10x a refinement
   would have to cost at most 0.16 s on yee-pec-box-1e5 and 0.03 s on ss-qa8fk-qa8fm. At the
-  measured 0.044 and 0.024 s per step, that is about 3 steps and 1 step. The measured rate needs
-  15-25.
+  measured 0.044 and 0.024 s per step, that is about 3 steps and 1 step. Measured with up to 30
+  steps, ss-qa8fk-qa8fm needs 28-30 without guards and 18-20 with g = 8 (section 7.1).
+  yee-pec-box-1e5, at 0.69 per step, would need about 26-29 (extrapolated from eta after 12 steps).
 
 ### 6.1 V1 end to end (the existing `--precision single`)
 
@@ -290,28 +301,80 @@ These were run with the committed bench, on the baseline reports, `--reps 1 --no
   * The Krylov phase sees the same ratio between the wanted theta = 1/36.7 and the null-space
     theta = -1/52.85, which is why double needs 84 applications there. A single solve injects
     null-space components at the 1e-4 level that only this ratio damps.
-* **Guard vectors do not help.** `--v2-guards 0,4,8` on yee-pec-box-1e5 refines k + g pairs: the
-  rate is unchanged (0.69-0.70). The single-operator Krylov phase needs 744 and 852 applications for
-  g = 4 and 8, against 80 for g = 0.
+* **Guard vectors do not help on yee-pec-box-1e5.** `--v2-guards 0,4,8` refines k + g pairs: the
+  rate stays 0.69-0.70, because the contamination is the curl-curl null space, far larger than any
+  small g. In this single 8-thread run the single-operator Krylov phase needed 744 and 852
+  applications for g = 4 and 8, against 80 for g = 0. Section 7.1 repeats the guard experiment on
+  all eight V2 cases in the measurement slot: on other cases guards do lower the rate.
 * **The Davidson-type extraction diverges.** `--v2-mode davidson` (Rayleigh-Ritz over
   [X, S^-1 R], keeping per old vector the Ritz vector of largest B-overlap) diverges on
   yee-pec-box-1e5 and ss-qa8fk-qa8fm: eta grows from 1e-4 to 1e-2 in 8 steps. It does so also with
   corrections from the double factor. On syn-mem27-46 it reaches only 5e-5. Standard Rayleigh-Ritz
   on the enlarged space admits spurious interior Ritz pairs.
-* **Rates on the other cases:**
+* **Rates on the other cases** (stage A medians; the 5-round rerun of section 7.1 differs by up to
+  0.06):
   * syn-mem125-46: 0.45, against the next eigenvalues beyond the 15 wanted;
   * ss-qa8fk-qa8fm: 0.61;
   * yee-bloch-1e4: 0.64;
   * cav2d-rect-pert-1e5: 0.83;
   * syn-mem27-100: 0.55.
   * Only syn-mem27-46, where the wanted 6-fold pairs are 1e3x nearer sigma than the rest, and
-    syn-ghep-near-singular-real-1e5 converge in 2-3 steps.
+    syn-ghep-near-singular-real-1e5 converge in 2-4 steps.
 
 Making V2 work would take a Krylov-accelerated refinement. One option is a few restarts of the
 refined-operator Lanczos from the V2 basis, but each refined application costs 2.7-16.6x a double
 one (section 4). The other is the existing Jacobi-Davidson with the single factor as
 preconditioner, which P3 measured at 3-4x the double solves. Neither fits in the 0.03-0.16 s budget
 above.
+
+### 7.1 Guard vectors on every V2 case (measurement slot, 16 threads, 5 rounds)
+
+`--v2-guards 0,4,8` carries g extra pairs through the Krylov phase (nev = k + g) and the
+refinement. Acceptance stays on the k pairs nearest sigma. Each case ran in one bench process with
+5 rotated rounds of the double arm and the three V2 arms. All V2 arms use Krylov tolerance 1e-8,
+rii, and at most 12 steps; ss-qa8fk-qa8fm was run a second time with at most 30 steps.
+* Applications are the range over the rounds; rate and times are medians.
+* The rate is defined as in section 5.
+* "Projected" uses the section 1 formula with this run's double arm and stage A's numeric saving
+  and c, for arms accepted in all rounds, or in 4 of 5 rounds for the 30-step g = 0 arm.
+* The g = 0 arms reproduce stage A's iterate times within 5%, except syn-mem27-46: its refinement
+  took 4 steps instead of 3 in 3 of the 5 rounds (0.38 s instead of 0.34 s).
+
+| case | Krylov applications: double / g = 0 / 4 / 8 | rate g = 0 / 4 / 8 | accepted rounds and final eta, g = 0 / 4 / 8 | iterate s: double / g = 0 / 4 / 8 | projected, g = 0 / 4 / 8 |
+|---|---|---|---|---|---|
+| syn-mem27-46 | 44 / 28 / 88-96 / 92-100 | 3-5 steps | 5/5 each, 2e-13..1e-10 | 0.40 / 0.38 / 0.85 / 0.99 | 2.31 (1.09x) / 2.77 (0.91x) / 2.92 (0.87x) |
+| yee-pec-box-1e5 | 84 / 80-88 / 484-584 / 652-792 | 0.69 / 0.69 / 0.69 | 0/5 each, 3e-8..6e-8 | 0.82 / 1.18 / 5.12 / 6.40 | fails |
+| ss-qa8fk-qa8fm | 100 / 80 / 104 / 104 | 0.66 / 0.57 / 0.51 | 0/5 each: 2e-8..3e-8 / 6e-9..1e-8 / 8e-10..5e-9 | 0.52 / 0.67 / 0.85 / 1.01 | fails |
+| ss-qa8fk-qa8fm, at most 30 steps | 100 / 80 / 104 / 104 | 0.69 / 0.61 / 0.58 | 4/5 in 28-30 steps / 5/5 in 23-24 / 5/5 in 18-20 | 0.52 / 1.08 / 1.21 / 1.31 | 2.22 (0.76x) / 2.35 (0.72x) / 2.45 (0.69x) |
+| cav2d-rect-pert-1e5 | 22 / 22 / 426-546 / 1094-1430 | 0.83 / 0.83 / 0.83 | 0/5 each, 9e-10..1e-9 | 0.14 / 0.31 / 3.95 / 10.95 | fails |
+| syn-mem125-46 | 148 / 88-92 / 148-160 / 140-144 | 0.51 / 0.49 / 0.47 | 0/5 each: 5e-10 / 2e-10..5e-10 / 2e-10 | 3.34 / 2.66 / 3.92 / 3.82 | fails |
+| ss-tem152078 | 88 / 72 / 84 / 92 | 0 steps | 5/5 each, 6e-13..1.3e-12 | 1.31 / 0.89 / 1.06 / 1.20 | 5.01 (1.09x)* / 5.18 (1.05x)* / 5.32 (1.03x)* |
+| yee-bloch-1e4 | 68 / 60-64 / 76-80 / 128-132 | 0.62 / 0.36 / 0.35 | 0/5, 9e-9..2e-8 / 5/5 in 11-12 steps, 4e-11..1e-10 / same | 0.20 / 0.35 / 0.43 / 0.59 | fails / 0.98 (0.84x) / 1.14 (0.72x) |
+| syn-ghep-near-singular-real-1e5 | 108 / 88 / 88 / 92 | 2 steps | 5/5 each, 3e-12..7e-12 | 0.39 / 0.39 / 0.43 / 0.51 | 1.39 (0.93x) / 1.43 (0.90x) / 1.51 (0.85x) |
+
+\* eigenvalues off double's (section 5).
+
+* **Guards help only where the contaminating components are a few eigenvalues next to the wanted
+  ones**, which g extra pairs can carry along:
+  * yee-bloch-1e4: g = 4 lowers the rate from 0.62 to 0.36, and V2 is accepted in 11-12 steps in
+    every round. Its iterate is still 0.43 s against 0.20 s for double, i.e. 0.84x end to end.
+  * ss-qa8fk-qa8fm: 0.66, 0.57 and 0.51 for g = 0, 4 and 8, not enough within 12 steps. With 30
+    steps it is accepted after 28-30 (g = 0), 23-24 (g = 4) or 18-20 (g = 8) steps, at 0.69-0.76x.
+* **Little or no change** on yee-pec-box-1e5 (0.69, the null space), cav2d-rect-pert-1e5 (0.83)
+  and syn-mem125-46 (0.51, 0.49, 0.47).
+* **The Krylov phase grows by a case-dependent factor**, from g = 0 to g = 4 or 8:
+  * 1.0-1.3x on syn-ghep-near-singular-real-1e5, ss-tem152078, ss-qa8fk-qa8fm and yee-bloch-1e4
+    (g = 4);
+  * 1.5-2.2x on syn-mem125-46 and yee-bloch-1e4 (g = 8);
+  * 3.1-3.6x on syn-mem27-46;
+  * 5.5-10x on yee-pec-box-1e5;
+  * 19-65x on cav2d-rect-pert-1e5.
+  * With the noisy operator the count varies between rounds: 484-792 here on yee-pec-box-1e5,
+    744 and 852 in the single 8-thread run above.
+* **The gate is unchanged.** Where g = 0 already passes, no guard arm is faster than it. No guard
+  arm passes on yee-pec-box-1e5 or cav2d-rect-pert-1e5. Where guards make V2 pass (yee-bloch-1e4,
+  and ss-qa8fk-qa8fm with 30 steps), V2 is slower than double. A Krylov-accelerated refinement
+  remains the only route.
 
 ## 8. The 1e6 case: memory (syn-mem27-100, n = 1e6, 27-point, sigma = 0, k = 12)
 
@@ -384,4 +447,12 @@ bench_mixprec_phases --case data/cases/yee-pec-box-1e5 --report ... --exp v2 --r
 bench_mixprec_phases ... --v2-guards 0,4,8 --v2-max-steps 12 --v2-mode rii
 bench_mixprec_phases --case data/cases/{syn-mem27-46,yee-pec-box-1e5,ss-qa8fk-qa8fm} ... --v2-max-steps 8 \
    --v2-mode davidson [--v2-refine-factor double]
+# guard vectors on every V2 case (section 7.1): one slot call, bench built at 8aae708 (bench source as
+# 0550e3b), CASES = the eight V2 cases of the section 7.1 table
+python3 tools/run/guard.py --exclusive --timeout 2700 --lock-wait 1500 -- bash -c 'for c in CASES; do
+   bench_mixprec_phases --case data/cases/$c --report $R/results/raw/p6-base/$c/hsolve-r0/report.json \
+   --exp v2 --reps 9 --no-v1 --v2-tols 1e-8 --v2-guards 0,4,8 --v2-max-steps 12 --v2-mode rii \
+   > $S/fix/guards/$c.jsonl; done                       # --reps 9 = 5 rotated rounds
+ bench_mixprec_phases --case data/cases/ss-qa8fk-qa8fm ... (same) --v2-max-steps 30 \
+   > $S/fix/guards/ss-qa8fk-qa8fm.steps30.jsonl'
 ```
