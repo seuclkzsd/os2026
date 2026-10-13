@@ -61,7 +61,7 @@ srcdir="$build_root/spral-$SPRAL_VERSION"
 # One-line patch: meson links a library containing .cu objects with nvcc, i.e. through nvcc's host
 # g++ (gcc 9 here), which then follows the conda sysroot's libm.so linker script to glibc 2.27+ files
 # CentOS 7 lacks (libmvec). Link libspral.so with the conda g++ instead, as a CPU-only build does
-# (no relocatable device code in SPRAL, so nvcc's device link step is not needed).
+# (no relocatable device code in SPRAL, so nvcc's device link step is not needed), plus libgfortran.
 if [ "$gpu" = true ]; then
   sed -i "s/^libspral = library('spral',\$/libspral = library('spral', link_language : 'cpp',/" "$srcdir/meson.build"
   grep -q "link_language : 'cpp'" "$srcdir/meson.build" || { echo "build_spral: patching meson.build failed" >&2; exit 1; }
@@ -103,6 +103,9 @@ if [ "$gpu" = true ]; then
 fi
 host_link="-L$CONDA_PREFIX/lib"
 for d in "${libdirs[@]}"; do host_link+=" -Wl,-rpath,$d"; done
+# With link_language 'cpp' meson no longer adds the Fortran runtime to libspral.so's link.
+cpp_link="$host_link"
+[ "$gpu" = true ] && cpp_link+=" -lgfortran -lm"
 native=-march=native
 python3 "$meson_pyz" setup "$build_root/build" "$srcdir" \
   --prefix="$prefix" --buildtype=release --wrap-mode=nodownload \
@@ -112,7 +115,7 @@ python3 "$meson_pyz" setup "$build_root/build" "$srcdir" \
   -Dlibmetis=metis -Dlibmetis_path="$CONDA_PREFIX/lib" -Dlibmetis_version=5 \
   -Dlibhwloc=hwloc-not-used \
   -Dc_args="$native" -Dcpp_args="$native" -Dfortran_args="$native" \
-  -Dc_link_args="$host_link" -Dcpp_link_args="$host_link" -Dfortran_link_args="$host_link" \
+  -Dc_link_args="$host_link" -Dcpp_link_args="$cpp_link" -Dfortran_link_args="$host_link" \
   "${cuda_opts[@]}" > "$build_root/configure.log" 2>&1 || true
 grep -E "Compiler for|Dependency|Library|WARNING|ERROR" "$build_root/configure.log" || true
 grep -q "^Build targets in project" "$build_root/configure.log" || { echo "build_spral: meson setup failed" >&2; exit 1; }
