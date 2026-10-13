@@ -44,11 +44,11 @@ while [ $# -gt 0 ]; do
     --bench-args) bench_args="$2"; shift 2 ;;
     --ssids-env) ssids_env="$2"; shift 2 ;;
     --batch) batch_rep="$2"; shift 2 ;;  # internal: one (repetition, case) inside the guard
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) cases+=("$1"); shift ;;
   esac
 done
-[ ${#cases[@]} -gt 0 ] || { sed -n '2,25p' "$0" >&2; exit 2; }
+[ ${#cases[@]} -gt 0 ] || { sed -n '2,23p' "$0" >&2; exit 2; }
 bench="$root/build/spral/bench_gpu_ssids"
 [ -x "$bench" ] || { echo "gpu_g1: $bench missing (tools/dev/build.sh spral)" >&2; exit 2; }
 IFS=, read -r -a vlist <<< "$variants"
