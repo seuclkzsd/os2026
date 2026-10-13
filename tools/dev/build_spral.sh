@@ -107,6 +107,11 @@ for d in "${libdirs[@]}"; do host_link+=" -Wl,-rpath,$d"; done
 cpp_link="$host_link"
 [ "$gpu" = true ] && cpp_link+=" -lgfortran -lm"
 native=-march=native
+# The conda sysroot is glibc 2.28, the nodes run 2.17: gfortran (no errno, glibc's pre-included
+# math-vector-fortran.h) vectorizes exp/log loops (scaling.f90, match_order.f90) into libmvec calls,
+# which CentOS 7 does not have. Fortran loops are therefore not loop-vectorized; SSIDS' numeric
+# kernels are C++ and BLAS. The install step checks that no newer glibc is needed.
+fortran_extra=-fno-tree-loop-vectorize
 python3 "$meson_pyz" setup "$build_root/build" "$srcdir" \
   --prefix="$prefix" --buildtype=release --wrap-mode=nodownload \
   -Dgpu="$gpu" -Dexamples=true -Dtests=false -Dmodules=false -Dopenmp=true \
@@ -114,7 +119,7 @@ python3 "$meson_pyz" setup "$build_root/build" "$srcdir" \
   -Dliblapack=openblas -Dliblapack_path="$CONDA_PREFIX/lib" \
   -Dlibmetis=metis -Dlibmetis_path="$CONDA_PREFIX/lib" -Dlibmetis_version=5 \
   -Dlibhwloc=hwloc-not-used \
-  -Dc_args="$native" -Dcpp_args="$native" -Dfortran_args="$native" \
+  -Dc_args="$native" -Dcpp_args="$native" -Dfortran_args="$native $fortran_extra" \
   -Dc_link_args="$host_link" -Dcpp_link_args="$cpp_link" -Dfortran_link_args="$host_link" \
   "${cuda_opts[@]}" > "$build_root/configure.log" 2>&1 || true
 grep -E "Compiler for|Dependency|Library|WARNING|ERROR" "$build_root/configure.log" || true
@@ -138,9 +143,13 @@ python3 "$meson_pyz" install -C "$build_root/build" > "$build_root/install.log" 
     echo "nvcc: $("$cuda_home/bin/nvcc" --version | grep release)"
     echo "nvcc host compiler: $host_cxx ($("$host_cxx" --version | head -1))"
   fi
-  echo "flags: $native -O3 (meson release); link: $host_link"
+  echo "flags: $native -O3 (meson release), Fortran also $fortran_extra; link: $host_link"
   echo "built $(date -Is) on $(hostname -s) by tools/dev/build_spral.sh"
 } > "$prefix/BUILDINFO"
 cat "$prefix/BUILDINFO"
 readelf -d "$prefix/lib/libspral.so" | grep -E "RPATH|RUNPATH" || true
+if readelf -d "$prefix/lib/libspral.so" | grep -q "libmvec" ||
+   objdump -T "$prefix/lib/libspral.so" | grep -qE "GLIBC_2\.(1[89]|2[0-9])"; then
+  echo "build_spral: libspral.so needs a glibc newer than 2.17 (libmvec or symbol versions)" >&2; exit 1
+fi
 ldd "$prefix/lib/libspral.so" | grep -E "cublas|cudart|openblas|metis|gfortran|gomp|omp|stdc|not found" || true
