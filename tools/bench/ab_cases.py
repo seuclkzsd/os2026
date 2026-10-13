@@ -11,11 +11,11 @@
              RUN/<case>/stderr-<label>-r<rep>.txt  the run's stderr (solver errors, guard summary line)
              RUN/runs.jsonl                        one line per run (host, binary, times, phases)
          Runs whose guard summary exists are skipped (resume); none starts after --deadline s.
-  table  medians of report time_total_s per (case, binary) over one or more raw run directories,
-         ratio B/A, geometric mean and the cases slower than --threshold. A run is valid when it
-         exited 0, was not killed, claims success and tools/eval/sweep.py's evaluation.json in its
-         result directory says pass; a ratio enters the geometric mean only when every run of both
-         binaries on that case was valid.
+  table  medians of report time_total_s per (case, binary) over the valid runs of one or more raw
+         run directories, ratio B/A, geometric mean and the cases slower than --threshold. A run is
+         valid when it exited 0, was not killed, claims success and tools/eval/sweep.py's
+         evaluation.json in its result directory says pass; a ratio enters the geometric mean only
+         when every run of both binaries on that case was valid.
 
 Measurement slot (docs/DESIGN.md §6): wrap `run` in one --exclusive guard per <= 45 min part, e.g.
   python3 tools/run/guard.py --exclusive --timeout 2700 -- python3 tools/bench/ab_cases.py run \\
@@ -138,24 +138,28 @@ def collect(run_dirs: list[Path]) -> dict[str, dict[str, list[dict[str, Any]]]]:
 
 
 def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
-    t = [r["time_total_s"] for r in runs if r.get("time_total_s") is not None]
+    """Medians over the valid runs (over all runs that report a time when none is valid)."""
+    t = [r["time_total_s"] for r in runs if r["valid"] and r.get("time_total_s") is not None] or \
+        [r["time_total_s"] for r in runs if r.get("time_total_s") is not None]
 
     def common(key: str) -> Any:
         vals = sorted({str(r.get(key)) for r in runs if r.get(key) is not None})
         return "/".join(vals) if vals else None
-    return {"reps": len(runs), "valid": sum(r["valid"] for r in runs), "ok": bool(runs) and all(r["valid"] for r in runs),
+    return {"reps": len(runs), "valid": sum(r["valid"] for r in runs),
+            "ok": bool(runs) and all(r["valid"] for r in runs),
             "time_s": _median(t), "time_min": min(t) if t else None, "time_max": max(t) if t else None, "times": t,
             "wall_s": _median([r["wall_s"] for r in runs if r.get("wall_s") is not None]),
             "peak_rss_gib": max((r["peak_rss_gib"] for r in runs if r.get("peak_rss_gib") is not None), default=None),
             "factorizations": common("factorizations"), "block_size": common("block_size"),
             "certificate_method": common("certificate_method"), "completeness": common("completeness"),
             "hosts": sorted({r["host"] for r in runs}), "binaries": sorted({r["binary"] for r in runs}),
-            "invalid": sorted({f"r{r['rep']}: rc={r.get('rc')} verdict={r['verdict']}" for r in runs if not r["valid"]})}
+            "invalid": sorted({f"r{r['rep']}: rc={r.get('rc')} verdict={r['verdict']}"
+                               for r in runs if not r["valid"]})}
 
 
 def cmd_table(a: argparse.Namespace) -> int:
     data = collect([Path(p) for p in a.run_dirs])
-    rows, logs = [], []
+    rows = []
     for name in sorted(data):
         base, new = summarize(data[name].get(a.base, [])), summarize(data[name].get(a.new, []))
         any_run = (data[name].get(a.new) or data[name].get(a.base))[0]
@@ -177,7 +181,7 @@ def cmd_table(a: argparse.Namespace) -> int:
              f"certificate {a.new} |", "|" + "---|" * 11]
     for r in rows:
         b, n = r[a.base], r[a.new]
-        mark = " **slower**" if r in slower else ""
+        mark = " **slower**" if r in slower else ("" if r["comparable"] else " (invalid runs: not compared)")
         lines.append(
             f"| {r['case']} | {r['n']} | {r['problem']} | {','.join(r['hosts'])} | "
             f"{f(b['time_s'], 3)} [{f(b['time_min'], 3)}-{f(b['time_max'], 3)}] | "
