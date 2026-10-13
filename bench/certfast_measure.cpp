@@ -23,9 +23,10 @@
 //                   from X, and with the found eigenvalue farthest from sigma removed, for every
 //                   delta x block size, policy window (radius r of the complete set)
 // Output: one JSON object per line; medians over the repetitions in the "summary" lines.
-// Run through tools/run/guard.py (2 threads, cores 30,33 in P4):
-//   python3 tools/run/guard.py --skip-busy-check --cores 30,33 --mem-gb 4 --timeout 1800 --
-//     build/release/bench_certfast_measure --case data/cases/<c> --solution <sol>/<c> --threads 2
+// Timed runs take a node's measurement slot (docs/DESIGN.md §6; P4 measured 2 threads on the
+// development server; the judging configuration is 16 threads):
+//   python3 tools/run/guard.py --exclusive --timeout 1800 --
+//     build/release/bench_certfast_measure --case data/cases/<c> --solution <sol>/<c> --threads 16
 //     --reps 3   (one command line)
 #include <omp.h>
 

@@ -17,8 +17,9 @@
 // factorizations, solve call = solve_s / (solves / rhs_per_call), solves = right-hand sides).
 // The analysis model is thread-independent (MUMPS' analysis is sequential) and stays.
 // Prints one JSON line: the logged prediction, the inputs used and the re-evaluated prediction.
-// Run it on a cluster node like every bench (it is O(1) work):
-//   python3 tools/run/guard.py --skip-busy-check --cores 16-19 --mem-gb 1 --timeout 60 --
+// Run it on a cluster node like every bench; it is O(1) work, so the build/test lane (default
+// cores, not the measurement slot) serves:
+//   python3 tools/run/guard.py --skip-busy-check --mem-gb 1 --timeout 60 --
 //     build/release/bench_certint_model --event E.jsonl --cmp results/cmp-p16-best.json --case C
 #include <algorithm>
 #include <cmath>

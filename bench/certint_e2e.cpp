@@ -13,9 +13,11 @@
 // report.json; docs/FORMATS.md §3), the layout tools/eval/sweep.py evaluates (--log DIR: the
 // driver's event log of every run as DIR/<case>-<mode>-rep<r>.jsonl):
 //   python -m tools.eval.sweep OUT --out OUT/eval.md      (under tools/run/guard.py)
-// Run through tools/run/guard.py (P5: gpu02, cores 24-27, 4 threads):
-//   python3 tools/run/guard.py --skip-busy-check --cores 24-27 --mem-gb 14 --timeout 3000 --
-//     build/release/bench_certint_e2e --case data/cases/<c> --out <run> --threads 4 --reps 3
+// Timed runs take a node's measurement slot (docs/DESIGN.md §6: 16 cores, 32 GiB, the judging
+// configuration; --threads defaults to 16), e.g. on gpu02:
+//   python3 tools/run/guard.py --exclusive --timeout 2700 --
+//     build/release/bench_certint_e2e --case data/cases/<c> --out <run> --threads 16 --reps 5
+// (several cases: one slot guard around a loop over them, at most 45 minutes per guard call).
 // The process peak RSS covers all modes (the modes share one process).
 #include <omp.h>
 
@@ -47,7 +49,7 @@ namespace fs = std::filesystem;
 
 struct Args {
   fs::path case_dir, out;
-  int threads = 4;
+  int threads = 16;  // the judging configuration (one measurement slot)
   int reps = 3;
   std::vector<std::string> modes{"exact", "auto", "randomized"};
   index_t drop = 0;
