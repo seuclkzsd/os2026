@@ -152,7 +152,8 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
             "peak_rss_gib": max((r["peak_rss_gib"] for r in runs if r.get("peak_rss_gib") is not None), default=None),
             "factorizations": common("factorizations"), "block_size": common("block_size"),
             "certificate_method": common("certificate_method"), "completeness": common("completeness"),
-            "hosts": sorted({r["host"] for r in runs}), "binaries": sorted({r["binary"] for r in runs}),
+            "hosts": sorted({r["host"] for r in runs}),
+            "binaries": sorted({r["binary"].replace(str(Path.home()), "~", 1) for r in runs}),
             "invalid": sorted({f"r{r['rep']}: rc={r.get('rc')} verdict={r['verdict']}"
                                for r in runs if not r["valid"]})}
 
