@@ -76,7 +76,9 @@ fronts above its L0 layer, and hsolve's own calls) the time is wall time; inside
 it is summed over threads, "in/T" below divides it by the thread count. Profiling cost: none
 measurable (route-off hook and profiled runs within +-3% of plain runs). Default solver
 configuration of each case (adaptive ordering, block size by `block_size_for`: p = 4 for the 3-D
-cases, GHIEP p = 2), one run each; `bench_asmkern_report` gives the per-shape tables.
+cases, GHIEP p = 2 - the P4 width of these binaries; since the P5c integration nearest runs take the
+block-size rule, which picks 8 on some 3-D cases, docs/DESIGN.md §3.5 / §3.6-5), one run each;
+`bench_asmkern_report` gives the per-shape tables.
 
 ### 2.1 Default block size, 4 / 8 / 16 threads (gpu01 slot)
 
