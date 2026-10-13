@@ -11,7 +11,10 @@
 //   * libhsolve_blashook.so, used through LD_PRELOAD (any executable, also python): its symbols
 //     come before the BLAS library in the global lookup scope, so MUMPS' calls land here;
 //   * the hsolve executable when configured with -DHSOLVE_BLAS_HOOK=ON: definitions in the
-//     executable are preferred by the dynamic linker for MUMPS' calls.
+//     executable are preferred by the dynamic linker for MUMPS' calls. CMake's
+//     hsolve_link_blas_hook links it so: --no-as-needed keeps the MUMPS libraries in DT_NEEDED
+//     (the executable's own dmumps_c satisfies libhsolve's references, so --as-needed would drop
+//     them and the wrapper would find no real dmumps_c), a dynamic list exports the entry points.
 // Use one or the other, not both (the calls would pass through the hook twice).
 // The real routines are the next definitions after the object that holds the hook
 // (next_definition: dlsym(RTLD_NEXT, name) - the BLAS library, or another preloaded BLAS such as

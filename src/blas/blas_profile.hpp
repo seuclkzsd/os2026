@@ -65,4 +65,12 @@ void set_info(const std::string& route, const std::string& blas_library);
 /// Writes the merged tables now (also done automatically at exit; later calls rewrite the file).
 void dump() noexcept;
 
+/// Calls of `op` recorded so far in phase `p`, summed over threads and shape classes (0 while
+/// disabled). Reads the other threads' tables without synchronization: call it while no other
+/// thread records (tests, quiescent points).
+std::int64_t recorded_calls(Op op, Phase p) noexcept;
+
+/// MUMPS calls recorded so far in phase `p` (record_mumps).
+std::int64_t recorded_mumps_calls(Phase p) noexcept;
+
 }  // namespace hs::blas::prof

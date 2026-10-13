@@ -135,10 +135,24 @@ add_library(hsolve_blashook SHARED src/blas/hook_symbols.cpp)
 target_include_directories(hsolve_blashook PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_options(hsolve_blashook PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
 target_link_libraries(hsolve_blashook PRIVATE hsolve_blas)
+# Links the hook's entry points into an executable that uses libhsolve. Its own dmumps_c / smumps_c
+# then satisfy libhsolve's references, so a linker running with --as-needed (conda-forge's LDFLAGS)
+# would drop the MUMPS libraries from DT_NEEDED and the wrappers would find no real routine:
+# --no-as-needed (after the toolchain's flags) keeps every library of the link line. The dynamic
+# list exports the executable's entry points, so the shared libraries' calls (MUMPS' BLAS calls)
+# bind to them.
+set(HSOLVE_BLASHOOK_DYNLIST "${CMAKE_CURRENT_BINARY_DIR}/hsolve_blashook.dynlist")
+file(WRITE "${HSOLVE_BLASHOOK_DYNLIST}"
+     "{ dgemm_; dtrsm_; dgemv_; daxpy_; dcopy_; dscal_; dswap_; dnrm2_; idamax_; dmumps_c; smumps_c; };\n")
+function(hsolve_link_blas_hook target)
+  target_sources(${target} PRIVATE "${PROJECT_SOURCE_DIR}/src/blas/hook_symbols.cpp")
+  target_include_directories(${target} PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(${target} PRIVATE hsolve_blas MUMPS::MUMPS)
+  target_link_options(${target} PRIVATE "LINKER:--no-as-needed"
+                                        "LINKER:--dynamic-list=${HSOLVE_BLASHOOK_DYNLIST}")
+endfunction()
 if(HSOLVE_BLAS_HOOK AND HSOLVE_BUILD_APPS)
-  target_sources(hsolve_cli PRIVATE src/blas/hook_symbols.cpp)
-  target_include_directories(hsolve_cli PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
-  target_link_libraries(hsolve_cli PRIVATE hsolve_blas)
+  hsolve_link_blas_hook(hsolve_cli)
 endif()
 foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
   get_filename_component(name "${src}" NAME_WE)
@@ -146,7 +160,15 @@ foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
     target_link_libraries(${name} PRIVATE hsolve_blas)
     target_compile_definitions(${name} PRIVATE HSOLVE_BLASHOOK_SO="$<TARGET_FILE:hsolve_blashook>")
     add_dependencies(${name} hsolve_blashook)
-    if(name STREQUAL "test_asmkern_fix")
+    if(name STREQUAL "test_asmkern_fix_exehook")
+      # The in-executable hook exactly as hsolve gets it; with HSOLVE_BLAS_HOOK=ON also a run of
+      # that hsolve executable.
+      hsolve_link_blas_hook(${name})
+      if(HSOLVE_BLAS_HOOK AND HSOLVE_BUILD_APPS)
+        target_compile_definitions(${name} PRIVATE HSOLVE_HOOKED_CLI="$<TARGET_FILE:hsolve_cli>")
+        add_dependencies(${name} hsolve_cli)
+      endif()
+    elseif(name STREQUAL "test_asmkern_fix")
       # The parallel routes under a runtime that grants fewer threads than they ask for.
       add_test(NAME test_asmkern_fix.ShortTeamUnderThreadLimit2
                COMMAND ${name} --gtest_filter=AsmkernFixShortTeam.*)

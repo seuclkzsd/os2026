@@ -1,6 +1,8 @@
 // BLAS hook: the Fortran BLAS entry points and MUMPS entry-point wrappers (blas_hook.hpp).
 // Only in libhsolve_blashook.so (LD_PRELOAD) and, with -DHSOLVE_BLAS_HOOK=ON, in the hsolve
-// executable - never in libhsolve or a test executable (it would capture their BLAS calls).
+// executable (CMake hsolve_link_blas_hook, which keeps MUMPS loaded and exports the entry
+// points) - never in libhsolve or a test executable (it would capture their BLAS calls), except
+// test_asmkern_fix_exehook, which tests that linkage.
 //
 // dgemm_ / dtrsm_ / dgemv_ go through the router with the process configuration
 // (HS_BLAS_ROUTE); the level-1 routines MUMPS uses are forwarded unchanged and only timed.

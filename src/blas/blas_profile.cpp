@@ -276,6 +276,30 @@ void set_info(const std::string& route, const std::string& blas_library) {
   pthread_mutex_unlock(&g_registry_mutex);
 }
 
+std::int64_t recorded_calls(Op op, Phase p) noexcept {
+  std::int64_t n = 0;
+  pthread_mutex_lock(&g_registry_mutex);
+  if (g_tables != nullptr)
+    for (const Table* t : *g_tables)
+      for (const auto& [key, s] : t->calls) {
+        // make_key: the op above 25 bits of flags and size classes, the phase above the
+        // in-parallel bit and the 3 route bits.
+        const auto key_op = static_cast<unsigned>(key >> 29) & 0xFu;
+        const auto key_phase = static_cast<unsigned>(key >> 4) & 7u;
+        if (key_op == static_cast<unsigned>(op) && key_phase == static_cast<unsigned>(p))
+          n += s.calls;
+      }
+  pthread_mutex_unlock(&g_registry_mutex);
+  return n;
+}
+
+std::int64_t recorded_mumps_calls(Phase p) noexcept {
+  pthread_mutex_lock(&g_registry_mutex);
+  const std::int64_t n = g_mumps[static_cast<int>(p)].calls;
+  pthread_mutex_unlock(&g_registry_mutex);
+  return n;
+}
+
 void dump() noexcept {
   const char* pattern = profile_path();
   if (pattern == nullptr) return;
