@@ -294,8 +294,10 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   返回列可能 ‖r‖ > rel_tol·‖BX‖，调用方须读 `last_relative_residual()` / `last_backward_error()`。
   **单精度或 BLR 分解必须配合修正**（否则特征对只是扰动矩阵的特征对，后向误差停在 1e-7 / blr_tol）。
   单精度仅当 σ 与所有特征值的相对距离 ≳ 1e-6‖K‖ 时可用（修正收敛需 eps_s·cond(K) < 1），否则修正
-  停滞或发散（实测 syn-mem27-46、σ = 0：10 步后 ‖r‖/‖Bx‖ ≈ 5e-6）。**driver 目前不检查**
-  `last_relative_residual()`，也不会自动换精度（§3.6-3、§3.6-5）。修正工作区 2·n·p 标量。
+  停滞或发散（实测 syn-mem27-46、σ = 0：10 步后 ‖r‖/‖Bx‖ ≈ 5e-6）。`last_apply_converged()`（P7）
+  报告上一次 apply 的每列是否以「达到 rel_tol 或舍入水平」结束（false：某列因修正被拒或步数用尽而
+  停下，返回的是扰动矩阵的算子）。driver 用 `DriverShiftInvert` 包装它：非精确因子的每次 apply 都
+  检查，未收敛即放弃该次尝试、改用双精度因子重解（§3.6-3「非精确因子」）。修正工作区 2·n·p 标量。
 - `FactorSolveOperator(factor)`（P4）：y = K⁻¹x，一次 p 列回代（任意精度的因子，不乘 B、不修正），
   如 LOBPCG / JD 的预条件子；构造检查与重分解防护同 ShiftInvertOperator。测试与 bench 中的局部副本
   （`test_jacobi_davidson.cpp`、`bench/lobpcg_jd_memory.cpp`）尚未换成它。
@@ -464,15 +466,40 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
      调用。
    - smallest / largest 的惯性搜索以谱两端的 Ritz 估计为种子：30 步 Lanczos（A；有 B 时为 B 内积下
      的 B⁻¹A，B 的分解复用主分析，对角 B 直接求逆）。
-3. **内存预算**（显式公式）：分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·(ncv_g +
+3. **内存预算**（P7：默认由机器决定）：`memory_budget_gb` 默认 `"auto"`（= 0，`kMemoryBudgetAuto`），
+   取进程最小内存上限 L 的一部分：budget = max(0.5, min(0.85·L, L − 1)) GiB（`kAutoBudgetFraction`、
+   `kAutoBudgetHeadroomGb`、`kAutoBudgetFloorGb`；`resolve_memory_budget`）。L 来自
+   `detect_memory_limits`（util.hpp）：内存 cgroup（v2 `memory.max`、v1 `memory.limit_in_bytes` 与
+   `memory.stat` 的 `hierarchical_memory_limit`，沿 /proc/self/cgroup 的路径取最小；容器内路径不存在
+   时读挂载点根）、调用方声明的 `HSOLVE_MEMORY_LIMIT_GB`（GiB；`tools/run/guard.py` 把它设为本次运行
+   的 RSS 上限：测量槽 32、构建道 12）、有限的 RLIMIT_AS / RLIMIT_DATA、MemTotal（不用 MemAvailable：
+   决策不随别的进程此刻占了多少而变）；都读不到时 14 GiB（P7 前的固定默认）。显式数值（config / CLI /
+   Python）仍优先；超过 L 时告警。报告 `memory{budget_gb, source, limit_gb, limit_source, limits[]}`
+   与事件 `memory_budget` 记录预算、来源与每个来源的值。系数的标定（峰值 RSS 对预算，最大测例）见
+   `results/p7_membudget.md`：计划内的量（规划时的 RSS、Krylov 预留、ICNTL(23) 上限下 MUMPS 的估计）
+   都在预算内，L 的其余部分容纳计划外的量（线程栈与 BLAS 缓冲、回代工作区、碎片）。
+   P7 前固定 14 GB：1e6 的三维测例（syn-mem27-100，因子 15.9 GB）在 32 GB 机器上也走外存，274.6 s，
+   而内存内 125.1 s。
+   分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·(ncv_g +
    6k_g))/1e6，k_g = k（interval：min(n, 64)），ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），
    `lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，p_g = min(block_size > 0 ? block_size : 4, 4)——即只为
    自动块宽预留块基，更宽的显式 block_size 不预留（分解优先，运行时再按剩余内存减半，见下）；
    cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap 作为 ICNTL(23)
    传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
-   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。BLR 与单精度只由配置开启
-   （`blr = on`、`factor_precision = single`），driver **不**自动降级（P0 设计的「BLR → 单精度」降级链
-   未实现）。
+   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。`out_of_core = auto` 时内存内
+   分解若仍因内存失败（INFO −13/−19，或 cap 下工作区重试长不够——估计偏低，如延迟主元），改用外存
+   重做并保持（`FactorOptions::ooc_on_memory_error`，`factor_stats.ooc_switches`）。外存运行仍需
+   外存工作内存与证书的只计惯性计数（InertiaCounter 总在内存内，工作内存与外存估计相当：
+   syn-mem27-100 7.2 GB 对 7.3 GB）都 ≤ cap。
+   **非精确因子**（P7）：`factor_precision = single`（或 `blr = on`）的因子每次算子 apply 都经双精度
+   修正，且受检查——修正未收敛（`DriverShiftInvert`）、非精确因子在某位移被判奇异（`factorize_near`
+   不对它做扰动或关检测），或结果不被接受（有对超 tol、证书失败）时，`driver::InexactFactorFailure`
+   放弃这次尝试，从诊断之后以双精度、同一主元顺序（`set_pivot_order`，免第二次排序）重解；报告
+   `precision{requested, used, blr, decision, fallback, fallback_reason, attempt_s}`，放弃的尝试时间
+   计入各阶段。单精度因此只用于省内存（因子 0.51–0.67 倍），从不返回错误结果；它本身更慢（P6：端到端
+   0.35–0.59 倍）。`factor_precision = auto`：分析（双精度）后若双精度内存内估计 > cap 而
+   `out_of_core ≠ on`，以同一主元顺序分析单精度对象，其内存内估计 ≤ cap 才改用单精度
+   （`choose_precision`），否则双精度外存。默认仍为 double；auto 的实测取舍见 `results/p7_membudget.md`。
    窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前 RSS)，
    否则 OutOfMemoryBudget；一片的工作集约 7·c·n·sizeof(T)（基 ~2c，Rayleigh–Ritz 的 X/AX/BX 与乘积
    临时量 4c，选中块 c）限制片大小 c；**无固定特征值个数上限**（P2 的 max(2000, n/2) 已废）。
@@ -516,7 +543,7 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    与重根重跑）被扰动时不告警、不计 shift_retries。
 5. **迭代求解**：内层容差 = tol × inner_tol_factor；θ → λ = σ + 1/θ。nearest 恰好收敛 k 对
    （nev = k；完备性由证书负责，不靠多算余量）。主分解为单精度 / BLR 时算子带双精度迭代修正
-   （≤ 10 步，rel_tol = 0.1·tol·inner_tol_factor；driver 不检查修正是否收敛，§3.4b）。
+   （≤ 10 步，rel_tol = 0.1·tol·inner_tol_factor；每次 apply 检查收敛，未收敛即改用双精度重解，§3.4b、§3.6-3）。
    **块 Krylov**（P4，`SolverConfig::block_size`，0 = 自动，1 = 单向量；报告 `block_size`）：
    - HEP/GHEP（`block_size_for`）：配置 > 0 时用配置值；自动时 nev ≥ 8 的运行 p = 4，否则 1。只取决于
      配置与 nev（不做计时探测：选择、从而特征向量都不随机器负载变化）。适用于定性路径的每次位移反演
@@ -732,7 +759,9 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：
 - 默认绑定 NUMA node1 的 16 个物理核 `24-30,33-41`，进程树 RSS 上限 30 GiB；系统可用内存低于
-  12 GiB 时只终止「大」进程树（≥ max(2 GiB, mem_gb/4)），小的构建/测试不受连带。
+  12 GiB 时只终止「大」进程树（≥ max(2 GiB, mem_gb/4)），小的构建/测试不受连带。RSS 上限（与外层
+  guard 或调用方已声明的较小值取小）作为 `HSOLVE_MEMORY_LIMIT_GB` 导出给子进程，hsolve 的自动内存
+  预算由它推出（§3.6-3）。
 - 峰值内存报告取采样和、内核高水位 VmHWM 之和、ru_maxrss 三者最大值（不漏短时尖峰）。
 - 重型实验加 `--exclusive`（全机串行）；单元测试用 `--skip-busy-check`。计时运行不要加
   `--skip-busy-check`：槽内的核若被别的进程占用，guard 会拒绝启动。
