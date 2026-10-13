@@ -490,6 +490,10 @@ TEST(DriverAutoPrecision, AnAbandonedAutoChoiceKeepsItsDecision) {
   const Estimates e = estimates(pencil, sigma);
   auto cfg = nearest(sigma, static_cast<index_t>(k), hs::FactorPrecision::Auto);
   cfg.ordering = 0;
+  // This budget leaves the certificate's counts no room within their allowance (P8: a counter
+  // ~71 MB and the out-of-core main object's ~62 MB working memory against ~43 MB), so the
+  // certificate would honestly end "not completed"; it is not what this test covers.
+  cfg.certificate = hs::CertificateMode::Off;
   // near the double estimate: the double run that follows must fit out of core (its analysis on
   // the single attempt's pivot order estimates more than a fresh one)
   const double cap_mb = e.sgl.incore_mb + 0.85 * (e.dbl.incore_mb - e.sgl.incore_mb);

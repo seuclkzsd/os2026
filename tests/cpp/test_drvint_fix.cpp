@@ -175,6 +175,7 @@ TEST(DriverCounter, CountsReleaseTheMainFactorsWheneverBothExceedTheCap) {
   fac->analyze(pencil, 1.0, -sigma);
 
   hs::SolverConfig cfg;
+  cfg.memory_budget_gb = 14.0;  // a resolved budget, as hs::solve hands the driver (the default "auto" is 0)
   hs::SolveReport rep;
   hs::driver::PhaseClock clock;
   hs::driver::Ctx c{cfg, nullptr, rep, clock};
