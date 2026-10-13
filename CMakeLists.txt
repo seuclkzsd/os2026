@@ -44,6 +44,8 @@ endif()
 
 # ---- library: every src/**/*.cpp belongs to libhsolve (module = directory) ----
 file(GLOB_RECURSE HSOLVE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+# src/blas is the optional BLAS hook (block at the end of this file), not part of libhsolve.
+list(FILTER HSOLVE_SOURCES EXCLUDE REGEX "/src/blas/")
 add_library(hsolve ${HSOLVE_SOURCES})
 target_include_directories(hsolve
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -113,3 +115,70 @@ if(HSOLVE_BUILD_TESTS)
       PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1")
   endforeach()
 endif()
+
+# ---- BLAS hook (src/blas, docs/BLAS.md): profiler and shape routing of the dense BLAS under MUMPS ----
+# Always built (small): hsolve_blas (router, kernels, profiler; compiled without -march=native, the
+# AVX-512 kernels are selected at run time) and libhsolve_blashook.so for LD_PRELOAD. The option
+# links the hook into the hsolve executable instead; HS_BLAS_ROUTE then configures it at run time.
+# Default: linked, route "all" - 1.05-1.16x end to end on the six head-to-head configurations at
+# 16 threads, equal accuracy (docs/BLAS.md sections 5-6); HS_BLAS_ROUTE=off turns the routes off at
+# run time. The defaults apply to new build directories (cached values persist).
+option(HSOLVE_BLAS_HOOK "Link the BLAS hook (src/blas) into the hsolve executable" ON)
+set(HSOLVE_BLAS_ROUTE_DEFAULT "all" CACHE STRING "BLAS hook routes when HS_BLAS_ROUTE is unset (\"\" = off)")
+add_library(hsolve_blas STATIC src/blas/route.cpp src/blas/narrow_kernels.cpp src/blas/blas_profile.cpp)
+target_include_directories(hsolve_blas PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+# -ffp-contract=off: the narrow kernels promise the same NN result for every row split (simd_kernels.hpp);
+# GCC contracts C++ by default (-ffp-contract=fast), which would fuse the register path's
+# alpha * t + beta * c into an FMA while the chunked path (baseline ISA) rounds both products.
+target_compile_options(hsolve_blas PRIVATE -Wall -Wextra -Wno-unused-parameter -ffp-contract=off
+                                           $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
+target_compile_definitions(hsolve_blas PRIVATE HSOLVE_BLAS_ROUTE_DEFAULT="${HSOLVE_BLAS_ROUTE_DEFAULT}")
+target_link_libraries(hsolve_blas PUBLIC OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
+add_library(hsolve_blashook SHARED src/blas/hook_symbols.cpp)
+target_include_directories(hsolve_blashook PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_options(hsolve_blashook PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
+target_link_libraries(hsolve_blashook PRIVATE hsolve_blas)
+# Links the hook's entry points into an executable that uses libhsolve. Its own dmumps_c / smumps_c
+# then satisfy libhsolve's references, so a linker running with --as-needed (conda-forge's LDFLAGS)
+# would drop the MUMPS libraries from DT_NEEDED and the wrappers would find no real routine:
+# --no-as-needed (after the toolchain's flags) keeps every library of the link line. The dynamic
+# list exports the executable's entry points, so the shared libraries' calls (MUMPS' BLAS calls)
+# bind to them.
+set(HSOLVE_BLASHOOK_DYNLIST "${CMAKE_CURRENT_BINARY_DIR}/hsolve_blashook.dynlist")
+file(WRITE "${HSOLVE_BLASHOOK_DYNLIST}"
+     "{ dgemm_; dtrsm_; dgemv_; daxpy_; dcopy_; dscal_; dswap_; dnrm2_; idamax_; dmumps_c; smumps_c; };\n")
+function(hsolve_link_blas_hook target)
+  target_sources(${target} PRIVATE "${PROJECT_SOURCE_DIR}/src/blas/hook_symbols.cpp")
+  target_include_directories(${target} PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(${target} PRIVATE hsolve_blas MUMPS::MUMPS)
+  target_link_options(${target} PRIVATE "LINKER:--no-as-needed"
+                                        "LINKER:--dynamic-list=${HSOLVE_BLASHOOK_DYNLIST}")
+endfunction()
+if(HSOLVE_BLAS_HOOK AND HSOLVE_BUILD_APPS)
+  hsolve_link_blas_hook(hsolve_cli)
+endif()
+foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
+  get_filename_component(name "${src}" NAME_WE)
+  if(name MATCHES "^test_asmkern" AND TARGET ${name})
+    target_link_libraries(${name} PRIVATE hsolve_blas)
+    target_compile_definitions(${name} PRIVATE HSOLVE_BLASHOOK_SO="$<TARGET_FILE:hsolve_blashook>")
+    add_dependencies(${name} hsolve_blashook)
+    if(name STREQUAL "test_asmkern_fix_exehook")
+      # The in-executable hook exactly as hsolve gets it; with HSOLVE_BLAS_HOOK=ON also a run of
+      # that hsolve executable.
+      hsolve_link_blas_hook(${name})
+      if(HSOLVE_BLAS_HOOK AND HSOLVE_BUILD_APPS)
+        target_compile_definitions(${name} PRIVATE HSOLVE_HOOKED_CLI="$<TARGET_FILE:hsolve_cli>")
+        add_dependencies(${name} hsolve_cli)
+      endif()
+    elseif(name STREQUAL "test_asmkern_fix")
+      # The parallel routes under a runtime that grants fewer threads than they ask for.
+      add_test(NAME test_asmkern_fix.ShortTeamUnderThreadLimit2
+               COMMAND ${name} --gtest_filter=AsmkernFixShortTeam.*)
+      set_tests_properties(test_asmkern_fix.ShortTeamUnderThreadLimit2 PROPERTIES
+                           ENVIRONMENT "OMP_THREAD_LIMIT=2;OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1")
+    endif()
+  elseif(name MATCHES "^asmkern_" AND TARGET bench_${name})
+    target_link_libraries(bench_${name} PRIVATE hsolve_blas)
+  endif()
+endforeach()

@@ -57,6 +57,8 @@ SingleCountValidity single_count_validity(const ShiftedPencil<T>& pencil, const 
     HS_THROW(InvalidInput, "single_count_validity: found_error must be empty or match found");
   if (!(rule.backward_factor > 0.0) || !std::isfinite(rule.backward_factor))
     HS_THROW(InvalidInput, "single_count_validity: backward_factor must be positive and finite");
+  if (!std::isfinite(rule.a_norm_1))
+    HS_THROW(InvalidInput, "single_count_validity: a_norm_1 must be finite (< 0: computed)");
 
   SingleCountValidity v;
   double bmin = 1.0, bmax = 1.0;
@@ -72,7 +74,7 @@ SingleCountValidity single_count_validity(const ShiftedPencil<T>& pencil, const 
   }
   v.applicable = true;
   v.b_min = bmin;
-  const double norm_a = norm_one(pencil.a());
+  const double norm_a = rule.a_norm_1 >= 0.0 ? rule.a_norm_1 : norm_one(pencil.a());
   const double emb = is_complex_v<T> ? std::sqrt(2.0) : 1.0;
   auto eta = [&](double s) {
     return rule.backward_factor * kUnitSingle * emb * (norm_a + std::abs(s) * bmax) / bmin;

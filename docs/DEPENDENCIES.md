@@ -1,7 +1,8 @@
 # 依赖清单与许可证
 
 赛题要求「说明开源依赖、授权和调用方式」，且不得以不可验证的闭源服务为核心能力。
-新增依赖必须在此登记（名称、版本、许可证、用途、调用方式）。
+新增依赖必须在此登记（名称、版本、许可证、用途、调用方式）。各组件的版权声明与许可证要求复制的文本
+集中在根目录的 `THIRD_PARTY_NOTICES`（分发 hsolve 的二进制时随附）。
 
 ## 求解器（环境 `os2026`，`env/environment.yml`）
 
@@ -10,7 +11,7 @@
 | MUMPS | 5.8.2（conda-forge mumps-seq，OpenMP） | CeCILL-C | 稀疏 LDLᵀ / LU 分解、惯性、多右端回代；单/双精度 | C 接口 `dmumps_c/zmumps_c/smumps_c/cmumps_c`，`src/factor/` |
 | METIS | 5.1.0 | Apache-2.0 | MUMPS 的填充约简排序 | 经 MUMPS（ICNTL(7)）；不直接链接 |
 | SCOTCH | 7.0 | CeCILL-C | MUMPS 备选排序 | 经 MUMPS；不直接链接 |
-| OpenBLAS | 0.3.34（OpenMP 版） | BSD-3-Clause | BLAS / LAPACK | Fortran 符号，`src/linalg/blas_lapack.hpp` |
+| OpenBLAS | 0.3.34（OpenMP 版） | BSD-3-Clause | BLAS / LAPACK；BLAS hook 的窄核改编自其 SkylakeX 核（见下） | Fortran 符号，`src/linalg/blas_lapack.hpp`；MUMPS 的 BLAS 调用经 `src/blas` 的 hook（默认链入 hsolve） |
 | zlib | 1.3 | zlib | 解压 `.npz` | `src/io/` |
 | nlohmann/json | 3.12 | MIT | 报告与日志 JSON | 头文件库 |
 | CLI11 | 2.7 | BSD-3-Clause | 命令行解析 | 头文件库，`apps/` |
@@ -24,6 +25,22 @@ P4 未增加求解器依赖：
   libdmumps 的间接依赖，hsolve 不直接链接也不调用它们（`docs/DESIGN.md` §3.4）。
 - AVX-512 稀疏核用编译器内建函数（`target` 属性）与 `__builtin_cpu_supports` 运行时检测，无额外库；
   无 AVX-512 的 CPU 上自动走可移植内核（`docs/DESIGN.md` §3.2）。
+
+P5 未增加求解器依赖：
+- **BLAS hook**（`src/blas`，`docs/BLAS.md`、`docs/DESIGN.md` §3.8）：拦截 MUMPS 与 hsolve 的
+  `dgemm_` / `dtrsm_` / `dgemv_`，按形状改道或原样转发给环境的 OpenBLAS；只用 OpenMP 与 libdl
+  （`dlsym(RTLD_NEXT)` 找真实例程），AVX-512 / AVX2 核用编译器内建函数并由 CPUID 在运行时选择。窄核的结构
+  **改编自 OpenBLAS 0.3.34**（`kernel/x86_64/dgemv_n_microk_skylakex-4.c`，Copyright (c) 2014 The OpenBLAS
+  Project；`kernel/x86_64/dgemm_small_kernel_{nn,tn}_skylakex.c`，Copyright (c) 2021 The OpenBLAS Project），
+  BSD-3-Clause：源码分发所需的声明在 `src/blas/simd_kernels.hpp`（`narrow_kernels.cpp` 指向它），二进制分发
+  所需的声明在 `THIRD_PARTY_NOTICES` 与 `docs/BLAS.md` §7。小三角求解核按参考 BLAS 的循环顺序自写。
+  链入方式：CMake 选项 `HSOLVE_BLAS_HOOK`（默认 ON，链入 `hsolve` 可执行文件）或 `libhsolve_blashook.so`
+  （LD_PRELOAD）；libhsolve 与 Python 扩展模块不带。
+- 自适应排序把 hsolve 自研的嵌套剖分列为候选、config 可用 `ordering = 10`（`docs/DESIGN.md` §3.6-3b）：仍是
+  自己的代码，METIS / SCOTCH / PORD 仍只经 MUMPS 调用。
+- 只用于实验、不随 hsolve 使用或分发：`tools/deps/build_openblas.sh`、`build_blis.sh`、`build_libxsmm.sh`
+  从固定版本的源码包（sha256 校验；脚本头注明下载地址）在集群节点上编译 OpenBLAS 0.3.34、BLIS 2.1、
+  LIBXSMM 1.17（均为 BSD-3-Clause），作为 LD_PRELOAD 替换件评估 BLAS（结论：都不采用，`docs/BLAS.md` §3、§6）。
 
 不使用：Intel MKL / PARDISO、HSL（MA57/MA97）、Panua-Pardiso 等非开源组件。
 CUDA（若引入）为 NVIDIA 闭源但免费，赛题明确允许；仅作可选加速，不作为核心能力。
@@ -44,7 +61,7 @@ CUDA（若引入）为 NVIDIA 闭源但免费，赛题明确允许；仅作可�
   PETSc/SLEPc 环境才能补全）。
 - `tools/bench/slepc_profiles.json` 存放调优配置（`results/baseline_tuning.md`，目前只有 2 核）。
 
-## 集群节点部署（gpu01 / gpu02 / c001）
+## 集群节点部署（gpu01 / gpu02 / c001–c005）
 
 节点为 CentOS 7（glibc 2.17）、无外网。`tools/dev/deploy_cluster.sh HOST` 由开发服务器的 conda 包缓存
 离线重建两个环境：

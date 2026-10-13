@@ -21,6 +21,20 @@ PYTHONPATH=build/release/python python -c "import hsolve; print(hsolve.version()
 - 依赖：numpy；scipy 仅在传入 scipy 稀疏矩阵或调用 `load_matrix` 时需要。
 - 测试：`python -m pytest tests/py/test_python_binding.py`（`tools/dev/test.sh release` 也会运行）；
   默认从 `build/release/python` 导入，`HSOLVE_PYTHON_DIR=<dir>` 指定其它构建；未构建时整个文件跳过。
+- **BLAS hook**（P5，`docs/BLAS.md`、`docs/DESIGN.md` §3.8）：命令行 `hsolve` 默认链入了 hook（route all，
+  16 线程端到端 1.05–1.16×，收益在回代），Python 扩展模块没有。要在 Python 中得到同样的路由，在解释器前
+  预加载同一构建的 `libhsolve_blashook.so`（da4be7d 起可用）：
+
+  ```bash
+  LD_PRELOAD=$PWD/build/release/libhsolve_blashook.so HS_BLAS_ROUTE=all \
+    PYTHONPATH=build/release/python python3 -c "import hsolve; r = hsolve.solve('A.npz', config='config.json'); print(r.report['success'])"
+  ```
+
+  扩展模块、MUMPS 与 OpenBLAS 在 Python 下由 `dlopen(RTLD_LOCAL)` 打开；预加载的 hook 仍排在它们的符号
+  查找之前，并自己在这些已加载的库里找到真实的 BLAS 例程。同一进程中 numpy / scipy 的 BLAS 调用也经过
+  hook（转发，或像 MUMPS 的调用一样改道；路由对任何调用方都正确）。`HS_BLAS_ROUTE` 不设时取构建默认值
+  （`HSOLVE_BLAS_ROUTE_DEFAULT`，默认 all），`HS_BLAS_ROUTE=off` 为纯转发。只验证了正确性，Python 下的
+  加速未单独计时。
 
 ## 2. 快速上手
 
@@ -137,15 +151,10 @@ dtype 转换在这次写入中完成；稀疏输入从不稠密化。
   csc 在内部是 Aᴴ，三角输入先要镜像，但报错不会出现转置后的形状或内部函数名。
 - 规范化与 `hs::load_matrix` 相同：重复项求和、求和后的精确零丢弃、inf/nan 报 `InvalidInputError`
   （有限的重复项求和溢出成 inf 也一样，load_matrix 同样在求和之后检查）；三角存储按 `storage` 恢复；
-  之后由 `hs::solve` 做厄密检查（缺陷 ≤ `hermitian_tol` 时取厄密部分）。
-- 已知差异（待 driver 修复）：内存输入的厄密检查是 `hs::solve` 的 `hermitian_input`，它用
-  未缩放的平方和计算 ‖M−Mᴴ‖_F/‖M‖_F，并以「缺陷 > 0」决定是否取厄密部分；`hs::load_matrix` 用缩放
-  平方和（任意量级都准确）并按逐元素精确比较决定。只有元素模超出约 1e±154 时二者结果才不同：例如
-  非厄密矩阵乘以 1e155，内存输入的缺陷算成 NaN 而通过检查、随后在 LAPACK 中以 `InternalError` 失败
-  （路径输入报 `NotHermitianError`）；近厄密矩阵乘以 1e-150，内存输入的缺陷算成 0 而不取厄密部分。
-  这样的量级下求解本身也不可靠（2026-10-11 实测：精确厄密的 40 阶矩阵乘以 1e155 时内存与路径输入都以
-  `InternalError: dsyev failed` 失败，乘以 1e-160 时都报 Lanczos 基向量非有限；1e±150 都正常），实际
-  影响小。修复属于 driver（改用缩放缺陷与精确比较），届时内存输入自动一致，本模块无需改动。
+  之后由 `hs::solve` 做厄密检查：P5 起与 `hs::load_matrix` 同一规则——缺陷 ‖M−Mᴴ‖_F/‖M‖_F 用缩放平方和
+  计算（任意量级都准确），超 `hermitian_tol` 报 `NotHermitianError`，按逐元素精确比较不是精确厄密时取
+  厄密部分；全零矩阵与非有限值报 `InvalidInputError`（`docs/DESIGN.md` §3.6-1）。P4 时内存输入用未缩放
+  的平方和，元素模超出约 1e±154 时与路径输入结果不同，这一差异已消除。
 - 内存：调用期间 scipy 持有的输入与求解器的 CsrMatrix 并存（≈ 输入大小 + 1 份 CSR）；转换后的
   矩阵在结果返回 Python 前释放。
 
@@ -168,7 +177,7 @@ dtype 转换在这次写入中完成；稀疏输入从不稠密化。
 
 - 配置：同一 schema、同一校验器（`hs::parse_config`）；`result.config` 可直接存为 `config.json`。
 - 路径输入走与 CLI 相同的 `hs::load_matrix`（`hermitian_tol` 取自配置）；内存输入按同样的规则
-  规范化（例外：元素模超出约 1e±154 时的厄密检查，见 §4）。测试（`tests/py/test_python_binding.py`）
+  规范化，厄密检查也相同（§4）。测试（`tests/py/test_python_binding.py`）
   中 22 种实矩阵输入（csr/csc/coo 的 matrix 与 array 版本、int64 索引、乱序 + 重复项、显式零、
   bsr/lil、稠密 C/F 序与步长视图、三角存储……）与 9 种复矩阵输入在 `deterministic=true` 下得到
   **逐位相同**的特征值与特征向量。
@@ -233,5 +242,6 @@ dtype 转换在这次写入中完成；稀疏输入从不稠密化。
 ## 9. 限制
 
 - 需要显式矩阵（要分解），不接受 `LinearOperator`。
-- 目标模式的支持范围随 driver：B 不定时只支持 nearest；smallest / largest 目前只支持标准问题。
+- 目标模式的支持范围随 driver：B 不定时只支持 nearest；interval / smallest / largest 要求 B 正定或 B = I。
+- 完备性检验的方法（`certificate`）只能经 `config` 设定（无对应关键字参数），见 `docs/FORMATS.md` §2。
 - 不同线程中的求解串行执行（见 §6）。

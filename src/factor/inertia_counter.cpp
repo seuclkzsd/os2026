@@ -20,7 +20,7 @@ struct InertiaCounter<T>::Impl {
   const ShiftedPencil<T>* pencil = nullptr;
   FactorOptions options;          ///< resolved: fixed thread count, in-core, no BLR
   std::vector<int> pivot_order;   ///< the source's SYM_PERM (empty: options.ordering)
-  std::unique_ptr<mumps::MumpsFactorization<T, double>> dbl;
+  std::unique_ptr<mumps::MumpsFactorization<T, double>> dbl;  ///< deferred: at its first use
   std::unique_ptr<mumps::MumpsFactorization<T, float>> sgl;  ///< created at the first single count
   InertiaCounterStats stats;
 
@@ -46,14 +46,23 @@ struct InertiaCounter<T>::Impl {
     ++stats.counts;
     stats.count_s += f.stats().factorize_s - before;
     stats.max_mb_used = std::max(stats.max_mb_used, f.stats().factor_mb_used);
-    stats.workspace_retries = dbl->stats().workspace_retries + (sgl ? sgl->stats().workspace_retries : 0);
+    stats.workspace_retries = (dbl ? dbl->stats().workspace_retries : 0) +
+                              (sgl ? sgl->stats().workspace_retries : 0);
     return f.inertia();
+  }
+
+  // The double-precision instance, analysed at the first call. Representative values: with a
+  // given pivot order MUMPS needs them for nothing that changes the counts (no compressed 2x2
+  // ordering; scaling ICNTL(8)=7 is recomputed per factorization).
+  mumps::MumpsFactorization<T, double>& double_instance() {
+    if (!dbl) dbl = make_instance<double>(1.0, 0.0);
+    return *dbl;
   }
 };
 
 template <class T>
 InertiaCounter<T>::InertiaCounter(const SparseFactorization<T>& analysed_source,
-                                  const FactorOptions& options)
+                                  const FactorOptions& options, bool defer_double_analysis)
     : impl_(std::make_unique<Impl>()) {
   Impl& m = *impl_;
   if (const auto* d = dynamic_cast<const mumps::MumpsFactorization<T, double>*>(&analysed_source)) {
@@ -76,9 +85,7 @@ InertiaCounter<T>::InertiaCounter(const SparseFactorization<T>& analysed_source,
   // L0-OpenMP factorizations must use the thread count of their analysis (INFO -58 otherwise).
   if (m.options.threads == 0) m.options.threads = max_threads();
   m.stats.reused_pivot_order = !m.pivot_order.empty();
-  // Representative values: with a given pivot order MUMPS needs them for nothing that changes
-  // the counts (no compressed 2x2 ordering; scaling ICNTL(8)=7 is recomputed per factorization).
-  m.dbl = m.template make_instance<double>(1.0, 0.0);
+  if (!defer_double_analysis) m.double_instance();
 }
 
 template <class T>
@@ -96,7 +103,7 @@ Inertia InertiaCounter<T>::count(double alpha, double beta, bool null_pivot_dete
     ++m.stats.single_counts;
     return in;
   }
-  return m.count_with(*m.dbl, alpha, beta, null_pivot_detection);
+  return m.count_with(m.double_instance(), alpha, beta, null_pivot_detection);
 }
 
 template <class T>
@@ -110,7 +117,12 @@ std::pair<Inertia, Inertia> InertiaCounter<T>::count_pair(double alpha1, double 
 
 template <class T>
 FactorEstimate InertiaCounter<T>::estimate() const {
-  return impl_->dbl->estimate();
+  return impl_->double_instance().estimate();
+}
+
+template <class T>
+bool InertiaCounter<T>::double_analysed() const {
+  return impl_->dbl != nullptr;
 }
 
 template <class T>

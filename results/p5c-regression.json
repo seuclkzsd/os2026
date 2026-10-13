@@ -1,0 +1,2661 @@
+{
+ "base": "main",
+ "new": "new",
+ "threshold": 0.03,
+ "geomean_ratio": 0.7855566626100071,
+ "cases": 42,
+ "comparable": 41,
+ "slower": [
+  "ss-tem152078"
+ ],
+ "faster": [
+  "cav2d-rect-pert-1e5",
+  "cav2d-square-1e4",
+  "ss-2cubes_sphere",
+  "ss-ge87h76",
+  "ss-helm3d01",
+  "ss-qa8fk-qa8fm",
+  "ss-tem27623",
+  "syn-ghep-multiplicity-real-1e4",
+  "syn-ghep-near-singular-real-1e5",
+  "syn-ghep-zero-cluster-complex-1e4",
+  "syn-lap2d-100",
+  "syn-lap3d-22",
+  "syn-lap3d-aniso-1e5",
+  "syn-mem125-46",
+  "syn-mem27-46",
+  "syn-multiplicity-complex-1e4",
+  "syn-multiplicity-real-1e4",
+  "syn-near-singular-complex-1e4",
+  "syn-near-singular-complex-1e5",
+  "syn-near-singular-real-1e4",
+  "syn-wide-range-complex-1e4",
+  "syn-wide-range-real-1e4",
+  "syn-zero-cluster-complex-1e4",
+  "syn-zero-cluster-real-1e4",
+  "syn-zero-cluster-real-1e5",
+  "wg-halfslab-1e4",
+  "wg-halfslab-1e5",
+  "wg-square-1e3",
+  "wg-square-1e5",
+  "wg-square-1e6",
+  "wg-square-n289",
+  "wg-square-pert-1e4",
+  "yee-bloch-1e4",
+  "yee-pec-box-1e4",
+  "yee-pec-box-1e5",
+  "yee-pec-cube-16",
+  "yee-pec-cube-32",
+  "yee-photonic-rods-1e4",
+  "yee-photonic-spheres-1e4"
+ ],
+ "rows": [
+  {
+   "case": "cav2d-rect-pert-1e5",
+   "n": 99459,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.34378271499999996,
+    "time_min": 0.341286404,
+    "time_max": 0.515133679,
+    "times": [
+     0.515133679,
+     0.341286404,
+     0.34378271499999996
+    ],
+    "wall_s": 0.434,
+    "peak_rss_gib": 0.25,
+    "factorizations": "4",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.29603324,
+    "time_min": 0.291504078,
+    "time_max": 0.300798621,
+    "times": [
+     0.29603324,
+     0.300798621,
+     0.291504078
+    ],
+    "wall_s": 0.403,
+    "peak_rss_gib": 0.251,
+    "factorizations": "3",
+    "block_size": "2",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8611056550647115,
+   "comparable": true
+  },
+  {
+   "case": "cav2d-square-1e4",
+   "n": 9976,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.06228134,
+    "time_min": 0.061724504,
+    "time_max": 0.064235632,
+    "times": [
+     0.064235632,
+     0.06228134,
+     0.061724504
+    ],
+    "wall_s": 0.116,
+    "peak_rss_gib": 0.095,
+    "factorizations": "3",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.04848874,
+    "time_min": 0.047953527,
+    "time_max": 0.059002722,
+    "times": [
+     0.059002722,
+     0.04848874,
+     0.047953527
+    ],
+    "wall_s": 0.115,
+    "peak_rss_gib": 0.113,
+    "factorizations": "3",
+    "block_size": "2",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7785436215726894,
+   "comparable": true
+  },
+  {
+   "case": "ss-2cubes_sphere",
+   "n": 101492,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 3.2861320090000006,
+    "time_min": 3.2413853270000006,
+    "time_max": 3.353384382,
+    "times": [
+     3.353384382,
+     3.2413853270000006,
+     3.2861320090000006
+    ],
+    "wall_s": 3.48,
+    "peak_rss_gib": 0.853,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.87387874,
+    "time_min": 2.8674375810000003,
+    "time_max": 2.911725096,
+    "times": [
+     2.911725096,
+     2.8674375810000003,
+     2.87387874
+    ],
+    "wall_s": 3.044,
+    "peak_rss_gib": 0.813,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.874547562949106,
+   "comparable": true
+  },
+  {
+   "case": "ss-3dspectralwave2",
+   "n": 292008,
+   "problem": "HEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "main": {
+    "reps": 4,
+    "valid": 4,
+    "ok": true,
+    "time_s": 356.44714786150007,
+    "time_min": 338.96284366199995,
+    "time_max": 359.176600079,
+    "times": [
+     359.099799118,
+     353.79449660500006,
+     338.96284366199995,
+     359.176600079
+    ],
+    "wall_s": 357.48699999999997,
+    "peak_rss_gib": 14.961,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 4,
+    "valid": 3,
+    "ok": false,
+    "time_s": 309.670683041,
+    "time_min": 304.166050356,
+    "time_max": 320.267445763,
+    "times": [
+     304.166050356,
+     309.670683041,
+     320.267445763
+    ],
+    "wall_s": 307.7895,
+    "peak_rss_gib": 13.053,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": [
+     "r1: rc=2 verdict=not evaluated"
+    ]
+   },
+   "ratio": 0.8687702648172813,
+   "comparable": false
+  },
+  {
+   "case": "ss-ge87h76",
+   "n": 112985,
+   "problem": "HEP",
+   "hosts": [
+    "c005"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 57.60302861,
+    "time_min": 57.24667586300001,
+    "time_max": 60.103809571,
+    "times": [
+     57.24667586300001,
+     60.103809571,
+     57.60302861
+    ],
+    "wall_s": 58.014,
+    "peak_rss_gib": 7.416,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c005"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 54.728319346,
+    "time_min": 53.444980609,
+    "time_max": 55.480180634,
+    "times": [
+     55.480180634,
+     53.444980609,
+     54.728319346
+    ],
+    "wall_s": 55.089,
+    "peak_rss_gib": 7.349,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c005"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.950094477089683,
+   "comparable": true
+  },
+  {
+   "case": "ss-helm3d01",
+   "n": 32226,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.739385728,
+    "time_min": 0.729314657,
+    "time_max": 0.77295053,
+    "times": [
+     0.77295053,
+     0.729314657,
+     0.739385728
+    ],
+    "wall_s": 0.804,
+    "peak_rss_gib": 0.251,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.547915171,
+    "time_min": 0.547533357,
+    "time_max": 0.557177983,
+    "times": [
+     0.547915171,
+     0.547533357,
+     0.557177983
+    ],
+    "wall_s": 0.635,
+    "peak_rss_gib": 0.252,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.741041042923674,
+   "comparable": true
+  },
+  {
+   "case": "ss-qa8fk-qa8fm",
+   "n": 66127,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.26028909,
+    "time_min": 2.250807972,
+    "time_max": 2.301545497,
+    "times": [
+     2.301545497,
+     2.250807972,
+     2.26028909
+    ],
+    "wall_s": 2.41,
+    "peak_rss_gib": 0.755,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.688593476,
+    "time_min": 1.6732095,
+    "time_max": 1.697773576,
+    "times": [
+     1.688593476,
+     1.697773576,
+     1.6732095
+    ],
+    "wall_s": 1.809,
+    "peak_rss_gib": 0.601,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7470696927533284,
+   "comparable": true
+  },
+  {
+   "case": "ss-si34h36",
+   "n": 97569,
+   "problem": "HEP",
+   "hosts": [
+    "c005"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 40.766924757,
+    "time_min": 40.567520085,
+    "time_max": 41.45286001,
+    "times": [
+     40.766924757,
+     41.45286001,
+     40.567520085
+    ],
+    "wall_s": 41.112,
+    "peak_rss_gib": 5.922,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c005"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 39.563795542,
+    "time_min": 38.08337365,
+    "time_max": 39.792844609,
+    "times": [
+     39.792844609,
+     38.08337365,
+     39.563795542
+    ],
+    "wall_s": 39.82,
+    "peak_rss_gib": 6.06,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c005"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.9704876141094403,
+   "comparable": true
+  },
+  {
+   "case": "ss-tem152078",
+   "n": 152078,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 5.10899828,
+    "time_min": 5.103153267,
+    "time_max": 5.168101047,
+    "times": [
+     5.103153267,
+     5.168101047,
+     5.10899828
+    ],
+    "wall_s": 5.892,
+    "peak_rss_gib": 1.517,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 5.451554311999999,
+    "time_min": 5.439578147,
+    "time_max": 5.472435145,
+    "times": [
+     5.439578147,
+     5.451554311999999,
+     5.472435145
+    ],
+    "wall_s": 6.192,
+    "peak_rss_gib": 1.379,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 1.0670495492905117,
+   "comparable": true
+  },
+  {
+   "case": "ss-tem27623",
+   "n": 27623,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.7441384949999998,
+    "time_min": 0.739394171,
+    "time_max": 0.753440149,
+    "times": [
+     0.739394171,
+     0.753440149,
+     0.7441384949999998
+    ],
+    "wall_s": 0.868,
+    "peak_rss_gib": 0.271,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.590838502,
+    "time_min": 0.587950332,
+    "time_max": 0.598804283,
+    "times": [
+     0.587950332,
+     0.598804283,
+     0.590838502
+    ],
+    "wall_s": 0.718,
+    "peak_rss_gib": 0.228,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7939899709126056,
+   "comparable": true
+  },
+  {
+   "case": "syn-ghep-multiplicity-real-1e4",
+   "n": 10000,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.179009087,
+    "time_min": 0.17782844399999997,
+    "time_max": 0.191619267,
+    "times": [
+     0.191619267,
+     0.17782844399999997,
+     0.179009087
+    ],
+    "wall_s": 0.239,
+    "peak_rss_gib": 0.091,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.134013415,
+    "time_min": 0.132941966,
+    "time_max": 0.137639718,
+    "times": [
+     0.134013415,
+     0.132941966,
+     0.137639718
+    ],
+    "wall_s": 0.202,
+    "peak_rss_gib": 0.107,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7486402910931554,
+   "comparable": true
+  },
+  {
+   "case": "syn-ghep-near-singular-real-1e5",
+   "n": 100000,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.694762914,
+    "time_min": 1.689178628,
+    "time_max": 1.708730827,
+    "times": [
+     1.708730827,
+     1.694762914,
+     1.689178628
+    ],
+    "wall_s": 2.006,
+    "peak_rss_gib": 0.245,
+    "factorizations": "5",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.286132885,
+    "time_min": 1.275739468,
+    "time_max": 1.286483049,
+    "times": [
+     1.275739468,
+     1.286483049,
+     1.286132885
+    ],
+    "wall_s": 1.605,
+    "peak_rss_gib": 0.348,
+    "factorizations": "5",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7588866114402123,
+   "comparable": true
+  },
+  {
+   "case": "syn-ghep-zero-cluster-complex-1e4",
+   "n": 10000,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.387352407,
+    "time_min": 0.386525638,
+    "time_max": 0.40140902,
+    "times": [
+     0.40140902,
+     0.386525638,
+     0.387352407
+    ],
+    "wall_s": 0.466,
+    "peak_rss_gib": 0.136,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.287080377,
+    "time_min": 0.286842173,
+    "time_max": 0.292247939,
+    "times": [
+     0.292247939,
+     0.287080377,
+     0.286842173
+    ],
+    "wall_s": 0.402,
+    "peak_rss_gib": 0.202,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7411348730821233,
+   "comparable": true
+  },
+  {
+   "case": "syn-lap2d-100",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.081275176,
+    "time_min": 0.081128389,
+    "time_max": 0.093496319,
+    "times": [
+     0.093496319,
+     0.081275176,
+     0.081128389
+    ],
+    "wall_s": 0.115,
+    "peak_rss_gib": 0.175,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.065696637,
+    "time_min": 0.06176716499999999,
+    "time_max": 0.065715961,
+    "times": [
+     0.065696637,
+     0.065715961,
+     0.06176716499999999
+    ],
+    "wall_s": 0.116,
+    "peak_rss_gib": 0.119,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8083235279613544,
+   "comparable": true
+  },
+  {
+   "case": "syn-lap3d-22",
+   "n": 10648,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.23482667900000004,
+    "time_min": 0.22850573,
+    "time_max": 0.23600133300000004,
+    "times": [
+     0.23482667900000004,
+     0.22850573,
+     0.23600133300000004
+    ],
+    "wall_s": 0.266,
+    "peak_rss_gib": 0.141,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.139140807,
+    "time_min": 0.138692312,
+    "time_max": 0.140921627,
+    "times": [
+     0.139140807,
+     0.138692312,
+     0.140921627
+    ],
+    "wall_s": 0.165,
+    "peak_rss_gib": 0.133,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.5925255494500264,
+   "comparable": true
+  },
+  {
+   "case": "syn-lap3d-aniso-1e5",
+   "n": 97200,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.579444622,
+    "time_min": 2.539487466,
+    "time_max": 2.690474642,
+    "times": [
+     2.579444622,
+     2.539487466,
+     2.690474642
+    ],
+    "wall_s": 2.777,
+    "peak_rss_gib": 0.674,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.083947369,
+    "time_min": 2.082118799,
+    "time_max": 2.090097522,
+    "times": [
+     2.083947369,
+     2.090097522,
+     2.082118799
+    ],
+    "wall_s": 2.176,
+    "peak_rss_gib": 0.598,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8079054503539561,
+   "comparable": true
+  },
+  {
+   "case": "syn-mem125-46",
+   "n": 97336,
+   "problem": "HEP",
+   "hosts": [
+    "c005"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 13.439709775000003,
+    "time_min": 13.321345399,
+    "time_max": 13.740084086999998,
+    "times": [
+     13.439709775000003,
+     13.740084086999998,
+     13.321345399
+    ],
+    "wall_s": 13.805,
+    "peak_rss_gib": 3.021,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c005"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 11.036247001,
+    "time_min": 10.975469424,
+    "time_max": 11.163756433,
+    "times": [
+     11.163756433,
+     11.036247001,
+     10.975469424
+    ],
+    "wall_s": 11.334,
+    "peak_rss_gib": 2.984,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c005"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8211670628133038,
+   "comparable": true
+  },
+  {
+   "case": "syn-mem27-46",
+   "n": 97336,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.788133508,
+    "time_min": 2.7099595770000002,
+    "time_max": 2.8069696199999994,
+    "times": [
+     2.788133508,
+     2.8069696199999994,
+     2.7099595770000002
+    ],
+    "wall_s": 2.931,
+    "peak_rss_gib": 1.054,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.373847434,
+    "time_min": 2.373658491,
+    "time_max": 2.377364517,
+    "times": [
+     2.377364517,
+     2.373847434,
+     2.373658491
+    ],
+    "wall_s": 2.476,
+    "peak_rss_gib": 0.861,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8514109626345769,
+   "comparable": true
+  },
+  {
+   "case": "syn-multiplicity-complex-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.26337935300000004,
+    "time_min": 0.259024915,
+    "time_max": 0.282647815,
+    "times": [
+     0.282647815,
+     0.259024915,
+     0.26337935300000004
+    ],
+    "wall_s": 0.367,
+    "peak_rss_gib": 0.138,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.204698455,
+    "time_min": 0.20158626400000001,
+    "time_max": 0.213730764,
+    "times": [
+     0.213730764,
+     0.204698455,
+     0.20158626400000001
+    ],
+    "wall_s": 0.316,
+    "peak_rss_gib": 0.209,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7772000829541106,
+   "comparable": true
+  },
+  {
+   "case": "syn-multiplicity-real-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.124099219,
+    "time_min": 0.124058861,
+    "time_max": 0.125111271,
+    "times": [
+     0.124099219,
+     0.125111271,
+     0.124058861
+    ],
+    "wall_s": 0.202,
+    "peak_rss_gib": 0.124,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.095774097,
+    "time_min": 0.094713563,
+    "time_max": 0.10329973499999999,
+    "times": [
+     0.094713563,
+     0.095774097,
+     0.10329973499999999
+    ],
+    "wall_s": 0.166,
+    "peak_rss_gib": 0.135,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7717542283646442,
+   "comparable": true
+  },
+  {
+   "case": "syn-near-singular-complex-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.320942937,
+    "time_min": 0.316521619,
+    "time_max": 0.329521926,
+    "times": [
+     0.329521926,
+     0.316521619,
+     0.320942937
+    ],
+    "wall_s": 0.402,
+    "peak_rss_gib": 0.138,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.230358086,
+    "time_min": 0.229269786,
+    "time_max": 0.238365147,
+    "times": [
+     0.238365147,
+     0.229269786,
+     0.230358086
+    ],
+    "wall_s": 0.317,
+    "peak_rss_gib": 0.182,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7177540286546328,
+   "comparable": true
+  },
+  {
+   "case": "syn-near-singular-complex-1e5",
+   "n": 100000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 3.46345574,
+    "time_min": 3.387668106,
+    "time_max": 3.499546881,
+    "times": [
+     3.499546881,
+     3.46345574,
+     3.387668106
+    ],
+    "wall_s": 3.81,
+    "peak_rss_gib": 0.442,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.485077331,
+    "time_min": 2.4719663020000002,
+    "time_max": 2.513120887,
+    "times": [
+     2.4719663020000002,
+     2.485077331,
+     2.513120887
+    ],
+    "wall_s": 2.817,
+    "peak_rss_gib": 0.657,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7175138120864221,
+   "comparable": true
+  },
+  {
+   "case": "syn-near-singular-real-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.13942072,
+    "time_min": 0.132392328,
+    "time_max": 0.147163963,
+    "times": [
+     0.147163963,
+     0.132392328,
+     0.13942072
+    ],
+    "wall_s": 0.202,
+    "peak_rss_gib": 0.118,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.10271901,
+    "time_min": 0.100420633,
+    "time_max": 0.10417353900000001,
+    "times": [
+     0.100420633,
+     0.10417353900000001,
+     0.10271901
+    ],
+    "wall_s": 0.165,
+    "peak_rss_gib": 0.102,
+    "factorizations": "4",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7367556988659936,
+   "comparable": true
+  },
+  {
+   "case": "syn-wide-range-complex-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.226540316,
+    "time_min": 0.224514289,
+    "time_max": 0.231147068,
+    "times": [
+     0.231147068,
+     0.226540316,
+     0.224514289
+    ],
+    "wall_s": 0.316,
+    "peak_rss_gib": 0.145,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.181558326,
+    "time_min": 0.181487313,
+    "time_max": 0.18517646399999999,
+    "times": [
+     0.181558326,
+     0.18517646399999999,
+     0.181487313
+    ],
+    "wall_s": 0.267,
+    "peak_rss_gib": 0.172,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.801439360577214,
+   "comparable": true
+  },
+  {
+   "case": "syn-wide-range-real-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.106593122,
+    "time_min": 0.106355996,
+    "time_max": 0.106737176,
+    "times": [
+     0.106737176,
+     0.106355996,
+     0.106593122
+    ],
+    "wall_s": 0.165,
+    "peak_rss_gib": 0.119,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.089153277,
+    "time_min": 0.08741335699999998,
+    "time_max": 0.09184581699999998,
+    "times": [
+     0.08741335699999998,
+     0.09184581699999998,
+     0.089153277
+    ],
+    "wall_s": 0.167,
+    "peak_rss_gib": 0.099,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8363886461642431,
+   "comparable": true
+  },
+  {
+   "case": "syn-zero-cluster-complex-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.470481111,
+    "time_min": 0.468626197,
+    "time_max": 0.478104363,
+    "times": [
+     0.468626197,
+     0.478104363,
+     0.470481111
+    ],
+    "wall_s": 0.566,
+    "peak_rss_gib": 0.163,
+    "factorizations": "5",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.305181216,
+    "time_min": 0.304187072,
+    "time_max": 0.308588071,
+    "times": [
+     0.304187072,
+     0.305181216,
+     0.308588071
+    ],
+    "wall_s": 0.402,
+    "peak_rss_gib": 0.156,
+    "factorizations": "5",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.6486577438812415,
+   "comparable": true
+  },
+  {
+   "case": "syn-zero-cluster-real-1e4",
+   "n": 10000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.19835014700000003,
+    "time_min": 0.193283056,
+    "time_max": 0.199157331,
+    "times": [
+     0.199157331,
+     0.193283056,
+     0.19835014700000003
+    ],
+    "wall_s": 0.266,
+    "peak_rss_gib": 0.12,
+    "factorizations": "6",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.129684703,
+    "time_min": 0.126164605,
+    "time_max": 0.135269378,
+    "times": [
+     0.135269378,
+     0.129684703,
+     0.126164605
+    ],
+    "wall_s": 0.202,
+    "peak_rss_gib": 0.136,
+    "factorizations": "5",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.6538170248999109,
+   "comparable": true
+  },
+  {
+   "case": "syn-zero-cluster-real-1e5",
+   "n": 100000,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.752520347,
+    "time_min": 1.751723693,
+    "time_max": 1.75956818,
+    "times": [
+     1.751723693,
+     1.752520347,
+     1.75956818
+    ],
+    "wall_s": 1.971,
+    "peak_rss_gib": 0.244,
+    "factorizations": "6",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.220644279,
+    "time_min": 1.219719342,
+    "time_max": 1.234132414,
+    "times": [
+     1.234132414,
+     1.220644279,
+     1.219719342
+    ],
+    "wall_s": 1.469,
+    "peak_rss_gib": 0.371,
+    "factorizations": "6",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.696507907077669,
+   "comparable": true
+  },
+  {
+   "case": "wg-halfslab-1e4",
+   "n": 9801,
+   "problem": "GHIEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.098591312,
+    "time_min": 0.097782332,
+    "time_max": 0.10996552999999999,
+    "times": [
+     0.10996552999999999,
+     0.098591312,
+     0.097782332
+    ],
+    "wall_s": 0.166,
+    "peak_rss_gib": 0.095,
+    "factorizations": "2",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.076384331,
+    "time_min": 0.07353088500000002,
+    "time_max": 0.078089789,
+    "times": [
+     0.076384331,
+     0.07353088500000002,
+     0.078089789
+    ],
+    "wall_s": 0.115,
+    "peak_rss_gib": 0.069,
+    "factorizations": "1",
+    "block_size": "1",
+    "certificate_method": "none",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7747572220156681,
+   "comparable": true
+  },
+  {
+   "case": "wg-halfslab-1e5",
+   "n": 99225,
+   "problem": "GHIEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.898089426,
+    "time_min": 0.85746003,
+    "time_max": 0.898997962,
+    "times": [
+     0.898089426,
+     0.85746003,
+     0.898997962
+    ],
+    "wall_s": 1.006,
+    "peak_rss_gib": 0.283,
+    "factorizations": "2",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.750111297,
+    "time_min": 0.7401221959999998,
+    "time_max": 0.750548677,
+    "times": [
+     0.7401221959999998,
+     0.750548677,
+     0.750111297
+    ],
+    "wall_s": 0.835,
+    "peak_rss_gib": 0.274,
+    "factorizations": "1",
+    "block_size": "2",
+    "certificate_method": "none",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8352300731798172,
+   "comparable": true
+  },
+  {
+   "case": "wg-square-1e3",
+   "n": 961,
+   "problem": "GHIEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.034988501000000005,
+    "time_min": 0.03326672,
+    "time_max": 0.039569917,
+    "times": [
+     0.03326672,
+     0.034988501000000005,
+     0.039569917
+    ],
+    "wall_s": 0.066,
+    "peak_rss_gib": 0.045,
+    "factorizations": "2",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.025472436,
+    "time_min": 0.022854295,
+    "time_max": 0.026429352,
+    "times": [
+     0.022854295,
+     0.025472436,
+     0.026429352
+    ],
+    "wall_s": 0.065,
+    "peak_rss_gib": 0.059,
+    "factorizations": "1",
+    "block_size": "1",
+    "certificate_method": "none",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.728023072494589,
+   "comparable": true
+  },
+  {
+   "case": "wg-square-1e5",
+   "n": 99225,
+   "problem": "GHIEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.597198969,
+    "time_min": 0.589691941,
+    "time_max": 0.614442275,
+    "times": [
+     0.614442275,
+     0.597198969,
+     0.589691941
+    ],
+    "wall_s": 0.717,
+    "peak_rss_gib": 0.269,
+    "factorizations": "2",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.48055722900000003,
+    "time_min": 0.47795493699999997,
+    "time_max": 0.487005006,
+    "times": [
+     0.48055722900000003,
+     0.487005006,
+     0.47795493699999997
+    ],
+    "wall_s": 0.603,
+    "peak_rss_gib": 0.221,
+    "factorizations": "1",
+    "block_size": "2",
+    "certificate_method": "none",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8046852957644675,
+   "comparable": true
+  },
+  {
+   "case": "wg-square-1e6",
+   "n": 998001,
+   "problem": "GHIEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 7.154356663999999,
+    "time_min": 7.089261593,
+    "time_max": 7.213541852999999,
+    "times": [
+     7.213541852999999,
+     7.089261593,
+     7.154356663999999
+    ],
+    "wall_s": 7.636,
+    "peak_rss_gib": 1.945,
+    "factorizations": "2",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 5.941301719,
+    "time_min": 5.920787005999999,
+    "time_max": 5.94275719,
+    "times": [
+     5.920787005999999,
+     5.941301719,
+     5.94275719
+    ],
+    "wall_s": 6.435,
+    "peak_rss_gib": 1.931,
+    "factorizations": "1",
+    "block_size": "2",
+    "certificate_method": "none",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8304452794331643,
+   "comparable": true
+  },
+  {
+   "case": "wg-square-n289",
+   "n": 289,
+   "problem": "GHIEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.023638017,
+    "time_min": 0.020633262,
+    "time_max": 0.023958209,
+    "times": [
+     0.020633262,
+     0.023638017,
+     0.023958209
+    ],
+    "wall_s": 0.065,
+    "peak_rss_gib": 0.045,
+    "factorizations": "2",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.020074987,
+    "time_min": 0.015582845,
+    "time_max": 0.022574742000000002,
+    "times": [
+     0.022574742000000002,
+     0.015582845,
+     0.020074987
+    ],
+    "wall_s": 0.065,
+    "peak_rss_gib": 0.043,
+    "factorizations": "1",
+    "block_size": "1",
+    "certificate_method": "none",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8492669668525916,
+   "comparable": true
+  },
+  {
+   "case": "wg-square-pert-1e4",
+   "n": 9801,
+   "problem": "GHIEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.090500455,
+    "time_min": 0.086494572,
+    "time_max": 0.106723177,
+    "times": [
+     0.090500455,
+     0.086494572,
+     0.106723177
+    ],
+    "wall_s": 0.166,
+    "peak_rss_gib": 0.147,
+    "factorizations": "2",
+    "block_size": "1",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.07604000800000002,
+    "time_min": 0.071892402,
+    "time_max": 0.084552014,
+    "times": [
+     0.07604000800000002,
+     0.084552014,
+     0.071892402
+    ],
+    "wall_s": 0.116,
+    "peak_rss_gib": 0.058,
+    "factorizations": "1",
+    "block_size": "1",
+    "certificate_method": "none",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8402168585782251,
+   "comparable": true
+  },
+  {
+   "case": "yee-bloch-1e4",
+   "n": 10080,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.093611294,
+    "time_min": 1.09042249,
+    "time_max": 1.141414555,
+    "times": [
+     1.093611294,
+     1.141414555,
+     1.09042249
+    ],
+    "wall_s": 1.17,
+    "peak_rss_gib": 0.338,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.831093402,
+    "time_min": 0.8264900180000001,
+    "time_max": 0.8390344,
+    "times": [
+     0.831093402,
+     0.8390344,
+     0.8264900180000001
+    ],
+    "wall_s": 0.918,
+    "peak_rss_gib": 0.31,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7599531996054898,
+   "comparable": true
+  },
+  {
+   "case": "yee-pec-box-1e4",
+   "n": 10064,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.277369192,
+    "time_min": 0.26991004899999993,
+    "time_max": 0.291681338,
+    "times": [
+     0.26991004899999993,
+     0.291681338,
+     0.277369192
+    ],
+    "wall_s": 0.403,
+    "peak_rss_gib": 0.172,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.200303483,
+    "time_min": 0.19824314199999998,
+    "time_max": 0.20608186900000003,
+    "times": [
+     0.20608186900000003,
+     0.19824314199999998,
+     0.200303483
+    ],
+    "wall_s": 0.234,
+    "peak_rss_gib": 0.178,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7221547625952633,
+   "comparable": true
+  },
+  {
+   "case": "yee-pec-box-1e5",
+   "n": 109744,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 3.223805875,
+    "time_min": 3.187118685,
+    "time_max": 3.291331769,
+    "times": [
+     3.291331769,
+     3.223805875,
+     3.187118685
+    ],
+    "wall_s": 3.331,
+    "peak_rss_gib": 0.929,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.922054894,
+    "time_min": 2.859890626,
+    "time_max": 2.969116271,
+    "times": [
+     2.922054894,
+     2.859890626,
+     2.969116271
+    ],
+    "wall_s": 3.015,
+    "peak_rss_gib": 0.928,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.9063991466297578,
+   "comparable": true
+  },
+  {
+   "case": "yee-pec-cube-16",
+   "n": 10800,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.325251814,
+    "time_min": 0.306516513,
+    "time_max": 0.34024721,
+    "times": [
+     0.325251814,
+     0.306516513,
+     0.34024721
+    ],
+    "wall_s": 0.403,
+    "peak_rss_gib": 0.174,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.212800857,
+    "time_min": 0.204976472,
+    "time_max": 0.216777912,
+    "times": [
+     0.212800857,
+     0.204976472,
+     0.216777912
+    ],
+    "wall_s": 0.267,
+    "peak_rss_gib": 0.182,
+    "factorizations": "3",
+    "block_size": "4",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.6542649351680481,
+   "comparable": true
+  },
+  {
+   "case": "yee-pec-cube-32",
+   "n": 92256,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.845157016,
+    "time_min": 2.789270708,
+    "time_max": 2.88828532,
+    "times": [
+     2.88828532,
+     2.845157016,
+     2.789270708
+    ],
+    "wall_s": 2.979,
+    "peak_rss_gib": 0.826,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 2.254569074,
+    "time_min": 2.245681197,
+    "time_max": 2.264373655,
+    "times": [
+     2.245681197,
+     2.264373655,
+     2.254569074
+    ],
+    "wall_s": 2.377,
+    "peak_rss_gib": 0.773,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7924234273613812,
+   "comparable": true
+  },
+  {
+   "case": "yee-photonic-rods-1e4",
+   "n": 10125,
+   "problem": "HEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.11261635,
+    "time_min": 1.1124839900000003,
+    "time_max": 1.1517064440000002,
+    "times": [
+     1.11261635,
+     1.1517064440000002,
+     1.1124839900000003
+    ],
+    "wall_s": 1.17,
+    "peak_rss_gib": 0.327,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.908609647,
+    "time_min": 0.904355387,
+    "time_max": 0.9213957760000001,
+    "times": [
+     0.904355387,
+     0.908609647,
+     0.9213957760000001
+    ],
+    "wall_s": 0.973,
+    "peak_rss_gib": 0.337,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8166423646389882,
+   "comparable": true
+  },
+  {
+   "case": "yee-photonic-spheres-1e4",
+   "n": 10125,
+   "problem": "GHEP",
+   "hosts": [
+    "c003"
+   ],
+   "main": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 1.189676068,
+    "time_min": 1.18433803,
+    "time_max": 1.199366312,
+    "times": [
+     1.189676068,
+     1.18433803,
+     1.199366312
+    ],
+    "wall_s": 1.269,
+    "peak_rss_gib": 0.33,
+    "factorizations": "1",
+    "block_size": "4",
+    "certificate_method": null,
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 3,
+    "valid": 3,
+    "ok": true,
+    "time_s": 0.973343952,
+    "time_min": 0.971293132,
+    "time_max": 0.985823057,
+    "times": [
+     0.985823057,
+     0.973343952,
+     0.971293132
+    ],
+    "wall_s": 1.008,
+    "peak_rss_gib": 0.34,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "consistent",
+    "hosts": [
+     "c003"
+    ],
+    "binaries": [
+     "~/p5c_int_p5c-meas/bin/hsolve_new"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8181588065701931,
+   "comparable": true
+  }
+ ]
+}

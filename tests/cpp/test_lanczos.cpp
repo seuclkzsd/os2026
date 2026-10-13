@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "eigen/block_lanczos.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/sparse.hpp"
@@ -1230,6 +1231,137 @@ TYPED_TEST(LanczosBlockTyped, DeflationInBInnerProduct) {
                     1e-10 * std::abs(expect[0]));
       EXPECT_LT(gram_deviation<T>(first.vectors, &bop, second.vectors, false), 1e-12);
     }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, FastAndTwoPassBlockOrthogonalizationAgree) {
+  // The block steps' default kernel (BlockOrthonormalizer::try_fast first) and the two-pass
+  // kernel alone (BlockTuning::fast_ortho = false) return the same pairs, both satisfying the
+  // contract, in the Euclidean and the B inner product and over restarts (nev 6 of a basis of a
+  // few blocks); next to a deflation block both take the two-pass kernel (try_fast needs a basis
+  // orthonormal to working precision, see BreakdownAgainstADeflationBlockOrthonormalOnlyToDelta).
+  using T = TypeParam;
+  const index_t n = 200;
+  const auto a = hs::test::random_hermitian<T>(n, 0.05, 141);
+  const auto b = hs::test::random_hpd<T>(n, 0.05, 142);
+  const double sigma = 0.1;
+  const auto bd = hs::test::to_dense(b);
+  for (bool with_b : {false, true}) {
+    hs::test::DenseShiftInvertOperator<T> op(hs::test::to_dense(a), with_b ? &bd : nullptr, sigma);
+    DenseOperator<T> bop(bd);
+    LinearOperator<T>* m = with_b ? &bop : nullptr;
+    std::vector<double> theta_exact;
+    for (double l : hs::test::dense_eigenvalues(a, with_b ? &b : nullptr))
+      theta_exact.push_back(1.0 / (l - sigma));
+    const auto expect = wanted(theta_exact, Which::LargestMagnitude, 12);
+    const double kappa = condition_number(with_b ? hs::add(T(1), a, T(-sigma), b)
+                                                 : hs::add(T(1), a, T(-sigma), hs::identity<T>(n)));
+    KrylovSchurOptions<T> first_opt;
+    first_opt.nev = 6;
+    first_opt.block_size = 2;
+    const auto first = hs::lanczos_krylov_schur<T>(op, m, Which::LargestMagnitude, first_opt);
+    ASSERT_TRUE(first.converged);
+    for (bool deflate : {false, true}) {
+      for (index_t p : {2, 3, 4}) {
+        SCOPED_TRACE(std::string(with_b ? "B" : "Euclidean") + (deflate ? ", deflation" : "") +
+                     ", p = " + std::to_string(p));
+        KrylovSchurOptions<T> opt;
+        opt.nev = 6;
+        opt.ncv = 3 * p + 10;  // a few blocks: several restarts
+        opt.tol = 1e-11;
+        opt.block_size = p;
+        if (deflate) opt.deflation = &first.vectors;
+        const std::vector<double> want(expect.begin() + (deflate ? 6 : 0),
+                                       expect.begin() + (deflate ? 12 : 6));
+        HermitianEigResult<T> r[2];
+        for (int fast = 0; fast < 2; ++fast) {
+          hs::eigen_detail::BlockTuning tuning;
+          tuning.fast_ortho = fast == 1;
+          hs::eigen_detail::LanczosTimings tm;
+          hs::eigen_detail::BlockRunStats st;
+          r[fast] = hs::eigen_detail::block_lanczos_krylov_schur_timed<T>(
+              op, m, Which::LargestMagnitude, opt, tm, tuning, &st);
+          EXPECT_TRUE(r[fast].converged) << "fast " << fast;
+          EXPECT_GT(r[fast].restarts, 0) << "fast " << fast;
+          // The kernel the tuning asks for (P5c review: an ignored fast_ortho went unnoticed):
+          // try_fast takes the steps (it refuses only ill-conditioned or dependent blocks) unless
+          // it is off or a deflation block is there; every block step (one operator application
+          // of p columns) is counted once.
+          const index_t steps = r[fast].op_applies / p;
+          EXPECT_EQ(st.fast_steps + st.two_pass_steps, steps) << "fast " << fast;
+          if (fast == 1 && !deflate) {
+            EXPECT_GT(st.fast_steps, steps / 2);
+          } else {
+            EXPECT_EQ(st.fast_steps, 0) << "fast " << fast;
+          }
+          check_contract<T>(op, m, r[fast], Which::LargestMagnitude, opt, kappa);
+          expect_values(r[fast].theta, want, 1e-10 * std::abs(expect[0]));
+          if (deflate) {
+            EXPECT_LT(gram_deviation<T>(first.vectors, m, r[fast].vectors, false), 1e-12);
+          }
+        }
+        for (index_t i = 0; i < opt.nev; ++i)
+          EXPECT_NEAR(r[1].theta[i], r[0].theta[i], 1e-10 * std::abs(r[0].theta[0])) << i;
+      }
+    }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, BlockTuningShapesTheBasisLayout) {
+  // P5c review: no test passed a non-default BlockTuning to the solver, so extra_blocks,
+  // min_auto_ncv and keep_fraction could be ignored unnoticed (the layout sweeps of
+  // bench_blocktune_sweep depend on them). A run that cannot converge in two restarts (smallest
+  // values of a 1-D Laplacian, n = 400) shows the layout in its history: the first cycle fills the
+  // automatic ncv (probes stop it only on convergence) and every restart adds ncv - keep.
+  using T = TypeParam;
+  using hs::eigen_detail::BlockTuning;
+  const index_t n = 400, p = 2;
+  auto op = DenseOperator<T>(hs::test::to_dense(hs::test::laplacian_1d<T>(n)));
+  KrylovSchurOptions<T> opt;
+  opt.nev = 6;
+  opt.max_restarts = 2;
+  opt.block_size = p;
+  hs::eigen_detail::LanczosSetup setup;
+  setup.n = setup.n_free = n;
+  setup.nev = opt.nev;
+  setup.ncv = std::max(2 * opt.nev + 1, opt.nev + 16);  // 22
+  struct Case {
+    BlockTuning tuning;
+    index_t ncv, keep;  // block_dimensions, auto ncv; base = 22
+  };
+  auto tuned = [](index_t extra, index_t min_ncv, double keep) {
+    BlockTuning t;
+    t.extra_blocks = extra;
+    t.min_auto_ncv = min_ncv;
+    t.keep_fraction = keep;
+    return t;
+  };
+  const Case cases[] = {
+      {BlockTuning{}, 30, 18},             // 22 + 4 * 2; 6 + 24 / 2
+      {tuned(0, 0, 0.5), 22, 14},          // base; 6 + 16 / 2
+      {tuned(8, 0, 0.5), 38, 22},          // 22 + 8 * 2; 6 + 32 / 2
+      {tuned(0, 41, 0.5), 42, 24},         // 41 rounded up to whole blocks; 6 + 36 / 2
+      {tuned(4, 0, 0.0), 30, 8},           // keep >= spare = round_up(nev + 1, p) = 8
+      {tuned(4, 0, 1.0), 30, 28},          // keep <= ncv - p
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE("extra " + std::to_string(c.tuning.extra_blocks) + " min_ncv " +
+                 std::to_string(c.tuning.min_auto_ncv) + " keep " +
+                 std::to_string(c.tuning.keep_fraction));
+    const auto dims = hs::eigen_detail::block_dimensions(setup, p, true, c.tuning);
+    ASSERT_TRUE(dims.feasible);
+    EXPECT_EQ(dims.ncv, c.ncv);
+    EXPECT_EQ(dims.keep, c.keep);
+    hs::eigen_detail::LanczosTimings tm;
+    const auto r = hs::eigen_detail::block_lanczos_krylov_schur_timed<T>(
+        op, nullptr, Which::SmallestAlgebraic, opt, tm, c.tuning);
+    EXPECT_FALSE(r.converged);
+    ASSERT_EQ(r.history.size(), 3u);
+    EXPECT_EQ(r.history[0].op_applies, c.ncv);
+    EXPECT_EQ(r.history[1].op_applies, c.ncv + (c.ncv - c.keep));
+    EXPECT_EQ(r.history[2].op_applies, c.ncv + 2 * (c.ncv - c.keep));
+    EXPECT_EQ(r.ritz_all.size(), static_cast<std::size_t>(c.ncv));
+    check_contract<T>(op, nullptr, r, Which::SmallestAlgebraic, opt);
   }
 }
 

@@ -74,6 +74,33 @@ class BlockOrthonormalizer {
   void run(T* basis, T* mbasis, index_t k, double ratio, std::uint64_t seed,
            std::uint64_t& next_stream, DenseMatrix<T>& coef, DenseMatrix<T>& r);
 
+  /// One-projection fast path for Krylov blocks (Euclidean and recompute mode; store mode always
+  /// refuses): linalg::orthogonalize_block_cgs2 against V (row-blocked, thread-count independent
+  /// sweeps; a second pass only where the DGKS test asks for it) followed by Cholesky-QR twice
+  /// inside the block, CholQR2, with M*Q1 = (M W1) R1^{-1} instead of a further M application:
+  ///   W1 = W - V C;  G1 = W1^H M W1 = R1^H R1,  Q1 = W1 R1^{-1};  G2 = Q1^H M Q1 = R2^H R2,
+  ///   Q = Q1 R2^{-1},  R = R2 R1.
+  /// No projection against V follows the Cholesky steps, so R1^{-1} amplifies the rounding-level
+  /// components of W1 in span(V) (O(eps / eta) of each column after DGKS) by up to the 2-norm
+  /// condition number of the column-scaled W1; the path accepts only blocks with that number <=
+  /// kMaxFastCond, no column that lost more than its share (after <= ratio * before, as run()
+  /// tests after both passes), ||G2 - I||_F <= 0.5 and |R(i, i)| > ratio * before(i). Cost: 2 or
+  /// 3 block applications of M (one per projection pass plus the first), against 3 for run(), and
+  /// 2 or 4 row-blocked sweeps over V instead of 4 BLAS calls on the tall n x k operand.
+  /// Returns false, with basis(:, k:k+p) restored to the input W (= W1 + V C, up to rounding),
+  /// when it refuses (then call run()). On success coef, r, before() and deficient() (all 0) are
+  /// set as by run(), and used_fallback() is false.
+  /// Precondition beyond run()'s: V M-orthonormal to working precision (the DGKS test's, see
+  /// linalg::Reorth). For a V orthonormal only to delta >> eps (a deflation block accepted at
+  /// 1e-8) even two projections leave V^H M W1 = O(delta^2 ||W||), which the normalization
+  /// amplifies by ||W|| / ||W1||: near an invariant subspace (W1 ~ delta W) the new columns lose
+  /// orthogonality to V at the delta level (measured: 2.6e-8 for delta = 1e-10, p = 4). run()
+  /// projects the normalized block again and keeps it at rounding level; use run() there.
+  bool try_fast(T* basis, T* mbasis, index_t k, double ratio, DenseMatrix<T>& coef,
+                DenseMatrix<T>& r);
+  /// Largest accepted 2-norm condition number of the column-scaled W1 in try_fast.
+  static constexpr double kMaxFastCond = 64.0;
+
   /// M-norms of the input columns of the last run (sqrt(||C1(:, i)||^2 + G1(i, i)), Pythagoras).
   const std::vector<double>& before() const noexcept { return before_; }
   /// Column i of the last run was replaced by a random vector (R(i, i) = 0).
@@ -82,6 +109,9 @@ class BlockOrthonormalizer {
   bool used_fallback() const noexcept { return fallback_; }
   /// Runs that took the fallback, over the object's lifetime.
   index_t fallbacks() const noexcept { return fallbacks_; }
+  /// try_fast calls that succeeded / refused, over the object's lifetime.
+  index_t fast_runs() const noexcept { return fast_runs_; }
+  index_t fast_refusals() const noexcept { return fast_refusals_; }
 
  private:
   /// "M X" for the p columns of x: x itself (Euclidean) or M x written to y.
@@ -103,6 +133,8 @@ class BlockOrthonormalizer {
   std::vector<char> deficient_;
   bool fallback_ = false;
   index_t fallbacks_ = 0;
+  index_t fast_runs_ = 0;
+  index_t fast_refusals_ = 0;
 };
 
 }  // namespace hs::eigen_detail

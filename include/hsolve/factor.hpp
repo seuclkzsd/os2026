@@ -424,8 +424,12 @@ class InertiaCounter {
   /// max_memory_mb (cap of each count), null_pivot_tol, single_null_pivot_tol, deterministic,
   /// verbosity, and ordering only if the source has no pivot order. Counts are always in-core
   /// and without BLR. Analyses the double-precision instance right away (estimate() is
-  /// available). Throws InvalidInput (no MUMPS source / not analysed) or as analyze().
-  InertiaCounter(const SparseFactorization<T>& analysed_source, const FactorOptions& options);
+  /// available), or with defer_double_analysis at its first use - the first double count or
+  /// estimate() - so that a counter used for single counts only pays one analysis (the single
+  /// instance's; ~0.06 s at n ~ 1e5, 16 threads). Throws InvalidInput (no MUMPS source / not
+  /// analysed) or as analyze() (deferred: at that first use).
+  InertiaCounter(const SparseFactorization<T>& analysed_source, const FactorOptions& options,
+                 bool defer_double_analysis = false);
   ~InertiaCounter();
   InertiaCounter(const InertiaCounter&) = delete;
   InertiaCounter& operator=(const InertiaCounter&) = delete;
@@ -447,8 +451,11 @@ class InertiaCounter {
                                          FactorPrecision precision = FactorPrecision::Double);
 
   /// MUMPS estimate of a double count (INFOG(16) etc. of the inertia-only analysis: incore_mb
-  /// is the working memory, there are no factors to keep).
+  /// is the working memory, there are no factors to keep). Analyses a deferred double instance
+  /// first.
   FactorEstimate estimate() const;
+  /// Whether the double-precision instance is analysed (false only while deferred and unused).
+  bool double_analysed() const;
   const InertiaCounterStats& stats() const;
   /// Order n of K.
   index_t order() const;

@@ -3,7 +3,9 @@
 
 Every solver run goes through tools/run/guard.py (core pinning, RSS watchdog, peak memory incl. all
 MPI ranks), so wall time and peak RSS are measured the same way for all solvers. Solvers (--solvers):
-  hsolve        default configuration (inertia certificate on)
+  hsolve        default configuration (inertia certificate on, certificate=exact)
+  hsolve-auto   certificate=auto: the cheapest check that certifies - exact counts, single-precision
+                counts or the randomized exclusion check - predicted per run (SolverConfig::certificate)
   hsolve-nocert inertia certificate off (pure speed; same accuracy, no completeness proof)
   slepc         SLEPc Krylov-Schur + shift-invert + MUMPS (tools/bench/baseline_slepc.py, env os2026-ref)
 SLEPc configuration (--slepc-profile):
@@ -15,7 +17,7 @@ SLEPc configuration (--slepc-profile):
                 the default is untuned, so a speedup against either is not a speedup against the
                 tuned baseline (the speedup table marks it).
 Solver time, equal scope for both (the comparison's main column):
-  hsolve        report time_total_s: all of hs::solve after the CLI loaded the matrices (norm
+  hsolve*       report time_total_s: all of hs::solve after the CLI loaded the matrices (norm
                 estimates, analysis, factorizations, iterations, Rayleigh-Ritz, residual checks,
                 inertia certificate)
   slepc         -log_view setup + solve + eigenvector computation (EPSSetUp incl. MUMPS analysis
@@ -112,15 +114,24 @@ def slepc_config(c: case.Case, tgt: dict[str, Any], ncores: int, args) -> tuple[
     return SlepcConfig(ranks, ncores // ranks), "default", "default"
 
 
+# Configuration keys each hsolve variant sets on top of the case's config.json (docs/FORMATS.md §2).
+HSOLVE_VARIANTS: dict[str, dict[str, Any]] = {
+    "hsolve": {},
+    "hsolve-auto": {"certificate": "auto"},
+    "hsolve-nocert": {"inertia_check": "off"},
+}
+SOLVERS = (*HSOLVE_VARIANTS, "slepc")
+
+
 def hsolve_command(c: case.Case, solver: str, out: Path, ncores: int, args, target: dict | None) -> list[str]:
+    if solver not in HSOLVE_VARIANTS:
+        raise SystemExit(f"unknown hsolve variant {solver} (known: {', '.join(HSOLVE_VARIANTS)})")
     cmd = [str(HSOLVE), "--A", str(c.path / "A.npz"), "--config", str(c.path / "config.json"),
            "--out", str(out), "--threads", str(ncores), "--memory-budget-gb", str(args.mem_gb * 0.9), "-q"]
     if c.B is not None:
         cmd[3:3] = ["--B", str(c.path / "B.npz")]
-    if solver == "hsolve-nocert" or target is not None:
-        cfg = dict(c.config)
-        if solver == "hsolve-nocert":
-            cfg["inertia_check"] = "off"
+    if HSOLVE_VARIANTS[solver] or target is not None:
+        cfg = {**c.config, **HSOLVE_VARIANTS[solver]}
         if target is not None:
             cfg["target"] = target
         cfg_path = out.parent / f"config-{solver}.json"
@@ -390,7 +401,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("cases", nargs="+")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--cores", default=os.environ.get("HS_CORES", "24-30,33-41"))
-    ap.add_argument("--solvers", default="hsolve,hsolve-nocert,slepc")
+    ap.add_argument("--solvers", default="hsolve,hsolve-nocert,slepc",
+                    help=f"comma-separated, run interleaved; any of {', '.join(SOLVERS)}")
     ap.add_argument("--slepc-profile", choices=("default", "best"), default="default")
     ap.add_argument("--slepc-profile-file", default=str(PROFILE_FILE))
     ap.add_argument("--slepc-ranks", type=int, default=1, help="ranks of the default SLEPc profile")
@@ -408,9 +420,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    solvers = args.solvers.split(",")
+    unknown = [s for s in solvers if s not in SOLVERS]
+    if unknown:
+        raise SystemExit(f"unknown solver(s) {', '.join(unknown)} (known: {', '.join(SOLVERS)})")
     from tools.eval import common, evaluate
     common.require_guard("compare")
-    solvers = args.solvers.split(",")
     override = json.loads(args.target) if args.target else None
     ncores = len(parse_cpulist(args.cores))
     rows = []

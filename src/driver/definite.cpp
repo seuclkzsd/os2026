@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 
+#include "driver/certificate.hpp"
 #include "driver/internal.hpp"
 #include "driver/projection.hpp"
 #include "hsolve/eigen.hpp"
@@ -116,10 +117,11 @@ const char* which_name(Which w) {
 // One shift-invert Lanczos run at the shift the factorization currently holds, optionally deflated,
 // with Krylov blocks of p vectors (KrylovSchurOptions::block_size; p = 1: single vector).
 // theta = 1/(lambda - sigma): LargestMagnitude = nearest sigma, SmallestAlgebraic = the eigenvalues
-// just below sigma, LargestAlgebraic = just above.
+// just below sigma, LargestAlgebraic = just above. lead > 0: the run may end once the lead best
+// ranked of the nev pairs have converged (KrylovSchurOptions::lead_nev).
 template <class T>
 void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma, Which which,
-                 index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out) {
+                 index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out, index_t lead = 0) {
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
   SolveRefinement refine;
@@ -138,6 +140,7 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   ko.seed = c.cfg.seed + static_cast<std::uint64_t>(out.restarts);  // fresh start for reruns
   ko.deflation = deflation;
   ko.block_size = std::max<index_t>(p, 1);
+  ko.lead_nev = lead < nev ? lead : 0;
   HermitianEigResult<T> res;
   {
     PhaseScope phase(c.clock, Phase::Iterate);
@@ -148,11 +151,23 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
   out.converged = res.converged;
   event(c, "lanczos", {{"sigma", sigma}, {"which", std::string(which_name(which))},
                        {"nev", static_cast<std::int64_t>(nev)},
+                       {"lead", static_cast<std::int64_t>(ko.lead_nev)},
                        {"block_size", static_cast<std::int64_t>(ko.block_size)},
                        {"nconv", static_cast<std::int64_t>(res.nconv)},
                        {"restarts", static_cast<std::int64_t>(res.restarts)},
                        {"op_applies", static_cast<std::int64_t>(res.op_applies)},
-                       {"deflated", static_cast<std::int64_t>(deflation ? deflation->cols() : 0)}});
+                       {"deflated", static_cast<std::int64_t>(deflation ? deflation->cols() : 0)},
+                       {"max_estimate", res.history.empty() ? 0.0 : res.history.back().max_estimate}});
+  if (!res.converged) {
+    // Where the restarts stalled: the first restarts, then every 4^j-th, and the last one.
+    const std::size_t len = res.history.size();
+    for (std::size_t i = 0; i < len; i = (i < 4 || i + 1 == len) ? i + 1 : std::min(4 * i, len - 1)) {
+      const RestartRecord& h = res.history[i];
+      event(c, "lanczos_history", {{"restart", static_cast<std::int64_t>(h.restart)},
+                                   {"nconv", static_cast<std::int64_t>(h.nconv)}, {"max_estimate", h.max_estimate},
+                                   {"op_applies", static_cast<std::int64_t>(h.op_applies)}});
+    }
+  }
   for (double th : res.ritz_all)
     if (th != 0.0) out.ritz_hints.push_back(sigma + 1.0 / th);
   // Append the new vectors (all nev, converged first) to the candidate block.
@@ -333,23 +348,46 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   const index_t k = t.k;
   if (k > n) HS_THROW(InvalidInput, "target.k = " << k << " exceeds the matrix order " << n);
 
-  // Factorization at the shift (near-singular handling in factorize_near).
+  // Factorization at the shift (near-singular handling in factorize_near). Its time and the solve
+  // calls of the Krylov run are measured for the auto choice of the completeness check.
   bool detection_off = false;
+  CertificateTimings timings;
+  const FactorStats before_factor = fac.stats();
   const double sigma = factorize_near(c, fac, t.sigma, scale, detection_off);
   rep.sigma_used = sigma;
   const FactorStats& fs = fac.stats();
+  if (fs.factorizations > before_factor.factorizations)
+    timings.factorize_s = (fs.factorize_s - before_factor.factorize_s) /
+                          static_cast<double>(fs.factorizations - before_factor.factorizations);
   event(c, "factorization", {{"sigma", sigma}, {"factor_s", fs.factorize_s}, {"entries", static_cast<std::int64_t>(fs.factor_entries)},
                              {"mb", fs.factor_mb_used}, {"delayed_pivots", static_cast<std::int64_t>(fs.delayed_pivots)}});
 
   // Converge exactly the k wanted pairs (most wanted by |theta| = nearest to sigma). Asking for
   // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
   const index_t nev = std::min<index_t>(n, k);
-  // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis.
-  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c.cfg, nev));
+  // Block width: the blocktune rule on the run's shape, with the entries of the factorization the
+  // run's solves use (block_size_for; reserved up to its widest width before the analysis).
+  eigen_detail::ShiftInvertShape shape;
+  shape.n = n;
+  shape.nev = nev;
+  shape.factor_entries = static_cast<double>(fs.factor_entries);
+  shape.nnz_b = pencil.b() ? static_cast<double>(pencil.b()->nnz()) : 0.0;
+  shape.complex_scalars = is_complex_v<T>;
+  // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis. The memory
+  // plan reserved the P4 width: an auto width beyond it is halved back to it without a warning.
+  const index_t p_rule = block_size_for(c.cfg, shape);
+  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, p_rule,
+                                      c.cfg.block_size > 0 ? p_rule : std::min(p_rule, reserved_block_size(c.cfg)));
   rep.block_size = p;
   DefiniteRun<T> run;
+  const FactorStats before_run = fac.stats();
   lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev, p, static_cast<const DenseMatrix<T>*>(nullptr),
               run);
+  if (fac.stats().solves > before_run.solves) {
+    const auto calls = static_cast<double>(fac.stats().solves - before_run.solves);
+    timings.solve_call_s = (fac.stats().solve_s - before_run.solve_s) / calls;
+    timings.rhs_per_call = static_cast<double>(fac.stats().rhs_solved - before_run.rhs_solved) / calls;
+  }
   if (!run.converged) warn(c, "Krylov-Schur did not converge all requested pairs within max_restarts");
 
   const double zero_tol = cfg.zero_filter_tol >= 0 ? cfg.zero_filter_tol * scale : -1.0;
@@ -394,16 +432,28 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     if (rep.zero_modes_filtered > 0 || sel.size() < k || std::abs(t.sigma) - r <= zero_tol) return hand_over();
   }
 
-  // Inertia certificate (DESIGN §3.6-8), with up to two deflated reruns on a count mismatch. Its
-  // two counts per round come from an InertiaCounter when that pays (counter_pays). The main
-  // factors at sigma are released before the counter counts (MainFactors::Release): after the
-  // rescue above they are needed only for a rerun, which refactorizes once - as main-object counts
-  // would - and the counts never hold both in memory.
-  const bool want_cert = cfg.inertia_check != Toggle::Off;
+  // Completeness check (DESIGN §3.6-8; method by SolverConfig::certificate, certificate.hpp),
+  // with up to two deflated reruns when pairs are missing. The exact certificate's two counts per
+  // round come from an InertiaCounter when that pays (counter_pays). The main factors at sigma are
+  // released before the counter counts (MainFactors::Release): after the rescue above they are
+  // needed only for a rerun, which refactorizes once - as main-object counts would - and the
+  // counts never hold both in memory. The randomized check runs on the factors held at sigma.
+  const bool want_cert = cfg.inertia_check != Toggle::Off && cfg.certificate != CertificateMode::Off;
+  if (want_cert && cfg.certificate_fault_drop > 0) {
+    // Fault injection (tests and measurements): the check must find these pairs missing.
+    const std::vector<double> removed =
+        drop_found_pairs(run.all, run.ritz_hints, sel.lambda, t.sigma, cfg.certificate_fault_drop);
+    std::string list;
+    for (double l : removed) list += (list.empty() ? "" : ", ") + fmt(l);
+    warn(c, "certificate_fault_drop: " + std::to_string(removed.size()) +
+                " found pair(s) removed before the completeness check (" + list + ")");
+    select_and_verify();
+  }
   InertiaCertificate& cert = rep.certificate;
   const bool on_counter = want_cert && counter_pays(cfg, fac.estimate(), mumps_input_size(pencil),
                                                     fac.options().threads, 2);
   CountSource<T> counts(fac, pencil, on_counter, MainFactors::Release);
+  NearestCertifier<T> fast(c, pencil, fac, sigma, detection_off, scale, n2a, n2b, timings);
   for (int round = 0; want_cert && round < 3; ++round) {
     if (sel.size() == 0) break;
     const double tiny = 1e-12 * std::max(scale, std::abs(t.sigma));
@@ -419,36 +469,90 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     double a_end = push_out(t.sigma - r, -1.0);
     double b_end = push_out(t.sigma + r, +1.0);
     if (zero_tol >= 0 && a_end <= zero_tol && b_end >= -zero_tol) return hand_over();  // window meets the band
-    const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-    const index_t nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
-    const index_t nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
-    cert.performed = true;
-    cert.lower = a_end;
-    cert.upper = b_end;
-    cert.count_inertia = nu_b - nu_a;
-    index_t found = 0;
-    for (double l : run.all.lambda)
-      if (std::isfinite(l) && l >= a_end && l <= b_end && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
-    cert.count_found = found;
-    cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
-    event(c, "certificate", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end}, {"upper", b_end},
-                             {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
-                             {"count_found", static_cast<std::int64_t>(found)}, {"passed", cert.passed}});
-    if (cert.passed || cert.count_inertia < cert.count_found || round == 2) break;
-    const index_t missing = cert.count_inertia - cert.count_found;
-    warn(c, "certificate: " + std::to_string(missing) + " eigenvalue(s) missing in the window; deflated rerun");
+    index_t missing = 0;
+    index_t zd = 0;
+    // Fewer than k selected pairs (fault injection, pairs left unconverged, a rescue merging
+    // columns): every check covers only the found pairs' window / disc, which may end before the
+    // k-th nearest eigenvalue - a passed check then still reruns for the pairs short.
+    const index_t short_by = std::min<index_t>(k, n) - sel.size();
+    auto rerun_short = [&]() {
+      warn(c, "certificate: only " + std::to_string(sel.size()) + " of " + std::to_string(k) +
+                  " pairs selected; deflated rerun for the nearest ones beyond");
+      return short_by;
+    };
+    const RoundPairs<T> pairs{run.all, &sel, select_nearest(run.all.lambda, t.sigma, k, zero_tol, zd)};
+    const CheckOutcome quick = fast.check({t.sigma, r, a_end, b_end}, pairs, round);
+    if (quick.verdict == CheckOutcome::Verdict::Passed) {
+      if (short_by == 0 || round == 2) break;
+      missing = rerun_short();
+    } else if (quick.verdict == CheckOutcome::Verdict::Missing && round < 2) {
+      // Still missing after the last rerun: the exact counts give the final verdict (below).
+      missing = std::max(quick.missing, short_by);
+      warn(c, "certificate: the " + cert.method + " check finds " + std::to_string(quick.missing) +
+                  " eigenvalue(s) missing near sigma; deflated rerun");
+    } else {
+      // Exact counts: on the certifier's InertiaCounter when its single counts built one (no
+      // second analysis; a window it counted to check single counts is not counted again).
+      index_t nu_a = 0, nu_b = 0;
+      const bool on_certifier = fast.exact_counts(a_end, b_end, nu_a, nu_b);
+      if (!on_certifier) {
+        const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
+        nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+        nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+      }
+      cert.performed = true;
+      cert.lower = a_end;
+      cert.upper = b_end;
+      cert.count_inertia = nu_b - nu_a;
+      index_t found = 0;
+      for (double l : run.all.lambda)
+        if (std::isfinite(l) && l >= a_end && l <= b_end && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
+      cert.count_found = found;
+      cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
+      fast.record_exact(on_certifier || counts.uses_counter());
+      event(c, "certificate", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end}, {"upper", b_end},
+                               {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
+                               {"count_found", static_cast<std::int64_t>(found)}, {"passed", cert.passed},
+                               {"short_by", static_cast<std::int64_t>(short_by)}});
+      if (cert.count_inertia < cert.count_found || round == 2) break;
+      if (cert.passed) {
+        if (short_by == 0) break;
+        missing = rerun_short();
+      } else {
+        missing = std::max(cert.count_inertia - cert.count_found, short_by);
+        warn(c, "certificate: " + std::to_string(cert.count_inertia - cert.count_found) +
+                    " eigenvalue(s) missing in the window; deflated rerun");
+      }
+    }
     keep_converged(run, n2a, n2b, cfg.tol);
+    // The missing pairs are the nearest sigma beyond the deflated ones: the rerun asks for two
+    // more, which shape its basis and are kept when they converge, but it ends once the missing
+    // ones have (lead; the next round checks the window again). A pair beyond them may lie in a
+    // cluster wider than the inner tolerance and never converge: yee-pec-box-1e5, k = 10, one
+    // copy of the double eigenvalue 59.986 removed - the rerun's third pair is a vector of the
+    // 35475-fold curl-curl null space (|theta| = 1/sigma, its Ritz values at lambda ~ 4e-9),
+    // whose estimate stalled at 3e-10 |theta| against the inner tolerance 1e-11 at widths 4 and
+    // 8 (deterministic run, 4 threads, max_restarts 60: 1236 / 1976 applications; with lead 40 /
+    // 72); reruns of width 2 got under it after 154 and 218 applications (with lead: 20). In the
+    // measurement slot (16 threads, 5 interleaved runs per width) the rerun now ends after one
+    // restart at widths 4 and 8, whole solve 4.65 .. 4.81 s (the review: 1000 restarts, ~200 s).
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
     if (nev_rerun < 1) break;
     refactorize_at(c, fac, sigma, detection_off);
     DenseMatrix<T> defl = run.all.x;
     const index_t d = defl.cols();
-    const index_t p_rerun = fit_block_size<T>(c, n, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, missing));
-    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run);
+    const index_t p_rerun =
+        fit_block_size<T>(c, n, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(cfg, p, missing));
+    lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run, missing);
     select_and_verify();
   }
+  if (cert.performed && cert.passed && sel.size() < std::min<index_t>(k, n))
+    cert.statement += "; but only " + std::to_string(sel.size()) + " of " + std::to_string(k) +
+                      " pairs were found: the window covers the found pairs, not the k-th nearest eigenvalue";
   if (cert.performed && !cert.passed) {
-    if (cert.count_inertia < cert.count_found)
+    if (cert.count_inertia < 0)
+      warn(c, "certificate failed: the " + cert.method + " check still finds eigenvalues missing near sigma");
+    else if (cert.count_inertia < cert.count_found)
       warn(c, "certificate: more computed eigenvalues than inertia allows (duplicates/ghosts) in [" + fmt(cert.lower) +
                   ", " + fmt(cert.upper) + "]");
     else
@@ -1037,6 +1141,7 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     return partial ? std::max<index_t>(0, s.want - inside) : count - inside - near_out;
   };
   sr.nev = std::min(n_, s.required());
+  // The P4 width: the blocktune rule was calibrated on nearest-target runs, not per-slice nev.
   const index_t p = fit_block_size<T>(c_, n_, sr.nev, 0, 4 * sr.nev, block_size_for(c_.cfg, sr.nev));
   if (id == 0) c_.rep.block_size = p;
   lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, p, static_cast<const DenseMatrix<T>*>(nullptr), run);
@@ -1056,7 +1161,8 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
                               {"multiplet", m_sigma}});
     DenseMatrix<T> defl = run.all.x;
     const index_t d = defl.cols();
-    const index_t p_rerun = fit_block_size<T>(c_, n_, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, miss));
+    const index_t p_rerun =
+        fit_block_size<T>(c_, n_, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(cfg, p, miss));
     if (std::isfinite(m_sigma)) {
       tried.push_back(m_sigma);
       bool off = false;
@@ -1515,29 +1621,54 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   // Work not inside a Factor / Iterate scope (refinement, residuals, rescue, certificate
   // bookkeeping) is verification.
   PhaseScope phase(c.clock, Phase::Verify);
+  // Report: the checks' wall time (all rounds; the Certificate phase of this path), and the
+  // exact counts of window targets, which set no method of their own.
+  const auto finish = [&](Solution<T>&& sol) {
+    InertiaCertificate& cert = c.rep.certificate;
+    cert.seconds = c.clock.seconds(Phase::Certificate);
+    if (cert.performed && cert.method == "none") {
+      cert.method = certificate_method_name(CertificateMethod::Exact);
+      cert.rigorous = cert.passed;
+      cert.failure_probability = cert.passed ? 0.0 : 1.0;
+      cert.statement = "double-precision Sylvester counts at every window end and slice cut: " +
+                       std::to_string(cert.count_inertia) + " eigenvalue(s) required, " +
+                       std::to_string(cert.count_found) + " distinct found pair(s)" +
+                       (cert.passed ? std::string(": every required eigenvalue is found") : std::string());
+    }
+    return std::move(sol);
+  };
   if (c.cfg.target.mode == TargetMode::Nearest) {
     double r0 = -1.0;
     Solution<T> sol = solve_nearest(c, pencil, fac, n2a, n2b, scale, &r0);
-    if (!(r0 > 0)) return sol;
+    if (!(r0 > 0)) return finish(std::move(sol));
     // The zero band interferes: k nearest outside it from windows [sigma - r, sigma + r] minus the
     // band (slices with shifts kept away from the band), r from inertia counts.
     warn(c, "zero band |lambda| <= " + fmt(c.cfg.zero_filter_tol * scale) +
                 " reaches the nearest window: windowed solve with radius from inertia counts");
+    if (c.cfg.certificate == CertificateMode::Randomized)
+      warn(c, "certificate=randomized not used: the windowed solve counts exactly (its count points are shifts)");
     const index_t restarts = c.rep.restarts, applies = c.rep.op_applies;
+    const index_t solves = c.rep.certificate.solves;
     c.rep.pairs.clear();
     c.rep.certificate = InertiaCertificate{};
+    c.rep.certificate.solves = solves;
     c.rep.zero_modes_filtered = 0;
     WindowSolver<T> ws(c, pencil, fac, n2a, n2b, scale, spectrum);
     ws.set_nearest_radius(r0);
     sol = ws.solve();
     c.rep.restarts += restarts;
     c.rep.op_applies += applies;
-    return sol;
+    return finish(std::move(sol));
   }
   if (c.cfg.inertia_check == Toggle::Off)
     warn(c, "inertia_check=off ignored: interval / smallest / largest targets are built on inertia counts");
+  else if (c.cfg.certificate == CertificateMode::Off)
+    warn(c, "certificate=off ignored: interval / smallest / largest targets are built on inertia counts");
+  else if (c.cfg.certificate == CertificateMode::Randomized)
+    warn(c, "certificate=randomized applies to nearest targets: interval / smallest / largest targets count "
+            "exactly (their count points are slice cuts and shifts)");
   WindowSolver<T> ws(c, pencil, fac, n2a, n2b, scale, spectrum);
-  return ws.solve();
+  return finish(ws.solve());
 }
 
 #define HS_INSTANTIATE_SOLVE_DEFINITE(T)                                                                  \

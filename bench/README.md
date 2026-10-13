@@ -35,6 +35,8 @@ development server where the quoted numbers were taken).
 | `bench_slicing_sweep` | `hs::solve` on a case for several settings: interval slice sizes, smallest / largest (vs the pre-P3 path), nearest with zero-cluster handling | `bench_slicing_sweep --A A.npz [--B B.npz] interval LO HI SIZE...` \| `smallest K` \| `largest K` \| `nearest SIGMA K [ZFT]` |
 | `bench_slicing_fix_probe` | regression probes of the slicing review (multiplets, clusters, null spaces, anchors, GHIEP zero cluster) on small known spectra | `bench_slicing_fix_probe PROBE\|all [SEED]` |
 | `bench_pybind_convert` | cost of converting scipy/numpy buffers to `hs::CsrMatrix` (python/src/csr_convert.hpp) per layout and dtype, against an owning copy | `bench_pybind_convert [N=100] [repeats=5]` |
+| `tools/bench/ab_cases.py` (Python) | A/B regression of two hsolve binaries on data cases: interleaved ABBA runs of the default configuration in the measurement slot (layout of tools/eval/sweep.py), then medians, ratio, geometric mean and the cases slower than a threshold over the valid runs (results/p5c_measurements.md section 2) | `guard.py --exclusive --timeout 2700 -- python3 tools/bench/ab_cases.py run --bin main=BIN --bin new=BIN --run-dir RUN CASE...`; `python3 tools/bench/ab_cases.py table RUN...` |
+| `tools/bench/compare_merge.py` (Python) | one compare.py table from parts run on several nodes (same solvers, profile, reps, target) | `python3 tools/bench/compare_merge.py --tag TAG PART.json@HOST...` |
 
 P4 programs:
 
