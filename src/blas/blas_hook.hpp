@@ -29,7 +29,9 @@
 // Results: a route changes the operation order of a call (rounding-level differences against the
 // real routine), never its semantics; for a fixed thread count every route is deterministic (each
 // output element is computed by one thread in a fixed order, the work split depends only on the
-// shape and the thread count).
+// shape and the thread count). The thread count is the one a route asks for; its fixed blocks are
+// dealt round-robin over the team the OpenMP runtime actually forms, so a smaller team
+// (OMP_THREAD_LIMIT, OMP_DYNAMIC, max-active-levels) computes every block and the same result.
 #pragma once
 
 #include <cstddef>

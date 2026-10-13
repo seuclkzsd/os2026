@@ -142,6 +142,13 @@ foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
     target_link_libraries(${name} PRIVATE hsolve_blas)
     target_compile_definitions(${name} PRIVATE HSOLVE_BLASHOOK_SO="$<TARGET_FILE:hsolve_blashook>")
     add_dependencies(${name} hsolve_blashook)
+    if(name STREQUAL "test_asmkern_fix")
+      # The parallel routes under a runtime that grants fewer threads than they ask for.
+      add_test(NAME test_asmkern_fix.ShortTeamUnderThreadLimit2
+               COMMAND ${name} --gtest_filter=AsmkernFixShortTeam.*)
+      set_tests_properties(test_asmkern_fix.ShortTeamUnderThreadLimit2 PROPERTIES
+                           ENVIRONMENT "OMP_THREAD_LIMIT=2;OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1")
+    endif()
   elseif(name MATCHES "^asmkern_" AND TARGET bench_${name})
     target_link_libraries(bench_${name} PRIVATE hsolve_blas)
   endif()

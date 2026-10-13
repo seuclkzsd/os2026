@@ -63,6 +63,12 @@ bool parse_int(const std::string& s, long long lo, long long hi, long long* out)
   return true;
 }
 
+// The parallel helpers below split the work into `threads` fixed blocks (a function of the shape
+// and `threads` only, so the result does not depend on the team) and hand them out round-robin
+// over the team the runtime actually forms: OpenMP may grant fewer threads than num_threads asks
+// for (OMP_THREAD_LIMIT, OMP_DYNAMIC, max-active-levels, a thread limit of the caller), and every
+// block must still be computed.
+
 // Gemv with the real routine on `threads` fixed blocks of y (rows of A for 'N', columns of A for
 // 'T'); incx, incy > 0. Each element of y is computed by one real dgemv call on one thread.
 void parallel_gemv(int threads, bool trans, fint m, fint n, double alpha, const double* a,
@@ -74,8 +80,8 @@ void parallel_gemv(int threads, bool trans, fint m, fint n, double alpha, const 
   const fint per = ((len + threads - 1) / threads + align - 1) / align * align;
   const char t = trans ? 'T' : 'N';
 #pragma omp parallel num_threads(threads)
-  {
-    const fint i0 = static_cast<fint>(omp_get_thread_num()) * per;
+  for (int blk = omp_get_thread_num(); blk < threads; blk += omp_get_num_threads()) {
+    const fint i0 = static_cast<fint>(blk) * per;
     const fint i1 = std::min<fint>(len, i0 + per);
     if (i0 < i1) {
       const fint cnt = i1 - i0;
@@ -99,8 +105,8 @@ void parallel_gemm(int threads, bool ta, bool tb, fint m, fint n, fint k, double
   const char cta = ta ? 'T' : 'N';
   const char ctb = tb ? 'T' : 'N';
 #pragma omp parallel num_threads(threads)
-  {
-    const fint i0 = static_cast<fint>(omp_get_thread_num()) * per;
+  for (int blk = omp_get_thread_num(); blk < threads; blk += omp_get_num_threads()) {
+    const fint i0 = static_cast<fint>(blk) * per;
     const fint i1 = std::min<fint>(m, i0 + per);
     if (i0 < i1) {
       const fint cnt = i1 - i0;
@@ -111,8 +117,9 @@ void parallel_gemm(int threads, bool ta, bool tb, fint m, fint n, fint k, double
 }
 
 // C = alpha * A^T * B + beta * C with A k x m, B k x n, split over K into `threads` fixed chunks:
-// each thread forms its partial product with the real dgemm (beta = 0), the partials are added
-// in thread order, so the result depends only on the shape and the thread count.
+// the partial product of each chunk is formed with the real dgemm (beta = 0) into its own slot,
+// the partials are added in chunk order, so the result depends only on the shape and the thread
+// count.
 void splitk_gemm_tn(int threads, fint m, fint n, fint k, double alpha, const double* a, fint lda,
                     const double* b, fint ldb, double beta, double* c, fint ldc) {
   const RealBlas& rb = real_blas();
@@ -120,16 +127,15 @@ void splitk_gemm_tn(int threads, fint m, fint n, fint k, double alpha, const dou
   const std::size_t mn = static_cast<std::size_t>(m) * n;
   std::vector<double> part(mn * threads, 0.0);
 #pragma omp parallel num_threads(threads)
-  {
-    const int t = omp_get_thread_num();
-    const fint k0 = static_cast<fint>(t) * per;
+  for (int blk = omp_get_thread_num(); blk < threads; blk += omp_get_num_threads()) {
+    const fint k0 = static_cast<fint>(blk) * per;
     const fint k1 = std::min<fint>(k, k0 + per);
     if (k0 < k1) {
       const fint kc = k1 - k0;
       const double one = 1.0, zero = 0.0;
       const char tr = 'T', nt = 'N';
-      rb.dgemm(&tr, &nt, &m, &n, &kc, &one, a + k0, &lda, b + k0, &ldb, &zero, part.data() + mn * t,
-               &m, 1, 1);
+      rb.dgemm(&tr, &nt, &m, &n, &kc, &one, a + k0, &lda, b + k0, &ldb, &zero,
+               part.data() + mn * static_cast<std::size_t>(blk), &m, 1, 1);
     }
   }
   for (fint j = 0; j < n; ++j)
