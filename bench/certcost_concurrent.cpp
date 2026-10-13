@@ -7,7 +7,8 @@
 // measures what any concurrent scheme could gain and what the fork-based one does gain.
 //
 //   bench_certcost_concurrent --case DIR --lower a --upper b [--sigma s] [--ordering o]
-//                             [--threads t] [--reps r] [--at a|b] --exp E[,E...]
+//                             [--threads t] [--reps r] [--at a|b] [--scaling s] [--detection 0|1]
+//                             [--set-blas 0|1] --exp E[,E...]
 //
 // DIR holds A.npz (B.npz) and config.json (sigma); [a, b] is the certificate window (a hsolve
 // report's certificate.lower / upper). o: a DETERMINISTIC ordering (5 METIS, 10 hsolve's nested
@@ -25,6 +26,10 @@
 //         thread pool does not survive fork(); a new thread gets a new pool) and returns it through
 //         a pipe, the parent counts nu(a) meanwhile, then waits: wall time per pair, and the counts
 //         must equal seq's.
+// --scaling: ICNTL(8) of the counters (default 7, the driver's; 0 none, to bound what a reused
+// scaling could save), --detection 0: counts without null-pivot detection (its cost), --set-blas 1:
+// openblas_set_num_threads(t) before every count (with the OpenMP OpenBLAS of the conda environment
+// this hung the 8-thread count in the build lane: off by default).
 // Output: one JSON object per line on stdout. Run through tools/run/guard.py.
 //
 // P8 commands (gpu01 measurement slot, 16 threads; cases, windows and results in
@@ -85,10 +90,14 @@ struct Args {
   int threads = 0;
   int reps = 5;
   bool set_blas = false;
+  int scaling = 7;        // ICNTL(8) of the counters (the driver's: 7)
+  bool detection = true;  // null-pivot detection of the counts (the driver's: on)
   std::string at = "a";
 };
 
 bool g_set_blas = false;
+int g_scaling = 7;
+bool g_detection = true;
 
 void emit(const json& j) { std::cout << j.dump() << std::endl; }
 
@@ -103,6 +112,7 @@ template <class T>
 std::unique_ptr<hs::InertiaCounter<T>> make_counter(const hs::SparseFactorization<T>& fac, int threads) {
   hs::FactorOptions o = fac.options();
   o.threads = threads;
+  o.scaling = g_scaling;
   return std::make_unique<hs::InertiaCounter<T>>(fac, o);
 }
 
@@ -110,7 +120,7 @@ std::unique_ptr<hs::InertiaCounter<T>> make_counter(const hs::SparseFactorizatio
 template <class T>
 hs::Inertia count(hs::InertiaCounter<T>& c, double s, int threads) {
   if (g_set_blas) openblas_set_num_threads(threads);
-  return c.count(1.0, -s);
+  return c.count(1.0, -s, g_detection);
 }
 
 template <class T>
@@ -241,6 +251,8 @@ int main(int argc, char** argv) {
       else if (k == "--reps") args.reps = std::stoi(need(i));
       else if (k == "--at") args.at = need(i);
       else if (k == "--set-blas") args.set_blas = std::stoi(need(i)) != 0;
+      else if (k == "--scaling") args.scaling = std::stoi(need(i));
+      else if (k == "--detection") args.detection = std::stoi(need(i)) != 0;
       else if (k == "--exp") {
         std::stringstream ss(need(i));
         std::string e;
@@ -259,6 +271,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   g_set_blas = args.set_blas;
+  g_scaling = args.scaling;
+  g_detection = args.detection;
   try {
     if (std::isnan(args.sigma)) {
       std::ifstream f(args.case_dir / "config.json");
