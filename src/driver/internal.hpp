@@ -2,10 +2,12 @@
 // Scalar set of the templates: T in {double, cplx}, instantiated in the .cpp that defines them.
 #pragma once
 
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "driver/norms.hpp"
@@ -140,14 +142,19 @@ MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil);
 
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb);
 
-/// Factorize K(sigma0) (DESIGN §3.6-4): perturb the shift on a null pivot, and factorize at sigma0
-/// without null-pivot detection when every nearby shift looks singular (dense cluster). Returns
-/// the shift used; detection_off tells later refactorizations at that shift to do the same.
-/// on_eigenvalue: sigma0 was placed on an eigenvalue on purpose (a multiple eigenvalue's own
-/// shift): the perturbation is expected and not reported as a warning.
+/// Factorize K(sigma0) (DESIGN §3.6-4): perturb the shift by 1e-8 * max(scale, |sigma0|) on null
+/// pivots of one eigenvalue (isolated eigenvalue at sigma0), and factorize at sigma0 without
+/// null-pivot detection inside a dense cluster - several eigenvalues' worth of null pivots
+/// (near_null_eigenvalues >= 2), or the perturbed shift singular as well. Returns the shift used;
+/// detection_off tells later refactorizations at that shift to do the same. on_eigenvalue: sigma0
+/// was placed on an eigenvalue on purpose (a multiple eigenvalue's own shift): the perturbation is
+/// expected (whatever the null pivots), and not reported as a warning.
 template <class T>
 double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off,
                       bool on_eigenvalue = false);
+/// Eigenvalues the null pivots of a factorization stand for: a complex T factorizes the real
+/// embedding, in which every eigenvalue appears twice.
+index_t near_null_eigenvalues(index_t null_pivots, bool complex_scalars);
 
 /// Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
 /// No-op when the object already holds exactly that factorization (Ctx::held).
@@ -235,7 +242,10 @@ template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed = false);
 
-/// The adaptive ordering's decision from the AMD probe's estimate (deterministic, see steps.cpp).
+/// The P4 rule of the adaptive ordering (AMD probe; one MUMPS nested dissection, nd_ordering, if
+/// the P3 model's saving exceeds kNdAnalysisOverAmd AMD analyses). Replaced in the driver by
+/// choose_ordering / adaptive_analysis below; kept as the reference the P5 choice is compared
+/// against (bench/anaint_decide.cpp, bench/drvint_*). Deterministic.
 struct OrderingDecision {
   double fill_ratio = 0.0;      ///< AMD factor entries / nnz(K)
   double saving_s = 0.0;        ///< predicted saving of nested dissection on the run
@@ -246,17 +256,164 @@ struct OrderingDecision {
 OrderingDecision decide_ordering(const FactorEstimate& amd, const MumpsInputSize& in, double pencil_nnz,
                                  int threads, index_t expected_factorizations, index_t expected_solves);
 
-/// MUMPS ICNTL(7) of the nested-dissection branch of the adaptive ordering: SCOTCH (3), or METIS
-/// (5, fixed seed) when cfg.deterministic asks for bitwise-reproducible runs - SCOTCH's orderings
-/// vary from run to run (measurements in steps.cpp).
+/// MUMPS ICNTL(7) of the P4 rule's nested dissection: SCOTCH (3), or METIS (5, fixed seed) when
+/// cfg.deterministic asks for bitwise-reproducible runs - SCOTCH's orderings vary from run to run
+/// (measurements in steps.cpp).
 int nd_ordering(const SolverConfig& cfg);
 
-/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe + cost model, nested dissection
-/// (nd_ordering) if it pays.
+// ------------------------------------------------------------------------------ ordering choice
+
+/// What a solve plans to do with the factors of its one analysis, from the configuration and the
+/// problem type known before the analysis (ProblemType::Auto: B's inertia is still to be counted,
+/// one factorization). Deterministic (no timing); calibrated on the data cases' end-to-end runs
+/// (plan_work in steps.cpp). The adaptive ordering prices every candidate on it.
+struct PlannedWork {
+  double factorizations = 1.0;  ///< numeric factorizations of the main object (shifts, B, A's null space)
+  double counts = 0.0;          ///< certificate inertia counts (an InertiaCounter's or the main object's)
+  double solve_calls = 0.0;     ///< multi-RHS solve calls of the Krylov runs
+  index_t block = 1;            ///< right-hand sides per call (block Krylov width)
+};
+/// scale: ||A||_2 / ||B||_2 (GHIEP: a shift in the zero band means one-sided runs).
+PlannedWork plan_work(const SolverConfig& cfg, ProblemType type, index_t n, double scale);
+
+/// One candidate fill-reducing ordering of the adaptive analysis, priced on the planned work.
+struct OrderingCandidate {
+  int ordering = 0;         ///< FactorOptions::ordering (0 AMD, kOrderingNestedDissection, 5, 4, 3)
+  bool analysed = false;    ///< flops / entries are its own analysis estimate (else predicted)
+  double analysis_s = 0.0;  ///< predicted analysis time still to pay (0 once analysed)
+  double flops = 0.0;       ///< factorization flops (RINFOG(1))
+  double entries = 0.0;     ///< factor entries (INFOG(20))
+  double numeric_s = 0.0;   ///< predicted time of the planned factorizations, counts and solves
+  double incore_mb = 0.0;   ///< in-core MB of the factors (estimate; predicted for the others)
+  /// What the choice compares: the analysed candidates' numeric_s; for the others their analysis
+  /// plus numeric_s less the expected gain of knowing their actual estimate (choose_ordering).
+  /// Factors beyond the in-core cap score kOverCapScore-scaled by their size (steps.cpp).
+  double score_s = 0.0;
+};
+
+/// Orderings the adaptive analysis chooses from, in order of preference on near-equal scores: AMD,
+/// SCOTCH, hsolve's nested dissection (multithreaded), METIS, PORD (steps.cpp: why this order).
+std::vector<int> candidate_orderings(const SolverConfig& cfg);
+/// FactorOptions::ordering of MUMPS' SCOTCH (ICNTL(7) = 3).
+constexpr int kOrderingScotch = 3;
+/// Whether adaptive_analysis takes `ordering` on its prediction: once it is the best-scoring
+/// candidate it is analysed and used without comparing its estimate (SCOTCH: its orderings differ
+/// between runs, so a comparison could choose differently in identical runs).
+bool taken_on_prediction(int ordering);
+
+/// Sizes of the graphs the orderings work on: MUMPS orders its input (mumps_input_size), hsolve's
+/// nested dissection the same graph - or, for a complex pencil whose couplings are mostly complex,
+/// the n-vertex graph of K (compute_ordering's Embedding::Auto rule), with pencil.nnz() entries.
+struct OrderingInput {
+  MumpsInputSize mumps;
+  MumpsInputSize nd;
+};
+template <class T>
+OrderingInput ordering_input(const ShiftedPencil<T>& pencil);
+
+/// The constants of the ordering cost model (steps.cpp: what they are and how they were fitted;
+/// bench/anaint_fix_fit.cpp refits them from the raw measurements and replays the choice).
+struct OrderingModel {
+  static constexpr int kShapeKnots = 6;
+  double floor_order, floor_entry, floor_fe;       ///< given-order analysis (MUMPS, PERM_IN)
+  double nd_work_vertex, nd_work_edge, nd_work_fe;  ///< hsolve's nested dissection, 1 thread: W
+  double nd_serial;                                 ///< its serial fraction on many threads
+  double rho_metis, rho_pord, rho_scotch;           ///< MUMPS' orderings: rho * W of the input
+  double amd_order, amd_entry;                      ///< AMD's ordering
+  /// ln (flops, entries) of an ordering over AMD's at the knots kShapeKnotFill of AMD's fill.
+  struct Shape {
+    int ordering;
+    double flops[kShapeKnots], entries[kShapeKnots];
+  };
+  Shape shapes[4];
+  double fac_order, fac_entry, fac_fe, fac_flops;  ///< first factorization on an analysis, 16 threads
+  double refactor, count;                          ///< refactorization, InertiaCounter count: of it
+  double solve_order, solve_fe, solve_per_rhs;     ///< 1-RHS solve, 16 threads; per extra RHS
+  double fac_thread_gamma, solve_thread_gamma;     ///< (16 / threads)^gamma
+  double amd_low_fill_factorization, amd_low_fill_solve;  ///< AMD's numeric phases at fill <= 4
+};
+/// The fitted model (steps.cpp).
+const OrderingModel& ordering_model();
+/// AMD fill ratios of the shape fits' knots.
+constexpr double kShapeKnotFill[OrderingModel::kShapeKnots] = {1.0, 4.0, 10.0, 40.0, 150.0, 1000.0};
+/// ln r at AMD fill `fill` of a shape fit (piecewise linear in ln fill, constant beyond the knots).
+double shape_log_ratio(const double (&knots)[OrderingModel::kShapeKnots], double fill);
+
+/// Predicted wall time of one analysis with `ordering` (MUMPS orderings are serial, hsolve's nested
+/// dissection runs on `threads`) of an input of sizes `in` whose factors hold `factor_entries`.
+double ordering_analysis_s(const OrderingModel& m, int ordering, const OrderingInput& in, double factor_entries,
+                           int threads);
+double ordering_analysis_s(int ordering, const OrderingInput& in, double factor_entries, int threads);
+/// Predicted seconds of one numeric factorization (the first on its analysis) of an input of sizes
+/// `in` whose factors take `flops` and hold `entries`, on `threads`.
+double factorization_s(const OrderingModel& m, const MumpsInputSize& in, double flops, double entries, int threads);
+double factorization_s(const MumpsInputSize& in, double flops, double entries, int threads);
+/// Predicted time of the planned numeric work with factors of `flops` and `entries` on `threads`:
+/// factorizations, certificate counts (on an InertiaCounter when counter_pays, which then adds the
+/// counter's analysis) and the solve calls of width w.block. amd_fill > 0: the factors are AMD's,
+/// with this fill ratio (entries / nnz of the pencil) - at low fill its numeric phases parallelize
+/// worse (steps.cpp); 0 for a nested dissection.
+double planned_numeric_s(const OrderingModel& m, const SolverConfig& cfg, const PlannedWork& w,
+                         const MumpsInputSize& in, double flops, double entries, int threads, double amd_fill = 0.0);
+double planned_numeric_s(const SolverConfig& cfg, const PlannedWork& w, const MumpsInputSize& in, double flops,
+                         double entries, int threads, double amd_fill = 0.0);
+/// Predicted (flops, entries) of `ordering` on an input whose AMD analysis estimated `amd`
+/// (pencil_nnz: upper entries of the pencil), scaled from the actual estimate `anchor` of the
+/// analysed ordering `anchor_ordering` (AMD itself, or a nested dissection: the relative
+/// prediction between two nested dissections is much tighter than from AMD).
+std::pair<double, double> predicted_shape(const OrderingModel& m, int ordering, const FactorEstimate& amd,
+                                          double pencil_nnz, int anchor_ordering, const FactorEstimate& anchor);
+std::pair<double, double> predicted_shape(int ordering, const FactorEstimate& amd, double pencil_nnz,
+                                          int anchor_ordering, const FactorEstimate& anchor);
+
+/// The pricing steps of adaptive_analysis (pure: bench/anaint_fix_fit.cpp replays the driver's
+/// choice on recorded estimates with them). analysed(): candidate i got the analysis estimate e (i
+/// = 0: the AMD probe, whose estimate the predictions scale); predict(): the candidates not
+/// analysed yet re-priced from the analysed candidate `anchor` - predicted analysis plus numeric
+/// time less the expected gain of an actual estimate; factors beyond cap_mb score beyond every
+/// candidate that fits.
+struct OrderingPricer {
+  const OrderingModel& model;
+  const SolverConfig& cfg;
+  PlannedWork work;
+  OrderingInput in;
+  double pencil_nnz = 0.0;
+  int threads = 1;
+  double cap_mb = 0.0;  ///< in-core cap of the factors (0: none)
+  FactorEstimate amd;   ///< the probe's estimate
+  void analysed(std::vector<OrderingCandidate>& cand, std::size_t i, const FactorEstimate& e);
+  void predict(std::vector<OrderingCandidate>& cand, std::size_t anchor) const;
+};
+
+/// The choice step of adaptive_analysis: given the candidates (at least one analysed), the index
+/// of the one to take if it is analysed, or to analyse next. Scores ties go to the earlier
+/// candidate; a candidate must beat an earlier one by kOrderingMargin of its score. Pure function.
+std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates);
+/// A later candidate must score below (1 - kOrderingMargin) times an earlier one to be preferred.
+constexpr double kOrderingMargin = 0.05;
+
+/// The analysis loop of adaptive_analysis on candidates priced by callbacks (pure: testable without
+/// MUMPS). cand[0] must be AMD; candidates' `ordering` set. analyse(i) gives candidate i its actual
+/// estimate (analysed, score_s); predict(i) re-prices the candidates not analysed yet from the
+/// analysed candidate i; release(i) frees i's analysis. Calls analyse(0) and predict(0), then
+/// analyses the best-scoring candidate (choose_ordering) while it is not analysed yet; each newly
+/// analysed candidate is compared with the one kept so far by choose_ordering's rule for the two,
+/// and the loser is released; a candidate taken on its prediction ends the loop as the choice
+/// unless its score is over the cap. Returns the choice: analysed and never released.
+std::size_t run_ordering_choice(std::vector<OrderingCandidate>& cand, const std::function<void(std::size_t)>& analyse,
+                                const std::function<void(std::size_t)>& predict,
+                                const std::function<void(std::size_t)>& release);
+
+/// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe, then the candidate orderings
+/// priced on `work` by the ordering cost model; the most promising one is analysed, its actual
+/// estimate replaces the prediction, and so on until an analysed candidate is the best choice
+/// (steps.cpp). Every input of the decisions is deterministic (analysis estimates of
+/// deterministic orderings, models, the thread count), so identical runs choose the same ordering.
+/// cfg.deterministic runs keep the P4 rule (decide_ordering: AMD or METIS).
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
-                                                          index_t expected_factorizations, index_t expected_solves);
+                                                          const PlannedWork& work);
 
 // ------------------------------------------------------------------------------ cost model
 
@@ -318,6 +475,40 @@ struct SpectrumEstimate {
   bool valid = false;
 };
 
+// ------------------------------------------------------------------------------ definiteness of B
+
+enum class Definiteness { Positive, NotPositive, Unknown };
+
+/// A Ritz value of B's norm-estimate Lanczos below -kIndefiniteRitz * ||B||_2 proves B indefinite
+/// (test_b_definiteness).
+constexpr double kIndefiniteRitz = 1e-10;
+
+/// hs::solve gives the attempts of prove_positive_definite (norms.hpp) and its level-1 pattern at
+/// most this fraction of the predicted time of the factorization of B a proof saves
+/// (factorization_s of the main analysis' estimate, against hpd_attempt_seconds,
+/// hpd_count_seconds and hpd_fill_seconds). Beyond them a proof costs its Lanczos run and, once theta passes the
+/// gate, the stored S (both O(nnz(B))). At 16 threads (bench/
+/// anaint_bproof.cpp, P5c) a failed proof cost 0.054 s on ss-tem27623 against a 0.058 s
+/// factorization of B (the worst ratio; theta passed the gate, the attempt failed), 0.001..0.09 s
+/// elsewhere (ss-tem152078 0.09 s against 0.6 s, before the Lanczos ran on the implicitly scaled B);
+/// a successful one 0.004..0.08 s against 0.026..0.20 s.
+constexpr double kBProofBudget = 0.5;
+
+/// Whether B is HPD, as far as decided before the analysis, without a factorization.
+struct BDefiniteness {
+  Definiteness verdict = Definiteness::Unknown;
+  Inertia inertia;           ///< valid when the test yields it (diagonal B, dominant B)
+  std::string how = "none";  ///< "diagonal", "dominant", "diagonal_entry", "lanczos"; "none": Unknown
+};
+
+/// The cheap tests of B's definiteness (DESIGN §3.6-1), in this order: a diagonal B by the signs of
+/// its diagonal; strict diagonal dominance with a positive diagonal (HPD by Gershgorin); a diagonal
+/// entry <= 0 (not HPD); a Ritz value of `nb` - the norm-estimate Lanczos of B (estimate_norm2) -
+/// below -kIndefiniteRitz * nb.norm2 (not HPD: Ritz values stay inside the spectrum's hull up to
+/// O(eps ||B||_2)). Unknown: B's inertia must be counted. O(nnz(B)); does not modify b.
+template <class T>
+BDefiniteness test_b_definiteness(const CsrMatrix<T>& b, const NormEstimate& nb);
+
 // ------------------------------------------------------------------------------ solve paths
 
 /// HEP / GHEP (B HPD): shift-invert Lanczos, Rayleigh-Ritz, rescue, inertia certificate;
@@ -331,5 +522,22 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
 template <class T>
 Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac, double n2a,
                              double n2b, double scale);
+
+/// GHIEP: |lambda| <= kGhiepZeroBand * scale is numerically zero - the band of A's null-space
+/// cluster, kept away from the shifts (indefinite.cpp; zero_filter_tol can widen it).
+constexpr double kGhiepZeroBand = 1e-8;
+
+/// Krylov block size of a GHIEP shift-invert run with nev wanted pairs on an order-n pencil, before
+/// the memory fit: cfg.block_size if positive - capped at nev (a block wider than the wanted set
+/// only adds basis work), 64 and n / 16, and 1 for the side probes (nev <= 2) - else 2 for
+/// n >= 2e4 and nev >= 4, 1 below (measurements in indefinite.cpp). Deterministic.
+index_t ghiep_block_size(const SolverConfig& cfg, index_t n, index_t nev);
+
+/// n-vectors of T the GHIEP path keeps beside the factorization (memory plan of DESIGN §3.6-3,
+/// reserved before the analysis): the first run's krylov_schur_general_peak_columns (block size of
+/// ghiep_block_size, refinement workspace for single / BLR factors) plus the plain run's Schur
+/// basis and the union refinement basis held while later runs factorize (indefinite.cpp).
+template <class T>
+index_t ghiep_reserve_columns(const SolverConfig& cfg, index_t n);
 
 }  // namespace hs::driver
