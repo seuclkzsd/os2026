@@ -569,7 +569,9 @@ TEST(BlasHookRouter, SmallTrsmLimitDependsOnTheInstructionSet) {
   const RouteConfig a2 = hs::blas::parse_route_config("strsm=512,avx2");
   EXPECT_EQ(hs::blas::small_trsm_limit(a2), a2.isa == Isa::Avx2 ? 256 : 32);
   const RouteConfig best = hs::blas::parse_route_config("strsm=512");
-  if (best.isa == Isa::Avx512) EXPECT_EQ(hs::blas::small_trsm_limit(best), 512);
+  if (best.isa == Isa::Avx512) {
+    EXPECT_EQ(hs::blas::small_trsm_limit(best), 512);
+  }
   // The cap applies to routing: m = 40 goes to the real dtrsm on the portable kernels.
   std::vector<double> a(40 * 40, 0.0), b(40 * 2, 1.0);
   for (int i = 0; i < 40; ++i) a[i * 41] = 2.0;
