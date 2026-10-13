@@ -341,6 +341,12 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
   （`Always`，每步 3 次；§3.3 的 DGKS 前提）。单向量 Krylov 对精确重特征值只能靠舍入得到其余
   副本：driver 的惯性证书 + 收缩重跑负责补齐。block_size = 1 与 P2 的求解器逐位一致
   （`test_lanczos_bitwise.cpp` 对 base 17a2a79 钉住每种标量 12 种配置的输出哈希）。
+- **`KrylovSchurOptions::lead_nev`**（P5c 集成，单向量与块模式都有；`krylov_schur_general` 对非零值抛
+  InvalidInput）：0 < lead_nev < nev 时，按 which 排名最前的 lead_nev 个 Ritz 对全部收敛即结束运行（单向量在
+  轮末、块模式也在提前停止探测处检查），不论其余 nev − lead_nev 个想要的对如何；它们照样决定基数与保留集，
+  按其估计返回（收敛与否；结果契约不变，converged == (nconv ≥ nev)）。用于调用方多要的余量对：宽于 tol 的簇
+  内的对永不收敛（如 Maxwell 铅笔的 curl-curl 零空间，θ 上只在约 1e-10 相对内为零），不能让它把运行拖到
+  max_restarts。0（默认）或 nev：nev 个都须收敛；[0, nev] 之外抛 InvalidInput。
 - **块模式**（`KrylovSchurOptions::block_size = p > 1`，块 Krylov-Schur，Zhou & Saad 2008）：每步
   一次 p 列的 `op.apply`（多右端回代）；新块对 [D V] 做块 CGS2、块内做 M 内积 Cholesky-QR
   （`BlockOrthonormalizer`：G 非正定、R 的列尺度条件数 > 1e5 或某列在两遍后仍相关时回退逐列 CGS2，
@@ -350,7 +356,7 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     倍数）；给定 ncv 时即为基数，自动时再加 4p（受 n − d ≥ 2(ncv + p) 限制）。每次重启保留
     k = nev + (ncv − nev)/2 下取整到 p 的倍数，至少 s（留一个备用 Ritz 对）、至多 ncv − p。
   - **提前停止探测**：在块边界也做 Rayleigh–Ritz（第一轮从基数处起，之后从 k + p 起），nev 个全部
-    收敛即结束本轮。块运行因此恰好达到 tol，而 p = 1 只在轮末检查、通常超出 tol 几个量级——两者
+    （或 `lead_nev` 个最前者，见上）收敛即结束本轮。块运行因此恰好达到 tol，而 p = 1 只在轮末检查、通常超出 tol 几个量级——两者
     须在相同残差下比较，不能在相同 tol 下比较。
   - 自由空间不足（n − d < 2(ncv + p)），或 p 大到放不下一个块基，则用一轮覆盖整个自由空间的单向量
     循环精确求解（n − d 次作用）。
@@ -368,8 +374,8 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     `BlockTuning`（布局参数 extra_blocks、min_auto_ncv、keep_fraction 与 fast_ortho）与 `BlockRunStats`
     （各种步核的次数）只供测量与测试；16 线程的布局变体扫描是负结果（几何平均 −0.9%），默认布局不变。
   - driver 的用法（§3.6-5）：nearest 的位移反演运行用块宽规则（下），切片与单边运行仍用 P4 规则（nev ≥ 8
-    时 p = 4，否则 1），证书收缩重跑宽度 max(p, min(4, 缺数上取偶))。P3 的 eigen 层测量（相同精度下
-    几何平均 1.36–1.41×）由 driver 端到端测量取代（`results/p4_measurements.md` §3）。
+    时 p = 4，否则 1），证书收缩重跑宽度 max(q, min(4, 缺数上取偶))，q 为显式块宽 p、自动时 min(p, 4)。P3 的
+    eigen 层测量（相同精度下几何平均 1.36–1.41×）由 driver 端到端测量取代（`results/p4_measurements.md` §3）。
 - **块宽规则**（P5c，`src/eigen/block_rule.*`，eigen 内部、供 driver 用；纯函数，不读计时）：
   `recommended_block_size(ShiftInvertShape{n, nev, factor_entries, nnz_b, complex_scalars})`，
   factor_entries 为该运行位移处分解的因子条目（复数为实嵌入的），在 p ∈ `kRuleWidths` = {1, 2, 4, 8} 中
@@ -697,10 +703,15 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
        1.05–1.13×，yee-bloch-1e4 与 yee-photonic-*-1e4 选 8 比 P4 慢 2.5–3%。
      - 谱切片与单边运行（每片的 nev，含零带干扰时转交窗口的 nearest）：P4 规则，nev ≥ 8 时 p = 4，否则 1
        ——块宽规则只在 nearest 运行上标定。
-     报告的 `block_size` 是第一次运行的块宽（经内存适配后）。证书收缩重跑缺 m 对时宽度为 `rerun_block_size`
-     = max(p, min(4, m 上取偶))：宽度 ≥ 重数时随机起始块保证一轮取全副本；上限 4（不设上限时
+     报告的 `block_size` 是第一次运行的块宽（经内存适配后）。证书收缩重跑缺 m 对时宽度为
+     `rerun_block_size(cfg, p, m)` = max(q, min(4, m 上取偶))，q = p（显式块宽）或 min(p, 4)（自动块宽，P5c
+     集成）：宽度 ≥ 重数时随机起始块保证一轮取全副本；上限 4（不设上限时
      syn-ghep-multiplicity-real-1e4 缺 9 个、p = 10 的重跑用 200 次作用而单向量只用 59 次），更多副本仍靠
-     舍入与后续重跑。P4 规则的依据（30 个 HEP/GHEP 数据测例，4 线程，p = 1/4/8，`results/p4_measurements.md`
+     舍入与后续重跑。自动块宽进入时也先限到 4：重跑只求 m + 2 对，正是 P4 测得 8 慢于 4 的情形，而规则的 8
+     是为主运行的 k 对选的（gpu01 测量槽 16 线程，5 次交错，`certificate_fault_drop = 1`，主运行用规则的 8；
+     重跑阶段 = σ 处重分解 + 重跑迭代，宽度 8 → 4：ss-2cubes_sphere 1.301 → 1.197 s（作用 168 → 100）、
+     yee-pec-cube-32 0.788 → 0.735 s、syn-mem27-46（auto）0.235 → 0.185 s、yee-bloch-1e4（auto）0.165 →
+     0.131 s，范围不重叠；整次求解比集成树（重跑用 8、无 lead）快 1.05–1.33×）。P4 规则的依据（30 个 HEP/GHEP 数据测例，4 线程，p = 1/4/8，`results/p4_measurements.md`
      §3）：三维 1e5 测例迭代阶段快 1.4–2.5×，重特征值测例总时间快 1.4–2.2×（不再需要重跑）；k = 6、7
      （cav2d）块更慢（22 → 60 次作用；P5c 的块步快路径与规则使 p = 2 在这两例上也划算，§3.5），p = 8 只在
      重特征值主导时胜过 4。小而低填充的复数 1e4 测例最多慢 0.1 s；切片代价模型（§3.6-8b）仍按 p = 1 标定，
@@ -759,6 +770,12 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    - **轮次**：每轮先做该模式的检验；结论「缺」（exact：计数 > 找到；exact_single：两种精度确认的亏缺；
      randomized：检出）→ 以已收敛对（η ≤ 10·tol）作 deflation、在 σ 处重分解后重跑（nev = 缺数 + 2，块宽
      `rerun_block_size`，§3.6-5），至多 2 轮，每轮之后同法再检；精确计数少于找到数 → 告警（重复/幽灵收敛）。
+     重跑以 `lead_nev` = 缺数（§3.5，P5c 集成）运行：缺的那几个最近的对收敛即结束，多要的 2 对决定基、收敛了就
+     保留，但不再拖住运行（下一轮照样检验窗口）。多要的对可能落在宽于内层容差的簇里：yee-pec-box-1e5（k = 10，
+     删掉二重特征值 59.986 的一个副本）重跑的第三个对是 35475 重 curl-curl 零空间的向量，其估计停在
+     3e-10·|θ|，高于内层容差 1e-11——无 lead 时重跑跑满 1000 次重启（约 200 s，整次求解本应约 5 s）；确定性复现
+     （4 线程，max_restarts 60）宽度 4 / 8 的作用 1236 / 1976 → 40 / 72，16 线程测量槽中每次重跑一轮重启即止，
+     整次求解 4.65–4.81 s。
      **选中的对少于 k**（补救合并了列、对未收敛、故障注入）时，任何检验都只覆盖已找到的对的窗口，第 k 个
      最近的特征值可能在窗口之外：即使检验通过也重跑（缺数至少为 k − 选中数），最后仍不足时陈述注明。
    - `certificate_fault_drop`（只用于测试与测量）：第一次 Krylov 运行之后、检验之前删掉这么多已找到的对（先删
@@ -811,8 +828,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      用单边位移（SmallestAlgebraic：取位移以下；LargestAlgebraic：取以上），直接复用该计数点的分解；
      被判奇异的端点（其上有特征值，如用户端点）不作锚点——有限片改取中心，开放片取该端旁谱隙中点。
    - 每片收敛恰好其计数个对；离切点 δ = 1e-9·max(scale, |cut|) 以内的片外对也保留（这么近的特征值
-     可能算到另一侧），交给去重。缺对时以已得对作 deflation 重跑，只要还有新对（至多 缺数 + 4 轮、
-     上限 32 轮、连续 2 轮无新对即停）；已得对中有重特征值时，重跑位移放在离它 1% 谱隙处（重根主导
+     可能算到另一侧），交给去重。缺对时以已得对作 deflation 重跑（不用 `lead_nev`：片内缺的对不一定是排名
+     最前的），只要还有新对（至多 缺数 + 4 轮、上限 32 轮、连续 2 轮无新对即停）；已得对中有重特征值时，重跑位移放在离它 1% 谱隙处（重根主导
      算子约 100 倍，舍入补出其余副本；正放在重根上会把数值重簇拆成逐个收敛的 θ）。
    - P4：计数默认在主对象上（§3.6-8）；每片的块宽为 `block_size_for`(该片 nev)（≥ 8 对时 p = 4），
      片大小的代价模型未按块运行重新标定，窗口目标的性能未重测。
