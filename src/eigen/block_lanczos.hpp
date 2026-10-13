@@ -56,6 +56,8 @@ struct LanczosSetup {
   /// Single-vector basis size: auto min(n_free, max(2 nev + 1, nev + 16)), or the request (which
   /// must exceed nev) clamped to n_free. ncv == n_free means one cycle spans the free space.
   index_t ncv = 0;
+  /// KrylovSchurOptions::lead_nev in (0, nev), else 0 (all nev wanted pairs must converge).
+  index_t lead = 0;
 };
 
 /// Every option check of lanczos_krylov_schur except block_size: b_inner order, nev, tol,
@@ -98,6 +100,9 @@ struct RitzPairs {
   void classify(double tol, Which which);
   /// Converged pairs among the nev best ranked.
   index_t wanted_converged(index_t nev) const;
+  /// Whether a run may stop: all nev wanted pairs converged, or (lead > 0, LanczosSetup::lead)
+  /// the lead best ranked ones.
+  bool done(index_t nev, index_t lead) const;
   /// History record of this Rayleigh-Ritz step: converged wanted pairs and the largest relative
   /// estimate among the unconverged wanted ones.
   RestartRecord record(index_t restart, index_t nev, index_t op_applies) const;

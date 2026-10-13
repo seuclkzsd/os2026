@@ -133,6 +133,7 @@ class ThickRestartLanczos {
   index_t n_ = 0;
   index_t d_ = 0;  ///< deflation columns
   index_t nev_ = 0;
+  index_t lead_ = 0;         ///< LanczosSetup::lead
   index_t ncv_ = 0;          ///< basis size m of every cycle
   bool full_space_ = false;  ///< ncv == n - d: one cycle spans the whole free space (exact)
   bool store_bv_ = false;
@@ -162,6 +163,7 @@ ThickRestartLanczos<T>::ThickRestartLanczos(LinearOperator<T>& op, LinearOperato
   n_ = setup.n;
   d_ = setup.d;
   nev_ = setup.nev;
+  lead_ = setup.lead;
   ncv_ = setup.ncv;
   full_space_ = ncv_ == setup.n_free;
   // store_bv only matters for a non-identity inner product; with M = I there is nothing to store.
@@ -384,8 +386,8 @@ HermitianEigResult<T> ThickRestartLanczos<T>::run() {
   for (;;) {
     expand(first);
     rayleigh_ritz();
-    const index_t nconv = record_history();
-    if (nconv >= nev_ || full_space_ || restarts_ == opt_.max_restarts) break;
+    record_history();
+    if (rr_.done(nev_, lead_) || full_space_ || restarts_ == opt_.max_restarts) break;
     restart(keep);
     first = keep;
     ++restarts_;
@@ -435,6 +437,11 @@ LanczosSetup validate_lanczos(const LinearOperator<T>& op, const LinearOperator<
   } else {
     s.ncv = options.ncv;
   }
+  if (options.lead_nev < 0 || options.lead_nev > s.nev)
+    HS_THROW(InvalidInput, "lanczos_krylov_schur: lead_nev = " << options.lead_nev
+                                                               << " outside [0, nev = " << s.nev
+                                                               << "]");
+  s.lead = options.lead_nev < s.nev ? options.lead_nev : 0;
   if (options.initial) {
     if (options.initial->rows() != s.n || options.initial->cols() < 1)
       HS_THROW(InvalidInput, "lanczos_krylov_schur: initial block is "
@@ -527,6 +534,15 @@ index_t RitzPairs<T>::wanted_converged(index_t nev) const {
   index_t nconv = 0;
   for (index_t l = 0; l < nev; ++l) nconv += conv[order[l]] ? 1 : 0;
   return nconv;
+}
+
+template <class T>
+bool RitzPairs<T>::done(index_t nev, index_t lead) const {
+  if (wanted_converged(nev) >= nev) return true;
+  if (lead <= 0) return false;
+  for (index_t l = 0; l < lead; ++l)
+    if (!conv[order[l]]) return false;
+  return true;
 }
 
 template <class T>

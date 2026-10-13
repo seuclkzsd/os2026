@@ -160,6 +160,7 @@ class BlockThickRestartLanczos {
   index_t d_ = 0;
   index_t p_ = 0;
   index_t nev_ = 0;
+  index_t lead_ = 0;         ///< LanczosSetup::lead
   index_t ncv_ = 0;          ///< basis size of a full cycle (multiple of p)
   index_t keep_ = 0;         ///< Ritz pairs kept per restart (multiple of p)
   index_t m_ = 0;            ///< basis size of the current cycle: ncv_, or less after an early stop
@@ -199,6 +200,7 @@ BlockThickRestartLanczos<T>::BlockThickRestartLanczos(LinearOperator<T>& op,
   n_ = setup.n;
   d_ = setup.d;
   nev_ = setup.nev;
+  lead_ = setup.lead;
   p_ = options.block_size;
   ncv_ = dims.ncv;
   keep_ = dims.keep;
@@ -308,7 +310,7 @@ bool BlockThickRestartLanczos<T>::expand(index_t first) {
     rlast_ = rblk_;
     if (m_ < ncv_ && m_ >= (restarts_ == 0 ? first_probe_ : keep_ + p)) {
       rayleigh_ritz();
-      if (rr_.wanted_converged(nev_) >= nev_) return true;
+      if (rr_.done(nev_, lead_)) return true;
     }
   }
   return false;
@@ -392,7 +394,7 @@ HermitianEigResult<T> BlockThickRestartLanczos<T>::run() {
   for (;;) {
     if (!expand(first)) rayleigh_ritz();  // an early stop leaves its probe's state current
     history_.push_back(rr_.record(restarts_, nev_, op_.applications() - op_applies0_));
-    if (history_.back().nconv >= nev_ || restarts_ == opt_.max_restarts) break;
+    if (rr_.done(nev_, lead_) || restarts_ == opt_.max_restarts) break;
     restart();
     first = keep_;
     ++restarts_;

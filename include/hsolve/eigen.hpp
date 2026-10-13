@@ -53,6 +53,16 @@ struct KrylovSchurOptions {
   /// krylov_schur_general; p < 1 throws InvalidInput). 1 = the single-vector solvers (bitwise the
   /// behaviour without this option).
   index_t block_size = 1;
+  /// Hermitian solver only (krylov_schur_general rejects a nonzero value). 0 < lead_nev < nev:
+  /// the run also ends as soon as the lead_nev best ranked Ritz pairs (by `which`) have all
+  /// converged, whatever the state of the other nev - lead_nev wanted pairs. Those still size the
+  /// basis and the kept set and are returned with their estimates, converged or not (the result
+  /// contract is unchanged: converged == (nconv >= nev)). For a margin of extra pairs that must
+  /// not hold the run hostage - a pair inside a cluster whose width exceeds tol never converges
+  /// (e.g. the curl-curl null space of a Maxwell pencil, numerically zero only to ~1e-10 relative
+  /// in theta). 0 (default) or nev: all nev wanted pairs must converge. Outside [0, nev]:
+  /// InvalidInput.
+  index_t lead_nev = 0;
 };
 
 /// One record per restart (observability / convergence analysis).
@@ -114,8 +124,9 @@ struct HermitianEigResult {
 ///     (one spare pair) and at most ncv - p.
 ///   * Early stop: a cycle also runs Rayleigh-Ritz at block boundaries, from base basis vectors on
 ///     in the first cycle and from k + p on in later ones, and ends there once all nev wanted
-///     pairs have converged (one heev of the projected matrix per block); ritz_all then holds the
-///     Ritz values of that shorter basis. The result then just meets tol, whereas p = 1 tests
+///     pairs (or the lead_nev leading ones, KrylovSchurOptions::lead_nev) have converged (one
+///     heev of the projected matrix per block); ritz_all then holds the Ritz values of that
+///     shorter basis. The result then just meets tol, whereas p = 1 tests
 ///     only at cycle ends and usually overshoots tol by orders of magnitude: compare the two at
 ///     matched residuals, not at equal tol.
 ///   * A free space below twice the basis plus its residual block (n - d < 2 (ncv + p)), and any
