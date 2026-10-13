@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <random>
 #include <string>
 #include <vector>
@@ -23,6 +24,8 @@
 #include "hsolve/sparse.hpp"
 #include "hsolve/util.hpp"
 #include "support/fixtures.hpp"
+
+#include <nlohmann/json.hpp>
 
 namespace {
 
@@ -363,6 +366,69 @@ TEST(DriverAutoPrecision, AutoTakesSingleFactorsWhenOnlyTheyFitInCore) {
   EXPECT_FALSE(small.report.factor_options.out_of_core);
   EXPECT_FALSE(small.report.precision.fallback) << small.report.precision.fallback_reason;
   expect_same(small.eigenvalues, nearest_of(w, sigma, 8), 1e-9);
+}
+
+// Auto takes single factors, whose attempt then fails (sigma 1e-8 ||K|| from an eigenvalue:
+// eps_single * cond(K) ~ 6): the double run that follows goes out of core, and the report keeps
+// what auto compared - the decision and its warning - next to why the choice did not hold
+// (FORMATS §3).
+TEST(DriverAutoPrecision, AnAbandonedAutoChoiceKeepsItsDecision) {
+  const index_t m = 30;
+  const auto a = laplacian_3d(m);
+  const auto w = laplacian_3d_eigenvalues(m);
+  const double sigma = w[60] + 1e-8 * 12.0;  // ||K|| < 12
+  // k: the 8 nearest, extended over any multiplet that the 8th one splits
+  std::vector<double> d;
+  for (double x : w) d.push_back(std::abs(x - sigma));
+  std::sort(d.begin(), d.end());
+  std::size_t k = 8;
+  while (k < d.size() && d[k] - d[k - 1] < 1e-8) ++k;
+  hs::ShiftedPencil<double> pencil(a, nullptr);
+  const Estimates e = estimates(pencil, sigma);
+  auto cfg = nearest(sigma, static_cast<index_t>(k), hs::FactorPrecision::Auto);
+  cfg.ordering = 0;
+  // near the double estimate: the double run that follows must fit out of core (its analysis on
+  // the single attempt's pivot order estimates more than a fresh one)
+  const double cap_mb = e.sgl.incore_mb + 0.85 * (e.dbl.incore_mb - e.sgl.incore_mb);
+  ASSERT_GT(cap_mb - e.sgl.incore_mb, 15.0) << "the window between the estimates is too narrow";
+  ASSERT_LT(e.dbl.ooc_mb, e.sgl.incore_mb) << "the double run must fit out of core";
+  const auto reserve = hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, a.nrows);
+  const double krylov = static_cast<double>(a.nrows) * 8.0 * static_cast<double>(reserve.columns);
+  const double rss = static_cast<double>(std::max<std::int64_t>(hs::current_rss_bytes(), 0));
+  cfg.memory_budget_gb = (rss + krylov + cap_mb * 1e6 / 0.95) / 1073741824.0;
+  const std::string path = ::testing::TempDir() + "/membudget_auto_fallback.jsonl";
+  hs::Solution<double> sol;
+  {
+    hs::Logger log(0, path);
+    try {
+      sol = hs::solve(a, nullptr, cfg, &log);
+    } catch (const hs::Error& err) {
+      ADD_FAILURE() << err.what();
+    }
+  }
+  std::string plans;  // the memory plans of both attempts, for the failure messages
+  {
+    std::ifstream in(path);
+    for (std::string line; std::getline(in, line);)
+      if (line.find("memory_plan") != std::string::npos || line.find("memory_replan") != std::string::npos ||
+          line.find("\"analysis\"") != std::string::npos)
+        plans += line + "\n";
+  }
+  SCOPED_TRACE("estimates double " + std::to_string(e.dbl.incore_mb) + " / " + std::to_string(e.dbl.ooc_mb) +
+               " MB, single " + std::to_string(e.sgl.incore_mb) + " MB, cap " + std::to_string(cap_mb) + "\n" + plans);
+  expect_valid(sol);
+  const auto& p = sol.report.precision;
+  EXPECT_EQ(p.requested, hs::FactorPrecision::Auto);
+  EXPECT_TRUE(p.fallback) << p.decision;
+  EXPECT_FALSE(p.fallback_reason.empty());
+  EXPECT_EQ(p.used, hs::FactorPrecision::Double);
+  EXPECT_EQ(p.decision.rfind("single: in-core estimates", 0), 0u) << p.decision;
+  EXPECT_TRUE(warned(sol.report, hs::driver::kAutoSingleWarning));
+  EXPECT_TRUE(warned(sol.report, "single-precision factors abandoned"));
+  EXPECT_TRUE(sol.report.factor_options.out_of_core);
+  const auto j = nlohmann::json::parse(sol.report.to_json());
+  EXPECT_EQ(j["precision"]["decision"], p.decision);
+  expect_same(sol.eigenvalues, nearest_of(w, sigma, k), 1e-9);
 }
 
 }  // namespace

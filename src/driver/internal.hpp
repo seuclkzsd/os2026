@@ -157,6 +157,10 @@ MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil);
 /// (FactorOptions::ooc_on_memory_error).
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb);
 
+/// Start of the warning choose_precision issues when auto takes single factors; it stays in the
+/// report when that attempt is abandoned for double factors (hs::solve).
+inline constexpr const char* kAutoSingleWarning = "factor_precision auto: single-precision factors";
+
 /// FactorPrecision::Auto (DESIGN §3.6-3): `fac` holds the main analysis in double precision. When
 /// its in-core estimate exceeds the factorization cap (FactorOptions::max_memory_mb) and
 /// out_of_core is not forced on, a single-precision object is analysed on the same pivot order

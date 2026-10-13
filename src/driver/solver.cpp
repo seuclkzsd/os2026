@@ -4,10 +4,15 @@
 // live in the lower layers. Shared steps: internal.hpp / steps.cpp.
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <string>
 #include <vector>
+
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -522,7 +527,21 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
     std::vector<int> order = fac ? fac->pivot_order() : std::vector<int>{};
     fac.reset();  // frees the inexact factors (and their out-of-core files) before the new analysis
     sol = Solution<T>{};
+#if defined(__GLIBC__)
+    // The new attempt plans with the memory in use: what the abandoned one freed must not count
+    // (glibc keeps freed blocks below its mmap threshold - Krylov bases at n <~ 1e5 - resident:
+    // 41 MB of 57 at n = 27000).
+    malloc_trim(0);
+#endif
+    // What precision auto compared and its warning stay on the record (FORMATS §3): the fallback
+    // below says why the choice did not hold.
+    const std::string decision = rep.precision.decision;
+    std::vector<std::string> auto_warnings;
+    for (const std::string& w : rep.warnings)
+      if (w.rfind(driver::kAutoSingleWarning, 0) == 0) auto_warnings.push_back(w);
     rep = diagnosed;
+    rep.precision.decision = decision;
+    rep.warnings.insert(rep.warnings.end(), auto_warnings.begin(), auto_warnings.end());
     c.held = driver::FactorHeld{};
     cfg.factor_precision = FactorPrecision::Double;
     if (cfg.blr == Toggle::On) cfg.blr = Toggle::Off;

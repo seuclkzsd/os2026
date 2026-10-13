@@ -166,7 +166,7 @@ void choose_precision(Ctx& c, std::unique_ptr<SparseFactorization<T>>& fac, cons
                                   {"cap_mb", cap}, {"single", fits}});
   }
   if (fac->options().precision == FactorPrecision::Single)
-    warn(c, "factor_precision auto: single-precision factors (" + decision + ")");
+    warn(c, std::string(kAutoSingleWarning) + " (" + decision + ")");
 }
 
 // ------------------------------------------------------------------------------ run-time models
