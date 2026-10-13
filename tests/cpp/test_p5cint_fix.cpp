@@ -3,7 +3,8 @@
 //     tol (they never converge) ends once its leading pairs have converged, and the driver's
 //     deflated certificate reruns use it - they ask for missing + 2 pairs but end with the
 //     missing ones (yee-pec-box-1e5: the third pair of a rerun, a curl-curl null-space vector,
-//     held the rerun until max_restarts).
+//     held the rerun until max_restarts);
+//   * a deflated rerun after an auto width takes at most the P4 width (rerun_block_size(cfg, ...)).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -14,10 +15,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include "driver/internal.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/log.hpp"
 #include "hsolve/solver.hpp"
+#include "hsolve/sparse.hpp"
 #include "support/fixtures.hpp"
 
 namespace {
@@ -195,5 +198,78 @@ TEST(P5cIntFixRerun, EndsWithTheMissingPairsReal) {
   for (const index_t p : {1, 4, 8}) rerun_ends_with_the_missing_pairs<double>(p);
 }
 TEST(P5cIntFixRerun, EndsWithTheMissingPairsComplex) { rerun_ends_with_the_missing_pairs<cplx>(4); }
+
+// Width of a deflated rerun: an auto width enters capped at the P4 width, an explicit one as is.
+TEST(P5cIntFixRerun, RerunWidthOfAnAutoRun) {
+  using hs::driver::rerun_block_size;
+  hs::SolverConfig cfg;
+  ASSERT_EQ(cfg.block_size, 0);
+  EXPECT_EQ(rerun_block_size(cfg, 8, 1), 4);
+  EXPECT_EQ(rerun_block_size(cfg, 8, 2), 4);
+  EXPECT_EQ(rerun_block_size(cfg, 8, 9), 4);
+  EXPECT_EQ(rerun_block_size(cfg, 4, 1), 4);
+  EXPECT_EQ(rerun_block_size(cfg, 2, 1), 2);
+  EXPECT_EQ(rerun_block_size(cfg, 1, 3), 4);
+  EXPECT_EQ(rerun_block_size(cfg, 1, 1), 2);
+  cfg.block_size = 8;
+  EXPECT_EQ(rerun_block_size(cfg, 8, 2), 8);
+  EXPECT_EQ(rerun_block_size(cfg, 4, 2), 4);  // an explicit 8 halved by the memory fit
+  EXPECT_EQ(rerun_block_size(8, 2), 8);       // the P4 function itself is unchanged
+}
+
+/// Dense real symmetric matrix H diag(w) H, H = I - 2 u u^T (u a fixed unit vector): exactly the
+/// spectrum w (up to rounding), with the factor fill of a dense matrix - the blocktune rule picks
+/// p = 8 for k = 12 on it.
+hs::CsrMatrix<double> dense_with_spectrum(const std::vector<double>& w) {
+  const auto n = static_cast<index_t>(w.size());
+  std::vector<double> u(static_cast<std::size_t>(n));
+  double norm = 0.0;
+  for (index_t i = 0; i < n; ++i) {
+    u[i] = std::sin(0.7 * static_cast<double>(i) + 0.3) + 0.1;
+    norm += u[i] * u[i];
+  }
+  for (auto& x : u) x /= std::sqrt(norm);
+  double s = 0.0;
+  for (index_t i = 0; i < n; ++i) s += w[i] * u[i] * u[i];
+  std::vector<index_t> rows, cols;
+  std::vector<double> vals;
+  for (index_t i = 0; i < n; ++i)
+    for (index_t j = 0; j < n; ++j) {
+      const double v = (i == j ? w[i] : 0.0) - 2.0 * u[i] * u[j] * (w[i] + w[j]) + 4.0 * u[i] * u[j] * s;
+      rows.push_back(i);
+      cols.push_back(j);
+      vals.push_back(v);
+    }
+  return hs::csr_from_coo<double>(n, n, rows, cols, vals);
+}
+
+// End to end: the rule picks 8 for the main run; the rerun after the fault injection runs at the
+// P4 width 4 (before: 8, inherited through max(p, ...)), an explicit 8 keeps 8.
+TEST(P5cIntFixRerun, AutoWidthRerunTakesTheP4Width) {
+  std::vector<double> w;
+  for (int j = 0; j < 12; ++j) w.push_back((j % 2 ? 1.0 : -1.0) * (0.05 + 0.02 * j));
+  for (int i = 0; i < 700; ++i) w.push_back(1.0 + 4.0 * i / 699.0);
+  for (int i = 0; i < 300; ++i) w.push_back(-1.0 - 4.0 * i / 299.0);
+  const auto a = dense_with_spectrum(w);
+  for (const index_t configured : {0, 8}) {
+    auto cfg = nearest_cfg(0.0, 12);
+    cfg.block_size = configured;
+    cfg.certificate_fault_drop = 1;
+    const std::string path = ::testing::TempDir() + "/p5cint_fix_width" + std::to_string(configured) + ".jsonl";
+    hs::Solution<double> sol;
+    {
+      hs::Logger log(0, path);
+      sol = hs::solve(a, nullptr, cfg, &log);
+    }
+    const auto& r = sol.report;
+    EXPECT_TRUE(r.success) << configured << ": " << r.certificate.statement;
+    ASSERT_EQ(r.block_size, 8) << configured << ": the rule no longer picks 8 here; the test needs a shape where it does";
+    expect_same_set(sol.eigenvalues, nearest(w, 0.0, 12), 1e-9);
+    const auto runs = events(path, "lanczos");
+    ASSERT_EQ(runs.size(), 2u) << configured;
+    EXPECT_EQ(runs[0].at("block_size").get<index_t>(), 8) << configured;
+    EXPECT_EQ(runs[1].at("block_size").get<index_t>(), configured == 0 ? 4 : 8) << configured;
+  }
+}
 
 }  // namespace

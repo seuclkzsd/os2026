@@ -505,6 +505,11 @@ index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_
 /// rounding and further reruns; see steps.cpp for why it is capped.
 index_t rerun_block_size(index_t p, index_t missing);
 
+/// The same for a run of the configured width: an explicit cfg.block_size keeps its run width p;
+/// an auto width enters capped at kMaxAutoBlockSize (the blocktune rule's p = 8 pays on the main
+/// run's k pairs, not on a rerun's few: steps.cpp).
+index_t rerun_block_size(const SolverConfig& cfg, index_t p, index_t missing);
+
 /// Ritz estimates of the ends of the spectrum of the pencil (from inside): lowest two and
 /// highest two Ritz values of a short Lanczos run (A alone for B = I, B^{-1}A otherwise).
 struct SpectrumEstimate {

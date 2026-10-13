@@ -82,8 +82,9 @@ struct SolverConfig {
                                     ///< spectrum slices (interval / smallest / largest, windowed
                                     ///< nearest) p = 4 for >= 8 wanted pairs of the slice, else 1.
                                     ///< A deflated certificate rerun missing m pairs uses
-                                    ///< max(p, min(4, m rounded up to even)) (rerun_block_size), so
-                                    ///< it gets all missing copies of a multiple eigenvalue by
+                                    ///< max(q, min(4, m rounded up to even)) (rerun_block_size),
+                                    ///< q = p for a configured width, min(p, 4) for the auto one,
+                                    ///< so it gets all missing copies of a multiple eigenvalue by
                                     ///< construction only up to that width; it asks for m + 2
                                     ///< pairs but ends once the m nearest have converged. p is
                                     ///< halved (warning) while the block basis does not fit the

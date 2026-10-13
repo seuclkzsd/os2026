@@ -939,6 +939,13 @@ index_t rerun_block_size(index_t p, index_t missing) {
   return std::max<index_t>(std::max<index_t>(p, 1), std::min<index_t>(kMaxAutoBlockSize, (missing + 1) / 2 * 2));
 }
 
+// An auto width enters capped at the P4 width: a rerun wants missing + 2 pairs, the regime in
+// which the P4 measurements below found 8 slower than 4, whereas the blocktune rule picks 8 for
+// the main run's k = 10..12 pairs.
+index_t rerun_block_size(const SolverConfig& cfg, index_t p, index_t missing) {
+  return rerun_block_size(cfg.block_size > 0 ? p : std::min(p, kMaxAutoBlockSize), missing);
+}
+
 // P4 auto block width (spectrum slices and plan_work; nearest-target runs take the blocktune rule
 // below, whose measurements and calibration are in src/eigen/block_rule.cpp), from end-to-end
 // runs of p = 1, 4, 8 (ncv auto) on the 30 HEP/GHEP data cases

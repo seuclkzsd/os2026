@@ -536,7 +536,8 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     refactorize_at(c, fac, sigma, detection_off);
     DenseMatrix<T> defl = run.all.x;
     const index_t d = defl.cols();
-    const index_t p_rerun = fit_block_size<T>(c, n, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, missing));
+    const index_t p_rerun =
+        fit_block_size<T>(c, n, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(cfg, p, missing));
     lanczos_run(c, fac, pencil, sigma, Which::LargestMagnitude, nev_rerun, p_rerun, &defl, run, missing);
     select_and_verify();
   }
@@ -1155,7 +1156,8 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
                               {"multiplet", m_sigma}});
     DenseMatrix<T> defl = run.all.x;
     const index_t d = defl.cols();
-    const index_t p_rerun = fit_block_size<T>(c_, n_, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(p, miss));
+    const index_t p_rerun =
+        fit_block_size<T>(c_, n_, nev_rerun, d, 3 * d + 4 * nev_rerun, rerun_block_size(cfg, p, miss));
     if (std::isfinite(m_sigma)) {
       tried.push_back(m_sigma);
       bool off = false;
