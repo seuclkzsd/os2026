@@ -177,7 +177,8 @@ TEST(DriverBlocks, RerunWidthAndBasisColumns) {
   EXPECT_EQ(lanczos_basis_columns(60, 10, 12, 0, 8), 10 + 50 + 2);
 }
 
-// Auto rule: p = 4 from 8 wanted pairs on, single vector below; an explicit width wins.
+// P4 auto rule (spectrum slices, plan_work): p = 4 from 8 wanted pairs on, single vector below;
+// an explicit width wins. Nearest runs take the blocktune rule (test_blocktune_driver.cpp).
 TEST(DriverBlocks, AutoRule) {
   hs::SolverConfig cfg;
   ASSERT_EQ(cfg.block_size, 0);
@@ -189,11 +190,13 @@ TEST(DriverBlocks, AutoRule) {
   EXPECT_EQ(hs::driver::block_size_for(cfg, 500), 1);
   cfg.block_size = 8;
   EXPECT_EQ(hs::driver::block_size_for(cfg, 2), 8);
-  // End to end: the report carries the width used.
+  // End to end: the report carries the width used - for nearest targets the blocktune rule's,
+  // at least 4 from 8 wanted pairs on, and 2 instead of the P4 width 1 on this low-fill pattern
+  // at k = 6.
   std::vector<double> w;
   const auto a = shifted_laplacian(w);
-  EXPECT_EQ(hs::solve(a, nullptr, nearest_cfg(0.3, 10)).report.block_size, 4);
-  EXPECT_EQ(hs::solve(a, nullptr, nearest_cfg(0.3, 6)).report.block_size, 1);
+  EXPECT_GE(hs::solve(a, nullptr, nearest_cfg(0.3, 10)).report.block_size, 4);
+  EXPECT_EQ(hs::solve(a, nullptr, nearest_cfg(0.3, 6)).report.block_size, 2);
 }
 
 // Memory: a budget that holds the p = 1 basis but not the p = 8 one halves the block width (with

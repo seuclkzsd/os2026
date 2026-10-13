@@ -29,14 +29,15 @@
 // calibration shapes keep their pick for entries within +-10 % (test
 // LanczosBlockRuleFix.PinnedPicksSurviveTheOrderingSpread).
 //
-// Driver hook-up (an interface request: src/driver is not this module's). The P4 rule
-// (internal.hpp block_size_for(cfg, nev): 4 for nev >= 8, else 1) has no factor statistics, so:
-//   1. call recommended_block_size(ShiftInvertShape) where the main shift's factorization exists
-//      (solve_nearest after factorize_near: FactorStats::factor_entries of that factorization,
-//      nnz(B), n, nev, scalar type), for SolverConfig::block_size == 0 only;
-//   2. reserve the basis of the widest width the rule returns (kRuleWidths.back() = 8, against
-//      kMaxAutoBlockSize = 4 in solver.cpp's p_guess today) in the memory budget before the
-//      factorization, or fit_block_size halves 8 -> 4 with a warning on memory-tight runs;
+// Driver hook-up (P5c integration, src/driver/internal.hpp): the P4 rule (block_size_for(cfg,
+// nev): 4 for nev >= 8, else 1) has no factor statistics, so
+//   1. solve_nearest calls block_size_for(cfg, ShiftInvertShape) after factorize_near: for
+//      SolverConfig::block_size == 0 this rule on {n, nev, FactorStats::factor_entries of the
+//      main shift's factorization, nnz(B), scalar type};
+//   2. the memory plan before the factorization (krylov_reservation) reserves the basis of the
+//      widest width the rule returns (kRuleWidths.back() = 8) for nearest targets, falling back
+//      to the P4 width when that does not fit; fit_block_size still halves 8 -> 4 with a warning
+//      on memory-tight runs;
 //   3. the rule is calibrated on nearest-target runs (k wanted pairs next to sigma); spectrum
 //      slicing (per-slice nev, definite.cpp) keeps the P4 rule until measured.
 // Scalar-independent; thread-safe (pure functions).

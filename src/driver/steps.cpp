@@ -451,7 +451,9 @@ int nd_ordering(const SolverConfig& cfg) { return cfg.deterministic ? 5 : 3; }
 
 // What a solve does with its factors (PlannedWork), from the end-to-end runs of the data cases
 // (hsolve CLI at 6a3d7c1, 4 threads, report op_applies / factor_stats; all nearest targets):
-//   * HEP / GHEP nearest, block width p = block_size_for(k): column applications ~ 40 + 4k for
+//   * HEP / GHEP nearest, block width p = block_size_for(cfg, k), the P4 width (the run itself
+//     takes the blocktune rule's width, which needs the factorization this plan prices; the
+//     constants were measured with the P4 widths): column applications ~ 40 + 4k for
 //     p = 4 (32 cases, k = 10..26: measured / model median 1.04, range 0.50..1.48), 2k + 12 for
 //     p = 1 (k = 6, 7: 0.92, 1.19); one factorization at sigma, B's inertia one more while
 //     undecided, two certificate counts;
@@ -937,7 +939,9 @@ index_t rerun_block_size(index_t p, index_t missing) {
   return std::max<index_t>(std::max<index_t>(p, 1), std::min<index_t>(kMaxAutoBlockSize, (missing + 1) / 2 * 2));
 }
 
-// Auto block width, from end-to-end runs of p = 1, 4, 8 (ncv auto) on the 30 HEP/GHEP data cases
+// P4 auto block width (spectrum slices and plan_work; nearest-target runs take the blocktune rule
+// below, whose measurements and calibration are in src/eigen/block_rule.cpp), from end-to-end
+// runs of p = 1, 4, 8 (ncv auto) on the 30 HEP/GHEP data cases
 // (bench reproduction: tools/run/guard.py + hsolve --block-size, medians of 3 interleaved runs,
 // 4 threads; the full table is in the drvint report). Iterate-phase time p = 1 -> 4 -> 8:
 //   3-D, 1e5 (syn-mem27-46, yee-pec-cube-32, yee-pec-box-1e5, ss-2cubes_sphere, ss-qa8fk-qa8fm,
@@ -962,6 +966,22 @@ index_t block_size_for(const SolverConfig& cfg, index_t nev) {
   return nev >= kAutoBlockMinNev ? kMaxAutoBlockSize : 1;
 }
 
+// Nearest targets (P5c blocktune): the rule prices each width's block step from the shift's
+// factor entries, n, nnz(B) and the scalar type at 16 threads and keeps p >= 4 from nev >= 8 on
+// (block_rule.hpp). End to end against the P4 width (bench/blocktune_fix_e2e.cpp, 12 data cases,
+// 16 threads in the measurement slot, 5 interleaved runs, all valid): 0.98x .. 1.19x, gains where
+// it moves 4 -> 8 (3-D, multiple eigenvalues, complex) or 1 -> 2 (low fill, k = 6, 7), the one
+// loss ss-2cubes_sphere (8 instead of 4, 1.6 %); never slower than p = 1 (1.03x .. 2.45x).
+index_t block_size_for(const SolverConfig& cfg, const eigen_detail::ShiftInvertShape& shape) {
+  if (cfg.block_size > 0) return cfg.block_size;
+  return eigen_detail::recommended_block_size(shape);
+}
+
+index_t reserved_block_size(const SolverConfig& cfg) {
+  if (cfg.block_size > 0) return std::min(cfg.block_size, kMaxAutoBlockSize);
+  return cfg.target.mode == TargetMode::Nearest ? eigen_detail::kRuleWidths.back() : kMaxAutoBlockSize;
+}
+
 template <class T>
 index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p) {
   const double vec = static_cast<double>(n) * sizeof(T);
@@ -979,8 +999,34 @@ index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_
   return p;
 }
 
+template <class T>
+KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, index_t n,
+                                     double free_bytes) {
+  const index_t k =
+      cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
+  const index_t indefinite = ghiep_reserve_columns<T>(cfg, n);
+  const auto columns = [&](index_t p) {
+    const index_t ncv = std::max(
+        cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k + 16) + 1, k + 32),
+        lanczos_basis_columns(n, 0, std::min(n, k), cfg.ncv, p));
+    const index_t definite = ncv + 6 * k;
+    return type == ProblemType::GeneralizedIndefinite ? indefinite
+           : type == ProblemType::Auto                ? std::max(definite, indefinite)
+                                                      : definite;
+  };
+  const double vector_bytes = static_cast<double>(n) * sizeof(T);
+  KrylovReservation r;
+  r.block_size = reserved_block_size(cfg);
+  while (r.block_size > kMaxAutoBlockSize &&
+         vector_bytes * static_cast<double>(columns(r.block_size)) >= free_bytes)
+    r.block_size /= 2;
+  r.columns = columns(r.block_size);
+  return r;
+}
+
 #define HS_INSTANTIATE_DRIVER_BLOCKS(T)                                                                     \
-  template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t);
+  template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t);                  \
+  template KrylovReservation krylov_reservation<T>(const SolverConfig&, ProblemType, index_t, double);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_BLOCKS)
 #undef HS_INSTANTIATE_DRIVER_BLOCKS
 

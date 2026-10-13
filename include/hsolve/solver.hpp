@@ -72,10 +72,16 @@ struct SolverConfig {
   double inner_tol_factor = 0.1;    ///< Krylov tolerance = tol * inner_tol_factor
   index_t ncv = 0;                  ///< 0 = auto
   index_t block_size = 0;           ///< Krylov block width p of the shift-invert Lanczos runs (HEP /
-                                    ///< GHEP, incl. slices; KrylovSchurOptions::block_size): 0 = auto
-                                    ///< (src/driver/internal.hpp block_size_for: p = 4 for runs of
-                                    ///< >= 8 wanted pairs, else 1; depends on nev only), 1 = single
-                                    ///< vector. A deflated certificate rerun missing m pairs uses
+                                    ///< GHEP, incl. slices; KrylovSchurOptions::block_size): 0 = auto,
+                                    ///< 1 = single vector. Auto (src/driver/internal.hpp
+                                    ///< block_size_for): nearest targets take the blocktune rule
+                                    ///< (src/eigen/block_rule.hpp recommended_block_size: p in
+                                    ///< {1, 2, 4, 8} from n, nev, the entries of the shift's
+                                    ///< factors, nnz(B) and the scalar type, calibrated at 16
+                                    ///< threads; p >= 4 from 8 wanted pairs on; no timing enters);
+                                    ///< spectrum slices (interval / smallest / largest, windowed
+                                    ///< nearest) p = 4 for >= 8 wanted pairs of the slice, else 1.
+                                    ///< A deflated certificate rerun missing m pairs uses
                                     ///< max(p, min(4, m rounded up to even)) (rerun_block_size), so
                                     ///< it gets all missing copies of a multiple eigenvalue by
                                     ///< construction only up to that width. p is halved (warning)

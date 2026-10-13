@@ -362,8 +362,16 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   // Converge exactly the k wanted pairs (most wanted by |theta| = nearest to sigma). Asking for
   // extra pairs only costs iterations: completeness is the certificate's job, not a safety margin.
   const index_t nev = std::min<index_t>(n, k);
+  // Block width: the blocktune rule on the run's shape, with the entries of the factorization the
+  // run's solves use (block_size_for; reserved up to its widest width before the analysis).
+  eigen_detail::ShiftInvertShape shape;
+  shape.n = n;
+  shape.nev = nev;
+  shape.factor_entries = static_cast<double>(fs.factor_entries);
+  shape.nnz_b = pencil.b() ? static_cast<double>(pencil.b()->nnz()) : 0.0;
+  shape.complex_scalars = is_complex_v<T>;
   // Candidate block X, AX, BX (3 nev) and the returned vectors (nev) next to the basis.
-  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c.cfg, nev));
+  const index_t p = fit_block_size<T>(c, n, nev, 0, 4 * nev, block_size_for(c.cfg, shape));
   rep.block_size = p;
   DefiniteRun<T> run;
   const FactorStats before_run = fac.stats();
@@ -1115,6 +1123,7 @@ bool WindowSolver<T>::run_slice(const Slice& s, index_t id) {
     return partial ? std::max<index_t>(0, s.want - inside) : count - inside - near_out;
   };
   sr.nev = std::min(n_, s.required());
+  // The P4 width: the blocktune rule was calibrated on nearest-target runs, not per-slice nev.
   const index_t p = fit_block_size<T>(c_, n_, sr.nev, 0, 4 * sr.nev, block_size_for(c_.cfg, sr.nev));
   if (id == 0) c_.rep.block_size = p;
   lanczos_run(c_, fac_, pencil_, sigma, which, sr.nev, p, static_cast<const DenseMatrix<T>*>(nullptr), run);
