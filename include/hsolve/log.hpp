@@ -25,7 +25,8 @@ class Logger {
   Logger(const Logger&) = delete;
   Logger& operator=(const Logger&) = delete;
 
-  /// Machine-readable event; also printed to stderr when verbosity >= level.
+  /// Machine-readable event; also printed to stderr when verbosity >= level. The JSON-lines
+  /// record also carries the process's current and peak resident memory (rss_mb, peak_rss_mb).
   void event(const std::string& name, std::initializer_list<LogField> fields, int level = 1);
   void info(const std::string& message) { message_line("info", message, 1); }
   void debug(const std::string& message) { message_line("debug", message, 2); }
