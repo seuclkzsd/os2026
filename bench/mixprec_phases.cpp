@@ -34,8 +34,9 @@
 //           applications, steps, the eta history and the eigenvalue deviation from the double
 //           arm |lambda - mu| / (scale + |mu|).
 // Repetitions are interleaved with the arm order rotated (v2: reps / 2 + 1 rounds). With
-// --single-only the double object is analysed (estimates) but never factorized (cases whose
-// double factors do not fit the memory).
+// --single-only only the single object is compared (the driver's double factorization still runs
+// on its own and is released first when its estimate fits); nothing is factorized when the MUMPS
+// estimates of the objects held at once exceed --max-factor-mb.
 // Output: JSON lines on stdout ("kind": setup | single_probe | factor | accuracy | refine | v2 |
 // note | median | end), progress on stderr.
 //
@@ -44,7 +45,7 @@
 //     --case data/cases/CASE --report RUN/report.json [--exp phases,v2] [--reps 5] [--inner 3]
 //     [--p P] [--v2-tols 1e-11,1e-8] [--v2-guards 0] [--v2-mode rii|davidson]
 //     [--v2-max-steps 8] [--v2-max-restarts 300] [--v2-refine-factor single|double] [--no-v1]
-//     [--single-only]
+//     [--single-only] [--max-factor-mb 26000]
 // Linked with the BLAS hook exactly like the hsolve executable (route "all" unless HS_BLAS_ROUTE
 // says otherwise): the hook routes the d* BLAS of dmumps; smumps' s* calls go to OpenBLAS.
 // Numbers quoted in results/p6_mixprec.md: gpu02 slot (cores 16-31), base 1bd75f9 + this program;
@@ -103,6 +104,8 @@ struct Args {
   int v2_max_steps = 8;
   bool v1_arm = true;  // the refined-operator Lanczos arm (V1) in --exp v2
   bool refine_with_double = false;  // diagnostic: refine the V2 Ritz pairs with the double factor
+  double max_factor_mb = 26000;  // refuse to factorize when the MUMPS estimates of the objects to be
+                                 // factorized (INFOG(16), MB) add up to more than this
 };
 
 std::vector<std::string> split(const std::string& s) {
@@ -148,6 +151,8 @@ Args parse_args(int argc, char** argv) {
       a.v2_max_steps = std::stoi(value());
     else if (s == "--v2-refine-factor")
       a.refine_with_double = value() == "double";
+    else if (s == "--max-factor-mb")
+      a.max_factor_mb = std::stod(value());
     else if (s == "--no-v1")
       a.v1_arm = false;
     else if (s == "--single-only")
@@ -416,7 +421,10 @@ void run(const Args& args, const std::string& name, const CsrMatrix<T>& a, const
                 {"est_double", {{"entries", est_d.factor_entries}, {"incore_mb", est_d.incore_mb},
                                 {"flops", est_d.flops}}},
                 {"blas_route", std::getenv("HS_BLAS_ROUTE") ? std::getenv("HS_BLAS_ROUTE") : "(default)"}};
-  if (!args.single_only) {
+  // The driver's double factorization (released before the comparison objects factorize), also
+  // with --single-only as long as it fits on its own.
+  if (est_d.incore_mb <= args.max_factor_mb) {
+    const std::int64_t rss_ref = hs::current_rss_bytes();
     t.reset();
     const bool ok = ref.factorize(1.0, -sigma);
     ref_factor_s = t.seconds();
@@ -424,7 +432,12 @@ void run(const Args& args, const std::string& name, const CsrMatrix<T>& a, const
     setup["driver_numeric_ok"] = ok;
     setup["driver_factor_mb_used"] = ref.stats().factor_mb_used;
     setup["driver_factor_entries"] = ref.stats().factor_entries;
+    setup["driver_rss_growth_gib"] = gib(hs::current_rss_bytes() - rss_ref);
     static_cast<void>(ref.release_factors());
+  } else if (!args.single_only) {
+    setup["note"] = "double estimate above --max-factor-mb: nothing factorized";
+    emit(setup);
+    return;
   }
   const std::vector<int> order = ref.pivot_order();
 
@@ -446,6 +459,13 @@ void run(const Args& args, const std::string& name, const CsrMatrix<T>& a, const
   rss0 = hs::current_rss_bytes();
   setup["rss_before_factor_gib"] = gib(rss0);
   emit(setup);
+  // Memory: the estimates of everything factorized below (both objects are held at once).
+  const double planned_mb = est_s.incore_mb + (dbl ? est_d.incore_mb : 0.0);
+  if (planned_mb > args.max_factor_mb) {
+    emit({{"kind", "note"}, {"case", name},
+          {"text", "factorizations not run: estimates " + std::to_string(planned_mb) + " MB > --max-factor-mb"}});
+    return;
+  }
 
   // ---------------------------------------------------------------- numeric factorizations
   // Probe: the single factorization with null-pivot detection (single_null_pivot_tol). A flagged
