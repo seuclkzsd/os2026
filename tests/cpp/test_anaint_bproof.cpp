@@ -150,7 +150,17 @@ void mass_matrices() {
   EXPECT_GT(proof.lower_bound, 0.0);
   EXPECT_LE(proof.lower_bound, lmin);
   EXPECT_GE(proof.theta_min, lmin - 1e-12);  // a Ritz value lies inside the spectrum
-  EXPECT_GE(proof.attempts, 1);
+  EXPECT_EQ(proof.attempts, 1);
+  EXPECT_EQ(proof.level, 1);  // fill level 1 first
+  EXPECT_GE(proof.seconds + 1e-9, proof.setup_s + proof.lanczos_s + proof.attempts_s);
+  EXPECT_GE(proof.pattern_s, 0.0);
+  // Level 0 alone proves it as well.
+  hs::driver::HpdProofOptions only0;
+  only0.levels = {0};
+  const auto p0 = hs::driver::prove_positive_definite(m, only0);
+  EXPECT_TRUE(p0.proven) << p0.outcome;
+  EXPECT_EQ(p0.level, 0);
+  EXPECT_EQ(p0.pattern_s, 0.0);  // the level-1 pattern was not built
   // lambda_min of the scaled B - mu D is (lambda_min - mu) / (1 - mu).
   for (const double excess : {1e-12, 1e-9, 1e-4}) {
     const auto shifted = minus_scaled_identity(m, lmin + excess);

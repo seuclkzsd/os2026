@@ -62,7 +62,9 @@ NormEstimate estimate_pencil_spectrum(const CsrMatrix<T>& a, const CsrMatrix<T>&
 /// Options of prove_positive_definite.
 struct HpdProofOptions {
   int lanczos_steps = 20;  ///< steps of the Lanczos estimate theta of lambda_min(S)
-  int max_level = 1;       ///< fill levels 0 .. max_level are tried in this order
+  /// Fill levels (0 or 1) in order of preference: a later one is tried only when the earlier one
+  /// does not fit the time or memory limit (norms.cpp: why level 1 first).
+  std::vector<int> levels{1, 0};
   /// Uniform shift c = fraction * theta of a level's first attempt, and the smaller fractions
   /// tried after a breakdown (a pivot of the incomplete factorization not positive).
   std::vector<double> fractions{0.9, 0.5, 0.2};
@@ -73,8 +75,12 @@ struct HpdProofOptions {
   /// Memory limit (bytes) of an attempt beyond the stored lower triangle of S (IcProver: pattern,
   /// factor, workspaces); a level beyond it is not tried (outcome too_large).
   double max_bytes = 1e300;
-  /// No attempt when theta < this (S nearly singular: no margin to prove).
-  double min_theta = 1e-6;
+  /// No attempt when theta < this. The check needs the fill an attempt drops below the shift
+  /// c < theta in every row; with theta < 0.1 that held on none of the data cases (bench/
+  /// anaint_bproof.cpp: syn-ghep-multiplicity-real-1e4 0.043, syn-ghep-near-singular-real-1e5
+  /// 0.035, ss-tem152078 0.072 failed at every level and shift, ss-tem152078's attempts costing
+  /// 3.7x the factorization of B), while every proven case had theta >= 0.14.
+  double min_theta = 0.1;
   std::uint64_t seed = 2026;
 };
 
@@ -107,7 +113,11 @@ struct HpdProof {
   double shift = 0.0;          ///< its uniform shift c
   int attempts = 0;            ///< incomplete factorizations computed
   index_t factor_entries = 0;  ///< of the last attempt
-  double seconds = 0.0;
+  double seconds = 0.0;        ///< all of it; the parts:
+  double setup_s = 0.0;        ///< the scaled S (rows and columns)
+  double lanczos_s = 0.0;      ///< the Lanczos run on S
+  double pattern_s = 0.0;      ///< the level-1 pattern (when built)
+  double attempts_s = 0.0;     ///< the attempts (factorizations and checks)
   /// "proven", "indefinite", "nonpositive_diagonal", "nearly_singular" (theta < min_theta),
   /// "breakdown" / "gershgorin" / "too_expensive" / "too_large" (why the last attempt did not
   /// prove it).

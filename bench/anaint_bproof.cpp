@@ -7,7 +7,8 @@
 //
 // DIR holds A.npz and B.npz. Output: one JSON line - n, nnz_b, the proof (outcome, seconds,
 // theta_min / theta_max of the scaled B, the attempt that decided: level, shift, lower bound,
-// factor entries; median seconds over --reps runs), with --scan 1 every (level, shift fraction)
+// factor entries; median seconds over --reps runs, and of its parts: setup_s (the scaled B), lanczos_s,
+// pattern_s (level-1 fill pattern), attempts_s), with --scan 1 every (level, shift fraction)
 // attempt on a grid (lower bound, failing rows, breakdown, factorization / check seconds), and the
 // MUMPS side: analysis of the pencil with FactorOptions::ordering --ordering (the driver's options
 // otherwise), then factorize(0 A + 1 B) - median seconds of --reps factorizations - with B's
@@ -65,13 +66,19 @@ int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>
   json out = {{"case", args.case_dir.filename().string()}, {"n", b.nrows},       {"nnz_b", b.nnz()},
               {"complex", hs::is_complex_v<T>},             {"threads", args.threads}, {"ordering", args.ordering}};
   // The proof, as the driver runs it.
-  std::vector<double> secs;
+  std::vector<double> secs, setup, lanczos, pattern, attempts;
   hs::driver::HpdProof proof;
   for (int r = 0; r < std::max(1, args.reps); ++r) {
     proof = hs::driver::prove_positive_definite(b);
     secs.push_back(proof.seconds);
+    setup.push_back(proof.setup_s);
+    lanczos.push_back(proof.lanczos_s);
+    pattern.push_back(proof.pattern_s);
+    attempts.push_back(proof.attempts_s);
   }
   out["proof"] = {{"outcome", proof.outcome},      {"proven", proof.proven},           {"seconds", median(secs)},
+                  {"setup_s", median(setup)},      {"lanczos_s", median(lanczos)},     {"pattern_s", median(pattern)},
+                  {"attempts_s", median(attempts)},
                   {"theta_min", proof.theta_min},  {"theta_max", proof.theta_max},     {"level", proof.level},
                   {"shift", proof.shift},          {"lower_bound", proof.lower_bound}, {"attempts", proof.attempts},
                   {"factor_entries", proof.factor_entries}};

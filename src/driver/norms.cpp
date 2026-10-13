@@ -131,8 +131,8 @@ constexpr double kProofSecondsPerCheckWork = 4.5e-9;
 constexpr double kProofSecondsPerRow = 8e-8;
 constexpr double kProofSecondsPerLevel = 5e-6;
 constexpr double kRowsPerBusyThread = 8.0;
-/// Per-thread workspaces of the factorization and the check stay within this many bytes in all
-/// (fewer threads otherwise).
+/// Per-thread workspaces (pattern construction, factorization, check) stay within this many bytes
+/// in all (fewer threads otherwise).
 constexpr double kWorkspaceBytes = 268435456.0;
 /// The factorization runs level by level in parallel only with at least this many rows per level
 /// on average (a barrier per level).
@@ -144,8 +144,20 @@ double gamma_m(double m) {
   return mu < 0.5 ? mu / (1.0 - mu) : std::numeric_limits<double>::infinity();
 }
 
-/// Lower triangular sparse matrix: CSR rows with sorted columns, the diagonal last in each row, and
-/// its column structure (CSC, rows sorted, the diagonal first in each column).
+/// Threads whose per-thread workspaces of `per_thread` bytes fit kWorkspaceBytes together.
+int workspace_threads(double per_thread) {
+  return std::max(1, std::min(max_threads(), static_cast<int>(std::floor(kWorkspaceBytes / std::max(per_thread, 1.0)))));
+}
+
+/// Exclusive prefix sum in place: v[0] = 0 on entry, v[i + 1] = count of row i -> row pointers.
+void prefix_sum(std::vector<index_t>& v) {
+  for (std::size_t i = 1; i < v.size(); ++i) v[i] += v[i - 1];
+}
+
+/// Lower triangular sparse pattern with values: CSR rows with sorted columns, the diagonal last in
+/// each row, and the transposed structure (CSC, rows sorted, the diagonal first in each column)
+/// with cpos[q] = the CSR position of CSC entry q, so that any values on the pattern can be read
+/// column-wise (gather).
 template <class T>
 struct LowerMatrix {
   index_t n = 0;
@@ -154,61 +166,128 @@ struct LowerMatrix {
   std::vector<T> val;
   std::vector<index_t> cptr;
   std::vector<std::int32_t> crow;
-  std::vector<T> cval;
+  std::vector<index_t> cpos;
 
   index_t nnz() const { return static_cast<index_t>(col.size()); }
-  /// Builds the CSC arrays from the CSR ones (counting sort: rows come out sorted).
+  /// The CSC structure by a counting sort of the CSR one (rows come out sorted). O(nnz).
   void build_columns() {
     cptr.assign(static_cast<std::size_t>(n) + 1, 0);
     for (const std::int32_t j : col) ++cptr[static_cast<std::size_t>(j) + 1];
-    for (index_t j = 0; j < n; ++j) cptr[j + 1] += cptr[j];
+    prefix_sum(cptr);
     std::vector<index_t> next(cptr.begin(), cptr.end() - 1);
     crow.resize(col.size());
-    cval.resize(val.size());
+    cpos.resize(col.size());
     for (index_t i = 0; i < n; ++i)
       for (index_t p = ptr[i]; p < ptr[i + 1]; ++p) {
         const index_t q = next[col[p]]++;
         crow[q] = static_cast<std::int32_t>(i);
-        cval[q] = val[p];
+        cpos[q] = p;
       }
+  }
+  /// out[q] = v[cpos[q]]: values on the pattern in column order.
+  void gather(const std::vector<T>& v, std::vector<T>& out) const {
+    const auto m = static_cast<index_t>(cpos.size());
+    out.resize(cpos.size());
+#pragma omp parallel for schedule(static)
+    for (index_t q = 0; q < m; ++q) out[q] = v[cpos[q]];
   }
 };
 
-/// The proof's state for one B (see norms.hpp): the scaled lower triangle S of B and the patterns of
-/// the fill levels, built once and reused by the attempts.
+/// What an attempt on one fill level needs besides the pattern: the rows by level of the
+/// incomplete factorization (level(i) = 1 + max level(j) over the strict lower part of row i;
+/// rows ascending within a level) and the attempt's size (IcWork; integer counts, so the time
+/// model and the budget decisions are exact and do not depend on the thread count).
+struct Schedule {
+  IcWork work;
+  std::vector<index_t> lptr, rows;
+};
+
+template <class T>
+Schedule make_schedule(const LowerMatrix<T>& p) {
+  Schedule s;
+  const index_t n = p.n;
+  std::vector<index_t> level(static_cast<std::size_t>(n), 0);
+  index_t levels = 0;
+  for (index_t i = 0; i < n; ++i) {
+    index_t lv = 0;
+    for (index_t q = p.ptr[i]; q + 1 < p.ptr[i + 1]; ++q) lv = std::max(lv, level[p.col[q]] + 1);
+    level[i] = lv;
+    levels = std::max(levels, lv + 1);
+  }
+  std::int64_t factor = 0, check = 0;
+#pragma omp parallel for reduction(+ : factor) schedule(static)
+  for (index_t i = 0; i < n; ++i)
+    for (index_t q = p.ptr[i]; q < p.ptr[i + 1]; ++q) factor += p.ptr[p.col[q] + 1] - p.ptr[p.col[q]];
+#pragma omp parallel for reduction(+ : check) schedule(static)
+  for (index_t k = 0; k < n; ++k) {
+    const std::int64_t c = p.cptr[k + 1] - p.cptr[k];
+    check += c * c;
+  }
+  s.work.factor = static_cast<double>(factor);
+  s.work.check = static_cast<double>(check);
+  s.work.levels = levels;
+  s.lptr.assign(static_cast<std::size_t>(levels) + 1, 0);
+  s.rows.resize(static_cast<std::size_t>(n));
+  for (index_t i = 0; i < n; ++i) ++s.lptr[level[i] + 1];
+  prefix_sum(s.lptr);
+  std::vector<index_t> next(s.lptr.begin(), s.lptr.end() - 1);
+  for (index_t i = 0; i < n; ++i) s.rows[next[level[i]]++] = i;
+  return s;
+}
+
+/// The proof's state for one B (see norms.hpp): the scaled lower triangle S of B, the patterns of
+/// the fill levels and their schedules, built once and reused by the attempts.
 template <class T>
 class IcProver {
  public:
-  /// ok() == false: some diagonal entry is not a positive real number (no proof possible).
+  /// ok() == false: some diagonal entry is missing or not a positive real number (no proof).
   explicit IcProver(const CsrMatrix<T>& b) : n_(b.nrows) {
     s_.n = n_;
     s_.ptr.assign(static_cast<std::size_t>(n_) + 1, 0);
     w_.assign(static_cast<std::size_t>(n_), 0.0);
-    std::vector<double> d(static_cast<std::size_t>(n_), 0.0);
-    for (index_t i = 0; i < n_ && ok_; ++i) {
-      for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p)
-        if (b.colind[p] == i) {
-          d[i] = std::real(b.values[p]);
-          if (std::imag(b.values[p]) != 0.0) ok_ = false;
-        }
-      w_[i] = 1.0 / std::sqrt(d[i]);
-      if (!(d[i] > 0.0) || !std::isfinite(w_[i]) || !(w_[i] > 0.0)) ok_ = false;
-    }
-    if (!ok_) return;
-    // s_ij = (w_i b_ij) w_j for j <= i: within gamma_2 |s_ij| of w_i b_ij w_j with the stored w
-    // (complex b_ij: two real products per component).
+    bool bad = false;
+#pragma omp parallel for reduction(|| : bad) schedule(static)
     for (index_t i = 0; i < n_; ++i) {
+      index_t lower = 0;
+      double d = 0.0;
+      bool found = false;
       for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p) {
         const index_t j = b.colind[p];
-        if (j >= i) break;  // sorted columns: the strict lower part comes first
-        s_.col.push_back(static_cast<std::int32_t>(j));
-        s_.val.push_back((w_[i] * b.values[p]) * w_[j]);
+        if (j < i) {
+          ++lower;
+        } else if (j == i) {
+          found = true;
+          d = std::real(b.values[p]);
+          if (std::imag(b.values[p]) != 0.0) bad = true;
+        }
       }
-      s_.col.push_back(static_cast<std::int32_t>(i));
-      s_.val.push_back(T((w_[i] * d[i]) * w_[i]));
-      s_.ptr[i + 1] = static_cast<index_t>(s_.col.size());
+      const double wi = 1.0 / std::sqrt(d);
+      w_[i] = wi;
+      s_.ptr[i + 1] = lower + 1;
+      if (!found || !(d > 0.0) || !std::isfinite(wi) || !(wi > 0.0)) bad = true;
+    }
+    if (bad) {
+      ok_ = false;
+      return;
+    }
+    prefix_sum(s_.ptr);
+    s_.col.resize(static_cast<std::size_t>(s_.ptr[n_]));
+    s_.val.resize(static_cast<std::size_t>(s_.ptr[n_]));
+    // s_ij = (w_i b_ij) w_j for j <= i: within gamma_2 |s_ij| of w_i b_ij w_j with the stored w
+    // (complex b_ij: two real products per component).
+#pragma omp parallel for schedule(static)
+    for (index_t i = 0; i < n_; ++i) {
+      index_t q = s_.ptr[i];
+      for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p) {
+        const index_t j = b.colind[p];
+        if (j > i) break;  // sorted columns: the strict lower part, then the diagonal
+        s_.col[q] = static_cast<std::int32_t>(j);
+        s_.val[q] = j < i ? (w_[i] * b.values[p]) * w_[j] : T((w_[i] * std::real(b.values[p])) * w_[i]);
+        ++q;
+      }
     }
     s_.build_columns();
+    s_.gather(s_.val, s_cval_);
   }
 
   bool ok() const { return ok_; }
@@ -220,145 +299,143 @@ class IcProver {
       T acc(0);
       for (index_t p = s_.ptr[i]; p < s_.ptr[i + 1]; ++p) acc += s_.val[p] * x[s_.col[p]];
       // strict upper part of row i = conjugated strict lower part of column i (diagonal first)
-      for (index_t q = s_.cptr[i] + 1; q < s_.cptr[i + 1]; ++q) acc += conj_if(s_.cval[q]) * x[s_.crow[q]];
+      for (index_t q = s_.cptr[i] + 1; q < s_.cptr[i + 1]; ++q) acc += conj_if(s_cval_[q]) * x[s_.crow[q]];
       y[i] = acc;
     }
   }
 
   index_t order() const { return n_; }
-  /// Stored entries of the Hermitian S (both triangles).
-  double entries() const { return static_cast<double>(2 * s_.nnz() - n_); }
 
-  /// Predicted multiply-adds of an attempt on fill level `level`: the factorization sums |row j|
-  /// over the entries (i, j) of the pattern, the check sums |column k|^2 over its columns.
-  IcWork work(int level) {
-    const LowerMatrix<T>& pattern = level <= 0 ? s_ : level1();
-    IcWork w;
-    std::vector<index_t> lv(static_cast<std::size_t>(n_), 0);
-    for (index_t i = 0; i < n_; ++i) {
-      for (index_t p = pattern.ptr[i]; p < pattern.ptr[i + 1]; ++p) {
-        const index_t j = pattern.col[p];
-        w.factor += static_cast<double>(pattern.ptr[j + 1] - pattern.ptr[j]);
-        if (j < i) lv[i] = std::max(lv[i], lv[j] + 1);
-      }
-      w.levels = std::max(w.levels, lv[i] + 1);
+  /// The pattern of a fill level (0: S itself; 1: built on first use) and its schedule.
+  const LowerMatrix<T>& pattern(int level) { return level <= 0 ? s_ : level1(); }
+  const Schedule& schedule(int level) {
+    const int k = level <= 0 ? 0 : 1;
+    if (!sched_built_[k]) {
+      sched_[k] = make_schedule(pattern(level));
+      sched_built_[k] = true;
     }
-    for (index_t k = 0; k < n_; ++k) {
-      const double c = static_cast<double>(pattern.cptr[k + 1] - pattern.cptr[k]);
-      w.check += c * c;
-    }
-    return w;
+    return sched_[k];
   }
 
-  /// Bytes an attempt on `level` allocates beyond the stored S: the level's pattern (level 1), the
-  /// factor (rows and columns) and the larger of the two per-thread workspaces (each capped at
-  /// kWorkspaceBytes).
+  /// Bytes an attempt on `level` allocates beyond the stored S: the level's pattern (level 1: CSR
+  /// and CSC structure, values), the factor's values (row and column order) and the larger of the
+  /// per-thread workspaces (at most kWorkspaceBytes). Builds the level's pattern.
   double attempt_bytes(int level) {
-    const LowerMatrix<T>& pattern = level <= 0 ? s_ : level1();
-    const double entry = static_cast<double>(sizeof(T) + sizeof(std::int32_t));
-    const double matrix = 2.0 * (static_cast<double>(pattern.nnz()) * entry + 8.0 * static_cast<double>(n_));
-    const double threads = static_cast<double>(std::max(1, max_threads()));
-    const double factor_ws = threads * static_cast<double>(n_) * (sizeof(T) + 8.0);
-    const double check_ws = threads * static_cast<double>(n_) * (2.0 * sizeof(T) + 20.0);
-    return (level <= 0 ? 0.0 : matrix) + matrix + std::min(kWorkspaceBytes, std::max(factor_ws, check_ws));
+    const LowerMatrix<T>& p = pattern(level);
+    const double entries = static_cast<double>(p.nnz()), nn = static_cast<double>(n_);
+    const double structure = entries * (sizeof(T) + 2.0 * sizeof(std::int32_t) + sizeof(index_t)) +
+                             2.0 * (nn + 1.0) * sizeof(index_t);
+    const double factor = 2.0 * entries * sizeof(T);
+    const double ws = static_cast<double>(std::max(1, max_threads())) * nn * (2.0 * sizeof(T) + 20.0);
+    return (level <= 0 ? 0.0 : structure) + factor + std::min(kWorkspaceBytes, ws);
   }
 
   /// One attempt: incomplete factor of S - shift I on the fill level, then the check.
   IcBound attempt(int level, double shift) {
     IcBound r;
-    const LowerMatrix<T>& pattern = level <= 0 ? s_ : level1();
-    r.work = work(level);
-    r.factor_entries = pattern.nnz();
+    const LowerMatrix<T>& p = pattern(level);
+    const Schedule& s = schedule(level);
+    r.work = s.work;
+    r.factor_entries = p.nnz();
     Timer t;
-    LowerMatrix<T> l;
-    const bool ok = factorize(pattern, shift, l);
+    std::vector<T> lval;
+    const bool ok = factorize(p, s, shift, lval);
     r.factor_s = t.seconds();
     if (!ok) {
       r.breakdown = true;
       return r;
     }
     t.reset();
-    check(l, shift, r);
+    std::vector<T> lcval;
+    p.gather(lval, lcval);
+    check(p, lval, lcval, shift, r);
     r.check_s = t.seconds();
     return r;
   }
 
+  double pattern_seconds() const { return pattern_s_; }
+
  private:
-  /// Pattern of fill level 1: (i, j), j < i, in the pattern of S or with some k < j such that
-  /// (i, k) and (j, k) are (Saad, Iterative Methods for Sparse Linear Systems, §10.3.3). Values: S
-  /// on its own pattern, 0 on the fill.
-  const LowerMatrix<T>& level1() {
-    if (l1_built_) return l1_;
-    l1_.n = n_;
-    l1_.ptr.assign(static_cast<std::size_t>(n_) + 1, 0);
-    std::vector<index_t> mark(static_cast<std::size_t>(n_), -1);
-    std::vector<std::int32_t> row;
-    for (index_t i = 0; i < n_; ++i) {
-      row.clear();
-      for (index_t p = s_.ptr[i]; p + 1 < s_.ptr[i + 1]; ++p) {  // strict lower part of row i
-        mark[s_.col[p]] = i;
-        row.push_back(s_.col[p]);
-      }
-      for (index_t p = s_.ptr[i]; p + 1 < s_.ptr[i + 1]; ++p) {
-        const index_t k = s_.col[p];
-        for (index_t q = s_.cptr[k] + 1; q < s_.cptr[k + 1]; ++q) {  // rows j > k of column k
-          const index_t j = s_.crow[q];
-          if (j >= i) break;
-          if (mark[j] != i) {
-            mark[j] = i;
-            row.push_back(static_cast<std::int32_t>(j));
-          }
+  /// Fill of row i on level 1 (unsorted): the strict lower part of row i of S plus every j < i
+  /// with some k < j such that (i, k) and (j, k) are in S (Saad, Iterative Methods for Sparse
+  /// Linear Systems, §10.3.3). mark: per-thread, n entries.
+  void level1_row(index_t i, std::vector<std::int32_t>& mark, std::vector<std::int32_t>& row) const {
+    row.clear();
+    const auto mi = static_cast<std::int32_t>(i);
+    for (index_t p = s_.ptr[i]; p + 1 < s_.ptr[i + 1]; ++p) {
+      mark[s_.col[p]] = mi;
+      row.push_back(s_.col[p]);
+    }
+    for (index_t p = s_.ptr[i]; p + 1 < s_.ptr[i + 1]; ++p) {
+      const index_t k = s_.col[p];
+      for (index_t q = s_.cptr[k] + 1; q < s_.cptr[k + 1]; ++q) {  // rows j > k of column k
+        const std::int32_t j = s_.crow[q];
+        if (j >= i) break;
+        if (mark[j] != mi) {
+          mark[j] = mi;
+          row.push_back(j);
         }
       }
-      std::sort(row.begin(), row.end());
-      // values: S where it has an entry (both lists sorted), 0 on the fill
-      index_t p = s_.ptr[i];
-      const index_t send = s_.ptr[i + 1] - 1;
-      for (const std::int32_t j : row) {
-        while (p < send && s_.col[p] < j) ++p;
-        l1_.col.push_back(j);
-        l1_.val.push_back(p < send && s_.col[p] == j ? s_.val[p] : T(0));
+    }
+  }
+
+  /// Pattern of fill level 1 (rows in parallel: sizes, then the sorted rows). Values: S on its own
+  /// pattern, 0 on the fill.
+  const LowerMatrix<T>& level1() {
+    if (l1_built_) return l1_;
+    Timer t;
+    l1_.n = n_;
+    l1_.ptr.assign(static_cast<std::size_t>(n_) + 1, 0);
+    const int threads = workspace_threads(static_cast<double>(n_) * sizeof(std::int32_t) * 2.0);
+#pragma omp parallel num_threads(threads)
+    {
+      std::vector<std::int32_t> mark(static_cast<std::size_t>(n_), -1), row;
+#pragma omp for schedule(dynamic, 256)
+      for (index_t i = 0; i < n_; ++i) {
+        level1_row(i, mark, row);
+        l1_.ptr[i + 1] = static_cast<index_t>(row.size()) + 1;
       }
-      l1_.col.push_back(static_cast<std::int32_t>(i));
-      l1_.val.push_back(s_.val[send]);
-      l1_.ptr[i + 1] = static_cast<index_t>(l1_.col.size());
+    }
+    prefix_sum(l1_.ptr);
+    l1_.col.resize(static_cast<std::size_t>(l1_.ptr[n_]));
+    l1_.val.resize(static_cast<std::size_t>(l1_.ptr[n_]));
+#pragma omp parallel num_threads(threads)
+    {
+      std::vector<std::int32_t> mark(static_cast<std::size_t>(n_), -1), row;
+#pragma omp for schedule(dynamic, 256)
+      for (index_t i = 0; i < n_; ++i) {
+        level1_row(i, mark, row);
+        std::sort(row.begin(), row.end());
+        // values: S where it has an entry (both lists sorted), 0 on the fill
+        index_t p = s_.ptr[i], q = l1_.ptr[i];
+        const index_t send = s_.ptr[i + 1] - 1;
+        for (const std::int32_t j : row) {
+          while (p < send && s_.col[p] < j) ++p;
+          l1_.col[q] = j;
+          l1_.val[q] = p < send && s_.col[p] == j ? s_.val[p] : T(0);
+          ++q;
+        }
+        l1_.col[q] = static_cast<std::int32_t>(i);
+        l1_.val[q] = s_.val[send];
+      }
     }
     l1_.build_columns();
     l1_built_ = true;
+    pattern_s_ += t.seconds();
     return l1_;
   }
 
   /// Incomplete Cholesky factor of (pattern values) - shift I on the pattern (row-Crout: l_ij =
   /// (s_ij - sum_{k<j} l_ik conj(l_jk)) / l_jj over the pattern, l_ii = sqrt(s_ii - shift -
-  /// sum_k |l_ik|^2)); false when a pivot is not positive. Row i needs the rows j < i of its
-  /// pattern only, so the rows of one level (level(i) = 1 + max level(j) over its pattern) are
-  /// computed in parallel; every row is computed exactly as in the sequential loop (same operations
-  /// in the same order), so the factor does not depend on the thread count. Narrow level
-  /// structures (fewer than kMinLevelWidth rows per level on average) run sequentially.
-  bool factorize(const LowerMatrix<T>& pattern, double shift, LowerMatrix<T>& l) const {
-    l.n = n_;
-    l.ptr = pattern.ptr;
-    l.col = pattern.col;
-    l.val.assign(pattern.val.size(), T(0));
-    // Levels and the rows of each level (counting sort, rows ascending within a level).
-    std::vector<index_t> level(static_cast<std::size_t>(n_), 0);
-    index_t levels = 0;
-    for (index_t i = 0; i < n_; ++i) {
-      index_t lv = 0;
-      for (index_t p = pattern.ptr[i]; p + 1 < pattern.ptr[i + 1]; ++p) lv = std::max(lv, level[pattern.col[p]] + 1);
-      level[i] = lv;
-      levels = std::max(levels, lv + 1);
-    }
-    std::vector<index_t> lptr(static_cast<std::size_t>(levels) + 1, 0), rows(static_cast<std::size_t>(n_));
-    for (index_t i = 0; i < n_; ++i) ++lptr[level[i] + 1];
-    for (index_t v = 0; v < levels; ++v) lptr[v + 1] += lptr[v];
-    {
-      std::vector<index_t> next(lptr.begin(), lptr.end() - 1);
-      for (index_t i = 0; i < n_; ++i) rows[next[level[i]]++] = i;
-    }
-    const double per_thread = static_cast<double>(n_) * (sizeof(T) + 8.0);
-    int threads = std::max(
-        1, std::min(max_threads(), static_cast<int>(std::floor(kWorkspaceBytes / std::max(per_thread, 1.0)))));
+  /// sum_k |l_ik|^2)), values in CSR order; false when a pivot is not positive. Row i needs the
+  /// rows j < i of its pattern only, so the rows of one level of the schedule are computed in
+  /// parallel; every row is computed exactly as in the sequential loop (same operations in the same
+  /// order), so the factor does not depend on the thread count. Narrow level structures (fewer than
+  /// kMinLevelWidth rows per level on average) run sequentially.
+  bool factorize(const LowerMatrix<T>& pattern, const Schedule& s, double shift, std::vector<T>& lval) const {
+    lval.assign(pattern.val.size(), T(0));
+    const index_t levels = s.work.levels;
+    int threads = workspace_threads(static_cast<double>(n_) * (sizeof(T) + 8.0));
     if (static_cast<double>(n_) < kMinLevelWidth * static_cast<double>(levels)) threads = 1;
     std::vector<unsigned char> failed(static_cast<std::size_t>(levels), 0);  // a pivot of the level failed
 #pragma omp parallel num_threads(threads)
@@ -367,8 +444,8 @@ class IcProver {
       std::vector<index_t> mark(static_cast<std::size_t>(n_), -1);
       for (index_t v = 0; v < levels; ++v) {
 #pragma omp for schedule(dynamic, 16)
-        for (index_t r = lptr[v]; r < lptr[v + 1]; ++r) {
-          const index_t i = rows[r];
+        for (index_t r = s.lptr[v]; r < s.lptr[v + 1]; ++r) {
+          const index_t i = s.rows[r];
           const index_t end = pattern.ptr[i + 1] - 1;  // the diagonal
           for (index_t p = pattern.ptr[i]; p < end; ++p) {
             x[pattern.col[p]] = pattern.val[p];
@@ -378,12 +455,12 @@ class IcProver {
           for (index_t p = pattern.ptr[i]; p < end; ++p) {
             const index_t j = pattern.col[p];
             T sum = x[j];
-            const index_t jend = l.ptr[j + 1] - 1;
-            for (index_t q = l.ptr[j]; q < jend; ++q)
-              if (mark[l.col[q]] == i) sum -= x[l.col[q]] * conj_if(l.val[q]);
-            const T lij = sum / std::real(l.val[jend]);
+            const index_t jend = pattern.ptr[j + 1] - 1;
+            for (index_t q = pattern.ptr[j]; q < jend; ++q)
+              if (mark[pattern.col[q]] == i) sum -= x[pattern.col[q]] * conj_if(lval[q]);
+            const T lij = sum / std::real(lval[jend]);
             x[j] = lij;
-            l.val[p] = lij;
+            lval[p] = lij;
             diag -= abs2(lij);
           }
           // A failed pivot stays 0: rows of the same level do not read it, and the factorization is
@@ -392,7 +469,7 @@ class IcProver {
 #pragma omp atomic write
             failed[v] = 1;
           } else {
-            l.val[end] = T(std::sqrt(diag));
+            lval[end] = T(std::sqrt(diag));
           }
         }  // implicit barrier: the level is complete
         unsigned char stop;
@@ -401,15 +478,13 @@ class IcProver {
         if (stop) break;  // written before the barrier only: every thread takes the same decision
       }
     }
-    if (std::find(failed.begin(), failed.end(), 1) != failed.end()) return false;
-    l.build_columns();
-    return true;
+    return std::find(failed.begin(), failed.end(), 1) == failed.end();
   }
 
-
   /// Rigorous Gershgorin bound of lambda_min(M), M = S - L L^H (exact arithmetic on the stored
-  /// numbers): row i of L L^H is accumulated as the sum over k in row i of L of l_ik conj(L(:, k)).
-  /// With t_ij the computed s_ij - shift delta_ij - (L L^H)_ij from cnt products,
+  /// numbers): row i of L L^H is accumulated as the sum over k in row i of L of l_ik conj(L(:, k))
+  /// (lcval: L's values in column order). With t_ij the computed s_ij - shift delta_ij - (L L^H)_ij
+  /// from cnt products,
   ///   |m_ij - shift delta_ij - t_ij| <= e_ij = f gamma_{cnt + 8} (|s_ij| + shift delta_ij + sum_k |l_ik| |l_jk|),
   /// f = 2 real / 4 complex (rounding of the scaled entries - gamma_2 -, the dot product - gamma_cnt,
   /// complex products within sqrt(2) gamma_2 -, the subtractions; a factor 2 of slack), and
@@ -417,13 +492,12 @@ class IcProver {
   ///                           - (1 + 2 gamma_{N_i + 4}) sum_{j != i} (|t_ij| + e_ij)]
   /// with the computed sums of N_i nonnegative terms bounded through gamma (|.| of a complex
   /// number within 2u). Rows are independent: the result does not depend on the thread count.
-  void check(const LowerMatrix<T>& l, double shift, IcBound& r) const {
+  void check(const LowerMatrix<T>& l, const std::vector<T>& lval, const std::vector<T>& lcval, double shift,
+             IcBound& r) const {
     constexpr double kFactor = is_complex_v<T> ? 4.0 : 2.0;
     // Per-thread workspace: acc and the S entry (T), sum of |products| (double), product count
-    // (int32), mark (int64); at most 256 MB in all.
-    const double per_thread = static_cast<double>(n_) * (2.0 * sizeof(T) + 8.0 + 4.0 + 8.0);
-    const int threads = std::max(
-        1, std::min(max_threads(), static_cast<int>(std::floor(kWorkspaceBytes / std::max(per_thread, 1.0)))));
+    // (int32), mark (int64); at most kWorkspaceBytes in all.
+    const int threads = workspace_threads(static_cast<double>(n_) * (2.0 * sizeof(T) + 8.0 + 4.0 + 8.0));
     double lower = std::numeric_limits<double>::infinity();
     index_t failing = 0;
 #pragma omp parallel num_threads(threads) reduction(min : lower) reduction(+ : failing)
@@ -448,13 +522,13 @@ class IcProver {
         };
         for (index_t q = l.ptr[i]; q < l.ptr[i + 1]; ++q) {
           const index_t k = l.col[q];
-          const T lik = l.val[q];
+          const T lik = lval[q];
           const double alik = std::abs(lik);
           for (index_t p = l.cptr[k]; p < l.cptr[k + 1]; ++p) {
             const index_t j = l.crow[p];
             touch(j);
-            acc[j] += lik * conj_if(l.cval[p]);
-            aab[j] += alik * std::abs(l.cval[p]);
+            acc[j] += lik * conj_if(lcval[p]);
+            aab[j] += alik * std::abs(lcval[p]);
             ++cnt[j];
           }
         }
@@ -464,7 +538,7 @@ class IcProver {
         }
         for (index_t p = s_.cptr[i] + 1; p < s_.cptr[i + 1]; ++p) {  // s_ij = conj(s_ji), j > i
           touch(s_.crow[p]);
-          sv[s_.crow[p]] = conj_if(s_.cval[p]);
+          sv[s_.crow[p]] = conj_if(s_cval_[p]);
         }
         double diag = -std::numeric_limits<double>::infinity(), off = 0.0;
         for (const std::int32_t j : touched) {
@@ -492,8 +566,12 @@ class IcProver {
   bool ok_ = true;
   std::vector<double> w_;
   LowerMatrix<T> s_;
+  std::vector<T> s_cval_;  ///< S's lower values in column order
   LowerMatrix<T> l1_;
   bool l1_built_ = false;
+  Schedule sched_[2];
+  bool sched_built_[2] = {false, false};
+  double pattern_s_ = 0.0;
 };
 
 }  // namespace
@@ -514,25 +592,32 @@ double hpd_attempt_seconds(index_t n, const IcWork& w, int threads) {
          kProofSecondsPerRow * nn + (parallel ? kProofSecondsPerLevel * levels : 0.0);
 }
 
-// The attempts (norms.hpp): per fill level the shift c = fraction * theta, the next (smaller)
-// fraction only after a breakdown - after a Gershgorin failure a smaller shift lowers the margins
-// (it did on every row of the scan in bench/anaint_bproof.cpp), the next level is tried. Each
-// attempt is paid from opt.max_seconds by its predicted time (hpd_attempt_seconds) before it runs.
-// A retry raising only the failing rows' shifts to 1.5 times their deficit was tried and dropped:
-// it never turned a failure into a proof (ss-qa8fk-qa8fm level 0, ss-tem27623 level 1: breakdown).
+// The attempts (norms.hpp): fill level 1 first - on every data case the proof succeeded at, level
+// 1 proved it with the first shift (fraction 0.9), while level 0 failed on two of the four
+// (ss-qa8fk-qa8fm, syn-ghep-zero-cluster-complex-1e4: dropped fill above the shift in some rows)
+// and was at most 10% cheaper elsewhere (bench/anaint_bproof.cpp, 16 threads) -, level 0 only
+// when level 1 does not fit the time or memory limit. Per level the shift c = fraction * theta,
+// the next (smaller) fraction only after a breakdown: after a Gershgorin failure a smaller shift
+// lowers the margins (it did on every row of the scan). Each attempt is paid from opt.max_seconds
+// by its predicted time (hpd_attempt_seconds) before it runs. A retry raising only the failing
+// rows' shifts to 1.5 times their deficit was tried and dropped: it never turned a failure into a
+// proof (ss-qa8fk-qa8fm level 0, ss-tem27623 level 1: breakdown).
 template <class T>
 HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& opt) {
   Timer timer;
   HpdProof r;
   const index_t n = b.nrows;
   IcProver<T> prover(b);
+  r.setup_s = timer.seconds();
   if (n == 0 || !prover.ok()) {
     r.outcome = "nonpositive_diagonal";
     r.seconds = timer.seconds();
     return r;
   }
+  Timer tl;
   const NormEstimate est = lanczos_ends<T>(
       n, [&](const T* x, T* y) { prover.apply(x, y); }, opt.lanczos_steps, opt.seed, /*stream=*/0x68706470ULL);
+  r.lanczos_s = tl.seconds();
   r.theta_min = est.ritz_min;
   r.theta_max = est.ritz_max;
   if (est.steps > 0 && est.ritz_min < -kIndefiniteRitzScaled * est.norm2) {
@@ -555,7 +640,7 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
       r.outcome = "too_large";
       return false;
     }
-    const double cost = hpd_attempt_seconds(n, prover.work(level), threads);
+    const double cost = hpd_attempt_seconds(n, prover.schedule(level).work, threads);
     if (cost > left) {
       r.outcome = "too_expensive";
       return false;
@@ -564,7 +649,9 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
     ++r.attempts;
     r.level = level;
     r.shift = shift;
+    Timer ta;
     ib = prover.attempt(level, shift);
+    r.attempts_s += ta.seconds();
     r.factor_entries = ib.factor_entries;
     if (ib.breakdown) {
       r.outcome = "breakdown";
@@ -577,13 +664,17 @@ HpdProof prove_positive_definite(const CsrMatrix<T>& b, const HpdProofOptions& o
     }
     return true;
   };
-  for (int level = 0; level <= opt.max_level && !r.proven; ++level) {
+  for (const int level : opt.levels) {
+    bool ran = false;
     for (const double fraction : opt.fractions) {
       IcBound ib;
-      if (!run(level, fraction * theta, ib) || !ib.breakdown) break;
+      if (!run(level, fraction * theta, ib)) break;
+      ran = true;
+      if (!ib.breakdown) break;
     }
-    if (r.outcome == "too_expensive" || r.outcome == "too_large") break;  // a higher level costs more
+    if (r.proven || ran) break;  // a lower level only where this one did not fit the limits
   }
+  r.pattern_s = prover.pattern_seconds();
   r.seconds = timer.seconds();
   return r;
 }

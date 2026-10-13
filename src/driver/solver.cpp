@@ -327,7 +327,9 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
                          {"lower_bound", proof.lower_bound}, {"theta_min", proof.theta_min},
                          {"theta_max", proof.theta_max}, {"level", static_cast<std::int64_t>(proof.level)},
                          {"shift", proof.shift}, {"attempts", static_cast<std::int64_t>(proof.attempts)},
-                         {"budget_s", po.max_seconds}, {"seconds", proof.seconds}});
+                         {"budget_s", po.max_seconds}, {"seconds", proof.seconds}, {"setup_s", proof.setup_s},
+                         {"lanczos_s", proof.lanczos_s}, {"pattern_s", proof.pattern_s},
+                         {"attempts_s", proof.attempts_s}});
     if (proof.proven) {
       Inertia ib;
       ib.neg = ib.zero = 0;
