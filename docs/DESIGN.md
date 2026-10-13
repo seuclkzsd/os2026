@@ -669,7 +669,9 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      1.9 倍，度、填充、分隔子大小都解释不了），其分析比 SCOTCH 慢一倍，总时间为 P4 的 1.15 倍。给嵌套剖分
      加上分析风险（未分析时加 0.5 倍预测分析时间）可修好这一例，但重放时 yee-bloch-1e4、yee-photonic-*、
      syn-lap3d-aniso-1e5、syn-mem27-46 与 ss-qa8fk-qa8fm 也转向 SCOTCH，平均超额 4.3% → 5.3%，未采用。模型只
-     在 16 线程下标定（4 线程数据只用于线程指数与 W），低填充 AMD 的系数只来自 syn-* 测例。
+     在 16 线程下标定（4 线程数据只用于线程指数与 W；它们是在测量槽有锁之前于槽核 28–31 上取的，复现时 4 线程
+     计时也须持槽：`guard.py --exclusive --cores 16-19`，命令见 `bench/anaint_orderings.cpp` 头注释；
+     `bench_anaint_decide` 的选择不依赖计时，在构建/测试道运行），低填充 AMD 的系数只来自 syn-* 测例。
    - **P4 规则**（`decide_ordering` / `nd_ordering`，现在只服务 `deterministic = true`，也是 bench 的对照）：
      AMD 探测后按确定的模型预估嵌套剖分在本次运行的分解与回代上能省的时间，超过其额外分析代价才改用嵌套
      剖分——SCOTCH，`deterministic = true` 时 METIS（5，固定种子）；该路径总是 deterministic，所以实际是
