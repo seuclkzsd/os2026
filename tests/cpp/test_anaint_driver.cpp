@@ -324,6 +324,39 @@ void ghiep_without_factorizing_b() {
 TEST(DriverBDefiniteness, LanczosProvesIndefiniteBReal) { ghiep_without_factorizing_b<double>(); }
 TEST(DriverBDefiniteness, LanczosProvesIndefiniteBComplex) { ghiep_without_factorizing_b<cplx>(); }
 
+// SolveReport::block_size of a GHIEP solve is the width its run used (it said 1 while the runs used
+// the auto p = 2 of ghiep_block_size): n = 21000 >= 2e4 and k = 6 >= 4 give p = 2, a configured 1
+// gives 1.
+TEST(DriverGhiepReport, BlockSizeIsTheRunsWidth) {
+  const index_t nx = 150, ny = 140;
+  const auto a = hs::test::laplacian_2d<double>(nx, ny);
+  auto b = a;
+  for (index_t i = 0; i < b.nrows; ++i)
+    for (index_t p = b.rowptr[i]; p < b.rowptr[i + 1]; ++p)
+      if (b.colind[p] == i) b.values[p] -= 2.0;
+  std::vector<double> w;
+  for (double l : hs::test::laplacian_2d_eigenvalues(nx, ny)) w.push_back(l / (l - 2.0));
+  auto cfg = nearest_cfg(3.3, 6);
+  ASSERT_EQ(hs::driver::ghiep_block_size(cfg, a.nrows, 6), 2);
+  const std::string path = ::testing::TempDir() + "/anaint_ghiep_block_size.jsonl";
+  hs::Solution<double> sol;
+  {
+    hs::Logger log(0, path);
+    sol = hs::solve(a, &b, cfg, &log);
+  }
+  EXPECT_EQ(sol.report.problem, hs::ProblemType::GeneralizedIndefinite);
+  EXPECT_TRUE(sol.report.success);
+  expect_same_set(sol.eigenvalues, nearest(w, 3.3, 6), 1e-9);
+  const auto runs = events(path, "krylov_schur");
+  ASSERT_FALSE(runs.empty());
+  EXPECT_EQ(runs[0].at("block_size").get<index_t>(), 2);
+  EXPECT_EQ(sol.report.block_size, 2);
+  cfg.block_size = 1;
+  const auto single = hs::solve(a, &b, cfg);
+  EXPECT_TRUE(single.report.success);
+  EXPECT_EQ(single.report.block_size, 1);
+}
+
 // ------------------------------------------------------------------------ GHIEP memory plan
 
 template <class T>

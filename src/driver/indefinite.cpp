@@ -196,6 +196,7 @@ struct KsRun {
   double sigma = 0.0;
   Which which = Which::LargestMagnitude;
   index_t nev = 0;
+  index_t block_size = 1;  ///< Krylov block width p of the run (after the memory fit)
   /// The Krylov-Schur result without its Ritz vectors: the refinement works on the Schur basis
   /// (same span, orthonormal), so ks_run drops the n x m complex vectors right away.
   GeneralEigResult<T> res;
@@ -226,6 +227,7 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   ko.seed = cfg.seed;
   ko.block_size = ghiep_block_size(cfg, pencil.order(), ko.nev);
   ko.block_size = fit_block_size(c, pencil.order(), ko, refine.max_steps > 0);
+  run.block_size = ko.block_size;
   {
     PhaseScope phase(c.clock, Phase::Iterate);
     run.res = krylov_schur_general<T>(op, which, ko);
@@ -963,6 +965,9 @@ Solution<T> solve_indefinite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFacto
     rep.restarts += r.res.restarts;
     rep.op_applies += r.res.op_applies;
   }
+  // SolveReport::block_size: the width of the first run (the plain run, or the first one-sided run
+  // - the probes before it are single-vector by rule).
+  if (!runs.empty()) rep.block_size = runs.front().block_size;
 
   Solution<T> sol;
   // The runs' Schur bases are no longer needed: free them before the outputs are formed from the
