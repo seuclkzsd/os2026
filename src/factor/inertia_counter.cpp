@@ -121,6 +121,14 @@ FactorEstimate InertiaCounter<T>::estimate() const {
 }
 
 template <class T>
+FactorEstimate InertiaCounter<T>::estimate(FactorPrecision precision) const {
+  Impl& m = *impl_;
+  if (precision != FactorPrecision::Single) return m.double_instance().estimate();
+  if (!m.sgl) m.sgl = m.template make_instance<float>(1.0, 0.0);
+  return m.sgl->estimate();
+}
+
+template <class T>
 bool InertiaCounter<T>::double_analysed() const {
   return impl_->dbl != nullptr;
 }

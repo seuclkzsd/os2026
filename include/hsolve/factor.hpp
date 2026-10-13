@@ -454,6 +454,12 @@ class InertiaCounter {
   /// is the working memory, there are no factors to keep). Analyses a deferred double instance
   /// first.
   FactorEstimate estimate() const;
+  /// The same for counts of `precision`: Single analyses the single-precision instance first if
+  /// no single count has (with representative values alpha = 1, beta = 0, as the double instance:
+  /// with a given pivot order they change nothing that matters to the counts). Lets a caller check
+  /// a count's working memory against what it may use before counting (the driver's count
+  /// allowance). Throws as analyze().
+  FactorEstimate estimate(FactorPrecision precision) const;
   /// Whether the double-precision instance is analysed (false only while deferred and unused).
   bool double_analysed() const;
   const InertiaCounterStats& stats() const;
