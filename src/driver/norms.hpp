@@ -70,7 +70,7 @@ struct HpdProofOptions {
   /// tried after a breakdown (a pivot of the incomplete factorization not positive).
   std::vector<double> fractions{0.9, 0.5, 0.2};
   /// Time budget (seconds) of the attempts and of the level-1 pattern, each paid by its predicted
-  /// time (hpd_attempt_seconds, hpd_pattern_seconds) before it runs: one beyond what is left is not
+  /// time (hpd_attempt_seconds, hpd_count_seconds, hpd_fill_seconds) before it runs: one beyond what is left is not
   /// run (outcome too_expensive). The driver passes a fraction of the predicted time of the
   /// factorization of B that a proof saves.
   double max_seconds = 1e300;

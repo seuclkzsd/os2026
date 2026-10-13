@@ -287,7 +287,8 @@ index_t strict_lower_entries(const CsrMatrix<T>& b) {
 template <class T>
 double stored_s_bytes(index_t n, double entries) {
   const double nn = static_cast<double>(n);
-  return entries * (2.0 * sizeof(T) + 2.0 * sizeof(std::int32_t) + sizeof(index_t)) + 3.0 * (nn + 1.0) * sizeof(index_t);
+  return entries * (2.0 * sizeof(T) + 2.0 * sizeof(std::int32_t) + sizeof(index_t)) +
+         3.0 * (nn + 1.0) * sizeof(index_t);
 }
 
 /// Bytes an attempt on `level` allocates beyond the stored S, on a pattern of `entries` (lower

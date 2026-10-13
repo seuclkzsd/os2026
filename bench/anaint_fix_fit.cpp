@@ -408,8 +408,12 @@ Fit fit(const Table& d16, const Table& d4) {
     std::vector<std::vector<double>> x;
     std::vector<double> y;
     Range rg{"floor"};
-    for (const Row* r : b16)
-      if (!std::isnan(r->ca)) x.push_back({r->order, r->entries, r->fe}), y.push_back(r->ca), rg.labels.push_back(label(r));
+    for (const Row* r : b16) {
+      if (std::isnan(r->ca)) continue;
+      x.push_back({r->order, r->entries, r->fe});
+      y.push_back(r->ca);
+      rg.labels.push_back(label(r));
+    }
     const auto z = nnls_rel(x, y, &rg.ratio);
     m.floor_order = z[0], m.floor_entry = z[1], m.floor_fe = z[2];
     f.ranges.push_back(rg);
@@ -419,8 +423,12 @@ Fit fit(const Table& d16, const Table& d4) {
     std::vector<std::vector<double>> x;
     std::vector<double> y;
     Range rg{"ND work W"};
-    for (const Row* r : b4)
-      if (r->o == kNd && !std::isnan(r->nd1)) x.push_back({r->gv, r->ge, r->fe}), y.push_back(r->nd1), rg.labels.push_back(r->c);
+    for (const Row* r : b4) {
+      if (r->o != kNd || std::isnan(r->nd1)) continue;
+      x.push_back({r->gv, r->ge, r->fe});
+      y.push_back(r->nd1);
+      rg.labels.push_back(r->c);
+    }
     const auto z = nnls_rel(x, y, &rg.ratio);
     m.nd_work_vertex = z[0], m.nd_work_edge = z[1], m.nd_work_fe = z[2];
     f.ranges.push_back(rg);
@@ -523,7 +531,11 @@ Fit fit(const Table& d16, const Table& d4) {
     std::vector<std::vector<double>> x;
     std::vector<double> y;
     Range rg{"factorization"};
-    for (const Row* r : num) x.push_back({r->order, r->entries, r->fe, r->flops}), y.push_back(r->fac), rg.labels.push_back(label(r));
+    for (const Row* r : num) {
+      x.push_back({r->order, r->entries, r->fe, r->flops});
+      y.push_back(r->fac);
+      rg.labels.push_back(label(r));
+    }
     const auto z = nnls_rel(x, y, &rg.ratio);
     m.fac_order = z[0], m.fac_entry = z[1], m.fac_fe = z[2], m.fac_flops = z[3];
     f.ranges.push_back(rg);
@@ -536,7 +548,11 @@ Fit fit(const Table& d16, const Table& d4) {
     std::vector<std::vector<double>> x;
     std::vector<double> y;
     Range rg{"1-RHS solve"};
-    for (const Row* r : num) x.push_back({r->order, r->fe}), y.push_back(r->s1), rg.labels.push_back(label(r));
+    for (const Row* r : num) {
+      x.push_back({r->order, r->fe});
+      y.push_back(r->s1);
+      rg.labels.push_back(label(r));
+    }
     const auto z = nnls_rel(x, y, &rg.ratio);
     m.solve_order = z[0], m.solve_fe = z[1];
     f.ranges.push_back(rg);
@@ -749,10 +765,9 @@ int main(int argc, char** argv) {
     const Fit f = fit(d16, d4);
     std::printf("\nconstants (refit from the raw data vs committed ordering_model()):\n");
     print_model(f.m, hs::driver::ordering_model());
+    const auto [smin, smax] = std::minmax_element(f.serial.begin(), f.serial.end());
     std::printf("ND serial fraction at 16 threads: median %.3f, quartiles %.3f %.3f, range %.2f..%.2f (%zu cases)\n",
-                f.m.nd_serial, percentile(f.serial, 25), percentile(f.serial, 75),
-                *std::min_element(f.serial.begin(), f.serial.end()), *std::max_element(f.serial.begin(), f.serial.end()),
-                f.serial.size());
+                f.m.nd_serial, percentile(f.serial, 25), percentile(f.serial, 75), *smin, *smax, f.serial.size());
     std::printf("\nranges of predicted / measured (refit):\n");
     for (const Range& r : f.ranges) summarize(r, verbose);
     // The replay: committed model, refit model, leave-one-case-out.

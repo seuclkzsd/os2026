@@ -485,8 +485,8 @@ constexpr double kIndefiniteRitz = 1e-10;
 
 /// hs::solve gives the attempts of prove_positive_definite (norms.hpp) and its level-1 pattern at
 /// most this fraction of the predicted time of the factorization of B a proof saves
-/// (factorization_s of the main analysis' estimate, against hpd_attempt_seconds and
-/// hpd_pattern_seconds). Beyond them a proof costs its Lanczos run and, once theta passes the
+/// (factorization_s of the main analysis' estimate, against hpd_attempt_seconds,
+/// hpd_count_seconds and hpd_fill_seconds). Beyond them a proof costs its Lanczos run and, once theta passes the
 /// gate, the stored S (both O(nnz(B))). At 16 threads (bench/
 /// anaint_bproof.cpp, P5c) a failed proof cost 0.054 s on ss-tem27623 against a 0.058 s
 /// factorization of B (the worst ratio; theta passed the gate, the attempt failed), 0.001..0.09 s
