@@ -12,7 +12,7 @@ the table says "ok" or lists what differed.
 
 Projection (--ref, the hsolve 16-core reference runs of tools/bench/compare.py): hsolve's measured
 phases with the factorizations and solves scaled by the measured SSIDS / MUMPS ratios
-  analysis  * analyse_X / analyse_M
+  analysis  * analyse_X / analyse_M     (ssids:mumps: + the MUMPS analysis that made the order)
   numeric   * (cold_X + (F-1) warm_X) / (cold_M + (F-1) warm_M)      F = the run's factorizations
   solves    * solve1_X / solve1_M
   certificate (hsolve - hsolve-nocert, when its counts are not main factorizations)
@@ -51,6 +51,8 @@ def summarize(runs: list[dict]) -> dict:
     if not ok:
         return s
     s["analyse"] = med([r["analyse_s"] for r in ok])
+    # ssids:mumps orders with the driver's MUMPS analysis (untimed in analyse_s): count it here.
+    s["analyse_total"] = med([r["analyse_s"] + (r.get("order_source") or {}).get("analyse_s", 0.0) for r in ok])
     s["cold"] = med([r["factor_s"][0] for r in ok])
     s["warm"] = med([med(r["factor_s"][1:]) if len(r["factor_s"]) > 1 else r["factor_s"][0] for r in ok])
     s["solve1"] = med([r["solve1_s"] for r in ok])
@@ -149,7 +151,7 @@ def main() -> int:
             def proj(phases, cert):
                 f = int(phases["factorizations"])
                 r_num = (x["cold"] + (f - 1) * x["warm"]) / (m["cold"] + (f - 1) * m["warm"])
-                a = phases["analysis_s"] * x["analyse"] / m["analyse"]
+                a = phases["analysis_s"] * x["analyse_total"] / m["analyse"]
                 n = phases["numeric_s"] * r_num
                 s = phases["solve_s"] * x["solve1"] / m["solve1"]
                 c = cert * x["warm"] / ((1 - COUNTER_SAVING) * m["warm"]) if cert > 0 else 0.0
