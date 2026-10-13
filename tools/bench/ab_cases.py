@@ -42,6 +42,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[2]
 GUARD = REPO / "tools/run/guard.py"
 DATA = Path(os.environ.get("HS_DATA_ROOT", str(REPO / "data")))
+PROBLEM = {"standard": "HEP", "generalized_definite": "GHEP", "generalized_indefinite": "GHIEP"}
 
 
 def hsolve_command(binary: Path, case_dir: Path, out: Path, threads: int) -> list[str]:
@@ -157,7 +158,8 @@ def cmd_table(a: argparse.Namespace) -> int:
         base, new = summarize(data[name].get(a.base, [])), summarize(data[name].get(a.new, []))
         any_run = (data[name].get(a.new) or data[name].get(a.base))[0]
         ratio = new["time_s"] / base["time_s"] if base["time_s"] and new["time_s"] else None
-        rows.append({"case": name, "n": any_run.get("n"), "problem": any_run.get("problem"),
+        rows.append({"case": name, "n": any_run.get("n"), "problem": PROBLEM.get(any_run.get("problem"),
+                                                                                 any_run.get("problem")),
                      "hosts": sorted(set(base["hosts"]) | set(new["hosts"])), a.base: base, a.new: new,
                      "ratio": ratio, "comparable": base["ok"] and new["ok"] and ratio is not None})
     comp = [r for r in rows if r["comparable"]]
