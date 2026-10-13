@@ -63,7 +63,9 @@ B 不定时用**一般 Krylov-Schur**（实 Schur 形 + dtrsen 重排，共轭�
 p 列，回代占一次算子作用的 80–100%，p = 16 时每列代价只有 p = 1 的 1/4–1/9（4 线程，六个 1e5 测例）。
 块宽按确定的规则选（不做计时探测，结果不随机器负载变化）：HEP/GHEP 的 nearest 运行由块宽规则（P5c）在
 p ∈ {1, 2, 4, 8} 中选——在 16 线程下标定的每步代价模型（p 列回代按 σ 处分解的因子条目与规模，加块正交化）
-乘实测的块步数比，取最小者，需求 ≥ 8 对时至少 4（重特征值在运行前看不见，而它们让更宽的块划算）；切片与
+乘实测的块步数比，取最小者，需求 ≥ 8 对时至少 4（重特征值在运行前看不见，而它们让更宽的块划算）；从 4
+加宽到 8 须有 10% 的模型收益（模型在没有 BLAS hook 时标定，hook 让窄块回代更便宜），且只在因子留出的内存
+放得下其基时才用（分析前只预留 p = 4 的基，分解优先）；切片与
 单边运行需求 ≥ 8 对时 p = 4，否则 1；GHIEP n ≥ 2e4 且需求 ≥ 4 对的运行 p = 2，否则 1（零簇旁的单边运行每块都会
 带回 p 个零簇方向，p = 4 最多慢 1.5 倍）。重数 ≤ p 的特征值一轮取全副本。块步的正交化先试单投影快路径
 （行块化块 CGS + 块内两次 Cholesky-QR），病态的块与 deflation 块旁的步才用两遍核。
@@ -250,7 +252,9 @@ T_solve 部分线性增长，T_factor 与 k 无关。
 验收偏保守（1-范数是上界，会使 η 偏乐观，故不用）。
 
 ### 5.3 停滞处置
-达到 max_restarts 仍未收敛的对标记为未接受；证书不通过触发收缩重跑（最近 k 个：最多 2 轮；切片：只要还在
+达到 max_restarts 仍未收敛的对标记为未接受；证书不通过触发收缩重跑（最近 k 个：最多 2 轮，每轮求缺数 + 2
+对、缺的那几个最近的对收敛即结束——多要的对可能落在宽于容差的簇里永不收敛，yee-pec-box-1e5 上重跑的第三个
+对是 curl-curl 零空间的向量，不设此停止条件时重跑跑满 1000 次重启；切片：只要还在
 找到新对就继续，至多缺数 + 4 轮，连续 2 轮无新对即停；缺的是重特征值的副本时，重跑位移放在离它 1% 谱隙处，
 让该重根主导算子）；残差不达标触发残差修正迭代；所有事件写入日志与报告。
 
@@ -294,7 +298,7 @@ GPU：赛题允许但非必需；当前为纯 CPU 实现，无 GPU 时即为完�
 | 近奇异位移（σ 贴近谐振点） | 零主元（INFOG(28)）或 INFO=−10 | 微扰 σ 一次 / 簇内无检测分解 | syn-near-singular（σ = λ(1+1e-12)）：误差 9e-16 |
 | 区间内特征值很多 | 区间端点惯性计数 | 谱切片，每片单独认证 | yee-pec-box-1e4 区间内 1075 个：11.1 s / 0.20 GiB（单位移 49.8 s / 0.89 GiB），误差 2.2e-15 |
 | GHIEP 零空间（波导节点自由度） | A 的零主元计数（`zero_cluster_dim`） | 零带两侧单边位移，零簇不被需要 | wg-square-1e5（零空间 24649 维）：10 个最近非零模，η ≤ 1e-15（P2 返回 10 个零） |
-| 内存受限 | MUMPS 分析阶段预估（INFOG(16/26)） | 内存外分解；超限则拒绝并报告；块基放不下时块宽减半（告警） | PARSEC 10 万阶（因子预估 7–9 GB > 7 GB 预算）：自动 OOC，结果正确 |
+| 内存受限 | MUMPS 分析阶段预估（INFOG(16/26)） | 内存外分解；超限则拒绝并报告；块基放不下时块宽减半（告警；块宽规则的 8 不预留，放不下时不告警地用 4） | PARSEC 10 万阶（因子预估 7–9 GB > 7 GB 预算）：自动 OOC，结果正确 |
 | 百万阶 GHIEP 后处理内存 | 峰值 RSS（报告 `peak_rss_bytes`） | 只留 Schur 基、分块投影、精修前释放分解 | wg-square-1e6：峰值 2886 → 1766 MB，特征值集合不变，η ≤ 2.2e-13 |
 
 诊断流程：每次运行输出 `report.json`（残差三件套、证书、每片记录 `slices`、零簇维数、分解统计、块宽、五个
@@ -409,7 +413,8 @@ PYTHONPATH=build/release/python python -c "import hsolve; print(hsolve.version()
 ./build/release/hsolve --A A.npz --B B.npz --sigma 0.5 --k 10 --block-size 1 --out out/  # 单向量（默认 0 = 自动块宽）
 ./build/release/hsolve --A A.npz --B B.npz --sigma 0.5 --k 10 --certificate auto --out out/  # 完备性检验方法（默认 exact）
 HS_BLAS_ROUTE=off ./build/release/hsolve --A A.npz --sigma 0.5 --k 10 --out out/          # 关闭 BLAS hook 的路由（纯 OpenBLAS）
-python3 tools/run/guard.py -- python tools/bench/compare.py --tag mytag --slepc-profile best --reps 5 case1 ...  # 对比调优 SLEPc
+python3 tools/run/guard.py --exclusive --timeout 2700 -- python3 tools/bench/compare.py --tag mytag --cores 16-31 \
+    --solvers hsolve,hsolve-auto,slepc --slepc-profile best --reps 5 case1 ...  # 测量槽内对比调优 SLEPc（hsolve-auto = certificate auto）
 python3 tools/run/guard.py -- python -m tools.eval.sweep results/raw/mytag                                     # 独立评测
 tools/dev/cluster_run.sh gpu01 -- tools/dev/build.sh release                                                   # 在集群节点上运行
 ```
