@@ -56,6 +56,15 @@ constexpr double kOrthoSinglePerRow = 0.772e-9;
 //   syn-multiplicity-real-1e4 (3 distinct values in 14): p = 2, 0.60 (best p = 8 0.42).
 // No pick is slower than p = 1; geometric mean over the 17 cases of T(pick) / T(best) = 1.03.
 // Without try_fast (the run() kernel throughout) p = 2 lost to p = 1 on cav2d-rect-pert-1e5 (1.20).
+// Validation on 14 further data cases (same setup, p in {1, 2, 4, 8}): no pick slower than p = 1
+// beyond noise (syn-ghep-multiplicity-real-1e4, 8 distinct values in 22: p = 2 1.02, p = 4 0.81),
+// picks within 15 % of the best width except where multiple eigenvalues favour wider blocks
+// (that case, yee-pec-cube-16, syn-lap3d-22, syn-multiplicity-complex-1e4: 1.26..1.40).
+// End to end (the CLI with --block-size forced, 16 threads in the slot, 5 interleaved runs, all
+// valid by tools/eval, certificate passed): solver time of the pick vs p = 1 on 15 cases 1.04x
+// (cav2d-rect-pert-1e5) .. 2.03x; p = 1 needed certificate reruns on the two low-fill multiplicity
+// cases, where p = 4 beats the pick p = 2 by 12..17 %, while p = 2 beats p = 4 by 3..8 % on the
+// four low-fill cases with distinct eigenvalues.
 
 /// Average basis size of a step of a width-p run with the automatic ncv (block_dimensions).
 double average_basis(index_t n, index_t nev, index_t p) {
