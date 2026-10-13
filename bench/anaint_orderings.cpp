@@ -19,10 +19,14 @@
 // counter_setup_s, counter_count_s, counter_incore_mb, solve1_s, solve_p_s {p: s} (medians per
 // call), neg / valid of the factorizations. One process per measurement, orderings interleaved,
 // through tools/run/guard.py; the commands behind the numbers quoted in src/driver/steps.cpp:
-//   for rep in 0 1 2; do for c in <cases>; do for o in 0 10 4 3; do   (order rotated by rep)
+//   16 threads, the fit (P5c; gpu02 measurement slot, one outer guard holding it, the nested guards
+//   share it), every case of order >= 5000, orderings rotated per case:
+//     python3 tools/run/guard.py --exclusive --timeout 600 --
+//       build/release/bench_anaint_orderings --case data/cases/$c --ordering $o --threads 16
+//   4 threads (P5: the 1-thread work of hsolve's nested dissection, the shape fits, the 16 / 4
+//   thread ratios), 3 interleaved repetitions:
 //     python3 tools/run/guard.py --skip-busy-check --cores 28-31 --mem-gb 14 --timeout 900 --
 //       build/release/bench_anaint_orderings --case data/cases/$c --ordering $o --threads 4 --nd-serial 1
-//   done; done; done
 // (gpu02, 2x Xeon Silver 4314; the driver's choice per case comes from bench_anaint_decide).
 #include <omp.h>
 

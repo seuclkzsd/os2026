@@ -12,9 +12,10 @@
 // attempt on a grid (lower bound, failing rows, breakdown, factorization / check seconds), and the
 // MUMPS side: analysis of the pencil with FactorOptions::ordering --ordering (the driver's options
 // otherwise), then factorize(0 A + 1 B) - median seconds of --reps factorizations - with B's
-// inertia. The numbers quoted in src/driver/solver.cpp come from
-//   python3 tools/run/guard.py --skip-busy-check --cores 20-23 --mem-gb 14 --timeout 900 --
-//     build/release/bench_anaint_bproof --case data/cases/$c --threads 4 --ordering <driver's choice>
+// inertia. The numbers quoted in src/driver/norms.{hpp,cpp} and the commit messages come from the
+// gpu02 measurement slot (16 threads; one outer guard --exclusive holds it, the nested ones share it):
+//   python3 tools/run/guard.py --exclusive --timeout 600 --
+//     build/release/bench_anaint_bproof --case data/cases/$c --threads 16 --ordering <driver's choice> [--scan 1]
 #include <omp.h>
 
 #include <algorithm>
