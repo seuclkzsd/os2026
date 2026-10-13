@@ -75,10 +75,13 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
   `ordering ∈ {−1, 0, 2..7, 10}`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
 - `block_size`（P4）：整数 ≥ 0，位移反演 Krylov 运行的块宽 p；0（默认）= 自动，1 = 单向量。
   HEP/GHEP：配置 > 0 时直接使用；自动时 nearest 的运行用块宽规则（P5c，`recommended_block_size`：由 n、
-  需求对数、σ 处主分解的因子条目、nnz(B) 与标量类型在 {1, 2, 4, 8} 中选，需求 ≥ 8 对时至少 4），切片与
-  单边运行需求 ≥ 8 对时 p = 4、否则 1；证书收缩重跑缺 m 对时用 max(p, min(4, m 上取偶))。GHIEP：自动时
+  需求对数、σ 处主分解的因子条目、nnz(B) 与标量类型在 {1, 2, 4, 8} 中选，需求 ≥ 8 对时至少 4，8 须比 4 有
+  10% 的模型收益），切片与单边运行需求 ≥ 8 对时 p = 4、否则 1；证书收缩重跑缺 m 对时用 max(q, min(4, m 上
+  取偶))，q = 配置的 p，自动时 min(p, 4)（重跑求 m + 2 对，m 个最近者收敛即结束）。GHIEP：自动时
   n ≥ 2e4 且 nev ≥ 4 的运行 p = 2，否则 1；配置值被限到 min(p, nev, 64, n/16)，探测运行（nev ≤ 2）恒为 1。
-  两条路径都会在块基放不下内存预算时把 p 减半（告警）。规则与依据见 DESIGN §3.5、§3.6-5。
+  分析前的内存规划只预留块宽 min(p, 4) 的基（自动时 4）；两条路径都会在块基放不下剩余内存时把 p 减半
+  （告警；nearest 的自动块宽从规则的 8 减到 4 时不告警，只记事件 `block_size_fit`）。规则与依据见 DESIGN
+  §3.5、§3.6-3、§3.6-5。
 - `inertia_counter`（P4）：证书的 Sylvester 计数是否在 InertiaCounter（只计惯性的分解，复用主分析的
   主元顺序）上做。auto（默认）= nearest 证书在代价模型判定划算时、以及主分解为单精度/BLR 时一律；
   on = 总是（含窗口/切片的计数）；off = 在主分解对象上计数（主分解为单精度/BLR 时仍用计数器——其自身
@@ -244,6 +247,9 @@ slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
 RUN/<case>/<solver>/              结果目录（§3）
 RUN/<case>/guard-<solver>.json    该求解器那次运行的 tools/run/guard.py --summary
 RUN/<case>/guard.json             只有一个求解器目录的测例用这个名字
+RUN/<case>/config-<solver>.json   compare.py 的 hsolve 变体实际用的配置（§2）：测例的 config.json 加上该变体的键
+                                  （hsolve-auto：certificate = auto；hsolve-nocert：inertia_check = off）与
+                                  --target；默认的 hsolve 无 --target 时直接用测例的 config.json，不写此文件
 ```
 
 每个（测例, 求解器）都是汇总表的一行：只有 guard 摘要而无结果目录的运行（崩溃、被杀、超时）记为
