@@ -14,7 +14,8 @@ Projection (--ref, the hsolve 16-core reference runs of tools/bench/compare.py):
 phases with the factorizations and solves scaled by the measured SSIDS / MUMPS ratios
   analysis  * analyse_X / analyse_M     (ssids:mumps: + the MUMPS analysis that made the order)
   numeric   * (cold_X + (F-1) warm_X) / (cold_M + (F-1) warm_M)      F = the run's factorizations
-  solves    * solve1_X / solve1_M
+  solves    * solveP_X / solveP_M   (--solve-ratio p, default: hsolve solves in blocks; or 1:
+                                     solve1_X / solve1_M)
   certificate (hsolve - hsolve-nocert, when its counts are not main factorizations)
             * warm_X / (0.87 warm_M)     (MUMPS counts discard the factors: 13% cheaper)
   + cuda_init_s for GPU variants; everything else (iteration, verification) unchanged.
@@ -81,6 +82,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("jsonl", type=Path)
     ap.add_argument("--ref", type=Path, default=Path("results/cmp-p16-best.json"))
+    ap.add_argument("--solve-ratio", choices=("p", "1"), default="p",
+                    help="scale hsolve's solve phase by the p-column (default) or 1-column solve ratio")
     args = ap.parse_args()
     runs = defaultdict(list)
     order = []
@@ -158,7 +161,8 @@ def main() -> int:
                 r_num = (x["cold"] + (f - 1) * x["warm"]) / (m["cold"] + (f - 1) * m["warm"])
                 a = phases["analysis_s"] * x["analyse_total"] / m["analyse"]
                 n = phases["numeric_s"] * r_num
-                s = phases["solve_s"] * x["solve1"] / m["solve1"]
+                skey = "solveP" if args.solve_ratio == "p" else "solve1"
+                s = phases["solve_s"] * x[skey] / m[skey]
                 c = cert * x["warm"] / ((1 - COUNTER_SAVING) * m["warm"]) if cert > 0 else 0.0
                 base = (phases["analysis_s"] + phases["numeric_s"] + phases["solve_s"] + cert)
                 total = h_or_n_total(phases) - base + a + n + s + c + (x["cuda_init"] or 0.0)
