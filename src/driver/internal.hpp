@@ -185,32 +185,56 @@ enum class MainFactors {
 
 // ------------------------------------------------------------------------------ count failures
 
-/// FAULT INJECTION bits of SolverConfig::certificate_fault_count (tests and measurements only):
-/// every InertiaCounter of the solve gets a 1 MB working-memory cap (ICNTL(23)), so its counts
-/// fail inside MUMPS with INFO(1) = -19 (OutOfMemoryBudget), as the counter of ss-3dspectralwave2
-/// did at the 14 GiB budget;
+/// FAULT INJECTION bits of SolverConfig::certificate_fault_count (tests and measurements only).
+/// What fails:
+///   every InertiaCounter count: by default each counter gets a 1 MB working-memory cap
+///   (ICNTL(23)), so its counts fail inside MUMPS with INFO(1) = -19 (OutOfMemoryBudget), as the
+///   counter of ss-3dspectralwave2 did at the 14 GiB budget; with a kind bit below, each count
+///   throws that failure before it factorizes;
 constexpr index_t kFaultCounterCounts = 1;
-/// counts on the main factorization object throw OutOfMemoryBudget before they factorize;
+///   counts on the main factorization object throw before they factorize;
 constexpr index_t kFaultMainCounts = 2;
-/// the count allowance (count_allowance_mb) is 0: every InertiaCounter is predicted not to fit;
+///   the count allowance of InertiaCounters is 0 (counter_allowance_mb): every counter is
+///   predicted not to fit and is not tried;
 constexpr index_t kFaultCountAllowance = 4;
-/// the refactorization of the main object at the working shift for a deflated rerun (or a
-/// randomized check after counts moved it) throws OutOfMemoryBudget.
+///   the refactorization of the main object at the working shift sigma (refactorize_at) before a
+///   deflated rerun and before a randomized check throws (whether or not it would refactorize).
 constexpr index_t kFaultRefactorization = 8;
-constexpr index_t kFaultCountMask = 15;
+/// The kind of the injected failures (bits 1, 2, 8; at most one of these two): default
+/// OutOfMemoryBudget (bit 1: the genuine MUMPS -19); 16 another MUMPS error (FactorizationFailed,
+/// e.g. workspace retries exhausted); 32 an allocation failure (std::bad_alloc).
+constexpr index_t kFaultOtherError = 16;
+constexpr index_t kFaultBadAlloc = 32;
+/// When: bits 1 and 2 take effect only once a window target (interval / smallest / largest, or a
+/// nearest target handed to the windows) starts its first slice - its window ends and cuts are
+/// counted before - and never on the nearest target's own certificate.
+constexpr index_t kFaultLate = 64;
+constexpr index_t kFaultCountMask = 127;
 inline bool fault(const SolverConfig& cfg, index_t bit) { return (cfg.certificate_fault_count & bit) != 0; }
+/// Throws the failure of the injected kind (OutOfMemoryBudget, FactorizationFailed or
+/// std::bad_alloc); `what`: the injection point, for the message.
+[[noreturn]] void throw_injected_fault(const SolverConfig& cfg, index_t bit, const std::string& what);
+/// kFaultCounterCounts makes each InertiaCounter count throw (a kind bit is set) rather than cap
+/// the counter at 1 MB (counter_options).
+inline bool counter_fault_throws(const SolverConfig& cfg) {
+  return fault(cfg, kFaultCounterCounts) && (fault(cfg, kFaultOtherError) || fault(cfg, kFaultBadAlloc));
+}
 
 /// A factorization error that ends one count source or one refactorization, not the solve:
 /// MUMPS out of memory (INFO -13, -19, an ICNTL(23) cap; OutOfMemoryBudget) or any other MUMPS
 /// failure (workspace retries exhausted, -9 ...; FactorizationFailed). Bugs (Internal), invalid
-/// input and singular shifts are not.
+/// input and singular shifts are not. (std::bad_alloc, caught separately, is one of memory.)
 inline bool count_failure(const Error& e) {
   return e.code() == Error::Code::OutOfMemoryBudget || e.code() == Error::Code::FactorizationFailed;
 }
 
 /// No inertia count could be made at a point: every count source failed (CountSource::count).
-/// The nearest certificate catches it and returns its converged pairs uncertified (definite.cpp);
-/// window targets, built on counts, end with it. Its code is that of the last failure.
+/// Its code is OutOfMemoryBudget when every source failed for memory (OutOfMemoryBudget,
+/// std::bad_alloc, or an estimate over the count allowance), FactorizationFailed when one of them
+/// failed otherwise (another MUMPS error) - a code independent of the order the sources were tried
+/// in. The nearest certificate catches it and returns its converged pairs uncertified; a window
+/// target returns the pairs of the slices it completed (definite.cpp) and ends with it only when it
+/// occurs before the first slice (window ends, cuts: nothing solved yet).
 class CountFailure : public Error {
  public:
   using Error::Error;
@@ -222,13 +246,15 @@ constexpr double kCountMemoryShare = 0.95;
 
 /// MB the working memory of an inertia count may take now: kCountMemoryShare of what
 /// SolverConfig::memory_budget_gb leaves beside the current RSS, and at most the factorization cap
-/// `cap_mb` (> 0; the counter's ICNTL(23)). 0 under kFaultCountAllowance.
+/// `cap_mb` (> 0; the counter's ICNTL(23)).
 double count_allowance_mb(const Ctx& c, double cap_mb);
+/// count_allowance_mb for an InertiaCounter: 0 under kFaultCountAllowance.
+double counter_allowance_mb(const Ctx& c, double cap_mb);
 
 /// The options of an InertiaCounter on the main object `fac` (its threads, scaling, cap ...), with
-/// the 1 MB cap of kFaultCounterCounts.
+/// the 1 MB cap of kFaultCounterCounts when `faults` (the fault applies now) and no kind bit is set.
 template <class T>
-FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac);
+FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac, bool faults);
 
 /// Where the Sylvester counts of a solve path come from (DESIGN §3.6-8):
 ///   * the main factorization object, refactorized at each count point: it then holds K(s)
@@ -247,8 +273,15 @@ FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac);
 /// after releasing the main factors when they are resident - is not even tried: under its
 /// ICNTL(23) cap it would fail with INFO -19 or, when MUMPS stays just below the cap, run the
 /// process above its budget (ss-3dspectralwave2, 14 GiB: 14.5 GB estimated against a 13.5 GB
-/// cap failed; 13.6 GB ran at a peak RSS of 15.1 GiB). When neither source can count, count()
-/// throws CountFailure. Not thread-safe; the pencil and the main object must outlive it.
+/// cap failed; 13.6 GB ran at a peak RSS of 15.1 GiB). Neither is the main object when it stands
+/// in for a preferred counter (memory is short there): its factors are released and its count is
+/// tried only if the working memory of its last factorization (INFOG(21)) fits count_allowance_mb -
+/// its own ICNTL(23) cap was fixed at the analysis, before the Krylov basis and the pairs
+/// (yee-pec-cube-32 analogue, 0.394 GiB budget: 231 MB against ~160 MB; counted anyway, the process
+/// peaked at 0.54 GiB). INFOG(21) predicts, it does not bound: that count grew the RSS by ~330 MB
+/// (DESIGN §3.6-8). Where the main object is the preferred source it counts under that cap, as
+/// the solve's own factorizations do. When neither source can count, count() throws CountFailure.
+/// Not thread-safe; the pencil and the main object must outlive it.
 template <class T>
 class CountSource {
  public:
@@ -273,11 +306,18 @@ class CountSource {
   void avoid_counter(Ctx& c, const std::string& why);
   /// Why sources were abandoned ("" while none was).
   std::string failures() const;
+  /// kFaultLate: the count faults (bits 1, 2) apply from now on (WindowSolver, first slice).
+  void arm_late_faults() { late_armed_ = true; }
 
  private:
   Inertia count_on_main(Ctx& c, double s, bool detection);
   Inertia count_on_counter(Ctx& c, double s, bool detection);
-  void abandon(Ctx& c, bool counter, const std::string& why);
+  /// memory: the failure was one of memory (OutOfMemoryBudget, std::bad_alloc).
+  void abandon(Ctx& c, bool counter, const std::string& why, bool memory);
+  /// Fault `bit` applies to this count (kFaultLate: only once armed).
+  bool injected(const Ctx& c, index_t bit) const {
+    return fault(c.cfg, bit) && (!fault(c.cfg, kFaultLate) || late_armed_);
+  }
 
   SparseFactorization<T>& fac_;
   const ShiftedPencil<T>& pencil_;
@@ -287,7 +327,9 @@ class CountSource {
   MainFactors main_ = MainFactors::KeepWithinCap;
   std::unique_ptr<InertiaCounter<T>> counter_;
   bool counter_failed_ = false, main_failed_ = false;
+  bool counter_memory_ = true, main_memory_ = true;  ///< the failure was one of memory
   std::string counter_why_, main_why_;
+  bool late_armed_ = false;  ///< see arm_late_faults()
 };
 
 /// Rule for the nearest target's certificate (`counts` counts, exact main factor): an

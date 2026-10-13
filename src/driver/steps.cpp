@@ -232,7 +232,6 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 // ------------------------------------------------------------------------------ inertia counts
 
 double count_allowance_mb(const Ctx& c, double cap_mb) {
-  if (fault(c.cfg, kFaultCountAllowance)) return 0.0;
   const double free_bytes = c.cfg.memory_budget_gb * 1073741824.0 -
                             static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
   double mb = kCountMemoryShare * std::max(0.0, free_bytes) / 1e6;
@@ -240,10 +239,22 @@ double count_allowance_mb(const Ctx& c, double cap_mb) {
   return mb;
 }
 
+double counter_allowance_mb(const Ctx& c, double cap_mb) {
+  return fault(c.cfg, kFaultCountAllowance) ? 0.0 : count_allowance_mb(c, cap_mb);
+}
+
+void throw_injected_fault(const SolverConfig& cfg, index_t bit, const std::string& what) {
+  if (fault(cfg, kFaultBadAlloc)) throw std::bad_alloc();
+  const std::string msg = "fault injection (certificate_fault_count & " + std::to_string(bit) + "): " + what;
+  if (fault(cfg, kFaultOtherError)) HS_THROW(FactorizationFailed, msg);
+  HS_THROW(OutOfMemoryBudget, msg);
+}
+
 template <class T>
-FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac) {
+FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac, bool faults) {
   FactorOptions o = fac.options();
-  if (fault(c.cfg, kFaultCounterCounts)) o.max_memory_mb = 1.0;  // MUMPS INFO -19 at every count
+  // MUMPS INFO -19 at every count
+  if (faults && fault(c.cfg, kFaultCounterCounts) && !counter_fault_throws(c.cfg)) o.max_memory_mb = 1.0;
   return o;
 }
 
@@ -276,19 +287,39 @@ Inertia CountSource<T>::count(Ctx& c, double s, bool detection) {
       return in;
     } catch (const Error& e) {
       if (!count_failure(e)) throw;
-      abandon(c, on_counter, std::string(to_string(e.code())) + ": " + e.what());
+      abandon(c, on_counter, std::string(to_string(e.code())) + ": " + e.what(),
+              e.code() == Error::Code::OutOfMemoryBudget);
     } catch (const std::bad_alloc&) {
-      abandon(c, on_counter, "allocation failure (std::bad_alloc)");
+      abandon(c, on_counter, "allocation failure (std::bad_alloc)", true);
     }
   }
-  throw CountFailure(Error::Code::OutOfMemoryBudget,
+  // Out of memory only when every source that failed failed for memory (CountFailure comment).
+  const bool memory = (!counter_failed_ || counter_memory_) && (!main_failed_ || main_memory_);
+  throw CountFailure(memory ? Error::Code::OutOfMemoryBudget : Error::Code::FactorizationFailed,
                      "no inertia count possible at s = " + fmt(s) + " (" + failures() + ")");
 }
 
 template <class T>
 Inertia CountSource<T>::count_on_main(Ctx& c, double s, bool detection) {
-  if (fault(c.cfg, kFaultMainCounts))
-    HS_THROW(OutOfMemoryBudget, "fault injection (certificate_fault_count & 2): count on the main factorization");
+  if (injected(c, kFaultMainCounts)) throw_injected_fault(c.cfg, kFaultMainCounts, "count on the main factorization");
+  if (use_counter_) {
+    // Standing in for the preferred counter, which failed: memory is short. The main object's own
+    // ICNTL(23) cap was fixed at the analysis, before the Krylov basis and the pairs, so it does
+    // not keep this count within the budget (CountSource comment): its factors go first, then the
+    // working memory of its last factorization (INFOG(21); before any, the analysis estimate) must
+    // fit what the budget leaves.
+    if (fac_.inertia().valid && fac_.release_factors()) c.held = FactorHeld{};
+    const FactorEstimate est = fac_.estimate();
+    const double need = fac_.stats().factor_mb_used > 0 ? fac_.stats().factor_mb_used
+                                                        : (fac_.options().out_of_core ? est.ooc_mb : est.incore_mb);
+    const double allowance = count_allowance_mb(c, fac_.options().max_memory_mb);
+    event(c, "main_count_check", {{"s", s}, {"need_mb", need}, {"allowance_mb", allowance},
+                                  {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
+    if (need > allowance)
+      HS_THROW(OutOfMemoryBudget, "main factorization: the working memory of its last factorization, "
+                                      << need << " MB, exceeds the " << allowance
+                                      << " MB the memory budget leaves for a count");
+  }
   c.held = FactorHeld{};
   fac_.set_null_pivot_detection(detection);
   Inertia in;
@@ -308,7 +339,7 @@ Inertia CountSource<T>::count_on_counter(Ctx& c, double s, bool detection) {
   const double cap = fac_.options().max_memory_mb;
   if (!counter_) {
     // Inertia-only instance on the main analysis' pivot order.
-    counter_ = std::make_unique<InertiaCounter<T>>(fac_, counter_options(c, fac_));
+    counter_ = std::make_unique<InertiaCounter<T>>(fac_, counter_options(c, fac_, injected(c, kFaultCounterCounts)));
     event(c, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s},
                                  {"incore_mb", counter_->estimate().incore_mb}, {"cap_mb", cap}});
   }
@@ -330,25 +361,28 @@ Inertia CountSource<T>::count_on_counter(Ctx& c, double s, bool detection) {
   }
   // The counter must fit what the budget leaves now (CountSource comment); resident main factors
   // go first.
-  double allowance = count_allowance_mb(c, cap);
-  if (counter_mb > allowance && release_main(false, "allowance")) allowance = count_allowance_mb(c, cap);
+  double allowance = counter_allowance_mb(c, cap);
+  if (counter_mb > allowance && release_main(false, "allowance")) allowance = counter_allowance_mb(c, cap);
   if (counter_mb > allowance)
     HS_THROW(OutOfMemoryBudget, "InertiaCounter: its in-core estimate " << counter_mb << " MB exceeds the "
                                                                         << allowance
                                                                         << " MB the memory budget leaves for a count");
+  if (injected(c, kFaultCounterCounts) && counter_fault_throws(c.cfg))
+    throw_injected_fault(c.cfg, kFaultCounterCounts, "InertiaCounter count");
   return counter_->count(1.0, -s, detection);
 }
 
 template <class T>
-void CountSource<T>::abandon(Ctx& c, bool counter, const std::string& why) {
+void CountSource<T>::abandon(Ctx& c, bool counter, const std::string& why, bool memory) {
   (counter ? counter_failed_ : main_failed_) = true;
   (counter ? counter_why_ : main_why_) = why;
+  (counter ? counter_memory_ : main_memory_) = memory;
   if (counter) counter_.reset();  // its analysis and whatever workspace MUMPS kept
   const bool other = counter ? main_exact_ && !main_failed_ : !counter_failed_;
   event(c, "count_source",
         {{"failed", std::string(counter ? "inertia_counter" : "main_factorization")},
          {"next", std::string(!other ? "none" : counter ? "main_factorization" : "inertia_counter")},
-         {"reason", why}, {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
+         {"reason", why}, {"memory", memory}, {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
   if (other)
     warn(c, std::string("certificate counts: the ") + (counter ? "InertiaCounter" : "main factorization") +
                 " could not count (" + why + "); counting on the " +
@@ -357,7 +391,7 @@ void CountSource<T>::abandon(Ctx& c, bool counter, const std::string& why) {
 
 template <class T>
 void CountSource<T>::avoid_counter(Ctx& c, const std::string& why) {
-  if (!counter_failed_) abandon(c, true, why);
+  if (!counter_failed_) abandon(c, true, why, true);  // another counter on the same order failed for memory
 }
 
 template <class T>
@@ -370,7 +404,7 @@ std::string CountSource<T>::failures() const {
 }
 
 #define HS_INSTANTIATE_COUNTER_OPTIONS(T) \
-  template FactorOptions counter_options<T>(const Ctx&, const SparseFactorization<T>&);
+  template FactorOptions counter_options<T>(const Ctx&, const SparseFactorization<T>&, bool);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_COUNTER_OPTIONS)
 #undef HS_INSTANTIATE_COUNTER_OPTIONS
 
@@ -424,8 +458,8 @@ index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, doub
 // not reproducible even with its random state reset, factor.hpp) whose estimate does not fit is
 // analysed again, up to kMaxReanalyses times, before giving up (P8): its estimates scatter by up to
 // ~30% - ss-3dspectralwave2 at the default 14 GiB budget had out-of-core estimates of 10.6..11.9 GB
-// in most analyses and 13.4..14.2 GB in 5 of 29 (P5c and P8), against a cap of 13.49 GB
-// (results/p8_certcost.md §2.3); each re-analysis costs one ordering (16 s there).
+// in most analyses and 13.4..14.4 GB in 6 of 42 (P5c and P8; 5 of them above the cap of ~13.49 GB;
+// results/p8_certcost.md §2.3); each re-analysis costs one ordering (16 s there).
 constexpr int kMaxReanalyses = 2;
 template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,

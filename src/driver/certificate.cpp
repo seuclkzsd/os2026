@@ -321,7 +321,7 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
       if (!b_diagonal_ && !b_bounds_) {
         // A general B: no proof can give lambda_min(B) above min b_ii (a Rayleigh quotient), so the
         // rule is first tried with that value - when even it does not hold the window, the proof
-        // (b_bounds(), up to kBoundsProofShare of the exact counts' time) is not worth running.
+        // (b_bounds(), its attempts within kBoundsProofShare of the exact counts' time) is not worth running.
         SingleCountRule best = rule;
         best.b_min_proven = b_diag_min_;
         const SingleWindow swb = single_window(w, pairs.all, 1.0 / std::sqrt(b_diag_min_));
@@ -462,12 +462,17 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   }
   const DenseMatrix<T> x = deflation_block(w, pairs);
   const index_t m = x.cols();
+  const std::string refactor_failed = "randomized check could not run: the refactorization at sigma failed (";
   try {
+    if (fault(cfg, kFaultRefactorization))
+      throw_injected_fault(cfg, kFaultRefactorization, "refactorization at sigma for the randomized check");
     refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
   } catch (const Error& err) {
     if (!count_failure(err)) throw;
-    fallback_note_ = std::string("randomized check could not run: the refactorization at sigma failed (") +
-                     to_string(err.code()) + ": " + err.what() + ")";
+    fallback_note_ = refactor_failed + to_string(err.code()) + ": " + err.what() + ")";
+    return {};
+  } catch (const std::bad_alloc&) {
+    fallback_note_ = refactor_failed + "allocation failure, std::bad_alloc)";
     return {};
   }
   SolveRefinement refine;
@@ -494,6 +499,9 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
     // decide instead.
     if (err.code() != Error::Code::InvalidInput && !count_failure(err)) throw;
     fallback_note_ = std::string("randomized check could not run (") + to_string(err.code()) + "): " + err.what();
+    return {};
+  } catch (const std::bad_alloc&) {
+    fallback_note_ = "randomized check could not run: allocation failure (std::bad_alloc)";
     return {};
   }
   cert.solves += res.op_applications;
@@ -584,18 +592,20 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   try {
     if (!counter_) {
       // The double instance only for a check of the single counts (exact_counts): deferred.
-      counter_ =
-          std::make_unique<InertiaCounter<T>>(fac_, counter_options(c_, fac_), /*defer_double_analysis=*/true);
+      counter_ = std::make_unique<InertiaCounter<T>>(fac_, counter_options(c_, fac_, counter_faults()),
+                                                     /*defer_double_analysis=*/true);
       event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s}, {"double_deferred", true},
                                     {"owner", std::string("certifier")}});
     }
     // The single counts' working memory must fit what the budget leaves (count_allowance_mb).
     const double need = counter_->estimate(FactorPrecision::Single).incore_mb;
-    const double allowance = count_allowance_mb(c_, fac_.options().max_memory_mb);
+    const double allowance = counter_allowance_mb(c_, fac_.options().max_memory_mb);
     if (need > allowance)
       HS_THROW(OutOfMemoryBudget, "single-precision InertiaCounter: its in-core estimate "
                                       << need << " MB exceeds the " << allowance
                                       << " MB the memory budget leaves for a count");
+    if (counter_faults() && counter_fault_throws(c_.cfg))
+      throw_injected_fault(c_.cfg, kFaultCounterCounts, "InertiaCounter single counts");
     s = single_precision_certificate(*counter_, pencil_, sw, rule);
   } catch (const Error& err) {
     if (!count_failure(err)) throw;
@@ -718,11 +728,13 @@ bool NearestCertifier<T>::exact_counts(double a, double b, index_t& nu_a, index_
       // The double counts' working memory must fit what the budget leaves (count_allowance_mb);
       // estimate() analyses the deferred double instance.
       const double need = counter_->estimate().incore_mb;
-      const double allowance = count_allowance_mb(c_, fac_.options().max_memory_mb);
+      const double allowance = counter_allowance_mb(c_, fac_.options().max_memory_mb);
       if (need > allowance)
         HS_THROW(OutOfMemoryBudget, "InertiaCounter: its in-core estimate "
                                         << need << " MB exceeds the " << allowance
                                         << " MB the memory budget leaves for a count");
+      if (counter_faults() && counter_fault_throws(c_.cfg))
+        throw_injected_fault(c_.cfg, kFaultCounterCounts, "InertiaCounter double counts");
       counts = counter_->count_pair(1.0, -a, 1.0, -b, true, FactorPrecision::Double);
     } catch (const Error& err) {
       if (!count_failure(err)) throw;

@@ -149,7 +149,10 @@ struct SolverConfig {
   /// statement). A count whose factorization fails (MUMPS out of memory or another MUMPS error)
   /// moves to the other count source (main factorization or InertiaCounter); when no count can be
   /// made, a nearest target returns its converged pairs with the certificate performed but not
-  /// completed (passed = false, count_inertia = -1, note "not completed: ...", success = false).
+  /// completed (passed = false, count_inertia = -1, note "not completed: ...", success = false); a
+  /// window target does so with the pairs of the slices it completed (count_inertia: the window's
+  /// count) when a count fails from its first slice on, and ends with the error before (window
+  /// ends and cuts: nothing solved yet).
   CertificateMode certificate = CertificateMode::Exact;
   double certificate_delta = 1e-12;  ///< randomized check: bound on the failure probability, (0, 1)
   /// FAULT INJECTION, for tests and measurements only (0 = off): after the first Krylov run of a
@@ -163,9 +166,13 @@ struct SolverConfig {
   /// (src/driver/internal.hpp kFault*): 1 every InertiaCounter gets a 1 MB working-memory cap
   /// (its counts fail in MUMPS with INFO -19); 2 counts on the main factorization object fail
   /// (OutOfMemoryBudget); 4 InertiaCounters are predicted not to fit the memory left (count
-  /// allowance 0); 8 the refactorization at the working shift for a deflated rerun fails. A count
-  /// that fails moves to the other count source; with none left the nearest target returns its
-  /// pairs with the certificate performed but not passed (docs/FORMATS.md §3).
+  /// allowance 0); 8 the refactorization at the working shift before a deflated rerun or a
+  /// randomized check fails. Kind of the failures of 1, 2, 8 (at most one): 16 another MUMPS error
+  /// (FactorizationFailed; bit 1 then throws at each count instead of the cap), 32 std::bad_alloc.
+  /// 64: bits 1 and 2 only from a window target's first slice on. A count that fails moves to the
+  /// other count source; with none left the nearest target returns its pairs with the certificate
+  /// performed but not completed, a window target the pairs of its completed slices
+  /// (docs/FORMATS.md §3).
   index_t certificate_fault_count = 0;
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
@@ -208,7 +215,8 @@ struct InertiaCertificate {
                                ///< kappa of B proven). Always a proof (rigorous): screening
                                ///< results are never reported as the verdict
   std::string note;            ///< e.g. "not available for GHIEP"; "not completed: no inertia count
-                               ///< possible" when every count source failed (P8)
+                               ///< possible ..." when every count source failed (P8; a window
+                               ///< target names the slices it could not solve)
   /// "exact" (double Sylvester counts), "exact_single" (single-precision counts under the
   /// perturbation rule of verify.hpp), "randomized" (exclusion check), "none" (not performed).
   std::string method = "none";

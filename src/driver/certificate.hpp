@@ -71,8 +71,8 @@
 //     exceeds count_allowance_mb (internal.hpp) - it is not even tried. The exact counts then
 //     come from definite.cpp's CountSource, which skips its own counter too after a memory
 //     failure (same pivot order, same working memory) and counts on the main object;
-//   * a randomized check whose refactorization at sigma or whose solves fail leaves the verdict to
-//     the counts;
+//   * a randomized check whose refactorization at sigma or whose solves fail (an hs::Error of
+//     memory or MUMPS, std::bad_alloc) leaves the verdict to the counts;
 //   * when no count can be made (CountFailure), record_not_completed() reports the certificate as
 //     performed but not completed and definite.cpp returns the converged pairs uncertified
 //     (success = false); a deflated rerun that cannot refactorize at sigma returns the pairs found.
@@ -111,8 +111,13 @@ constexpr double kClaimFraction = 0.01;
 constexpr double kAutoSingleSafety = 10.0;
 
 /// A general B's condition bounds (b_bounds(): an incomplete-Cholesky proof plus one O(nnz(B))
-/// pass) may take this share of the predicted time of the exact counts they could save; proofs
-/// that succeed cost 0.004-0.08 s at 16 threads on the data cases (bench/anaint_bproof.cpp).
+/// pass): the time budget of the proof's incomplete-Cholesky attempts and level-1 pattern
+/// (HpdProofOptions::max_seconds, each paid by its predicted time before it runs) is this share of
+/// the predicted time of the exact counts they could save. The Lanczos estimate of theta and the
+/// scaled copy S are not charged, so a whole proof can take longer than that budget (16 threads,
+/// certificate = randomized, 3 runs each: cav2d-rect-pert-1e5 0.016-0.023 s against 0.016-0.021 s,
+/// ss-tem27623 0.026-0.048 s against 0.024-0.032 s). Proofs that succeed cost 0.004-0.08 s at 16
+/// threads on the data cases (bench/anaint_bproof.cpp).
 constexpr double kBoundsProofShare = 0.25;
 
 /// What the nearest path measured before its certificate (inputs of the auto choice). Zero
@@ -262,11 +267,15 @@ class NearestCertifier {
   /// A general (non-diagonal) B's proven bounds (norms.hpp prove_condition_bound): kappa of the
   /// Jacobi-scaled B and lambda_min(B) >= b_min. Computed once, at the first use - only where the
   /// randomized check or single counts could beat the exact counts (choose()) or the mode asks for
-  /// the randomized check - within kBoundsProofShare of the predicted exact counts' time.
+  /// the randomized check - its attempts within kBoundsProofShare of the predicted exact counts'
+  /// time (kBoundsProofShare comment: not the whole proof).
   const ConditionBound& b_bounds();
   double bounds_budget_s() const;
   double check_budget_bytes() const;
   std::string prefix() const;
+  /// The InertiaCounter faults of SolverConfig::certificate_fault_count apply to this certifier's
+  /// counter (not with kFaultLate: those are for window targets only).
+  bool counter_faults() const { return !fault(c_.cfg, kFaultLate); }
 
   Ctx& c_;
   const ShiftedPencil<T>& pencil_;
