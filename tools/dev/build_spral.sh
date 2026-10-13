@@ -64,7 +64,8 @@ rpath="-Wl,-rpath,$CONDA_PREFIX/lib"
 cuda_opts=()
 if [ "$gpu" = true ]; then
   host_cxx="${SPRAL_CUDA_HOST_CXX:-$CXX}"
-  export NVCC="$cuda_home/bin/nvcc" CUDA_PATH="$cuda_home"
+  # meson finds nvcc on PATH only (no environment variable names it); CUDA_PATH locates the toolkit.
+  export PATH="$cuda_home/bin:$PATH" CUDA_PATH="$cuda_home"
   # Every nvcc call (including meson's sanity check) gets the host compiler.
   export NVCC_PREPEND_FLAGS="-ccbin=$host_cxx -allow-unsupported-compiler"
   export CUDA_VISIBLE_DEVICES=""
@@ -99,7 +100,7 @@ python3 "$meson_pyz" install -C "$build_root/build" > "$build_root/install.log" 
   echo "gpu $gpu  cuda_home $cuda_home  arch sm_$CUDA_ARCH  host_cxx ${host_cxx:-none}"
   "$CXX" --version | head -1
   "$FC" --version | head -1
-  [ "$gpu" = true ] && "$NVCC" --version | tail -2 | head -1
+  [ "$gpu" = true ] && "$cuda_home/bin/nvcc" --version | tail -2 | head -1
   echo "flags $native -O3 (meson release)  LDFLAGS $LDFLAGS"
   echo "built $(date -Is) on $(hostname -s) by tools/dev/build_spral.sh"
 } > "$prefix/BUILDINFO"
