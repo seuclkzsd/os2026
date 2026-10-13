@@ -179,8 +179,8 @@ class NearestCertifier {
   void record_exact(bool on_counter);
 
   /// The exact (double-precision) counts nu(a), nu(b) of a window on this certifier's
-  /// InertiaCounter, which single counts built and analysed (its double instance is analysed at
-  /// construction): no second counter and no main-object factorization. Counted with null-pivot
+  /// InertiaCounter, which single counts built (its double instance deferred: analysed at the
+  /// first double count): no second counter and no main-object factorization. Counted with null-pivot
   /// detection at a and b themselves (gap midpoints, as count_below with s_is_gap); the last
   /// window's counts are kept, so a window counted to check single counts is not counted again.
   /// false: no counter yet, or K(a) / K(b) flagged singular - the caller counts (count_below).
@@ -234,7 +234,8 @@ class NearestCertifier {
   SingleCountRule rule_;  ///< a_norm_1 < 0 until single_rule() computed it
   CertificateTimings timings_;
   std::unique_ptr<StartScaling> proven_scaling_, estimated_scaling_;
-  std::unique_ptr<InertiaCounter<T>> counter_;  ///< single counts (created at the first one)
+  std::unique_ptr<InertiaCounter<T>> counter_;  ///< single counts (created at the first one; its
+                                                ///< double instance deferred to the first double count)
   /// exact_counts' last window [a, b] (counted) and its counts (valid: both nonsingular)
   struct KeptCounts {
     double a = 0.0, b = 0.0;

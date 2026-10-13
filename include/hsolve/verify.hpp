@@ -413,8 +413,9 @@ struct CertificateCostInputs {
   bool complex_scalars = false;
   double factorize_s = 0.0;      ///< one double numeric factorization of K (measured)
   double counter_analysis_s = 0.0;  ///< InertiaCounter analysis (PERM_IN), ~AMD analysis time
-  /// Analyses of the single-count path; < 0: counter_analysis_s. A fresh InertiaCounter analyses
-  /// its double instance at construction and its single one at the first single count (two).
+  /// Analyses of the single-count path; < 0: counter_analysis_s. The driver's certifier builds
+  /// its InertiaCounter with the double instance deferred (factor.hpp), so a fresh one pays one
+  /// analysis, its single instance's, at the first single count (P5b: two).
   double single_analysis_s = -1.0;
   double count_ratio = 0.9;      ///< double count / factorize_s (InertiaCounter; measured 0.87-0.94)
   double single_ratio = 0.55;    ///< single count / double count (3-D: 0.54-0.61; low fill: ~1)

@@ -196,11 +196,12 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
   in.complex_scalars = is_complex_v<T>;
   in.factorize_s = timings_.factorize_s > 0.0 ? timings_.factorize_s : model_factor_s(est, in_size.order, threads);
   const double analysis = model_analysis_s(in_size.order, in_size.entries, static_cast<double>(est.factor_entries));
-  // The exact counts run on this certifier's counter once single counts built it (exact_counts).
-  in.counter_analysis_s = counter_ ? 0.0 : analysis;
-  // A fresh counter analyses its double instance at construction and its single one at the first
-  // single count; a counter of an earlier round has done both.
-  in.single_analysis_s = counter_ ? (counter_->stats().single_counts > 0 ? 0.0 : analysis) : 2.0 * analysis;
+  // The exact counts run on this certifier's counter once single counts built it (exact_counts);
+  // its double instance is analysed at the first double count (deferred, see single()).
+  in.counter_analysis_s = counter_ && counter_->double_analysed() ? 0.0 : analysis;
+  // Single counts analyse the counter's single instance at the first one (a counter of an
+  // earlier round has done it); the double instance only where a double check follows.
+  in.single_analysis_s = counter_ && counter_->stats().single_counts > 0 ? 0.0 : analysis;
   in.single_ratio = static_cast<double>(est.factor_entries) > kThreeDFill * in_size.entries ? kSingleRatio3d
                                                                                              : kSingleRatioLowFill;
   // Measured solve calls of the Krylov run; t_apply(q) = apply1 (1 + rhs_ratio (q - 1)).
@@ -487,9 +488,10 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   // only for a rerun, which refactorizes; the counts never hold both in memory.
   if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
   if (!counter_) {
-    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
-    event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s},
-                                  {"incore_mb", counter_->estimate().incore_mb}, {"owner", std::string("certifier")}});
+    // The double instance only for a check of the single counts (exact_counts): deferred.
+    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options(), /*defer_double_analysis=*/true);
+    event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s}, {"double_deferred", true},
+                                  {"owner", std::string("certifier")}});
   }
   SingleCertificate s = single_precision_certificate(*counter_, pencil_, sw, rule);
   const auto found = static_cast<index_t>(sw.found.size());
@@ -512,7 +514,8 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
                               {"nu_upper", static_cast<std::int64_t>(counted ? s.upper.neg : -1)},
                               {"nu_sigma", static_cast<std::int64_t>(nu_sigma_)}, {"sides_ok", sides_ok},
                               {"backward_factor", rule.backward_factor}, {"eta_lower", v.eta_lower},
-                              {"eta_upper", v.eta_upper}, {"seconds", s.seconds}});
+                              {"eta_upper", v.eta_upper}, {"seconds", s.seconds},
+                              {"counter_analyses", static_cast<std::int64_t>(counter_->stats().analyses)}});
   std::ostringstream os;
   os.precision(6);
   if (!counted || s.count < found) {
