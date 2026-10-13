@@ -516,7 +516,13 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   std::string fallback;
   try {
     sol = solve_with_factors(c, pencil, d, type, fac, {});
-    if (fac && driver::inexact_factor(fac->options())) fallback = unaccepted_result(rep);
+    if (fac && driver::inexact_factor(fac->options())) {
+      if (cfg.inexact_fault_reject && !rep.pairs.empty()) {  // fault injection (tests)
+        rep.pairs.front().accepted = false;
+        rep.success = false;
+      }
+      fallback = unaccepted_result(rep);
+    }
   } catch (const driver::InexactFactorFailure& e) {
     fallback = e.what();
   }

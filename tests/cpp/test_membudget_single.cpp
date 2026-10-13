@@ -1,11 +1,14 @@
 // P7 safe single precision: a single-precision (or BLR) factor never yields a wrong answer. Its
 // refined applications are checked (ShiftInvertOperator::last_apply_converged, the driver's
 // DriverShiftInvert), an inexact factor flagged singular is not used, and an attempt that fails
-// either way - or whose result is not accepted - is solved again with double factors. Small
-// analogues of the P6 failures (results/p6_mixprec.md section 6.1: syn-mem27-46 - wanted pairs
-// far nearer sigma than eps_single allows, syn-ghep-near-singular-real-1e5, the near-singular
-// complex case flagged "exactly singular") must return valid results. factor_precision = auto
-// takes single factors only when the double ones do not fit in core within the budget.
+// either way - or whose result is not accepted (fault injection: inexact_fault_reject) - is solved
+// again with double factors, single precision as BLR. Small analogues of the P6 failures
+// (results/p6_mixprec.md section 6.1: syn-mem27-46 - wanted pairs far nearer sigma than
+// eps_single allows, syn-ghep-near-singular-real-1e5, the near-singular complex case flagged
+// "exactly singular", syn-zero-cluster-real-1e5 - sigma inside a cluster at single precision's
+// resolution) must return valid results. factor_precision = auto takes single factors only when
+// the double ones do not fit in core within the budget, and keeps its decision on the record when
+// they are abandoned.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -233,12 +236,112 @@ TEST(DriverInexactFactors, GhiepSingleGivesTheDoubleResult) {
   ASSERT_EQ(dbl.report.problem, hs::ProblemType::GeneralizedIndefinite);
   EXPECT_TRUE(dbl.report.success);
   EXPECT_TRUE(sgl.report.success);
+  EXPECT_EQ(dbl.report.precision.used, hs::FactorPrecision::Double);
+  EXPECT_FALSE(dbl.report.precision.fallback);
+  // sigma = 0.3 lies in a gap of B^{-1}A far wider than single precision resolves: single serves
+  const auto& p = sgl.report.precision;
+  EXPECT_EQ(p.requested, hs::FactorPrecision::Single);
+  EXPECT_EQ(p.used, hs::FactorPrecision::Single) << p.fallback_reason;
+  EXPECT_FALSE(p.fallback) << p.fallback_reason;
+  EXPECT_TRUE(p.fallback_reason.empty());
   ASSERT_EQ(sgl.eigenvalues.size(), dbl.eigenvalues.size());
   expect_same(sgl.eigenvalues, [&] {
     auto v = dbl.eigenvalues;
     std::sort(v.begin(), v.end());
     return v;
   }(), 1e-9);
+}
+
+// The syn-zero-cluster-real-1e5 analogue (P6: timeout): sigma = 0 inside a cluster of n/10
+// eigenvalues spaced as there (2e-9 ||K||: 10000 in [-1e-5, 1e-5]; here 300 in [-3e-7, 3e-7]),
+// far below the resolution of single precision (eps_single * ||K|| = 6e-8): the single factor is
+// flagged, refactorized without detection, and its refinement cannot converge - the attempt is
+// abandoned and the double result returned. (With the cluster 30x wider, 300 in [-1e-5, 1e-5],
+// single resolves it and serves.)
+TEST(DriverInexactFactors, SingleInsideAZeroClusterFallsBackToDouble) {
+  const index_t n = 3000, cluster = n / 10;
+  std::vector<double> w;
+  std::mt19937_64 rng(200);
+  std::uniform_real_distribution<double> in_cluster(-3e-7, 3e-7), mag(0.05, 1.0);
+  for (index_t i = 0; i < cluster; ++i) w.push_back(in_cluster(rng));
+  for (index_t i = cluster; i < n; ++i) w.push_back((i % 2 ? 1.0 : -1.0) * mag(rng));
+  // blocks of the fixture take consecutive eigenvalues: mixed, as the case generator's 'random'
+  // grouping, so that the cluster's eigenvectors share blocks with O(1) ones (single precision's
+  // rounding is then eps_single * ||K||, not relative to a block of tiny eigenvalues)
+  std::shuffle(w.begin(), w.end(), rng);
+  const auto a = hs::test::prescribed_spectrum<double>(w, 8, 201);
+  std::sort(w.begin(), w.end());
+  // k: 21 as in the case, or more where the 21st and 22nd nearest are equally near (random cluster)
+  std::vector<double> d;
+  for (double x : w) d.push_back(std::abs(x));
+  std::sort(d.begin(), d.end());
+  std::size_t k = 21;
+  while (d[k] - d[k - 1] < 1e-9) ++k;
+  const auto sol = hs::solve(a, nullptr, nearest(0.0, static_cast<index_t>(k), hs::FactorPrecision::Single));
+  expect_valid(sol);
+  EXPECT_TRUE(sol.report.precision.fallback);
+  EXPECT_FALSE(sol.report.precision.fallback_reason.empty());
+  EXPECT_EQ(sol.report.precision.used, hs::FactorPrecision::Double);
+  expect_same(sol.eigenvalues, nearest_of(w, 0.0, k), 1e-9);
+}
+
+// The third way out of an inexact attempt: it completes, but its result is not accepted (a pair
+// above tol, or the certificate failed). Fault injection marks the first pair of the attempt's
+// result above tol; the solve must start again with double factors and say why.
+TEST(DriverInexactFactors, AnUnacceptedResultFallsBackToDouble) {
+  auto g = shifted_grid(60, 61, 2.0);
+  const std::size_t j = widest_gap(g.w, 1000, 2500);
+  const double sigma = g.w[j] + 0.3 * (g.w[j + 1] - g.w[j]);
+  auto cfg = nearest(sigma, 10, hs::FactorPrecision::Single);
+  cfg.inexact_fault_reject = true;
+  const auto sol = hs::solve(g.a, nullptr, cfg);
+  expect_valid(sol);
+  const auto& p = sol.report.precision;
+  EXPECT_TRUE(p.fallback);
+  EXPECT_EQ(p.fallback_reason.rfind("the result was not accepted (1 of ", 0), 0u) << p.fallback_reason;
+  EXPECT_NE(p.fallback_reason.find("pairs above tol"), std::string::npos) << p.fallback_reason;
+  EXPECT_EQ(p.used, hs::FactorPrecision::Double);
+  EXPECT_GT(p.attempt_s, 0.0);
+  EXPECT_TRUE(warned(sol.report, "single-precision factors abandoned"));
+  for (const auto& pair : sol.report.pairs) EXPECT_TRUE(pair.accepted);  // the double result's
+  expect_same(sol.eigenvalues, nearest_of(g.w, sigma, 10), 1e-9);
+  // the knob only acts on inexact attempts
+  cfg.factor_precision = hs::FactorPrecision::Double;
+  const auto dbl = hs::solve(g.a, nullptr, cfg);
+  expect_valid(dbl);
+  EXPECT_FALSE(dbl.report.precision.fallback);
+  // and is a configuration key (false by default)
+  EXPECT_FALSE(hs::SolverConfig{}.inexact_fault_reject);
+  EXPECT_TRUE(hs::parse_config(R"({"inexact_fault_reject": true})").inexact_fault_reject);
+  EXPECT_THROW(hs::parse_config(R"({"inexact_fault_reject": 1})"), hs::Error);
+  EXPECT_TRUE(hs::parse_config(hs::config_to_json(cfg)).inexact_fault_reject);
+}
+
+// BLR factors (blr = on) are inexact like single ones: checked, and abandoned for full-rank double
+// factors - BLR off - when their attempt fails; at a well-separated shift they serve.
+TEST(DriverInexactFactors, BlrFactorsAreCheckedAndFallBackToFullRank) {
+  auto g = shifted_grid(60, 61, 2.0);
+  const std::size_t j = widest_gap(g.w, 1000, 2500);
+  const double sigma = g.w[j] + 0.3 * (g.w[j + 1] - g.w[j]);
+  auto cfg = nearest(sigma, 10, hs::FactorPrecision::Double);
+  cfg.blr = hs::Toggle::On;
+  const auto blr = hs::solve(g.a, nullptr, cfg);
+  expect_valid(blr);
+  EXPECT_TRUE(blr.report.precision.blr);
+  EXPECT_TRUE(blr.report.factor_options.blr);
+  EXPECT_FALSE(blr.report.precision.fallback) << blr.report.precision.fallback_reason;
+  expect_same(blr.eigenvalues, nearest_of(g.w, sigma, 10), 1e-9);
+  cfg.inexact_fault_reject = true;
+  const auto sol = hs::solve(g.a, nullptr, cfg);
+  expect_valid(sol);
+  const auto& p = sol.report.precision;
+  EXPECT_TRUE(p.fallback);
+  EXPECT_NE(p.fallback_reason.find("pairs above tol"), std::string::npos) << p.fallback_reason;
+  EXPECT_FALSE(p.blr);
+  EXPECT_FALSE(sol.report.factor_options.blr);
+  EXPECT_EQ(p.used, hs::FactorPrecision::Double);
+  EXPECT_TRUE(warned(sol.report, "BLR factors abandoned"));
+  expect_same(sol.eigenvalues, nearest_of(g.w, sigma, 10), 1e-9);
 }
 
 // ------------------------------------------------------------------------------ precision auto

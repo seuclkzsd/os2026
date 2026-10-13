@@ -184,6 +184,10 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "certificate") c.certificate = enum_parse<CertificateMode>(v, k);
     else if (key == "certificate_delta") c.certificate_delta = get_number(v, k);
     else if (key == "certificate_fault_drop") c.certificate_fault_drop = get_integer<index_t>(v, k);
+    else if (key == "inexact_fault_reject") {
+      if (!v.is_boolean()) HS_THROW(InvalidInput, "config: 'inexact_fault_reject' must be true/false");
+      c.inexact_fault_reject = v.get<bool>();
+    }
     else if (key == "zero_filter_tol") c.zero_filter_tol = get_number(v, k);
     else if (key == "complex_tol") c.complex_tol = get_number(v, k);
     else if (key == "max_shift_retries") c.max_shift_retries = get_integer<index_t>(v, k);
@@ -241,6 +245,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"certificate", enum_name(c.certificate)},
             {"certificate_delta", c.certificate_delta},
             {"certificate_fault_drop", c.certificate_fault_drop},
+            {"inexact_fault_reject", c.inexact_fault_reject},
             {"zero_filter_tol", c.zero_filter_tol},
             {"complex_tol", c.complex_tol},
             {"max_shift_retries", c.max_shift_retries}};

@@ -171,6 +171,10 @@ struct SolverConfig {
   /// farthest selected ones with their Ritz hints - so that the solve must find them missing (a
   /// check detecting a copy, or fewer than k selected pairs) and the deflated rerun recover them.
   index_t certificate_fault_drop = 0;
+  /// FAULT INJECTION, for tests only (false = off): the result of an attempt with inexact factors
+  /// (single precision, BLR) is not accepted - its first pair is marked above tol - so that the
+  /// solve starts again with double factors (report.precision.fallback), as for a real miss.
+  bool inexact_fault_reject = false;
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
   double complex_tol = 1e-8;      ///< GHIEP: a pair is complex only if |Im lambda| >
