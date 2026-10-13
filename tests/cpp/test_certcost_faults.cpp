@@ -88,14 +88,17 @@ template <class T>
 hs::CsrMatrix<T> matrix() {
   const auto id = [](index_t i, index_t j, index_t k) { return i + kNx * (j + kNy * k); };
   const index_t n = kNx * kNy * kNz;
-  const auto phase = [](index_t v) { return 0.7 * static_cast<double>(v % 97); };
+  // Phases stored first: their differences are then exactly antisymmetric (no FMA contraction),
+  // so the matrix is exactly Hermitian.
+  std::vector<double> phi(static_cast<std::size_t>(n));
+  for (index_t v = 0; v < n; ++v) phi[v] = 0.7 * static_cast<double>(v % 97);
   std::vector<index_t> rows, cols;
   std::vector<T> vals;
   auto add = [&](index_t r, index_t c, double x) {
     rows.push_back(r);
     cols.push_back(c);
     if constexpr (hs::is_complex_v<T>)
-      vals.push_back(T(x) * std::polar(1.0, phase(c) - phase(r)));
+      vals.push_back(r == c ? T(x) : T(x) * std::polar(1.0, phi[c] - phi[r]));
     else
       vals.push_back(T(x));
   };

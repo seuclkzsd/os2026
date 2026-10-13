@@ -77,7 +77,12 @@ double tri(index_t i, index_t j, double d, double lo) { return i == j ? d : (std
 template <class T>
 std::pair<hs::CsrMatrix<T>, hs::CsrMatrix<T>> q1_pencil() {
   const index_t n = kM1 * kM2;
-  const auto phase = [](index_t v) { return 0.37 * static_cast<double>(v % 53); };
+  // Phases stored first: a difference of two stored doubles is exactly antisymmetric (an inlined
+  // 0.37 * v_c - 0.37 * v_r may be contracted into an FMA, which is not), so the pencil stays
+  // exactly Hermitian with a real diagonal.
+  std::vector<double> phi(static_cast<std::size_t>(n));
+  for (index_t v = 0; v < n; ++v) phi[v] = 0.37 * static_cast<double>(v % 53);
+  const auto phase = [&](index_t v) { return phi[v]; };
   std::vector<index_t> rows, cols;
   std::vector<T> va, vb;
   for (index_t i1 = 0; i1 < kM1; ++i1)
@@ -90,9 +95,11 @@ std::pair<hs::CsrMatrix<T>, hs::CsrMatrix<T>> q1_pencil() {
           const double b = m1 * m2, a = k1 * m2 + m1 * k2 - kShift * b;
           T ga(a), gb(b);
           if constexpr (hs::is_complex_v<T>) {
-            const cplx g = std::polar(1.0, phase(c) - phase(r));
-            ga *= g;
-            gb *= g;
+            if (r != c) {
+              const cplx g = std::polar(1.0, phase(c) - phase(r));
+              ga *= g;
+              gb *= g;
+            }
           }
           rows.push_back(r);
           cols.push_back(c);
