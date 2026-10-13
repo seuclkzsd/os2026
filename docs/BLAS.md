@@ -486,15 +486,16 @@ commit e985acb; 5 interleaved repetitions (variant order alternating), solver ti
 
 | component | version / source | license | used as |
 |---|---|---|---|
-| OpenBLAS | 0.3.34, release tarball (`tools/deps/build_openblas.sh`, sha256 `cd7e1298...`) | BSD-3-Clause | drop-in builds; the hook's narrow kernels adapt the structure of its `kernel/x86_64/dgemv_n_microk_skylakex-4.c` (NN; Copyright (c) 2014 The OpenBLAS Project) and `dgemm_small_kernel_{nn,tn}_skylakex.c` (TN, REDUCE_4; Copyright (c) 2021 The OpenBLAS Project) |
+| OpenBLAS | 0.3.34, release tarball (`tools/deps/build_openblas.sh`, sha256 `cd7e1298...`) | BSD-3-Clause | drop-in builds; the hook's narrow kernels adapt the structure of its `kernel/x86_64/dgemv_n_microk_skylakex-4.c` (NN; Copyright (c) 2014 The OpenBLAS Project) and `dgemm_small_kernel_{nn,tn}_skylakex.c` (the NN register path for few rows; TN, REDUCE_4; Copyright (c) 2021 The OpenBLAS Project) |
 | BLIS | 2.1, tag tarball (`tools/deps/build_blis.sh`, sha256 `901752ec...`) | BSD-3-Clause | drop-in experiment only |
 | LIBXSMM | 1.17, tag tarball (`tools/deps/build_libxsmm.sh`, sha256 `8b642127...`) | BSD-3-Clause | drop-in experiment only (`libxsmmext` call wrapper) |
 | small triangular solve (`small_trsm_left`) | the project's own, loop orders of the reference BLAS dtrsm | project | hook route `strsm` |
 
 OpenBLAS' copyright notices, its three license conditions and its disclaimer are reproduced in
 full in `src/blas/simd_kernels.hpp` (BSD-3-Clause clause 1, source redistributions;
-`src/blas/narrow_kernels.cpp` points there) and here, for the documentation of a binary
-distribution of hsolve built with the hook (clause 2):
+`src/blas/narrow_kernels.cpp` points there), in the repository's `THIRD_PARTY_NOTICES` (section 1.1,
+the file that accompanies a binary distribution of hsolve, together with the notices of the other
+components; clause 2) and here:
 
 > Copyright (c) 2014, The OpenBLAS Project<br>
 > Copyright (c) 2021, The OpenBLAS Project<br>

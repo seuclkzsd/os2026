@@ -36,8 +36,9 @@ The narrow dgemm kernels of hsolve's BLAS hook (module src/blas; linked into the
 by default, and built as libhsolve_blashook.so) adapt the structure of these OpenBLAS 0.3.34 files:
   * kernel/x86_64/dgemv_n_microk_skylakex-4.c (the NN column-group update)
       Copyright (c) 2014, The OpenBLAS Project
-  * kernel/x86_64/dgemm_small_kernel_nn_skylakex.c, kernel/x86_64/dgemm_small_kernel_tn_skylakex.c
-    (the TN register block and its REDUCE_4 reduction)
+  * kernel/x86_64/dgemm_small_kernel_nn_skylakex.c (the register path of NN calls with few rows:
+    accumulators over all of k), kernel/x86_64/dgemm_small_kernel_tn_skylakex.c (the TN register
+    block and its REDUCE_4 reduction)
       Copyright (c) 2021, The OpenBLAS Project
 The small triangular solve of the hook is hsolve's own code (loop orders of the reference BLAS).
 License (BSD-3-Clause; the same text in all three files):
