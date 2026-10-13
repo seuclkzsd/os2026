@@ -8,6 +8,7 @@
          directory has the layout tools/eval/sweep.py evaluates:
              RUN/<case>/<label>-r<rep>/            result directory (eigenvectors kept for tools/eval)
              RUN/<case>/guard-<label>-r<rep>.json  guard summary
+             RUN/<case>/stderr-<label>-r<rep>.txt  the run's stderr (solver errors, guard summary line)
              RUN/runs.jsonl                        one line per run (host, binary, times, phases)
          Runs whose guard summary exists are skipped (resume); none starts after --deadline s.
   table  medians of report time_total_s per (case, binary) over one or more raw run directories,
@@ -100,6 +101,7 @@ def cmd_run(a: argparse.Namespace) -> int:
                         g += ["--cores", a.cores]
                     cmd = hsolve_command(Path(bins[lb]), DATA / "cases" / name, out, a.threads)
                     p = subprocess.run(g + ["--"] + cmd, capture_output=True, text=True)
+                    (run_dir / name / f"stderr-{run}.txt").write_text(p.stderr)   # the solver's errors
                     s = json.loads(gsum.read_text()) if gsum.exists() else {"returncode": p.returncode}
                     rec: dict[str, Any] = {"case": name, "label": lb, "rep": rep, "host": host, "binary": bins[lb],
                                            "rc": s.get("returncode"), "killed": s.get("killed"),
