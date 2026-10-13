@@ -292,6 +292,15 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
     driver::PhaseScope phase(clock, driver::Phase::Factor);
     fac->analyze(pencil, 1.0, -sigma0);
   }
+  // The analysis keeps structures of its own resident (MUMPS' symbolic data and input copy: 0.55
+  // GB at n = 5e5, 3-D) that the plan above could not see: the cap shrinks by what the process
+  // grew since, so that cap plus resident memory stays within the budget (DESIGN §3.6-3).
+  const double grown = static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)) - rss;
+  if (grown > 0 && fopts.max_memory_mb > 0) {
+    const double cap_after = std::max(1.0, fopts.max_memory_mb - 0.95 * grown / 1e6);
+    fac->set_max_memory_mb(cap_after);
+    event(c, "memory_replan", {{"grown_mb", grown / 1e6}, {"cap_mb", cap_after}});
+  }
   if (cfg.factor_precision == FactorPrecision::Auto) driver::choose_precision(c, fac, pencil, sigma0);
   driver::analyze_within_budget(c, *fac, pencil, sigma0, /*already_analyzed=*/true);
   rep.factor_options = fac->options();
@@ -317,7 +326,8 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
     // Its memory: what the budget leaves beside the process now (the proof's arrays are freed
     // before anything else is allocated), and at most the factorization cap.
     po.max_bytes = std::max(0.0, budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)));
-    if (fopts.max_memory_mb > 0) po.max_bytes = std::min(po.max_bytes, fopts.max_memory_mb * 1e6);
+    const double cap_now = fac->options().max_memory_mb;
+    if (cap_now > 0) po.max_bytes = std::min(po.max_bytes, cap_now * 1e6);
     po.seed = cfg.seed;
     const driver::HpdProof proof = driver::prove_positive_definite(*b, po);
     event(c, "b_proof", {{"outcome", proof.outcome}, {"proven", proof.proven}, {"indefinite", proof.indefinite},

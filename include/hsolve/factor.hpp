@@ -320,6 +320,11 @@ class SparseFactorization {
 
   /// Toggle out-of-core storage of the factors; takes effect at the next factorize().
   virtual void set_out_of_core(bool on) = 0;
+  /// Change the working-memory cap (FactorOptions::max_memory_mb, ICNTL(23); 0 = none, else
+  /// finite > 0, InvalidInput otherwise); takes effect at the next factorize(). The driver lowers
+  /// it after the analysis by what the analysis kept resident (DESIGN §3.6-3). A backend without
+  /// a cap throws Unsupported.
+  virtual void set_max_memory_mb(double mb);
 
   /// Frees the numerical factors and their workspace but keeps the analysis (MUMPS JOB=-4), e.g.
   /// to count inertia with an InertiaCounter without holding both in memory. Afterwards solve()

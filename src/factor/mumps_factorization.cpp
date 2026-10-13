@@ -66,6 +66,11 @@ const FactorOptions& validated(const FactorOptions& o) {
   return o;
 }
 
+// ICNTL(23) of a working-memory cap in MB (0 = none).
+int icntl23(double max_memory_mb) {
+  return max_memory_mb > 0.0 ? static_cast<int>(std::clamp(std::floor(max_memory_mb), 1.0, double(INT_MAX))) : 0;
+}
+
 // ICNTL(14) for the next workspace retry: doubled, at least kMinRelaxIncrease points more,
 // saturating at INT_MAX.
 int grown_relaxation(int pct) {
@@ -118,10 +123,7 @@ void MumpsFactorization<T, U>::configure_static_controls() {
   mumps_.icntl(18) = 0;                 // centralized matrix on the host
   mumps_.icntl(20) = 0;                 // dense right-hand sides
   mumps_.icntl(21) = 0;                 // centralized solution, overwrites the right-hand sides
-  mumps_.icntl(23) =
-      options_.max_memory_mb > 0.0
-          ? static_cast<int>(std::clamp(std::floor(options_.max_memory_mb), 1.0, double(INT_MAX)))
-          : 0;
+  mumps_.icntl(23) = icntl23(options_.max_memory_mb);
   // Null-pivot detection: needs ICNTL(24)=1 AND CNTL(3) > 0 (threshold relative to the norm of
   // the scaled/permuted matrix); with CNTL(3)=0 exactly singular matrices "factorize". The
   // threshold depends on the arithmetic: float rounding alone moves eigenvalues by ~1e-7*||K||,
@@ -323,6 +325,14 @@ bool MumpsFactorization<T, U>::read_factorization_info(bool mumps_singular) {
 }
 
 template <class T, class U>
+void MumpsFactorization<T, U>::set_max_memory_mb(double mb) {
+  if (!(mb >= 0.0) || !std::isfinite(mb))
+    HS_THROW(InvalidInput, "SparseFactorization::set_max_memory_mb: must be finite and >= 0, got " << mb);
+  options_.max_memory_mb = mb;
+  mumps_.icntl(23) = icntl23(mb);  // read by MUMPS at the factorization
+}
+
+template <class T, class U>
 bool MumpsFactorization<T, U>::release_factors() {
   if (pencil_ == nullptr || !holds_factors_) return false;
   const int info1 = mumps_.run(kFreeFactors);
@@ -415,6 +425,11 @@ template <class T>
 const std::vector<int>& SparseFactorization<T>::pivot_order() const {
   static const std::vector<int> none;
   return none;
+}
+
+template <class T>
+void SparseFactorization<T>::set_max_memory_mb(double) {
+  HS_THROW(Unsupported, "SparseFactorization::set_max_memory_mb: this backend has no memory cap");
 }
 
 template <class T>

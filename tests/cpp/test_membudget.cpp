@@ -375,6 +375,40 @@ TEST(FactorOutOfCore, AMemoryErrorInCoreIsRetriedOutOfCore) {
   }
 }
 
+// The cap is planned before the analysis; what the analysis keeps resident is taken off it
+// before the in-core / out-of-core decision (event memory_replan), and the factors get that cap.
+TEST(DriverMemoryBudget, TheCapShrinksByWhatTheAnalysisKeepsResident) {
+  const auto a = laplacian_3d(30);
+  auto cfg = nearest(1.0, 6);
+  cfg.memory_budget_gb = 3.0;
+  const std::string path = ::testing::TempDir() + "/membudget_replan.jsonl";
+  hs::Solution<double> sol;
+  {
+    hs::Logger log(0, path);
+    sol = hs::solve(a, nullptr, cfg, &log);
+  }
+  EXPECT_TRUE(sol.report.success);
+  double plan = -1, replan = -1, grown = -1;
+  std::ifstream in(path);
+  for (std::string line; std::getline(in, line);) {
+    const auto j = nlohmann::json::parse(line);
+    EXPECT_TRUE(j.contains("rss_mb") && j.contains("peak_rss_mb")) << line;  // the memory timeline
+    if (j["event"] == "memory_plan") plan = j["cap_mb"];
+    if (j["event"] == "memory_replan") replan = j["cap_mb"], grown = j["grown_mb"];
+  }
+  ASSERT_GT(plan, 0.0);
+  ASSERT_GT(grown, 0.0) << "the analysis allocates its structures";
+  EXPECT_NEAR(replan, plan - 0.95 * grown, 1e-6 * plan);
+  EXPECT_DOUBLE_EQ(sol.report.factor_options.max_memory_mb, replan);
+  // the factor layer's setter
+  hs::ShiftedPencil<double> pencil(a, nullptr);
+  auto f = hs::make_mumps_factorization<double>(hs::FactorOptions{});
+  f->set_max_memory_mb(123.0);
+  EXPECT_EQ(f->options().max_memory_mb, 123.0);
+  EXPECT_THROW(f->set_max_memory_mb(-1.0), hs::Error);
+  EXPECT_THROW(f->set_max_memory_mb(HUGE_VAL), hs::Error);
+}
+
 // A budget too small for the in-core factors but enough for the out-of-core working memory (and
 // the certificate's inertia-only counts, which need about as much): a valid out-of-core run.
 TEST(DriverMemoryBudget, ABudgetBelowTheInCoreFactorsGivesAValidOutOfCoreRun) {

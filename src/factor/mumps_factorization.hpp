@@ -26,6 +26,7 @@ class MumpsFactorization final : public SparseFactorization<T> {
   void solve(T* b, index_t nrhs, index_t ldb) override;
   Inertia inertia() const override { return inertia_; }
   void set_out_of_core(bool on) override { options_.out_of_core = on; }
+  void set_max_memory_mb(double mb) override;
   bool release_factors() override;
   void set_null_pivot_detection(bool on) override { null_pivot_detection_ = on; }
   const FactorStats& stats() const override { return stats_; }
