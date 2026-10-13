@@ -141,15 +141,30 @@ MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil) {
 
 // ------------------------------------------------------------------------- factorization steps
 
+index_t near_null_eigenvalues(index_t null_pivots, bool complex_scalars) {
+  return complex_scalars ? (null_pivots + 1) / 2 : null_pivots;
+}
+
 // Factorize K(sigma0) (DESIGN §3.6-4). A null pivot means sigma0 is (numerically) ON an eigenvalue:
 // perturb the shift once, by delta = 1e-8 * max(scale, |sigma0|) - an isolated eigenvalue at
-// sigma0 is then ~1e3 times beyond the detection threshold (factor.hpp). If that shift still looks
-// singular, sigma0 lies inside a cluster denser than the null-pivot threshold: moving away (a
-// second, 10x larger perturbation used to be tried) would change which eigenvalues are nearest -
-// on syn-zero-cluster-real-1e5 it landed outside the cluster at 5x the wanted radius and the
-// certificate then counted 166 eigenvalues for 21 found - so factorize AT sigma0 with null-pivot
-// detection off (tiny pivots are kept; shift-invert then amplifies exactly the wanted near-null
-// directions). `detection_off` tells later refactorizations at this shift to do the same.
+// sigma0 is then ~1e3 times beyond the detection threshold (factor.hpp). Inside a cluster denser
+// than the null-pivot threshold, moving away (a second, 10x larger perturbation used to be tried)
+// changes which eigenvalues are nearest - on syn-zero-cluster-real-1e5 it landed outside the
+// cluster at 5x the wanted radius and the certificate then counted 166 eigenvalues for 21 found -
+// so there K is factorized AT sigma0 with null-pivot detection off (tiny pivots are kept;
+// shift-invert then amplifies exactly the wanted near-null directions). `detection_off` tells
+// later refactorizations at this shift to do the same.
+// Which case it is: more than one eigenvalue's worth of null pivots at sigma0 (near_null_eigenvalues:
+// the complex embedding doubles them) means several eigenvalues within the threshold - the
+// perturbation, of the threshold's size, would reorder them - and the perturbation is skipped; a
+// perturbed shift that still looks singular means the same. The null-pivot count decides first
+// because whether the perturbed shift is flagged depends on the pivot order: on
+// syn-zero-cluster-real-1e5 (21 wanted of 10^4 eigenvalues spaced 2e-9 around sigma0 = 0) AMD's
+// factors flagged it, METIS', SCOTCH's and hsolve's nested dissection's did not, and their runs at
+// sigma0 + 1e-8 found 21 pairs out to 2.85e-8 while 34 lie that close to 0 (the 21 nearest reach
+// 1.86e-8): a certificate rerun on every seed, 10..11 factorizations instead of 6 (P5c fix).
+// Exactly zero pivots at sigma0 with detection off (factorize() false): the perturbed shift after
+// all.
 template <class T>
 double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off,
                       bool on_eigenvalue) {
@@ -158,26 +173,31 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
   if (c.held.shift == sigma0 && !c.held.detection_off) return sigma0;  // e.g. right after counting there
   c.held = FactorHeld{};
   fac.set_null_pivot_detection(true);
-  double s = sigma0;
-  const index_t perturbations = std::min<index_t>(1, c.cfg.max_shift_retries);
-  for (index_t r = 0;; ++r) {
-    if (fac.factorize(1.0, -s)) {
-      if (!on_eigenvalue) {
-        c.rep.shift_retries = std::max(c.rep.shift_retries, r);
-        if (r > 0) warn(c, "shift perturbed to " + fmt(s) + " (A - sigma B singular at the requested shift)");
-      }
-      c.held = FactorHeld{s, false};
-      return s;
-    }
-    if (r >= perturbations) break;
-    const double mag = 1e-8 * std::max(scale, std::abs(sigma0)) * std::pow(10.0, static_cast<double>(r));
-    s = sigma0 + ((r % 2 == 0) ? mag : -mag);
+  if (fac.factorize(1.0, -sigma0)) {
+    c.held = FactorHeld{sigma0, false};
+    return sigma0;
   }
+  const index_t nulls = fac.stats().null_pivots;
+  const bool cluster = !on_eigenvalue && near_null_eigenvalues(nulls, is_complex_v<T>) >= 2;
+  const bool may_perturb = c.cfg.max_shift_retries > 0;
+  const double perturbed = sigma0 + 1e-8 * std::max(scale, std::abs(sigma0));
+  event(c, "singular_shift", {{"sigma", sigma0}, {"null_pivots", static_cast<std::int64_t>(nulls)},
+                              {"cluster", cluster}, {"on_eigenvalue", on_eigenvalue}});
+  auto at_perturbed = [&]() {
+    if (!fac.factorize(1.0, -perturbed)) return false;
+    if (!on_eigenvalue) {
+      c.rep.shift_retries = std::max<index_t>(c.rep.shift_retries, 1);
+      warn(c, "shift perturbed to " + fmt(perturbed) + " (A - sigma B singular at the requested shift)");
+    }
+    c.held = FactorHeld{perturbed, false};
+    return true;
+  };
+  if (!cluster && may_perturb && at_perturbed()) return perturbed;
   fac.set_null_pivot_detection(false);
   if (fac.factorize(1.0, -sigma0)) {
     detection_off = true;
     if (!on_eigenvalue) {
-      c.rep.shift_retries = std::max(c.rep.shift_retries, perturbations + 1);
+      c.rep.shift_retries = std::max<index_t>(c.rep.shift_retries, may_perturb ? 2 : 1);
       warn(c, "shift " + fmt(sigma0) + " lies inside an eigenvalue cluster denser than the null-pivot threshold; "
               "factorized there without null-pivot detection");
     }
@@ -185,6 +205,7 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
     return sigma0;
   }
   fac.set_null_pivot_detection(true);
+  if (cluster && may_perturb && at_perturbed()) return perturbed;
   HS_THROW(Singular, "A - sigma B is exactly singular at and near sigma = " << sigma0);
 }
 

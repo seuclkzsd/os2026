@@ -141,14 +141,19 @@ MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil);
 
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb);
 
-/// Factorize K(sigma0) (DESIGN §3.6-4): perturb the shift on a null pivot, and factorize at sigma0
-/// without null-pivot detection when every nearby shift looks singular (dense cluster). Returns
-/// the shift used; detection_off tells later refactorizations at that shift to do the same.
-/// on_eigenvalue: sigma0 was placed on an eigenvalue on purpose (a multiple eigenvalue's own
-/// shift): the perturbation is expected and not reported as a warning.
+/// Factorize K(sigma0) (DESIGN §3.6-4): perturb the shift by 1e-8 * max(scale, |sigma0|) on null
+/// pivots of one eigenvalue (isolated eigenvalue at sigma0), and factorize at sigma0 without
+/// null-pivot detection inside a dense cluster - several eigenvalues' worth of null pivots
+/// (near_null_eigenvalues >= 2), or the perturbed shift singular as well. Returns the shift used;
+/// detection_off tells later refactorizations at that shift to do the same. on_eigenvalue: sigma0
+/// was placed on an eigenvalue on purpose (a multiple eigenvalue's own shift): the perturbation is
+/// expected (whatever the null pivots), and not reported as a warning.
 template <class T>
 double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double scale, bool& detection_off,
                       bool on_eigenvalue = false);
+/// Eigenvalues the null pivots of a factorization stand for: a complex T factorizes the real
+/// embedding, in which every eigenvalue appears twice.
+index_t near_null_eigenvalues(index_t null_pivots, bool complex_scalars);
 
 /// Refactorize K(sigma) the way factorize_near() did (needed after certificate factorizations).
 /// No-op when the object already holds exactly that factorization (Ctx::held).
