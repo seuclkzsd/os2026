@@ -369,8 +369,10 @@ def solve(
              passed explicitly override it. Memory: config["memory_budget_gb"] is "auto" (the
              default, also 0) - a share of the smallest memory limit of the process: memory
              cgroup, the HSOLVE_MEMORY_LIMIT_GB environment variable (GiB), RLIMIT_AS/RLIMIT_DATA,
-             MemTotal - or a number of GiB; factors beyond it go out of core (result.report
-             ["memory"] says which budget and why). config["factor_precision"]: "double"
+             MemTotal; under RLIMIT_AS it is planned in address space, which also counts what the
+             process reserves without using it (BLAS buffers, malloc arenas) - or a number of GiB
+             (resident memory); factors beyond it go out of core (result.report["memory"] says
+             which budget, in which measure and why). config["factor_precision"]: "double"
              (default), "single" (half the factor memory, slower; checked, falls back to double
              rather than return a wrong answer) or "auto" (single only when the double factors do
              not fit in core but single ones do; result.report["precision"]).
