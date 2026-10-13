@@ -11,8 +11,11 @@ Where: gpu01 (2x Xeon Silver 4314, CentOS 7), the measurement slot - cores 16-31
 16 physical cores, 32 GiB, one run at a time (`tools/run/guard.py --exclusive`), i.e. the judging
 configuration; runs with fewer threads are pinned to the first cores of the slot while holding all
 of it. Release build, conda-forge OpenBLAS 0.3.34 (DYNAMIC_ARCH, OpenMP, SkylakeX kernels),
-MUMPS 5.8.2 (sequential), 2026-10-12/13. Section 2 also keeps an earlier 1/4/8-thread profile
-from gpu02 cores 16-23 (taken before the slot existed).
+MUMPS 5.8.2 (sequential), 2026-10-12/13. Binaries: the screening of sections 3 / 4.4 and the
+route-off profiles of section 2.1 (except wg-square-1e6) were built from commit 6da4c7a, before
+the review fixes of the hook (short OpenMP teams, `-ffp-contract=off`, the in-executable link),
+which change no timed code path's work; everything else from e985acb. Section 2 also keeps an
+earlier 1/4/8-thread profile from gpu02 cores 16-23 (taken before the slot existed).
 
 **Summary**
 
@@ -63,16 +66,17 @@ threads; best of 10), pinned to cores 16..16+T-1, two sessions:
 
 ## 2. Profile: where factorization and solves spend their time
 
-Method: `libhsolve_blashook.so` preloaded with routing off (`HS_BLAS_ROUTE=off`) and
-`HS_BLAS_PROFILE=<file>`; the hook times every dgemm/dtrsm/dgemv and the level-1 calls MUMPS
-makes, keyed by routine x operand flags x size classes (powers of two) x MUMPS phase (from the
-`dmumps_c` JOB and ICNTL(31): analysis, factorization, inertia count, solve with 1 / p right-hand
-sides) x inside / outside OpenMP parallel regions. Outside parallel regions (MUMPS' fronts above
-its L0 layer, and hsolve's own calls) the time is wall time; inside (the L0 subtrees) it is summed
-over threads, "in/T" below divides it by the thread count. Profiling cost: none measurable (route-off
-hook and profiled runs within +-3% of plain runs). Default solver configuration of each case
-(adaptive ordering, block size by `block_size_for`: p = 4 for the 3-D cases, GHIEP p = 2), one run
-each; `bench_asmkern_report` gives the per-shape tables.
+Method: `libhsolve_blashook.so` preloaded into a plain hsolve with routing off
+(`HS_BLAS_ROUTE=off`) and `HS_BLAS_PROFILE=<file>` (with the hook linked into hsolve, the default
+build now, the same without the preload); the hook times every dgemm/dtrsm/dgemv and the level-1
+calls MUMPS makes, keyed by routine x operand flags x size classes (powers of two) x MUMPS phase
+(from the `dmumps_c` JOB and ICNTL(31): analysis, factorization, inertia count, solve with 1 / p
+right-hand sides) x inside / outside OpenMP parallel regions. Outside parallel regions (MUMPS'
+fronts above its L0 layer, and hsolve's own calls) the time is wall time; inside (the L0 subtrees)
+it is summed over threads, "in/T" below divides it by the thread count. Profiling cost: none
+measurable (route-off hook and profiled runs within +-3% of plain runs). Default solver
+configuration of each case (adaptive ordering, block size by `block_size_for`: p = 4 for the 3-D
+cases, GHIEP p = 2), one run each; `bench_asmkern_report` gives the per-shape tables.
 
 ### 2.1 Default block size, 4 / 8 / 16 threads (gpu01 slot)
 
@@ -292,12 +296,13 @@ concurrent calls from any number of threads are tested.
 
 Two ways, not both at once (the calls would pass through the hook twice):
 
-1. **Preloaded** (any executable, nothing rebuilt): `tools/dev/build.sh release` builds
-   `build/release/libhsolve_blashook.so`;
+1. **Preloaded** (any executable that does not carry the hook, nothing rebuilt):
+   `tools/dev/build.sh release` builds `build/release/libhsolve_blashook.so`; for an hsolve built
+   with `-DHSOLVE_BLAS_HOOK=OFF` in `build-plain`:
 
    ```bash
    LD_PRELOAD=$PWD/build/release/libhsolve_blashook.so HS_BLAS_ROUTE=all \
-     build/release/hsolve --A A.npz --B B.npz --config config.json --out out --threads 16
+     build-plain/hsolve --A A.npz --B B.npz --config config.json --out out --threads 16
    ```
 
    **Python module**: the same preload in front of the interpreter. The extension module, MUMPS
@@ -312,14 +317,14 @@ Two ways, not both at once (the calls would pass through the hook twice):
 
    numpy / scipy BLAS calls of the same process also pass through the hook (forwarded or routed
    like MUMPS'; the routes are correct for any caller).
-2. **Linked into hsolve**: `cmake ... -DHSOLVE_BLAS_HOOK=ON [-DHSOLVE_BLAS_ROUTE_DEFAULT=all]`; the
-   executable then carries the hook (CMake function `hsolve_link_blas_hook`: the MUMPS libraries
-   stay in DT_NEEDED with `--no-as-needed` - with conda-forge's `-Wl,--as-needed` they used to be
-   dropped and hsolve aborted with "no definition of dmumps_c" - and a dynamic list exports the
-   entry points so that MUMPS' calls bind to them). `HS_BLAS_ROUTE` still overrides the built-in
-   default at run time (`HS_BLAS_ROUTE=off` = plain forwarding). `test_asmkern_fix_exehook` links
-   the same way in every build and checks that MUMPS' BLAS calls reach the hook; with the option ON
-   it also runs the hooked hsolve.
+2. **Linked into hsolve** (the default build; explicitly `cmake ... -DHSOLVE_BLAS_HOOK=ON
+   -DHSOLVE_BLAS_ROUTE_DEFAULT=all`): the executable carries the hook (CMake function
+   `hsolve_link_blas_hook`: the MUMPS libraries stay in DT_NEEDED with `--no-as-needed` - with
+   conda-forge's `-Wl,--as-needed` they used to be dropped and hsolve aborted with "no definition
+   of dmumps_c" - and a dynamic list exports the entry points so that MUMPS' calls bind to them).
+   `HS_BLAS_ROUTE` still overrides the built-in default at run time (`HS_BLAS_ROUTE=off` = plain
+   forwarding). `test_asmkern_fix_exehook` links the same way in every build and checks that
+   MUMPS' BLAS calls reach the hook; with the option ON it also runs the hooked hsolve.
 
 ### 4.3 Kernel measurements (16 threads, gpu01 slot)
 
@@ -467,7 +472,8 @@ commit e985acb; 5 interleaved repetitions (variant order alternating), solver ti
   all. The thresholds (256 KiB of A per thread for the parallel split, triangles up to 512 for the
   small trsm, N <= 16) follow this machine's ratio of one core's to the socket's bandwidth (1 : 2.6)
   and OpenBLAS' per-call overhead; on a CPU where one core can already saturate the memory the
-  parallel split would gain less, never lose much (the split only starts at 512 KiB of A). The rest
+  parallel split should gain less (not measured; it only starts at 512 KiB of A, where a parallel
+  region's few microseconds are small against the call). The rest
   of hsolve follows the build presets: `release` compiles with `-march=native` (build on the
   judging machine), `portable` without (a binary built elsewhere); the hook behaves the same in
   both.
@@ -484,13 +490,38 @@ commit e985acb; 5 interleaved repetitions (variant order alternating), solver ti
 | small triangular solve (`small_trsm_left`) | the project's own, loop orders of the reference BLAS dtrsm | project | hook route `strsm` |
 
 OpenBLAS' copyright notices, its three license conditions and its disclaimer are reproduced in
-full in `src/blas/simd_kernels.hpp` (BSD-3-Clause clause 1 for source redistributions);
-`src/blas/narrow_kernels.cpp` points there. A binary distribution of hsolve built with the hook
-must reproduce the same notice in its documentation (clause 2) - this page does so by reference
-to that header. Checksums were taken from the downloads and cross-checked against Spack's package
-recipes (OpenBLAS, LIBXSMM) and conda-forge's recipe (BLIS, OpenBLAS). No existing small-trsm
-kernel fits MUMPS' calls: LIBXSMM's trsm generator is for packed batches of matrices, BLIS'
-small-trsm path exists only in AMD's fork (AOCL-BLIS).
+full in `src/blas/simd_kernels.hpp` (BSD-3-Clause clause 1, source redistributions;
+`src/blas/narrow_kernels.cpp` points there) and here, for the documentation of a binary
+distribution of hsolve built with the hook (clause 2):
+
+> Copyright (c) 2014, The OpenBLAS Project<br>
+> Copyright (c) 2021, The OpenBLAS Project<br>
+> All rights reserved.
+>
+> Redistribution and use in source and binary forms, with or without modification, are permitted
+> provided that the following conditions are met:
+> 1. Redistributions of source code must retain the above copyright notice, this list of
+>    conditions and the following disclaimer.
+> 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+>    conditions and the following disclaimer in the documentation and/or other materials provided
+>    with the distribution.
+> 3. Neither the name of the OpenBLAS project nor the names of its contributors may be used to
+>    endorse or promote products derived from this software without specific prior written
+>    permission.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+> IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+> FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE OPENBLAS PROJECT OR
+> CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+> DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+> DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+> IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+> OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Checksums were taken from the downloads and cross-checked against Spack's package recipes
+(OpenBLAS, LIBXSMM) and conda-forge's recipe (BLIS, OpenBLAS). No existing small-trsm kernel fits
+MUMPS' calls: LIBXSMM's trsm generator is for packed batches of matrices, BLIS' small-trsm path
+exists only in AMD's fork (AOCL-BLIS).
 
 ## 8. Reproduction
 
@@ -502,11 +533,13 @@ runs with T < 16 threads go through a nested `python3 tools/run/guard.py --exclu
 of the work tree first.
 
 ```bash
-# builds: libhsolve_blashook.so and bench_asmkern_* (release), the hooked hsolve (build/hook)
-tools/dev/build.sh release
-cmake -S . -B build/hook -G Ninja -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DCMAKE_BUILD_TYPE=Release \
-  -DHSOLVE_BLAS_HOOK=ON -DHSOLVE_BLAS_ROUTE_DEFAULT=all -DHSOLVE_BUILD_BENCH=OFF -DHSOLVE_BUILD_PYTHON=OFF
-cmake --build build/hook --target hsolve_cli test_asmkern_fix_exehook
+# builds. The measurements here were made at e985acb, where the release build's hsolve was plain
+# and the hooked one came from build/hook; since then the default build carries the hook, and a
+# plain hsolve (build-plain below) needs -DHSOLVE_BLAS_HOOK=OFF.
+tools/dev/build.sh release      # libhsolve_blashook.so, bench_asmkern_*, hsolve (hooked by default)
+cmake -S . -B build-plain -G Ninja -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DCMAKE_BUILD_TYPE=Release \
+  -DHSOLVE_BLAS_HOOK=OFF -DHSOLVE_BUILD_TESTS=OFF -DHSOLVE_BUILD_BENCH=OFF -DHSOLVE_BUILD_PYTHON=OFF
+cmake --build build-plain --target hsolve_cli
 # drop-in libraries (tarballs in $HOME/deps/src, sha256 checked by the scripts)
 tools/deps/build_openblas.sh skx DYNAMIC_ARCH=0 TARGET=SKYLAKEX
 tools/deps/build_openblas.sh skx-fwd DYNAMIC_ARCH=0 TARGET=SKYLAKEX GEMM_GEMV_FORWARD=1
@@ -518,10 +551,13 @@ tools/deps/build_libxsmm.sh wrap1
 K=build/release/bench_asmkern_kernels
 $K peak --n 4096 --reps 3;  $K stream --mb 1024 --reps 10
 
-# 2. profiles (route off; all; one column: config.json with "block_size": 1 merged in)
+# 2. profiles (route off; all; one column: config.json with "block_size": 1 merged in), with a
+#    plain hsolve (built with -DHSOLVE_BLAS_HOOK=OFF, as here) and the preloaded hook ...
 env LD_PRELOAD=$PWD/build/release/libhsolve_blashook.so HS_BLAS_ROUTE=off HS_BLAS_PROFILE=prof.json \
-  build/release/hsolve --A data/cases/C/A.npz [--B data/cases/C/B.npz] --config data/cases/C/config.json \
+  build-plain/hsolve --A data/cases/C/A.npz [--B data/cases/C/B.npz] --config data/cases/C/config.json \
   --out out --threads T -q
+#    ... or with the default build, whose hsolve carries the hook (no preload: never both)
+env HS_BLAS_ROUTE=off HS_BLAS_PROFILE=prof.json build/release/hsolve ...
 build/release/bench_asmkern_report prof.json      # per-phase, per-routine and per-shape tables
 
 # 4.3 kernels at 16 threads (HS_BLAS_NO_AVX512=1: AVX2; plus HS_BLAS_NO_AVX2=1: portable)
@@ -532,7 +568,7 @@ $K shapes --reps 7 --pool-mb 1024 --routes par,narrow+par,strsm=512,gemv1+par --
 
 # 3. / 4.4 screening: one slot call, 3 interleaved repetitions, fixed orderings
 H=$PWD/build/release/libhsolve_blashook.so D=$HOME/deps
-$G build/release/bench_asmkern_e2e --cli build/release/hsolve --threads 16 --reps 3 --run-timeout 300 \
+$G build/release/bench_asmkern_e2e --cli build-plain/hsolve --threads 16 --reps 3 --run-timeout 300 \
   --cases syn-mem27-46,yee-pec-box-1e5,ss-qa8fk-qa8fm,wg-square-1e5,cav2d-rect-pert-1e5,wg-square-1e6 \
   --override 'syn-mem27-46:{"ordering": 3}' --override 'yee-pec-box-1e5:{"ordering": 3}' \
   --override 'ss-qa8fk-qa8fm:{"ordering": 3}' --override 'wg-square-1e5:{"ordering": 0}' \
@@ -550,10 +586,10 @@ $G build/release/bench_asmkern_e2e --cli build/release/hsolve --threads 16 --rep
 
 Section 5: compare.py runs `build/release/hsolve` of the repository it lives in, so each variant
 gets a scratch copy of the repository - `tools/` copied, `data` linked to the work tree's,
-`build/release/hsolve` linked to the plain (`build/release/hsolve`) or the hooked
-(`build/hook/hsolve`) executable. Per repetition R (1-3 in one slot call, 4-5 in a second; variant
-order plain, hook for odd R and hook, plain for even R), for each variant V with scratch copy
-`$REPO_V`:
+`build/release/hsolve` linked to the plain (`build-plain/hsolve`; at e985acb the release build's)
+or the hooked (`build/release/hsolve` now; at e985acb `build/hook/hsolve`) executable. Per
+repetition R (1-3 in one slot call, 4-5 in a second; variant order plain, hook for odd R and hook,
+plain for even R), for each variant V with scratch copy `$REPO_V`:
 
 ```bash
 $G python3 $REPO_V/tools/bench/compare.py --tag e2e-V-rR --cores 16-31 --solvers hsolve --reps 1 \
