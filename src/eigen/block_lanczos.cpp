@@ -64,6 +64,33 @@
 // reference |theta| of the wanted pairs), the single-vector rule with |b_l| replaced by the norm of
 // its coupling column.
 //
+// Applications (P5c review of the block method). For distinct eigenvalues a block run needs more
+// operator applications than p = 1 (ss-qa8fk-qa8fm: 50 / 68 / 100 / 160 for p = 1 / 2 / 4 / 8): j
+// block steps hold polynomials of degree j in p start vectors, so per application the space
+// converges more slowly on well separated eigenvalues; blocks pay through the cheaper multi-RHS
+// solve per column (the width choice is block_rule.cpp's). What was measured or ruled out:
+//   * The layout (BlockTuning), 16 threads in the measurement slot, 8 cases (ss-qa8fk-qa8fm,
+//     yee-pec-box-1e5, yee-pec-cube-32, cav2d-rect-pert-1e5, ss-tem27623, yee-bloch-1e4,
+//     syn-multiplicity-complex-1e4, syn-ghep-near-singular-real-1e5) x p in {2, 4, 8} x extra
+//     blocks {2, 4, 8} x keep fraction {0.5, 0.67}, medians of 3 interleaved runs
+//     (bench_blocktune_sweep): a larger basis (8 extra blocks) saves applications where runs
+//     restart often (ss-qa8fk-qa8fm p = 4: 100 -> 92 applications, iteration time -5 %;
+//     ss-tem27623 -5 %; yee-pec-box-1e5 p = 8 -3.5 %) and costs where they converge within one
+//     or two cycles (yee-bloch-1e4 p = 8 +7 %, syn-multiplicity-complex-1e4 p = 8 +16 %,
+//     cav2d-rect-pert-1e5 p = 2 +4 %); 2 extra blocks need as many or more applications
+//     (ss-qa8fk-qa8fm p = 4 112, p = 8 192) and are faster only on cav2d-rect-pert-1e5 p = 4
+//     (-5 %, a width the rule never picks there); keep 0.67 moves times by -5..+4 %. No variant
+//     wins on all cases: the defaults stay (4 extra blocks, keep 0.5).
+//   * Narrowing the block inside a run (once the wanted pairs turn out distinct) cannot be done
+//     exactly: the residual block V_m couples to every kept Ritz vector through b (p x k, rank p
+//     unless couplings vanish); applying Op to some of its columns creates as many new residual
+//     directions, so the residual width stays p, and dropping residual directions perturbs the
+//     Krylov relation by their coupling, which is not small before convergence. Only converged
+//     directions (coupling at rounding level) can go, which locking does. Widening is exact (new
+//     random residual columns with zero coupling rows), the direction an adaptive scheme could take
+//     (start narrow, widen on clusters of Ritz values); not implemented - the rule's floor at the
+//     P4 width covers the measured multiplicity cases.
+//
 // Multiplicity. In exact arithmetic a block Krylov space from a start block X contains, for each
 // eigenvalue, the M-orthogonal projection of span(X) onto its eigenspace: up to p copies of a
 // multiple eigenvalue are found by one run from a random start block (rounding can still add more).
@@ -98,6 +125,14 @@ class BlockThickRestartLanczos {
                            LanczosTimings& timings);
 
   HermitianEigResult<T> run();
+  /// Kernel counts of the run so far.
+  BlockRunStats stats() const {
+    BlockRunStats s;
+    s.fast_steps = ortho_.fast_runs();
+    s.two_pass_steps = two_pass_steps_;
+    s.fallbacks = ortho_.fallbacks();
+    return s;
+  }
 
  private:
   T* vcol(index_t j) { return basis_.col(d_ + j); }
@@ -143,6 +178,7 @@ class BlockThickRestartLanczos {
 
   index_t restarts_ = 0;
   index_t op_applies0_ = 0;
+  index_t two_pass_steps_ = 0;  ///< block steps orthonormalized by run()
   std::vector<RestartRecord> history_;
 };
 
@@ -242,9 +278,11 @@ bool BlockThickRestartLanczos<T>::expand(index_t first) {
       ScopedTimer t(time_.orthogonalization);
       // A deflation block is M-orthonormal only to 1e-8, outside try_fast's precondition: run().
       if (!fast_ortho_ || d_ > 0 ||
-          !ortho_.try_fast(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol, coef_, rblk_))
+          !ortho_.try_fast(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol, coef_, rblk_)) {
         ortho_.run(basis_.data(), mbasis(), d_ + j + p, kBreakdownTol, opt_.seed, next_stream_,
                    coef_, rblk_);
+        ++two_pass_steps_;
+      }
       // A_j: Op is M-self-adjoint, so the diagonal block is Hermitian up to rounding.
       for (index_t c = 0; c < p; ++c) {
         h_(j + c, j + c) = T(std::real(coef_(d_ + j + c, c)));
@@ -408,8 +446,10 @@ HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
                                                        LinearOperator<T>* b_inner, Which which,
                                                        const KrylovSchurOptions<T>& options,
                                                        LanczosTimings& timings,
-                                                       const BlockTuning& tuning) {
+                                                       const BlockTuning& tuning,
+                                                       BlockRunStats* stats) {
   HS_ASSERT(options.block_size > 1, "block solver called with block_size " << options.block_size);
+  if (stats) *stats = BlockRunStats{};
   const LanczosSetup setup = validate_lanczos(op, b_inner, options);
   const BlockDimensions dims =
       block_dimensions(setup, options.block_size, options.ncv == 0, tuning);
@@ -429,13 +469,14 @@ HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
   BlockThickRestartLanczos<T> solver(op, b_inner, which, options, setup, dims, tuning, timings);
   HermitianEigResult<T> result = solver.run();
   timings.total = total.seconds();
+  if (stats) *stats = solver.stats();
   return result;
 }
 
 #define HS_INSTANTIATE_BLOCK_LANCZOS(T)                                            \
   template HermitianEigResult<T> block_lanczos_krylov_schur_timed<T>(              \
       LinearOperator<T>&, LinearOperator<T>*, Which, const KrylovSchurOptions<T>&, \
-      LanczosTimings&, const BlockTuning&);
+      LanczosTimings&, const BlockTuning&, BlockRunStats*);
 
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_BLOCK_LANCZOS)
 #undef HS_INSTANTIATE_BLOCK_LANCZOS

@@ -1278,10 +1278,22 @@ TYPED_TEST(LanczosBlockTyped, FastAndTwoPassBlockOrthogonalizationAgree) {
           hs::eigen_detail::BlockTuning tuning;
           tuning.fast_ortho = fast == 1;
           hs::eigen_detail::LanczosTimings tm;
+          hs::eigen_detail::BlockRunStats st;
           r[fast] = hs::eigen_detail::block_lanczos_krylov_schur_timed<T>(
-              op, m, Which::LargestMagnitude, opt, tm, tuning);
+              op, m, Which::LargestMagnitude, opt, tm, tuning, &st);
           EXPECT_TRUE(r[fast].converged) << "fast " << fast;
           EXPECT_GT(r[fast].restarts, 0) << "fast " << fast;
+          // The kernel the tuning asks for (P5c review: an ignored fast_ortho went unnoticed):
+          // try_fast takes the steps (it refuses only ill-conditioned or dependent blocks) unless
+          // it is off or a deflation block is there; every block step (one operator application
+          // of p columns) is counted once.
+          const index_t steps = r[fast].op_applies / p;
+          EXPECT_EQ(st.fast_steps + st.two_pass_steps, steps) << "fast " << fast;
+          if (fast == 1 && !deflate) {
+            EXPECT_GT(st.fast_steps, steps / 2);
+          } else {
+            EXPECT_EQ(st.fast_steps, 0) << "fast " << fast;
+          }
           check_contract<T>(op, m, r[fast], Which::LargestMagnitude, opt, kappa);
           expect_values(r[fast].theta, want, 1e-10 * std::abs(expect[0]));
           if (deflate) {
@@ -1292,6 +1304,64 @@ TYPED_TEST(LanczosBlockTyped, FastAndTwoPassBlockOrthogonalizationAgree) {
           EXPECT_NEAR(r[1].theta[i], r[0].theta[i], 1e-10 * std::abs(r[0].theta[0])) << i;
       }
     }
+  }
+}
+
+TYPED_TEST(LanczosBlockTyped, BlockTuningShapesTheBasisLayout) {
+  // P5c review: no test passed a non-default BlockTuning to the solver, so extra_blocks,
+  // min_auto_ncv and keep_fraction could be ignored unnoticed (the layout sweeps of
+  // bench_blocktune_sweep depend on them). A run that cannot converge in two restarts (smallest
+  // values of a 1-D Laplacian, n = 400) shows the layout in its history: the first cycle fills the
+  // automatic ncv (probes stop it only on convergence) and every restart adds ncv - keep.
+  using T = TypeParam;
+  using hs::eigen_detail::BlockTuning;
+  const index_t n = 400, p = 2;
+  auto op = DenseOperator<T>(hs::test::to_dense(hs::test::laplacian_1d<T>(n)));
+  KrylovSchurOptions<T> opt;
+  opt.nev = 6;
+  opt.max_restarts = 2;
+  opt.block_size = p;
+  hs::eigen_detail::LanczosSetup setup;
+  setup.n = setup.n_free = n;
+  setup.nev = opt.nev;
+  setup.ncv = std::max(2 * opt.nev + 1, opt.nev + 16);  // 22
+  struct Case {
+    BlockTuning tuning;
+    index_t ncv, keep;  // block_dimensions, auto ncv; base = 22
+  };
+  auto tuned = [](index_t extra, index_t min_ncv, double keep) {
+    BlockTuning t;
+    t.extra_blocks = extra;
+    t.min_auto_ncv = min_ncv;
+    t.keep_fraction = keep;
+    return t;
+  };
+  const Case cases[] = {
+      {BlockTuning{}, 30, 18},             // 22 + 4 * 2; 6 + 24 / 2
+      {tuned(0, 0, 0.5), 22, 14},          // base; 6 + 16 / 2
+      {tuned(8, 0, 0.5), 38, 22},          // 22 + 8 * 2; 6 + 32 / 2
+      {tuned(0, 41, 0.5), 42, 24},         // 41 rounded up to whole blocks; 6 + 36 / 2
+      {tuned(4, 0, 0.0), 30, 8},           // keep >= spare = round_up(nev + 1, p) = 8
+      {tuned(4, 0, 1.0), 30, 28},          // keep <= ncv - p
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE("extra " + std::to_string(c.tuning.extra_blocks) + " min_ncv " +
+                 std::to_string(c.tuning.min_auto_ncv) + " keep " +
+                 std::to_string(c.tuning.keep_fraction));
+    const auto dims = hs::eigen_detail::block_dimensions(setup, p, true, c.tuning);
+    ASSERT_TRUE(dims.feasible);
+    EXPECT_EQ(dims.ncv, c.ncv);
+    EXPECT_EQ(dims.keep, c.keep);
+    hs::eigen_detail::LanczosTimings tm;
+    const auto r = hs::eigen_detail::block_lanczos_krylov_schur_timed<T>(
+        op, nullptr, Which::SmallestAlgebraic, opt, tm, c.tuning);
+    EXPECT_FALSE(r.converged);
+    ASSERT_EQ(r.history.size(), 3u);
+    EXPECT_EQ(r.history[0].op_applies, c.ncv);
+    EXPECT_EQ(r.history[1].op_applies, c.ncv + (c.ncv - c.keep));
+    EXPECT_EQ(r.history[2].op_applies, c.ncv + 2 * (c.ncv - c.keep));
+    EXPECT_EQ(r.ritz_all.size(), static_cast<std::size_t>(c.ncv));
+    check_contract<T>(op, nullptr, r, Which::SmallestAlgebraic, opt);
   }
 }
 

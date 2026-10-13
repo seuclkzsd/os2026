@@ -242,6 +242,41 @@ TYPED_TEST(LanczosBlockOrthoTyped, IllConditionedBlockFallsBackColumnByColumn) {
   }
 }
 
+TYPED_TEST(LanczosBlockOrthoTyped, FastPathRefusesModeratelyIllConditionedBlocks) {
+  // P5c review: the window kMaxFastCond (64) < cond < kMaxCholQrCond (1e5), where only try_fast's
+  // condition guard decides, was untested (the block above, cond ~1e8, is refused by the other
+  // checks too). W = V X + U with columns 0 and 2 of U at relative distance d (column-scaled
+  // 2-norm condition ~1.4 / d). Without the guard every other check accepts such a block and
+  // R1^{-1} amplifies the rounding-level components of W1 in span(V): with kMaxFastCond raised to
+  // 1e5 this test measured max |[V Q]^H M [V Q] - I| = 7.5e-14 / 3.4e-13 (Euclidean, d = 1e-3 /
+  // 1e-4) and 5.9e-14 / 4.4e-13 (M inner product), against ~1e-16 from run(). try_fast must refuse
+  // them (run() takes over); d = 0.1 (cond ~15) stays on the fast path.
+  using T = TypeParam;
+  const index_t n = 600, k = 40, p = 4;
+  DenseOperator<T> m(hs::test::to_dense(hs::test::random_hpd<T>(n, 0.02, 8)));
+  for (Mode mode : {Mode::Euclidean, Mode::Recompute}) {
+    LinearOperator<T>* mm = mode == Mode::Euclidean ? nullptr : &m;
+    const DenseMatrix<T> v = basis_with_block<T>(mm, n, k, DenseMatrix<T>(n, 0));
+    for (double d : {1e-1, 1e-3, 1e-4}) {
+      SCOPED_TRACE(trace(mode, true) + ", d " + std::to_string(d));
+      DenseMatrix<T> u = random_block<T>(n, p, 42);
+      const DenseMatrix<T> dir = random_block<T>(n, 1, 43);
+      std::copy(u.col(0), u.col(0) + n, u.col(2));
+      hs::linalg::axpy(
+          n, T(d * hs::linalg::norm2(n, u.col(0)) / hs::linalg::norm2(n, dir.col(0))), dir.col(0),
+          u.col(2));
+      DenseMatrix<T> w = mat_mul(v, random_block<T>(k, p, 41));
+      for (index_t j = 0; j < p; ++j) hs::linalg::axpy(n, T(1), u.col(j), w.col(j));
+      const auto o = run_kernel<T>(mode, &m, k, w, true);
+      EXPECT_EQ(o.fast, d > 0.05);
+      EXPECT_LT(o.ortho, 1e-14);
+      EXPECT_LT(o.relation, 1e-14);
+      EXPECT_EQ(o.lower, 0.0);
+      for (char c : o.deficient) EXPECT_EQ(c, 0);
+    }
+  }
+}
+
 TYPED_TEST(LanczosBlockOrthoTyped, DependentColumnsAreReplacedByRandomVectors) {
   // Column 1 lies in span(V), column 3 = column 0 + column 2 exactly: both are dependent at
   // rounding level, get R(i, i) = 0 and fresh random directions; the relation W = V C + Q R still
@@ -461,6 +496,63 @@ TEST(LanczosBlockLayout, BasisSizesAreWholeBlocks) {
       if (huge.feasible) {
         EXPECT_EQ(huge.ncv % p, 0);
       }
+    }
+  }
+}
+
+TEST(LanczosBlockLayout, TuningExtendsAndClampsTheAutomaticBasis) {
+  // Non-default BlockTuning (P5c review: untested; the layout sweeps depend on it). n_free = 100,
+  // nev = 4, single-vector ncv 20, p = 4: spare 8, base 20, room for (100 / 2 - 4) -> 44 columns.
+  using hs::eigen_detail::block_dimensions;
+  using hs::eigen_detail::BlockTuning;
+  using hs::eigen_detail::LanczosSetup;
+  LanczosSetup s;
+  s.n = s.n_free = 100;
+  s.nev = 4;
+  s.ncv = 20;
+  auto tuned = [](index_t extra, index_t min_ncv, double keep) {
+    BlockTuning t;
+    t.extra_blocks = extra;
+    t.min_auto_ncv = min_ncv;
+    t.keep_fraction = keep;
+    return t;
+  };
+  struct Case {
+    BlockTuning t;
+    bool automatic;
+    index_t ncv, keep;
+  };
+  const Case cases[] = {
+      {tuned(4, 0, 0.5), true, 36, 20},     // 20 + 4 * 4; 4 + 32 / 2
+      {tuned(0, 0, 0.5), true, 20, 12},     // base
+      {tuned(8, 0, 0.5), true, 44, 24},     // 20 + 8 * 4 = 52 clamped to the room
+      {tuned(0, 30, 0.5), true, 32, 16},    // 30 rounded up to whole blocks; 4 + 28 / 2 -> 16
+      {tuned(0, 80, 0.5), true, 44, 24},    // clamped to the room
+      {tuned(4, 0, 0.0), true, 36, 8},      // keep >= spare
+      {tuned(4, 0, 1.0), true, 36, 32},     // keep <= ncv - p
+      {tuned(8, 80, 0.5), false, 20, 12},   // requested ncv: only keep_fraction applies
+      {tuned(8, 80, 0.0), false, 20, 8},
+  };
+  for (const Case& c : cases) {
+    SCOPED_TRACE("extra " + std::to_string(c.t.extra_blocks) + " min " +
+                 std::to_string(c.t.min_auto_ncv) + " keep " + std::to_string(c.t.keep_fraction) +
+                 (c.automatic ? " auto" : " requested"));
+    const auto d = block_dimensions(s, 4, c.automatic, c.t);
+    EXPECT_TRUE(d.feasible);
+    EXPECT_EQ(d.ncv, c.ncv);
+    EXPECT_EQ(d.keep, c.keep);
+    EXPECT_EQ(d.first_probe, 20);
+  }
+  // Invalid tuning values are an internal error, not a silent clamp.
+  for (const BlockTuning& t :
+       {tuned(-1, 0, 0.5), tuned(4, -1, 0.5), tuned(4, 0, -0.1), tuned(4, 0, 1.5),
+        tuned(4, 0, std::numeric_limits<double>::quiet_NaN())}) {
+    try {
+      block_dimensions(s, 4, true, t);
+      ADD_FAILURE() << "tuning accepted: extra " << t.extra_blocks << " min " << t.min_auto_ncv
+                    << " keep " << t.keep_fraction;
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::Internal) << e.what();
     }
   }
 }
