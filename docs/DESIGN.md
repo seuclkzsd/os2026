@@ -23,14 +23,17 @@ v4（P4 合并后，6a3d7c1）——稀疏核运行时分派（Reference / Porta
 （`block_size`）、InertiaCounter 证书计数与第五个互斥阶段 certificate、确定性的排序代价模型、B 的
 O(nnz) 正定性筛查、GHIEP 块运行与后处理内存；集群节点部署。实测汇总在 `results/p4_measurements.md`。
 
-v5（P5c 集成，p5c-integration 1bd75f9 加 driver 的块宽接线）——src/verify 接入 driver：nearest 的完备性检验
+v5（P5c 集成：p5c-integration 1bd75f9 加集成修正，至 9201c2c）——src/verify 接入 driver：nearest 的完备性检验
 `certificate = exact | randomized | auto | off`（单精度计数先经双精度复核、auto 选单精度计数要求 10 倍余量、
 随机检验只在 κ(B) 有证明时出结论、选中对少于 k 时也重跑，§3.6-8）；输入检查（缩放的厄密缺陷、拒绝零矩阵与
 非有限值、恢复线程数）与 B 的正定性检验链（分析之前的廉价检验、IC + Gershgorin 严格证明及其预算，§3.6-1）；
 自适应排序改为 16 线程标定的代价模型（候选 AMD / SCOTCH / 自研嵌套剖分 / METIS / PORD，config 可直接用
 `ordering = 10`，§3.6-3b）；σ₀ 处按零主元数识别稠密簇（§3.6-4）；块宽规则 `recommended_block_size` 与块步的
-单投影快路径 `try_fast`（§3.5、§3.6-5）；GHIEP 的分析前内存预留按峰值列计、报告实际块宽；新模块 src/blas
-（BLAS hook，默认链入 hsolve、route all，§3.8，实测见 `docs/BLAS.md`）。
+单投影快路径 `try_fast`（§3.5），driver 的 nearest 运行用该规则（从 4 加宽到 8 须有 10% 的模型收益；内存只预留
+P4 块宽的基，§3.6-3、§3.6-5）；收缩重跑在缺的对收敛后即结束（`KrylovSchurOptions::lead_nev`），自动块宽之后的
+重跑至多用 P4 块宽（§3.6-8）；certifier 的 InertiaCounter 推迟其双精度实例的分析（§3.4）；GHIEP 的分析前内存
+预留按峰值列计、报告实际块宽；新模块 src/blas（BLAS hook，默认链入 hsolve、route all，§3.8，实测见
+`docs/BLAS.md`）。
 
 ---
 
@@ -924,8 +927,8 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
   `KrylovSchurGeneralBitwise`、`VerifyExclusion`、`VerifyBound`、`DriverBlocks`、`DriverCounter`、
   `DriverGhiepBlock`；P5 新增如 `DriverCertificate`、`DriverHpdProof`、`DriverBDefiniteness`、
   `DriverAdaptiveOrdering`、`DriverOrderingModel`、`LanczosBlockRule`、`VerifyStartScaling`，blas 模块为
-  `BlasHook*`；P5c 修复轮的 `AnaintFix*`、`AsmkernFix*`、`CertintFix*` 以 P5 子任务代号开头，是本规则的
-  例外）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
+  `BlasHook*`；P5c 修复轮的 `AnaintFix*`、`AsmkernFix*`、`CertintFix*` 与 P5c 集成的 `BlocktuneDriver`
+  （driver）、`CounterDeferred`（factor）、`P5cIntFix*`（eigen 与 driver）以子任务代号开头，是本规则的例外）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
   `<可执行文件>.<套件>.<用例>`，`tools/dev/test.sh release test_factor` 只跑该文件，匹配不到测试即
   报错。共享夹具在 `tests/cpp/support/`（`hsolve_test_support`），只追加不改签名。
   数值测试尽量用有解析解的问题。Python 工具与 Python 接口的测试在 `tests/py/`（pytest；
@@ -1005,4 +1008,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P2 | driver + CLI；端到端测试；测例集与首轮实验（对比 scipy 基线） |
 | P3 | **已完成**：低内存输入装配与无映射铅笔；确定性正交化（融合 CGS2、DGKS、块 CGS2）；MUMPS 约定补充与 InertiaCounter；块 Krylov-Schur（eigen 层）；LOBPCG / JD；谱切片与惯性搜索的单边目标、零带切除、GHIEP 零簇移位放置；互斥分阶段计时；Python 接口；评测工具（汇总、合并参考、scipy 基线）。**未做**：SpMV SIMD；GHIEP 重特征值的块 Krylov（一般 Krylov-Schur 仍只支持 p = 1）——二者 P4 完成 |
 | P4 | **已完成**（6a3d7c1）：稀疏核运行时分派（AVX-512）与融合修正残差、修正的舍入水平停止与活跃列回代、`FactorSolveOperator`；自研并行嵌套剖分（factor 层）与 ICNTL(15) 块分析；一般 Krylov-Schur 块模式与峰值列函数；src/verify（随机排除检验、单精度计数规则、代价模型）；driver：块 Krylov 默认（HEP/GHEP p = 4、GHIEP p = 2 的规则）、InertiaCounter 证书与 certificate 阶段、确定性排序模型（deterministic 用 METIS）、B 的 O(nnz) 筛查、GHIEP 后处理内存（wg-square-1e6 峰值 2.89 → 1.77 GB）；SLEPc 调优器与公平对比工具；集群节点部署。**未做**：JD + 单精度因子的内存受限回退；verify 接入 driver；自研嵌套剖分接入自适应排序；driver 检查单精度/BLR 修正是否收敛；16 核独占重测（SLEPc 调优与对比、排序、回代、GHIEP 块宽）；故障场景验证矩阵 |
-| P5 | **集成中**（P5c，p5c-integration）：verify 接入 driver（certificate = exact / randomized / auto / off，单精度计数的双精度复核）；输入检查与 B 正定性检验链（分析前的廉价检验、IC + Gershgorin 严格证明）；自适应排序的 16 线程代价模型，自研嵌套剖分作为候选与 `ordering = 10`；σ₀ 处的零主元簇规则；块宽规则 `recommended_block_size` 与块步快路径 `try_fast`；GHIEP 内存预留按峰值列计、报告实际块宽；BLAS hook（src/blas，默认链入、route all）；以上都在 16 核测量槽下测量。**未做**：JD + 单精度因子的内存受限回退；driver 检查单精度/BLR 修正是否收敛；InertiaCounter 双精度实例的惰性分析；SCOTCH 固定种子（之后可按其估计比较）；更好的嵌套剖分分隔子与 ND 功的预测（ss-tem152078）；一般 B 的 κ 证明（如分解 B − μ·diag(B)），使随机检验与单精度计数也适用于一般 HPD B；块宽规则用于切片；故障场景验证矩阵 |
+| P5 | **集成中**（P5c，p5c-integration）：verify 接入 driver（certificate = exact / randomized / auto / off，单精度计数的双精度复核）；输入检查与 B 正定性检验链（分析前的廉价检验、IC + Gershgorin 严格证明）；自适应排序的 16 线程代价模型，自研嵌套剖分作为候选与 `ordering = 10`；σ₀ 处的零主元簇规则；块宽规则 `recommended_block_size` 与块步快路径 `try_fast`，nearest 运行按规则取块宽（内存只预留 P4 块宽的基）；收缩重跑以 `lead_nev` 在缺的对收敛后结束、自动块宽之后至多用 P4 块宽；certifier 的 InertiaCounter 推迟双精度实例的分析；GHIEP 内存预留按峰值列计、报告实际块宽；BLAS hook（src/blas，默认链入、route all）；以上都在 16 核测量槽下测量。**未做**：JD + 单精度因子的内存受限回退；driver 检查单精度/BLR 修正是否收敛；SCOTCH 固定种子（之后可按其估计比较）；更好的嵌套剖分分隔子与 ND 功的预测（ss-tem152078）；一般 B 的 κ 证明（如分解 B − μ·diag(B)），使随机检验与单精度计数也适用于一般 HPD B；块宽规则在 BLAS hook 下的重新标定（现以 `kRuleWideMargin` 补偿，yee-bloch-1e4、yee-photonic-* 选 8 仍比 4 慢 2.5–3%）与用于切片；故障场景验证矩阵 |
