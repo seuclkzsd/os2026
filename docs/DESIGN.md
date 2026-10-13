@@ -38,8 +38,9 @@ P4 块宽的基，§3.6-3、§3.6-5）；收缩重跑在缺的对收敛后即结
 v6（P8「certcost」，分支 p8-certcost）——证书的分解失败不再结束求解：计数源（主对象 / InertiaCounter）失败时换另一个，
 估计放不下预算余量的计数器不尝试，都不能计数时 nearest 返回已收敛的对、证书「已做但未完成」（§3.4、§3.6-8，
 `certificate_fault_count` 故障注入）；一般 HPD B 的 κ 与 λ_min(B) 由 IC + Gershgorin 证明（`prove_condition_bound`），
-随机检验与单精度计数因此也能在一般 B 上认证（§3.5b、§3.6-8）；并发端点计数（8 + 8 线程）的可行性与上界实测为
-负结果，未采用（§3.4）；MUMPS 的 SCOTCH 排序仅靠随机种子不能复现（§3.4）。实测见 `results/p8_certcost.md`。
+随机检验与单精度计数因此也能在一般 B 上认证（§3.5b、§3.6-8；只影响 auto / randomized，默认仍为 exact）；更便宜的
+精确计数（并发端点计数 8 + 8 线程、一次分解两端、计数设置、计数来源）实测为负结果，未采用（§3.4）；MUMPS 的 SCOTCH
+排序在多线程下仅靠随机种子不能复现（§3.4）。实测见 `results/p8_certcost.md`。
 
 ---
 
@@ -286,6 +287,32 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
   用不到的双精度分析，yee-pec-box-1e5 约 0.075 s）；双精度实例在复核或精确计数第一次用到它时才分析。certifier
   的 `inertia_counter` 事件因此不再报 incore_mb（读它会触发分析），`single_counts` 记下计数器已做的分析次数。
   上面 P4 用法的计数器（`CountSource`）只做双精度计数，照旧在构造时分析。
+- **P8：计数的内存与失败**：`InertiaCounter::estimate(precision)` 给出某精度计数的工作内存（单精度时先分析单精度
+  实例），driver 在计数前据此判断能否放进预算（§3.6-8 计数余量）。计数在 ICNTL(23) 上限下的 MUMPS 失败（INFO −19，
+  `OutOfMemoryBudget`）照旧抛出，由 driver 接住换计数来源（§3.6-8）。
+- **P8：更便宜的精确计数——实测为负结果**（16 线程测量槽，gpu01；`bench/certcost_concurrent.cpp`、
+  `bench_certpar_inertia --exp blockpair`、`tools/bench/certcost_concurrent.sh`，`results/p8_certcost.md` §3）。nearest
+  证书的两次精确计数 ν(a)、ν(b) 是同一主元顺序上相互独立的只计惯性分解，最多能做的是：
+  - **并发（8 + 8 线程）**：进程内不可行（上文：MUMPS 实例间不线程安全；全局锁串行化一切 MUMPS 调用）。上界用两个
+    进程测：两个 8 线程计数同时跑（各绑槽内 8 核）对顺序的 16 线程计数对只快 0.99–1.29×——ss-qa8fk-qa8fm 1.29×
+    （0.325 → 0.253 s）、cav2d-rect-pert-1e5 1.26×（0.052 → 0.041 s）、三维测例 0.99–1.12×（计数受内存带宽限制：单个
+    8 线程计数 0.42–2.58 s，两个同时跑时各 0.63–4.33 s）；1e4 小测例 ~2×，但每对只 5–10 ms。即使实现了，整次求解在
+    qa8 上至多快 ~4%、cav2d 上 ~3.6%。进程内唯一的隔离办法（fork 出子进程计一端）不可用：OpenMP 用过之后 fork 的
+    子进程在 MUMPS 里 SIGSEGV（8 例中 6 例每次都是）；dlmopen 第二份 MUMPS（独立 Fortran 模块状态）在 glibc 2.17、
+    重复的 libgomp / OpenBLAS 下风险高、收益以上述上界为限，未做。
+  - **一次分解两端**（diag(K(b), −K(a))，MUMPS 自己的 L0-OpenMP 并行两棵独立的树）：16 线程下为顺序对的
+    0.96–1.09×，还要自己的分析（0.04–0.28 s）与 1.8–2.5 倍工作内存——更慢。
+  - **计数的设置**：不缩放（ICNTL(8) = 0）或不做零主元检测只省 ≤ 3%（噪声内）；计数线程 16 在每个测例上都快于 8。
+  - **计数来源**：在主对象上重分解还是在 InertiaCounter 上计数——`inertia_counter = on` 对现行规则（auto）在 31 个
+    HEP/GHEP 测例上几何平均慢 3.4%（ABBA 3 次），规则已经选对；与其它工作重叠：计数之前只有 verify（~0.01 s）不用
+    MUMPS，Krylov 的回代与计数抢同一把锁，无可重叠之处。
+  结论：在 MUMPS 5.8.2 上精确证书的代价就是两次分解，默认（exact）保持现状；ss-qa8fk-qa8fm / cav2d-rect-pert-1e5
+  对调优 SLEPc 的差距不能靠更便宜的精确计数消除。
+- **P8：SCOTCH 排序的可复现性**（MUMPS 估计逐次波动的来源）：MUMPS 里的 SCOTCH 排序随 OpenMP 线程数多线程运行；
+  2 个及以上线程时即使 `SCOTCH_randomSeed` + `SCOTCH_randomReset` 也逐次不同（syn-lap3d-aniso-1e5，8 线程：因子
+  条目 33.1e6–35.2e6，外存估计 208–272 MB），单线程时跨进程复现（同一进程内每次分析前 reset 也复现），但分析慢
+  2.6–3.7 倍（四个 1e5 测例 1.4–2.6 s 对 0.45–0.8 s）。不能廉价地复现；driver 改为不依赖估计的精确值（§3.6-8 的
+  计数余量与失败回退）。
 - **自研嵌套剖分**（P4，`compute_ordering`、`OrderingOptions`、`src/factor/ordering*.cpp`，无新依赖）：
   - 动机：MUMPS 内的排序是串行的（METIS/SCOTCH 占其分析的 90–97%；SCOTCH_PTHREAD_NUMBER 无效）；
     METIS/SCOTCH 不能直接链接（只是 libdmumps 的间接依赖，ld 拒绝间接 DSO，dlopen 需要 glibc 2.28

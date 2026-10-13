@@ -57,6 +57,7 @@ P4 programs:
 | `bench_ghiep_fix_e2e` | end-to-end GHIEP solves per block size with `--sigma` / `--k` overrides (the one-sided zero-cluster rows) | `bench_ghiep_fix_e2e [--p 1,2,4,8] [--sigma S] [--k K] CASE...` |
 | `bench_ghiep_fix_ortho` | the block step's fast path (`block_cgs_cholqr2`) vs the two-pass `BlockOrthonormalizer` on the same inputs | `bench_ghiep_fix_ortho [--n 100000] [--k 24,48,72] [--p 2,4,8,16,64] [--input krylov\|random]` |
 | `bench_certfast_measure` | exact certificate counts (driver path, InertiaCounter double / single pair) vs `exclusion_check` (delta x block size x pass radius), detection of removed copies, with hsolve's CLI solution as X | `bench_certfast_measure --case DIR --solution SOL [--reps 5] [--deltas 1e-6,1e-12] [--blocks 1,4]` |
+| `bench_certcost_concurrent` | P8: the certificate's two exact counts sequential (16 threads) vs concurrent (two 8-thread processes; fork) and the cost of the counts' scaling / null-pivot detection; `tools/bench/certcost_concurrent.sh` runs the P8 set (`results/p8_certcost.md` §3) | `bench_certcost_concurrent --case DIR --lower a --upper b --exp seq,one,fork [--threads t] [--scaling s] [--detection 0\|1]` |
 
 Measurement scripts outside `bench/`: `python/bench/overhead.py` (Python API vs CLI wall time and
 peak), `python/bench/load_memory.py` (`hsolve.load_matrix` vs `scipy.sparse.load_npz` memory),
