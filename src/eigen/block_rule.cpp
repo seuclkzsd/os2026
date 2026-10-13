@@ -55,7 +55,8 @@ constexpr double kOrthoSinglePerRow = 0.772e-9;
 // 0.07..0.13 of T(1), on the 4 low-fill cases with multiplicities p = 4 beats p = 2 by 0.05..0.24
 // (syn-multiplicity-real-1e4 0.60 -> 0.44, syn-ghep-multiplicity-real-1e4 1.02 -> 0.81,
 // syn-multiplicity-complex-1e4 0.84 -> 0.60, syn-lap2d-100 0.55 -> 0.50). Hence nev >= 8 keeps
-// p >= 4 (kRuleFloorWidth): never below P4, at a cost of <= 8 % end to end on distinct spectra.
+// p >= 4 (kRuleFloorWidth): never below P4, at a cost of <= 8 % end to end on distinct spectra
+// (P5b end-to-end runs of p = 2 vs 4 on four low-fill distinct cases: 3..8 %).
 //
 // Result: iteration time T(p) / T(1) of the width the rule picks against the best measured width
 // (bench_blocktune_sweep, medians of 3 interleaved repetitions, 16 threads in the slot):
@@ -75,6 +76,24 @@ constexpr double kOrthoSinglePerRow = 0.772e-9;
 // case/nev points 1.035 (the P5b rule without floor and small-nev rows: 1.11, picks up to 1.77 of
 // the best width at small nev, where it kept p = 1 or 2). Without try_fast (the run() kernel
 // throughout) p = 2 lost to p = 1 on cav2d-rect-pert-1e5 (1.20).
+//
+// End to end (bench/blocktune_fix_e2e.cpp: the hsolve CLI as tools/bench/compare.py runs it, with
+// --block-size 1, 0 = the P4 auto width, and the rule's pick from the main shift's factorization;
+// one binary, 16 threads in the slot, 5 interleaved runs; all 155 runs valid by
+// python3 -m tools.eval.sweep - 90 complete, 65 consistent, max eta 2.6e-11 - certificate passed).
+// Solver time (time_total_s, medians), pick: speed-up vs p = 1 / vs P4 auto:
+//   ss-qa8fk-qa8fm 4 (= P4) 2.236 s: 1.25x / 1.00x;   yee-pec-box-1e5 8: 3.117 s, 1.43x / 1.01x;
+//   ss-2cubes_sphere 8: 3.187 s, 1.24x / 0.98x;        syn-mem27-46 8: 2.569 s, 1.48x / 1.05x;
+//   yee-pec-cube-32 8: 2.392 s, 1.86x / 1.12x;         yee-bloch-1e4 8: 1.034 s, 1.33x / 1.06x;
+//   cav2d-rect-pert-1e5 2 (k = 6, P4: 1): 0.333 s, 1.03x / 1.02x;
+//   cav2d-square-1e4 2 (k = 7): 0.049 s, 1.15x / 1.19x;
+//   floor p = 4 (= P4): ss-tem27623 0.712 s 1.03x, syn-near-singular-complex-1e5 3.230 s 1.13x,
+//   syn-ghep-multiplicity-real-1e4 0.163 s 2.01x, syn-multiplicity-complex-1e4 0.246 s 2.45x
+//   (p = 1 needs a certificate rerun on the last two).
+// The pick never loses to p = 1 (1.03x..2.45x); against P4 it gains up to 1.19x where it moves
+// from 4 to 8 or from 1 to 2, and ss-2cubes_sphere is the one case where p = 8 is slower than 4
+// (1.6 %; distinct eigenvalues, p = 8 needs 184 applications against 108): the 4 / 8 choice of the
+// model cannot see the multiplicities that make 8 pay on syn-mem27-46 and yee-pec-cube-32.
 
 /// Average basis size of a step of a width-p run with the automatic ncv (block_dimensions).
 double average_basis(index_t n, index_t nev, index_t p) {
