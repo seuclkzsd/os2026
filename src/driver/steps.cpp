@@ -697,6 +697,42 @@ std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates) {
   return best;
 }
 
+// The analysis loop (adaptive_analysis). The analysed candidate kept is an incumbent: each newly
+// analysed one is compared with it alone, by choose_ordering's rule for the two (the earlier
+// candidate stays unless the later one beats it by the margin), and the loser is released at once.
+// choose_ordering over all analysed candidates instead is not monotone - a candidate released
+// because it lost may win again once another one joins (AMD 100, METIS 90, PORD 88: METIS, PORD
+// released; with ND 94 added: PORD) - and the driver then asked for a released analysis (P5c
+// review: 1 of 400k random replays; the incumbent rule cannot).
+std::size_t run_ordering_choice(std::vector<OrderingCandidate>& cand, const std::function<void(std::size_t)>& analyse,
+                                const std::function<void(std::size_t)>& predict,
+                                const std::function<void(std::size_t)>& release) {
+  HS_ASSERT(!cand.empty() && cand[0].ordering == 0, "run_ordering_choice: AMD must be the first candidate");
+  analyse(0);  // the AMD probe
+  predict(0);
+  std::size_t incumbent = 0;
+  auto duel = [&](std::size_t i, std::size_t j) {  // choose_ordering on the pair, in candidate order
+    const std::size_t lo = std::min(i, j), hi = std::max(i, j);
+    return cand[hi].score_s < (1.0 - kOrderingMargin) * cand[lo].score_s ? hi : lo;
+  };
+  // Analyse the best-scoring candidate while it is not analysed yet: then no further analysis is
+  // expected to pay. A candidate taken on its prediction (SCOTCH) is the choice once analysed -
+  // unless its factors exceed the in-core cap; it never anchors the predictions of the others.
+  for (std::size_t next = choose_ordering(cand); !cand[next].analysed; next = choose_ordering(cand)) {
+    analyse(next);
+    const bool on_prediction = taken_on_prediction(cand[next].ordering);
+    if (on_prediction && cand[next].score_s < kOverCapScore) {
+      release(incumbent);
+      return next;
+    }
+    const std::size_t keep = duel(incumbent, next);
+    release(keep == next ? incumbent : next);
+    incumbent = keep;
+    if (!on_prediction) predict(next);
+  }
+  return incumbent;
+}
+
 // Adaptive fill-reducing ordering (DESIGN §3.6-3b). The AMD probe (fast; its estimate tells 2-D-like
 // from 3-D-like fill) prices every candidate on the planned work: AMD by its own estimate, the
 // others by the shape fits. The best-scoring candidate is analysed and its actual estimate replaces
@@ -704,10 +740,11 @@ std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates) {
 // loop ends when the best-scoring candidate is an analysed one, or SCOTCH (taken on its
 // prediction, candidate_orderings). A second analysis beyond the probe therefore runs only where
 // the numeric work dwarfs it (the expected gain of an actual estimate, kGainFrom*, is a fraction
-// of the numeric time). Analysis objects that can no longer be chosen are freed at once (at most
-// two live; three while an analysed SCOTCH exceeds the in-core cap). Every input of the decisions is deterministic (estimates of deterministic orderings,
-// models, thread count; SCOTCH's estimate only for the in-core cap): identical runs choose the
-// same ordering. Wall times are logged, never used.
+// of the numeric time). The loop is run_ordering_choice: the analysed candidate kept is compared
+// with each newly analysed one, and the loser's analysis is freed at once (at most two live).
+// Every input of the decisions is deterministic (estimates of deterministic orderings, models,
+// thread count; SCOTCH's estimate only for the in-core cap): identical runs choose the same
+// ordering. Wall times are logged, never used.
 template <class T>
 std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOptions& fopts,
                                                           const ShiftedPencil<T>& pencil, double sigma0,
@@ -750,6 +787,7 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   std::vector<OrderingCandidate> cand(orderings.size());
   std::vector<std::unique_ptr<SparseFactorization<T>>> obj(orderings.size());
   std::vector<double> seconds(orderings.size(), 0.0);
+  FactorEstimate amd_estimate;  // of the probe (candidate 0)
   auto analyse = [&](std::size_t i) {
     FactorOptions o = fopts;
     o.ordering = orderings[i];
@@ -758,6 +796,7 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     obj[i]->analyze(pencil, 1.0, -sigma0);
     seconds[i] = t.seconds();
     const FactorEstimate e = obj[i]->estimate();
+    if (i == 0) amd_estimate = e;
     cand[i].analysed = true;
     cand[i].analysis_s = 0.0;
     cand[i].flops = e.flops;
@@ -771,10 +810,6 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     if (cap > 0 && e.incore_mb > cap) cand[i].score_s = kOverCapScore * (e.incore_mb / cap);
   };
   for (std::size_t i = 0; i < orderings.size(); ++i) cand[i].ordering = orderings[i];
-  HS_ASSERT(!orderings.empty() && orderings[0] == 0, "adaptive_analysis: AMD must be the first candidate");
-  analyse(0);  // the AMD probe
-  const FactorEstimate amd_estimate = obj[0]->estimate();
-  const double fill = cand[0].entries / std::max(1.0, nnz);
   // Re-price the candidates not analysed yet from the analysed candidate `anchor`.
   auto predict = [&](std::size_t anchor) {
     FactorEstimate a;
@@ -798,38 +833,10 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
       if (cap > 0 && cand[i].incore_mb > cap) cand[i].score_s = kOverCapScore * (cand[i].incore_mb / cap);
     }
   };
-  // The choice among the analysed candidates; their other analyses are freed.
-  auto keep_best_analysed = [&]() {
-    std::vector<OrderingCandidate> done;
-    std::vector<std::size_t> idx;
-    for (std::size_t i = 0; i < cand.size(); ++i)
-      if (cand[i].analysed) done.push_back(cand[i]), idx.push_back(i);
-    const std::size_t keep = idx[choose_ordering(done)];
-    for (std::size_t i : idx)
-      if (i != keep) obj[i].reset();
-    return keep;
-  };
-  predict(0);
-  // Analyse the best-scoring candidate while it is not analysed yet: then no further analysis is
-  // expected to pay, and the choice is among the analysed ones. A candidate taken on its
-  // prediction (SCOTCH) ends the loop as the choice once analysed - unless its factors exceed the
-  // in-core cap; it never anchors the predictions of the others.
-  std::size_t pick = cand.size();
-  for (std::size_t next = choose_ordering(cand); !cand[next].analysed; next = choose_ordering(cand)) {
-    analyse(next);
-    if (taken_on_prediction(orderings[next])) {
-      if (cand[next].score_s < kOverCapScore) {
-        pick = next;
-        break;
-      }
-      continue;  // beyond the cap: the analysed candidates decide (its over-cap score loses)
-    }
-    keep_best_analysed();
-    predict(next);
-  }
-  if (pick == cand.size()) pick = keep_best_analysed();
+  const std::size_t pick = run_ordering_choice(cand, analyse, predict, [&](std::size_t i) { obj[i].reset(); });
   for (std::size_t i = 0; i < cand.size(); ++i)
     if (i != pick) obj[i].reset();
+  const double fill = cand[0].entries / std::max(1.0, nnz);
   // The log: every candidate's price, which were analysed (with their wall time), the choice.
   std::string summary;
   for (std::size_t i = 0; i < cand.size(); ++i) {

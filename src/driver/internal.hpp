@@ -2,6 +2,7 @@
 // Scalar set of the templates: T in {double, cplx}, instantiated in the .cpp that defines them.
 #pragma once
 
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -337,6 +338,18 @@ std::pair<double, double> predicted_shape(int ordering, const FactorEstimate& am
 std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates);
 /// A later candidate must score below (1 - kOrderingMargin) times an earlier one to be preferred.
 constexpr double kOrderingMargin = 0.05;
+
+/// The analysis loop of adaptive_analysis on candidates priced by callbacks (pure: testable without
+/// MUMPS). cand[0] must be AMD; candidates' `ordering` set. analyse(i) gives candidate i its actual
+/// estimate (analysed, score_s); predict(i) re-prices the candidates not analysed yet from the
+/// analysed candidate i; release(i) frees i's analysis. Calls analyse(0) and predict(0), then
+/// analyses the best-scoring candidate (choose_ordering) while it is not analysed yet; each newly
+/// analysed candidate is compared with the one kept so far by choose_ordering's rule for the two,
+/// and the loser is released; a candidate taken on its prediction ends the loop as the choice
+/// unless its score is over the cap. Returns the choice: analysed and never released.
+std::size_t run_ordering_choice(std::vector<OrderingCandidate>& cand, const std::function<void(std::size_t)>& analyse,
+                                const std::function<void(std::size_t)>& predict,
+                                const std::function<void(std::size_t)>& release);
 
 /// Adaptive fill-reducing ordering (DESIGN §3.6-3b): AMD probe, then the candidate orderings
 /// priced on `work` by the ordering cost model; the most promising one is analysed, its actual
