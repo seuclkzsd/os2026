@@ -111,7 +111,8 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 `--smallest K`、`--largest K`、`--tol`、`--threads`（0 = 全部）、`--memory-budget-gb GiB|auto`、
 `--precision double|single|auto`、`--slice-size N`（→ `slice_size`）、`--block-size N`（→ `block_size`，
 0 = 自动，1 = 单向量）、`--zero-filter-tol TOL`
-（→ `zero_filter_tol`，< 0 关闭）；另有 `--log FILE`（JSON-lines 事件日志）、`-v/--verbose`、
+（→ `zero_filter_tol`，< 0 关闭）；另有 `--log FILE`（JSON-lines 事件日志；P7 起每条记录带进程当时的
+`rss_mb` 与峰值 `peak_rss_mb`）、`-v/--verbose`、
 `-q/--quiet`、`--version`。退出码：0 = 全部达标（且证书通过），1 = 完成但未达标，2 = 错误。
 
 ## 3. 求解结果目录（`hsolve --out DIR`，scipy 基线同格式）
