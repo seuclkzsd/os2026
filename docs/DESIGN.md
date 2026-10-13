@@ -40,7 +40,10 @@ v6（P8「certcost」，分支 p8-certcost）——证书的分解失败不再�
 `certificate_fault_count` 故障注入）；一般 HPD B 的 κ 与 λ_min(B) 由 IC + Gershgorin 证明（`prove_condition_bound`），
 随机检验与单精度计数因此也能在一般 B 上认证（§3.5b、§3.6-8；只影响 auto / randomized，默认仍为 exact）；更便宜的
 精确计数（并发端点计数 8 + 8 线程、一次分解两端、计数设置、计数来源）实测为负结果，未采用（§3.4）；MUMPS 的 SCOTCH
-排序在多线程下仅靠随机种子不能复现（§3.4）。实测见 `results/p8_certcost.md`。
+排序在多线程下仅靠随机种子不能复现（§3.4）。实测见 `results/p8_certcost.md`。评审修正（p8-certcost-fix）：主对象替补
+计数器时也先查计数余量（P8 初版在小例上超预算 38%）；窗口目标从第一片起只放弃计数不可能的那一片、返回其余片的对；
+「无法计数」的错误码按失败种类定；故障注入增加失败种类（其它 MUMPS 错误、`std::bad_alloc`）与「从第一片起」位，
+位 8 也作用于随机检验前的重分解（§3.6-8）。
 
 ---
 
@@ -544,9 +547,13 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
     且 λ_min(B) ≥ b_min = lower/maxᵢ wᵢ²·(1 − 4u)（xᴴBx = yᴴ(WBW)y，y = W⁻¹x，‖y‖ ≥ ‖x‖/max wᵢ）。κ 只以 log κ
     进入随机检验的步数，Gershgorin 上界足够。证明失败（θ < 0.1、破缺、Gershgorin 不正、超预算）时不作结论。
     driver 只在随机检验或单精度计数（在 b_min 取最好可能值 min bᵢᵢ 时）可能比精确计数便宜、或模式为 randomized 时
-    才算它，时间预算为精确计数预测时间的 `kBoundsProofShare` = 0.25（成功的证明在数据测例上 0.004–0.08 s）。
+    才算它；精确计数预测时间的 `kBoundsProofShare` = 0.25 是其 IC 尝试与 1 级填充模式的时间预算（各按预测时间
+    预付），θ 的 Lanczos 估计与缩放副本 S 不计入，故整个证明可超出这一预算（16 线程、randomized、各 3 次：
+    cav2d-rect-pert-1e5 0.016–0.023 s 对预算 0.016–0.021 s，ss-tem27623 0.026–0.048 s 对 0.024–0.032 s）；预算贴近
+    尝试的预测时间时，用 1 级还是 0 级随实测分解时间而变（cav2d-rect-pert-1e5 一次 κ ≤ 9.1、两次 κ ≤ 35.8）。成功的
+    证明在数据测例上 0.004–0.08 s。
     ss-qa8fk-qa8fm：lower 0.0358、upper 4.22、κ ≤ 118、b_min 1.26e-6（16 线程 0.084 s）；auto 在该例上仍选精确计数
-    （随机检验 ε = 0.14、预测不比精确计数便宜；单精度规则的 η ≈ 254 远大于窗口宽 2），见 `results/p8_certcost.md` §5。
+    （随机检验 ε = 0.14、预测不比精确计数便宜；单精度规则的 η ≈ 254 远大于窗口宽 2），见 `results/p8_certcost.md` §6。
 - 单精度计数规则：`single_count_validity` / `single_precision_certificate`：B = I 或对角 B > 0 时，单精度
   LDLᵀ 计数是 K + E 的精确惯性，‖E‖ ≤ c·g·u_s·‖K‖₁；把窗口两端各收缩 η = ‖E‖/min bᵢᵢ 后若所有已找到
   特征值（含误差棒）都在收缩窗口内且计数相等，则认证。唯一非严格输入是 c·g = 1e3
@@ -647,7 +654,7 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    运行分解期间保留的普通运行 Schur 基与并集精修基各 m 列，m = min(n, nev + 1（实）/ nev（复））；类型
    未定时取两者之大。cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap
    作为 ICNTL(23) 传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
-   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）——P8 起逐次不同的排序（SCOTCH，§3.4）先再分析（至多两次，告警）：ss-3dspectralwave2 在默认 14 GiB 下外存估计多为 10.6–11.9 GB，P5c 与 P8 的 29 次分析中有 5 次 13.4–14.2 GB，对上限 13.49 GB。BLR 与单精度只由配置开启
+   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）——P8 起逐次不同的排序（SCOTCH，§3.4）先再分析（至多两次，告警）：ss-3dspectralwave2 在默认 14 GiB 下外存估计多为 10.6–11.9 GB，P5c 与 P8 的 42 次分析中有 6 次 13.4–14.4 GB（其中 5 次超出约 13.49 GB 的上限；`results/p8_certcost.md` §2.3）。BLR 与单精度只由配置开启
    （`blr = on`、`factor_precision = single`），driver **不**自动降级（P0 设计的「BLR → 单精度」降级链
    未实现）。
    窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前 RSS)，
@@ -877,24 +884,46 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
        INFOG(16)：超过计数余量 `count_allowance_mb` = min(0.95·(memory_budget − 当前 RSS), 分解上限) 时先释放常驻的
        主因子再查，仍超就不尝试（在 ICNTL(23) 下它要么 INFO −19，要么——MUMPS 刚好在上限下时——让进程超出预算：
        ss-3dspectralwave2 在 14 GiB 下计数器估计 14.5 GB 对上限 13.5 GB 失败，13.6 GB 时运行成功但峰值 RSS 15.1 GiB）。
+     - 主对象**替补**首选的计数器时（内存已紧）同样先查余量（事件 `main_count_check`）：先释放其因子，其上次分解实际
+       用的工作内存 INFOG(21)（尚未分解过时用分析估计）超过计数余量就不尝试——主对象自己的 ICNTL(23) 上限定于分析时、
+       在 Krylov 基与已得对之前，挡不住这时的计数超出预算。yee-pec-cube-32 类比（METIS，0.394 GiB，8 线程）：P8 初版
+       在主对象上计数并认证，但峰值 0.54 GiB、超预算 38%；现在 231 MB 对余量约 160 MB，不尝试，证书「未完成」、峰值
+       0.31 GiB。INFOG(21) 是预测而非上界：该小例一次计数使 RSS 增加约 330 MB（比 INFOG(21) 多 43%，接近 MUMPS 所分配的
+       INFOG(18) 316 MB），故恰在阈值附近仍可能超出：0.47 GiB 预算下第一次计数通过检查（231 对 234 MB）、峰值
+       0.53 GiB（超约 13%），其后 RSS 不回落（JOB=−4 之后仍高约 160–175 MB），第二次被拒，证书未完成。
+       ss-3dspectralwave2（14 GiB，16 线程）：故障位 4 强制计数器放不下时与默认配置下计数器估计超出余量时，两次主对象
+       计数的 INFOG(21) 9.5 / 10.0 GB 都在余量 11.9–12.0 GB 内（计数前 RSS 2.43–2.47 GB），都认证，峰值 12.07 / 12.77 GiB
+       （`results/p8_certcost.md` §2.3）；INFOG(18) 在该例为 12.3–12.6 GB，若以它为准反会拒绝能放下的计数。主对象为首选来源时（窗口目标；
+       nearest 在 `counter_pays` 为假时）照旧只受其 ICNTL(23) 约束，与求解自己的分解相同。
      - certifier 自己的计数器（单精度计数及其双精度复核、`exact_counts`）同样先查余量（单精度计数用
        `InertiaCounter::estimate(Single)`，§3.4）；失败后本次求解不再用它（`counter_failure()`），由精确计数下结论；
-       失败属内存时 definite.cpp 让 `CountSource` 也不再建同一主元顺序上的计数器（`avoid_counter`），直接在主对象上数。
-     - 随机检验需要的 σ 处重分解、或其回代失败：不能下结论，交给精确计数（同 P5 的不能下结论）。
-     - 两个来源都不能计数（`CountFailure`）：nearest 返回已收敛的对，报告证书「已做但未完成」：performed = true、
-       passed = false、rigorous = false、failure_probability = 1、count_inertia = −1、count_found = 窗口内找到数、
-       note 以 "not completed" 开头、statement 写明原因与「对未经认证」，告警，success = false（CLI 退出码 1，结果照写）。
-       收缩重跑在 σ 处重分解失败时同样返回已找到的对（事件 `rerun_failed`、告警、statement 注明）。窗口目标的计数
-       就是解法本身：两个来源都失败时照旧抛出（错误码为最后一次失败的）。
+       失败属内存时 definite.cpp 让 `CountSource` 也不再建同一主元顺序上的计数器（`avoid_counter`），直接在主对象上数；
+       属其它 MUMPS 错误时 `CountSource` 仍先试自己的计数器。
+     - 随机检验需要的 σ 处重分解、或其回代失败（hs::Error 中的内存 / MUMPS 错误，或 `std::bad_alloc`）：不能下结论，
+       交给精确计数（同 P5 的不能下结论）。
+     - 两个来源都不能计数（`CountFailure`）：错误码在每个失败的来源都因内存（OutOfMemoryBudget、`std::bad_alloc`、
+       估计超余量）时为 `out_of_memory_budget`，否则为 `factorization_failed`——与来源的尝试顺序无关。nearest 返回
+       已收敛的对，报告证书「已做但未完成」：performed = true、passed = false、rigorous = false、failure_probability = 1、
+       count_inertia = −1、count_found = 窗口内找到数、note 以 "not completed" 开头、statement 写明原因与「对未经认证」，
+       告警，success = false（CLI 退出码 1，结果照写）。收缩重跑在 σ 处重分解失败时同样返回已找到的对（事件
+       `rerun_failed`、告警、statement 注明）。窗口目标在数窗口端点与切点时（尚无片解出）照旧抛出该错误；从第一片起，
+       一片所需的计数（单边锚点的谱隙点、部分簇的两次验证计数）不可能时只放弃该片（事件 `slice_not_completed`、告警、
+       该片 `slices[i].passed = false`、count_found = 0），其余片照常求解，返回已完成各片的对：证书 method = exact、
+       passed = false、rigorous = false、failure_probability = 1、count_inertia = 窗口计数、count_found = 找到数，
+       note 以 "not completed" 开头并列出未完成的片，statement 说明，success = false。
      - 故障注入 `certificate_fault_count`（只用于测试与测量，`docs/FORMATS.md` §2）：位 1 = 每个 InertiaCounter 的
-       ICNTL(23) 设为 1 MB（计数在 MUMPS 内真实地 INFO −19）；位 2 = 主对象计数抛 OutOfMemoryBudget；位 4 = 计数余量
-       为 0（计数器预判放不下）；位 8 = 重跑的 σ 处重分解失败。`tests/cpp/test_certcost_faults.cpp` 对实数与复数覆盖
-       每条路径（含两者都失败、窗口目标、certifier 计数器）。
+       ICNTL(23) 设为 1 MB（计数在 MUMPS 内真实地 INFO −19）；位 2 = 主对象计数失败；位 4 = 计数器的计数余量为 0
+       （预判放不下）；位 8 = σ 处的重分解（收缩重跑前、随机检验前）失败。失败种类：默认 OutOfMemoryBudget，位 16 =
+       其它 MUMPS 错误（FactorizationFailed；位 1 改为每次计数前抛出），位 32 = `std::bad_alloc`（16 与 32 互斥）。
+       位 64 = 位 1、2 只从窗口目标的第一片起生效（nearest 自身的证书不受影响）。`tests/cpp/test_certcost_faults.cpp`
+       对实数与复数覆盖每条路径（两者都失败、各失败种类与错误码、窗口目标在片中失败、certifier 计数器的内存与非内存
+       失败、主对象替补的余量检查）。
      - 实测：yee-pec-cube-32（METIS）在 0.394 GiB 预算下复现了 ss-3dspectralwave2 的失败方式（主因子外存、计数器估计
-       300 MB 超出余量；P5c 代码 rc = 2 「INFO(1)=−19」），P8 代码改在主对象上计数并认证。ss-3dspectralwave2 在默认
-       14 GiB 下（`results/p8_certcost.md` §2.3）：计数器估计 10.5–15.1 GB，21 次运行中 9 次超出余量、改在外存主对象上
-       计数（慢约 10%），21/21 全部认证、峰值 RSS ≤ 12.9 GiB（P5c：15.1 GB 估计时 INFO −19 丢失结果，13.6 GB 时峰值
-       15.1 GiB）；主分析的外存估计超上限另由 §3.6-3 的再分析处理。
+       300 MB 超出余量；P5c 代码 rc = 2 「INFO(1)=−19」）；P8 初版改在主对象上计数并认证但超出预算，修正后两源都不尝试、
+       证书未完成、不超预算（见上）。ss-3dspectralwave2 在默认 14 GiB 下（`results/p8_certcost.md` §2.3）：计数器估计
+       10.5–15.1 GB，21 次运行中 9 次超出余量、改在外存主对象上计数（慢约 10%；这 9 次的 INFOG(21) 9.4–10.1 GB 低于
+       当时的余量 11.2–11.4 GB，修正后的检查同样放行），21/21 全部认证、峰值 RSS ≤ 12.9 GiB（P5c：15.1 GB 估计时
+       INFO −19 丢失结果，13.6 GB 时峰值 15.1 GiB）；主分析的外存估计超上限另由 §3.6-3 的再分析处理。
    - 窗口目标（interval / smallest / largest）总是精确计数——它们的计数点就是切点与位移，`certificate =
      randomized` / `off` 被忽略并告警；零带干扰时转交窗口的 nearest 同样精确计数。报告的 method 为 exact。
    - GHIEP 无惯性证书（报告中注明，method 为 none）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。

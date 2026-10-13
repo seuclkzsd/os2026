@@ -73,7 +73,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 取值与语义（校验见 `parse_config`；算法见 `docs/DESIGN.md` §3.6）：
 - `tol ∈ (0, 1)`；`inner_tol_factor ∈ (0, 1]`；`ncv, block_size, slice_size, threads, max_shift_retries ≥ 0`；
   `max_restarts ≥ 1`；`memory_budget_gb > 0`；`certificate_delta ∈ (0, 1)`；`certificate_fault_drop ≥ 0`；
-  `certificate_fault_count ∈ [0, 15]`；
+  `certificate_fault_count ∈ [0, 127]`（位 16 与 32 不同时）；
   `ordering ∈ {−1, 0, 2..7, 10}`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
 - `block_size`（P4）：整数 ≥ 0，位移反演 Krylov 运行的块宽 p；0（默认）= 自动，1 = 单向量。
   HEP/GHEP：配置 > 0 时直接使用；自动时 nearest 的运行用块宽规则（P5c，`recommended_block_size`：由 n、
@@ -121,10 +121,13 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 - `certificate_fault_drop`（P5）：整数 ≥ 0，默认 0；**只用于测试与测量的故障注入**：nearest 目标第一次
   Krylov 运行后、完备性检验之前删掉这么多已找到的对（先删最大重特征值的副本、留一个，再删最远的选中对），
   检验须发现它们缺失、重跑须找回。
-- `certificate_fault_count`（P8）：整数 0..15，默认 0；**只用于测试与测量的故障注入**，各位相加：1 = 每个
+- `certificate_fault_count`（P8）：整数 0..127，默认 0；**只用于测试与测量的故障注入**，各位相加：1 = 每个
   InertiaCounter 的工作内存上限 ICNTL(23) 设为 1 MB（其计数在 MUMPS 内以 INFO −19 失败）；2 = 主分解对象上的计数
-  失败（OutOfMemoryBudget）；4 = 计数余量为 0（计数器被预判放不下，不尝试）；8 = 证书收缩重跑在 σ 处的重分解失败。
-  计数失败时改在另一个计数来源上计数；都不能计数时 nearest 目标返回已收敛的对，证书「已做但未完成」（§3）。
+  失败；4 = 计数器的计数余量为 0（被预判放不下，不尝试）；8 = σ 处的重分解（证书收缩重跑前、随机检验前）失败。
+  位 1、2、8 的失败种类：默认内存不足（OutOfMemoryBudget），16 = 其它 MUMPS 错误（FactorizationFailed；位 1 改为
+  每次计数前抛出），32 = 内存分配失败（`std::bad_alloc`）；16 与 32 不可同时给。64 = 位 1、2 只从窗口目标的第一片
+  起生效（窗口端点与切点照常计数；nearest 自身的证书不受影响）。计数失败时改在另一个计数来源上计数；都不能计数时
+  nearest 目标返回已收敛的对、窗口目标返回已完成各片的对，证书「已做但未完成」（§3）。
 - 当前限制：B 不定（GHIEP）只支持 `mode = nearest`（其余抛 Unsupported）；`method = lanczos`
   （免分解）抛 Unsupported。
 
@@ -193,7 +196,13 @@ slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
     `rigorous = false`、`failure_probability = 1`、`count_inertia = −1`（没有计数）、`count_found` 为窗口内找到的对数、
     [lower, upper] 为本应计数的窗口、`note` 以 `"not completed"` 开头、`statement` 写明原因并说明这些对未经认证；
     `success = false`（CLI 退出码 1，结果文件照写，stdout 证书行为 "NOT COMPLETED"）。证书收缩重跑在 σ 处重分解失败时
-    同样返回已找到的对（`statement` 注明）。窗口目标（interval / smallest / largest）本身由计数构成，都不能计数时报错。
+    同样返回已找到的对（`statement` 注明）。窗口目标（interval / smallest / largest，及零带干扰时转交窗口的 nearest）
+    本身由计数构成：在数窗口端点与切点时都不能计数则报错（尚无片解出）；从第一片起，某片所需的计数（单边锚点的谱隙点、
+    部分簇的验证计数）不可能时只放弃该片（`slices[i]` 的 `passed = false`、`count_found = 0`，告警），其余片照常，
+    返回已完成各片的对：`method = "exact"`、`passed = false`、`rigorous = false`、`failure_probability = 1`、
+    `count_inertia` 为窗口计数、`count_found` 为找到数、`note` 以 `"not completed"` 开头并列出未完成的片、
+    `success = false`。报错时的错误码：每个失败的计数来源都因内存（内存不足、分配失败、估计超出余量）时为
+    `out_of_memory_budget`，否则为 `factorization_failed`。
   - 随机检验下结论时 `count_inertia = −1`（不计数），[lower, upper] 为 σ 两侧的声称半径，`count_found` 为
     其中找到的对数。
   - `solves`：随机检验的单列回代次数（算子作用，所有轮次）；`seconds`：所有轮次完备性检验的墙钟时间
