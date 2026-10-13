@@ -25,6 +25,17 @@ using hs::eigen_detail::relative_block_steps;
 using hs::eigen_detail::ShiftInvertShape;
 using hs::eigen_detail::WidthTable;
 
+/// Runs f and expects hs::Error with code InvalidInput.
+template <class F>
+void expect_invalid(F&& f, const std::string& what) {
+  try {
+    f();
+    ADD_FAILURE() << what << ": no exception";
+  } catch (const hs::Error& e) {
+    EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << what << ": " << e.what();
+  }
+}
+
 TEST(LanczosBlockRule, RelativeStepsStartAtOneAndNeverIncreaseWithTheWidth) {
   for (index_t nev : {1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 15, 21, 22, 23, 40, 1000}) {
     SCOPED_TRACE("nev " + std::to_string(nev));
@@ -113,17 +124,19 @@ TEST(LanczosBlockRule, WidthsWhoseLayoutDoesNotFitAreSkipped) {
 }
 
 TEST(LanczosBlockRule, InvalidInputsThrow) {
-  EXPECT_THROW(relative_block_steps(0, 5), hs::InvalidInput);
-  EXPECT_THROW(relative_block_steps(2, 0), hs::InvalidInput);
+  expect_invalid([&] { relative_block_steps(0, 5); }, "relative_block_steps(0, 5)");
+  expect_invalid([&] { relative_block_steps(2, 0); }, "relative_block_steps(2, 0)");
   const WidthTable ok{1, 1, 1, 1};
-  EXPECT_THROW(recommended_block_size(5, 10, ok), hs::InvalidInput);  // n < nev
-  EXPECT_THROW(recommended_block_size(100, 0, ok), hs::InvalidInput);
+  expect_invalid([&] { recommended_block_size(5, 10, ok); },
+                 "recommended_block_size(5, 10, ok)");  // n < nev
+  expect_invalid([&] { recommended_block_size(100, 0, ok); }, "recommended_block_size(100, 0, ok)");
   const double nan = std::numeric_limits<double>::quiet_NaN();
   const double inf = std::numeric_limits<double>::infinity();
   for (double bad : {0.0, -1.0, nan, inf}) {
     WidthTable c = ok;
     c[2] = bad;
-    EXPECT_THROW(recommended_block_size(100, 10, c), hs::InvalidInput);
+    expect_invalid([&] { recommended_block_size(100, 10, c); },
+                   "recommended_block_size(100, 10, c)");
   }
   ShiftInvertShape s;
   s.n = 1000;
@@ -138,8 +151,8 @@ TEST(LanczosBlockRule, InvalidInputsThrow) {
         +[](ShiftInvertShape& x) { x.nnz_b = HUGE_VAL; }}) {
     ShiftInvertShape t = s;
     mutate(t);
-    EXPECT_THROW(modelled_step_seconds(t), hs::InvalidInput);
-    EXPECT_THROW(recommended_block_size(t), hs::InvalidInput);
+    expect_invalid([&] { modelled_step_seconds(t); }, "modelled_step_seconds(t)");
+    expect_invalid([&] { recommended_block_size(t); }, "recommended_block_size(t)");
   }
 }
 
@@ -157,7 +170,9 @@ TEST(LanczosBlockRule, ModelledStepCostsArePositiveAndGrowWithTheWidth) {
         for (std::size_t i = 0; i < kRuleWidthCount; ++i) {
           EXPECT_GT(t[i], 0.0);
           EXPECT_TRUE(std::isfinite(t[i]));
-          if (i >= 2) EXPECT_GT(t[i], t[i - 1]);  // p >= 2: a + b p + o(p) grows
+          if (i >= 2) {
+            EXPECT_GT(t[i], t[i - 1]);  // p >= 2: a + b p + o(p) grows
+          }
         }
         // Per column, wider blocks are cheaper to apply.
         EXPECT_LT(t[3] / 8.0, t[0]);
