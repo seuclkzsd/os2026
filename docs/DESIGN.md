@@ -891,8 +891,10 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
        为 0（计数器预判放不下）；位 8 = 重跑的 σ 处重分解失败。`tests/cpp/test_certcost_faults.cpp` 对实数与复数覆盖
        每条路径（含两者都失败、窗口目标、certifier 计数器）。
      - 实测：yee-pec-cube-32（METIS）在 0.394 GiB 预算下复现了 ss-3dspectralwave2 的失败方式（主因子外存、计数器估计
-       300 MB 超出余量；P5c 代码 rc = 2 「INFO(1)=−19」），P8 代码改在主对象上计数并认证；ss-3dspectralwave2 本身见
-       `results/p8_certcost.md` §2。
+       300 MB 超出余量；P5c 代码 rc = 2 「INFO(1)=−19」），P8 代码改在主对象上计数并认证。ss-3dspectralwave2 在默认
+       14 GiB 下（`results/p8_certcost.md` §2.3）：计数器估计 10.5–15.1 GB，21 次运行中 9 次超出余量、改在外存主对象上
+       计数（慢约 10%），21/21 全部认证、峰值 RSS ≤ 12.9 GiB（P5c：15.1 GB 估计时 INFO −19 丢失结果，13.6 GB 时峰值
+       15.1 GiB）；主分析的外存估计超上限另由 §3.6-3 的再分析处理。
    - 窗口目标（interval / smallest / largest）总是精确计数——它们的计数点就是切点与位移，`certificate =
      randomized` / `off` 被忽略并告警；零带干扰时转交窗口的 nearest 同样精确计数。报告的 method 为 exact。
    - GHIEP 无惯性证书（报告中注明，method 为 none）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。
