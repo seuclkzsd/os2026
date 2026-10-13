@@ -4,6 +4,8 @@
 # only - hsolve itself does not use SPRAL (docs/DEPENDENCIES.md).
 #
 #   tools/dev/build_spral.sh [--cpu-only]
+#   tools/dev/build_spral.sh --smoke [GPU]   (run the installed SSIDS example without a GPU, then on
+#                                            GPU index GPU if given and idle)
 #
 # Run it inside the project environment and the resource guard (build/test lane), e.g.
 #   tools/dev/cluster_run.sh gpu02 -- python3 tools/run/guard.py --skip-busy-check --timeout 3600 --
@@ -36,10 +38,12 @@ MESON_SHA256=05f25d74eab0d1a9b26f1d2fe482677b9c2b9543f974016c8102a5f96b2b73f5
 CUDA_ARCH=70
 
 gpu=true
+smoke=0
 case "${1:-}" in
   "") ;;
   --cpu-only) gpu=false ;;
-  *) sed -n '2,30p' "$0" >&2; exit 2 ;;
+  --smoke) smoke=1 ;;
+  *) sed -n '2,32p' "$0" >&2; exit 2 ;;
 esac
 [ -n "${CONDA_PREFIX:-}" ] || { echo "build_spral: run inside the project environment (env/run.sh)" >&2; exit 2; }
 src_dir="${SPRAL_SRC_DIR:-$HOME/src}"
@@ -47,6 +51,21 @@ cuda_home="${CUDA_HOME:-/usr/local/cuda-12.2}"
 suffix=$([ "$gpu" = true ] && echo "cuda$(basename "$cuda_home" | sed 's/^cuda-//')" || echo cpu)
 prefix="${SPRAL_PREFIX:-$HOME/opt/spral-$SPRAL_VERSION-$suffix}"
 build_root="${SPRAL_BUILD_DIR:-$HOME/build/spral-$SPRAL_VERSION-$suffix}"
+if [ "$smoke" = 1 ]; then
+  example="$prefix/examples/C/ssidss_c"
+  export OMP_CANCELLATION=TRUE OMP_PROC_BIND=TRUE
+  echo "== $example, no GPU"
+  CUDA_VISIBLE_DEVICES="" "$example"
+  if [ -n "${2:-}" ]; then
+    uuid="$(nvidia-smi -i "$2" --query-gpu=uuid --format=csv,noheader)"
+    if nvidia-smi --query-compute-apps=gpu_uuid --format=csv,noheader | grep -q "$uuid"; then
+      echo "build_spral: GPU $2 is in use, not touched" >&2; exit 3
+    fi
+    echo "== $example, GPU $2"
+    CUDA_VISIBLE_DEVICES="$2" "$example"
+  fi
+  exit 0
+fi
 tarball="$src_dir/spral-$SPRAL_VERSION.tar.gz"
 meson_pyz="$src_dir/meson-$MESON_VERSION.pyz"
 
