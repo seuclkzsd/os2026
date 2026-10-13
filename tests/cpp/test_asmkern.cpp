@@ -305,33 +305,37 @@ TEST(BlasHookKernels, NarrowGemmMatchesLongDoubleReference) {
 
 // Row splits without a K split (k < 512) give every element the same arithmetic: the result does
 // not depend on the thread count. min_rows = 8 / 4 makes small row blocks: with m = 61 the
-// per-thread blocks of NN take the register path, the whole (one thread) the chunked one.
+// per-thread blocks of NN take the register path, the whole (one thread) the chunked one. MUMPS'
+// scalars (-1, 1: exact products) and inexact ones, which would expose an FMA-contracted
+// epilogue on one of the two NN paths (more cases in test_asmkern_fix).
 TEST(BlasHookKernels, NarrowGemmIsBitwiseIndependentOfThreads) {
+  const double scalars[][2] = {{-1.0, 1.0}, {0.7, -0.3}};
   for (const fint m : {2049, 61})
   for (const fint n : {6, 3})
   for (const fint k : {300, 5})
   for (Isa isa : isas())
-    for (char ta : {'N', 'T'}) {
-      const fint lda = ta == 'N' ? m : k;
-      const auto a = random_vec(static_cast<std::size_t>(lda) * (ta == 'N' ? k : m), 5);
-      const auto b = random_vec(static_cast<std::size_t>(k) * n, 6);
-      const auto c0 = random_vec(static_cast<std::size_t>(m) * n, 7);
-      std::vector<double> ref;
-      for (int threads : {1, 2, 3, 4, 7}) {
-        std::vector<double> c = c0;
-        if (ta == 'N')
-          hs::blas::narrow_gemm_nn(isa, threads, m, n, k, -1.0, a.data(), lda, b.data(), k, 1.0,
-                                   c.data(), m, 8);
-        else
-          hs::blas::narrow_gemm_tn(isa, threads, m, n, k, -1.0, a.data(), lda, b.data(), k, 1.0,
-                                   c.data(), m, 4);
-        if (ref.empty())
-          ref = c;
-        else
-          EXPECT_EQ(c, ref) << hs::blas::isa_name(isa) << " " << ta << " m=" << m
-                            << " threads " << threads;
+    for (char ta : {'N', 'T'})
+      for (const auto& s : scalars) {
+        const fint lda = ta == 'N' ? m : k;
+        const auto a = random_vec(static_cast<std::size_t>(lda) * (ta == 'N' ? k : m), 5);
+        const auto b = random_vec(static_cast<std::size_t>(k) * n, 6);
+        const auto c0 = random_vec(static_cast<std::size_t>(m) * n, 7);
+        std::vector<double> ref;
+        for (int threads : {1, 2, 3, 4, 7}) {
+          std::vector<double> c = c0;
+          if (ta == 'N')
+            hs::blas::narrow_gemm_nn(isa, threads, m, n, k, s[0], a.data(), lda, b.data(), k, s[1],
+                                     c.data(), m, 8);
+          else
+            hs::blas::narrow_gemm_tn(isa, threads, m, n, k, s[0], a.data(), lda, b.data(), k, s[1],
+                                     c.data(), m, 4);
+          if (ref.empty())
+            ref = c;
+          else
+            EXPECT_EQ(c, ref) << hs::blas::isa_name(isa) << " " << ta << " m=" << m
+                              << " alpha=" << s[0] << " beta=" << s[1] << " threads " << threads;
+        }
       }
-    }
 }
 
 // Parallel split with K chunks (few rows of C, long K: MUMPS' backward-solve updates above its L0

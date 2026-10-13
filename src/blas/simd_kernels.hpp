@@ -28,7 +28,10 @@
 // Every C element is computed in a fixed order that does not depend on the row split (NN: one FMA
 // chain over k, then alpha * t + beta * c with separately rounded products, on either NN path; TN:
 // W lane chains over k, then the same reduction tree for every row), so results are identical for
-// any row split.
+// any row split. "Separately rounded" needs -ffp-contract=off (CMake target hsolve_blas): GCC
+// contracts C++ by default and would turn the register path's mul + add (vector arithmetic in
+// the intrinsics) into an FMA while the chunked path's finish_block (baseline ISA, no FMA) rounds
+// both products - test_asmkern_fix checks it with inexact alpha and beta.
 
 using reg = typename V::reg;
 
@@ -95,7 +98,8 @@ HS_SIMD void nn_tiles(fint rows, fint ng, const double* a, fint lda, const doubl
 // C(m x NG) = alpha * A(m x k) * B(k x NG) + beta * C for m <= MB * W rows, accumulated in
 // registers (no t buffer: for the tiny products of MUMPS' 2-D solves). Per element the same
 // arithmetic as the chunked path - one FMA chain over k from 0, then alpha * t + beta * c with
-// separately rounded products - so the result does not depend on which path a row takes.
+// separately rounded products (no contraction: -ffp-contract=off) - so the result does not
+// depend on which path a row takes.
 template <int MB, int NG>
 HS_SIMD void nn_reg(fint m, fint k, double alpha, const double* a, fint lda, const double* b,
                     fint ldb, double beta, double* c, fint ldc) {

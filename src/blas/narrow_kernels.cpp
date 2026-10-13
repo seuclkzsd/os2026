@@ -13,6 +13,8 @@
 // Isa::Portable runs the plain C++ loops below (reference and fallback; on non-x86 CPUs the only
 // kernels compiled, whatever Isa the caller passes). Provenance of the SIMD
 // code: simd_kernels.hpp and docs/BLAS.md (adapted from OpenBLAS 0.3.34, BSD-3-Clause).
+// Build requirement: -ffp-contract=off (CMake target hsolve_blas), so that both NN paths round
+// alpha * t + beta * c alike and the NN result does not depend on the row split.
 #include <omp.h>
 
 #include <algorithm>

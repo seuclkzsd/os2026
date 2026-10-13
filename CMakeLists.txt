@@ -124,7 +124,11 @@ option(HSOLVE_BLAS_HOOK "Link the BLAS hook (src/blas) into the hsolve executabl
 set(HSOLVE_BLAS_ROUTE_DEFAULT "" CACHE STRING "BLAS hook routes when HS_BLAS_ROUTE is unset (\"\" = off)")
 add_library(hsolve_blas STATIC src/blas/route.cpp src/blas/narrow_kernels.cpp src/blas/blas_profile.cpp)
 target_include_directories(hsolve_blas PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_compile_options(hsolve_blas PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
+# -ffp-contract=off: the narrow kernels promise the same NN result for every row split (simd_kernels.hpp);
+# GCC contracts C++ by default (-ffp-contract=fast), which would fuse the register path's
+# alpha * t + beta * c into an FMA while the chunked path (baseline ISA) rounds both products.
+target_compile_options(hsolve_blas PRIVATE -Wall -Wextra -Wno-unused-parameter -ffp-contract=off
+                                           $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
 target_compile_definitions(hsolve_blas PRIVATE HSOLVE_BLAS_ROUTE_DEFAULT="${HSOLVE_BLAS_ROUTE_DEFAULT}")
 target_link_libraries(hsolve_blas PUBLIC OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
 add_library(hsolve_blashook SHARED src/blas/hook_symbols.cpp)

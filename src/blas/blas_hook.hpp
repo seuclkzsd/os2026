@@ -215,7 +215,8 @@ Route dgemv(const RouteConfig& cfg, char t, fint m, fint n, double alpha, const 
 // partial products are summed in chunk order afterwards (A is then still read in long unit-stride
 // runs: the backward-solve updates of MUMPS have few rows and a long K). The split depends on the
 // shape and the thread count only: deterministic for a fixed thread count; without a K split the
-// result is the same for every thread count.
+// result is the same for every thread count (both NN paths round alpha * t + beta * c alike:
+// hsolve_blas is compiled with -ffp-contract=off).
 
 /// Default min_rows of the NN split: 64 rows = 512-byte unit-stride runs of every column of A.
 constexpr fint kNnSplitRows = 64;

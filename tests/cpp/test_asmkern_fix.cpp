@@ -2,7 +2,10 @@
 //   * the parallel routes (dgemv split, gemv1 + par, parallel_gemm, split-K, narrow + par) compute
 //     every block when the OpenMP runtime forms a smaller team than they ask for - one thread
 //     (max-active-levels 0, below) or two (OMP_THREAD_LIMIT=2: ctest
-//     test_asmkern_fix.ShortTeamUnderThreadLimit2 runs the AsmkernFixShortTeam suite so).
+//     test_asmkern_fix.ShortTeamUnderThreadLimit2 runs the AsmkernFixShortTeam suite so);
+//   * the narrow NN kernels give bitwise the same result for every row split (thread count) also
+//     for general alpha / beta, i.e. the register path (<= kRegRows rows) and the chunked path
+//     round alpha * t + beta * c alike (hsolve_blas is compiled with -ffp-contract=off).
 // The real BLAS is the test executable's (OpenBLAS), found by the hook through dlsym(RTLD_NEXT).
 #include <gtest/gtest.h>
 #include <omp.h>
@@ -37,6 +40,13 @@ std::vector<double> random_vec(std::size_t n, std::uint64_t seed) {
   std::uniform_real_distribution<double> u(-1.0, 1.0);
   std::vector<double> v(n);
   for (double& x : v) x = u(g);
+  return v;
+}
+
+std::vector<Isa> isas() {
+  std::vector<Isa> v{Isa::Portable};
+  if (hs::blas::cpu_has_avx2_fma()) v.push_back(Isa::Avx2);
+  if (hs::blas::cpu_has_avx512f()) v.push_back(Isa::Avx512);
   return v;
 }
 
@@ -175,6 +185,71 @@ TEST(AsmkernFixShortTeam, ParallelRoutesComputeEveryBlockUnderAThreadLimit) {
 TEST(AsmkernFixShortTeam, ParallelRoutesAreAccurateOnAFullTeam) {
   if (team_size(kThreads) != kThreads) GTEST_SKIP() << "the runtime forms no team of " << kThreads;
   check_parallel_routes("full team");
+}
+
+// Row splits without a K split (k < 512) leave every element's arithmetic unchanged for general
+// alpha / beta (inexact products, where an FMA in only one of the two NN paths would show): the
+// result is bitwise the same for every thread count. min_rows = 8 makes blocks of 8-32 rows,
+// which take the NN register path, while the whole (one thread) takes the chunked path.
+TEST(AsmkernFixNarrowDeterminism, NnAndTnAreBitwiseIndependentOfTheRowSplitForGeneralScalars) {
+  const double scalars[][2] = {{0.7, -0.3}, {1.3, 0.9}, {0.7, 0.0}, {-1.0, 1.0}};
+  std::uint64_t seed = 70;
+  for (Isa isa : isas())
+    for (char ta : {'N', 'T'})
+      for (const fint m : {33, 40, 61, 130, 1025})
+        for (const fint n : {1, 3, 6})
+          for (const fint k : {5, 300}) {
+            const fint lda = (ta == 'N' ? m : k) + 1;
+            const auto a = random_vec(static_cast<std::size_t>(lda) * (ta == 'N' ? k : m), ++seed);
+            const auto b = random_vec(static_cast<std::size_t>(k) * n, ++seed);
+            const auto c0 = random_vec(static_cast<std::size_t>(m) * n, ++seed);
+            for (const auto& s : scalars) {
+              std::vector<double> ref;
+              for (int threads : {1, 2, 3, 4, 7, 16}) {
+                std::vector<double> c = c0;
+                if (ta == 'N')
+                  hs::blas::narrow_gemm_nn(isa, threads, m, n, k, s[0], a.data(), lda, b.data(), k,
+                                           s[1], c.data(), m, 8);
+                else
+                  hs::blas::narrow_gemm_tn(isa, threads, m, n, k, s[0], a.data(), lda, b.data(), k,
+                                           s[1], c.data(), m, 4);
+                if (ref.empty()) {
+                  ref = c;
+                  continue;
+                }
+                std::size_t differ = 0;
+                for (std::size_t i = 0; i < c.size(); ++i) differ += c[i] != ref[i] ? 1 : 0;
+                ASSERT_EQ(differ, 0u) << hs::blas::isa_name(isa) << " " << ta << " m=" << m
+                                      << " n=" << n << " k=" << k << " alpha=" << s[0]
+                                      << " beta=" << s[1] << " threads=" << threads;
+              }
+            }
+          }
+}
+
+// The NN register path (m <= kRegRows: 32 rows for AVX-512, 16 for AVX2) against the chunked
+// path on the same rows: the first m rows of an (m + 8)-row product equal the m-row product.
+TEST(AsmkernFixNarrowDeterminism, NnRegisterPathRoundsLikeTheChunkedPath) {
+  for (Isa isa : isas())
+    for (const fint m : {8, 16, 32})
+      for (const fint n : {1, 4, 5})
+        for (const fint k : {3, 64, 301}) {
+          const fint big = m + 8, lda = big;
+          const auto a = random_vec(static_cast<std::size_t>(lda) * k, 81);
+          const auto b = random_vec(static_cast<std::size_t>(k) * n, 82);
+          const auto c0 = random_vec(static_cast<std::size_t>(lda) * n, 83);
+          std::vector<double> whole = c0, part = c0;
+          hs::blas::narrow_gemm_nn(isa, 1, big, n, k, 0.7, a.data(), lda, b.data(), k, -0.3,
+                                   whole.data(), lda);
+          hs::blas::narrow_gemm_nn(isa, 1, m, n, k, 0.7, a.data(), lda, b.data(), k, -0.3,
+                                   part.data(), lda);
+          for (fint j = 0; j < n; ++j)
+            for (fint i = 0; i < m; ++i) {
+              const std::size_t q = i + static_cast<std::size_t>(j) * lda;
+              ASSERT_EQ(part[q], whole[q]) << hs::blas::isa_name(isa) << " m=" << m << " n=" << n
+                                           << " k=" << k << " at (" << i << ", " << j << ")";
+            }
+        }
 }
 
 }  // namespace
