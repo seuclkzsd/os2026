@@ -130,14 +130,45 @@ struct BlockDimensions {
 };
 /// Free space needed by a block run, in units of its basis plus residual block (see above).
 constexpr index_t kFreeSpaceFactor = 2;
-BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv);
+
+/// Parameters of the block solver that the measurements behind its defaults vary
+/// (bench/blocktune_sweep.cpp). A default-constructed BlockTuning is what lanczos_krylov_schur
+/// runs.
+///   extra_blocks:  blocks added to base for the automatic ncv;
+///   min_auto_ncv:  the automatic ncv is at least this (rounded up to a multiple of p);
+///   keep_fraction: a restart keeps nev + keep_fraction * (ncv - nev) Ritz pairs (rounded down to
+///                  a multiple of p, clamped to [spare, ncv - p]).
+/// Requested ncv values (setup from options.ncv > 0) use only keep_fraction.
+///   fast_ortho:    block steps try BlockOrthonormalizer::try_fast first (false: run() only, the
+///                  P3/P4 kernel). See "Block steps" in block_lanczos.cpp for the measurements.
+struct BlockTuning {
+  index_t extra_blocks = 4;
+  index_t min_auto_ncv = 0;
+  double keep_fraction = 0.5;
+  bool fast_ortho = true;
+};
+/// Invalid tuning values (extra_blocks or min_auto_ncv < 0, keep_fraction outside [0, 1]) are an
+/// internal error (HS_ASSERT, Error::Code::Internal).
+BlockDimensions block_dimensions(const LanczosSetup& setup, index_t p, bool auto_ncv,
+                                 const BlockTuning& tuning = BlockTuning{});
+
+/// Which orthogonalization kernel the block steps of one run took (measurement and tests).
+struct BlockRunStats {
+  index_t fast_steps = 0;      ///< block steps accepted by BlockOrthonormalizer::try_fast
+  index_t two_pass_steps = 0;  ///< block steps by run() (fast_ortho off, refused, or deflation)
+  index_t fallbacks = 0;  ///< run() calls (start block included) that took the column-wise path
+};
 
 /// Block Krylov-Schur, options.block_size > 1 (lanczos_krylov_schur_timed dispatches here). Same
-/// contract and timing semantics as lanczos_krylov_schur_timed.
+/// contract and timing semantics as lanczos_krylov_schur_timed. `tuning` (measurement use) changes
+/// only the basis layout and the step kernel; `stats` (may be nullptr) receives the kernel counts
+/// (all zero when the call is solved by the exact single-vector cycle, see BlockDimensions).
 template <class T>
 HermitianEigResult<T> block_lanczos_krylov_schur_timed(LinearOperator<T>& op,
                                                        LinearOperator<T>* b_inner, Which which,
                                                        const KrylovSchurOptions<T>& options,
-                                                       LanczosTimings& timings);
+                                                       LanczosTimings& timings,
+                                                       const BlockTuning& tuning = BlockTuning{},
+                                                       BlockRunStats* stats = nullptr);
 
 }  // namespace hs::eigen_detail
