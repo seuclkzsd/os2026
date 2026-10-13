@@ -4,7 +4,8 @@ P8 asked for (1) certificate counts whose failure never ends a solve, (2) cheape
 (concurrent edge counts, count settings, overlap), (3) a proven kappa for a general SPD B (optional
 after the user's decision that the default stays `certificate = exact`), and (4) the measurements
 below. Branch `p8-certcost` from main 34cbfd4. Every timing is from a 16-core measurement slot
-(`guard.py --exclusive`, cores 16-31, 32 GiB), 16 threads, 2026-10-14.
+(`guard.py --exclusive`, cores 16-31, 32 GiB), 16 threads, 2026-10-14. The fixes of the P8 review
+(branch `p8-certcost-fix`) and their measurements are in §8; §2 and §7 are updated for them.
 
 ## 1. Setup
 
@@ -17,6 +18,8 @@ BLAS hook linked, route all; build lane, cores 8-15, `HS_JOBS=4`; copies in `~/p
 | P8 (p8b) | d0035c5 | 0414844016fbd4df384675349b59f7a5 | counter A/B, regression, head-to-head nearest, first ss-3dspectralwave2 campaign |
 | P8 (92d4962) | 92d4962 | - (work tree build) | head-to-head interval |
 | P8 (p8e) | be2efde | 707cdb2efeebae52ffd15fb8a52fdb12 | ss-3dspectralwave2 campaigns 2 and 3 |
+| P8 head (p8head) | 91a9c01 | 66bc28e68057d0f6b86dc4ddd4ddd80d | review fixes: the analogue before the fix (§2.1, §8) |
+| fix (fix2) | aa5fe66 (p8-certcost-fix; built from the work tree before the commit, the commit's build has the same md5) | f700ae5b32d343d3d6464e95eec87d27 | §2.1, §2.3 (fix runs), §8 |
 
 The commits after d0035c5 change only (a) the re-analysis of a SCOTCH analysis that does not fit the
 budget (92d4962, be2efde: inert unless an estimate exceeds the cap, which happens in none of the
@@ -38,6 +41,9 @@ Evaluations (tools/eval) ran in the build lane.
 | regression | gpu01 | 02:20-02:35 | §5 (34 cases x 2 binaries x 3) |
 | ss-3dspectralwave2 | c005 | 02:03-02:36, 02:38-03:19 | §2.3 (binaries d0035c5, be2efde) |
 | ss-3dspectralwave2 | gpu01 | 02:39-03:18 | §2.3 (be2efde) |
+| ss-3dspectralwave2 | gpu01 | 04:32-04:44 | §2.3 (fix2: fault bit 4, default) |
+| proof time | gpu01 | 04:45 | §8 (fix2, certificate = randomized) |
+| regression check | gpu01 | 04:48-04:49 (3 reps), 04:50-04:51 (5 reps) | §8 (P8 head vs fix, 8 cases) |
 
 ## 2. Counter robustness (task 1)
 
@@ -52,16 +58,37 @@ converged pairs were lost; at 13.6 GB it ran with a peak RSS of 15.1 GiB, above 
 Small analogue (build lane, 8 threads; not timed): yee-pec-cube-32 with METIS (`ordering = 5`) at
 `--memory-budget-gb 0.394`: main factors out of core (in-core estimate 636 MB, cap 287 MB), counter
 estimate 300 MB. main / P5c code: exit 2, "MUMPS factorization ran out of memory: INFO(1)=-19,
-INFO(2)=464894" after the Krylov run, no result. P8: the counter is not tried (300 MB above the
-156 MB the budget leaves for a count; event `count_source`, warning), the counts run on the main
-object (out of core), 12/12 pairs, certificate exact passed.
+INFO(2)=464894" after the Krylov run, no result. P8 as first merged (91a9c01): the counter is not
+tried (300 MB above the 156-174 MB the budget leaves for a count; event `count_source`, warning), the
+counts run on the main object (out of core), 12/12 pairs, certificate exact passed - but at a peak RSS
+of 0.53-0.54 GiB, 35-38% above the budget (review finding; with `--certificate off` the run peaks at
+0.31 GiB). Fixed (§8): the main object standing in for the counter must fit the same allowance with
+the working memory of its last factorization (INFOG(21) = 231 MB against ~160 MB): not tried, the
+certificate is not completed (exit 1, the 12 pairs written uncertified), peak 0.31 GiB.
+
+| budget (GiB) | binary | counts on | certificate | peak RSS (GiB, report / sampled) |
+|---|---|---|---|---|
+| 0.394 | P8 head 91a9c01 | main object, unchecked | exact passed | 0.531 / 0.531 |
+| 0.394 | fix | none (counter 300 MB, main object 231 MB > 158 MB) | not completed | 0.310 / 0.304 |
+| 0.47 | fix | main object once (231 <= 234 MB), then none (RSS +174 MB after it) | not completed | 0.530 / 0.530 |
+
+The RSS trace (5 ms samples) explains both: the process holds 229 MiB before a count (the analysis,
+the pairs, retained heap; 52 MiB before the analysis) and each main-object count adds ~315 MiB
+(330 MB: INFOG(21) is 231 MB, MUMPS allocated INFOG(18) = 316 MB), more than its INFOG(21) - so at
+0.47 GiB the check passes and the count still overshoots the budget by ~13%; afterwards the RSS stays
+~160-175 MB higher (also after JOB=-4 and malloc_trim), and the second count is refused. On
+ss-3dspectralwave2 INFOG(21) is the better predictor (§2.3: the counts fit with 2 GB to spare;
+INFOG(18) 12.3-12.6 GB would refuse them).
 
 ### 2.2 What changed (DESIGN §3.6-8 "计数失败不结束求解", FORMATS §3)
 
 - `CountSource::count`: a count that fails (OutOfMemoryBudget - MUMPS -13/-19 -, FactorizationFailed -
   any other MUMPS error -, `std::bad_alloc`) abandons that source for the solve and retries on the other
   one (counter <-> main object); a counter whose in-core estimate exceeds `count_allowance_mb` =
-  min(0.95 (memory_budget - RSS), cap) - after releasing resident main factors - is not tried.
+  min(0.95 (memory_budget - RSS), cap) - after releasing resident main factors - is not tried; nor,
+  since the review (§8), is the main object standing in for the counter when the working memory of
+  its last factorization (INFOG(21)) exceeds that allowance (its factors released first; event
+  `main_count_check`).
 - The certifier's own counter (single counts, their double check, `exact_counts`) checks the same
   allowance (`InertiaCounter::estimate(precision)`, new) and leaves the verdict to the exact counts
   when it fails; after a memory failure CountSource does not build a second counter on the same order.
@@ -70,11 +97,18 @@ object (out of core), 12/12 pairs, certificate exact passed.
   not completed (passed = false, rigorous = false, failure_probability = 1, count_inertia = -1,
   note "not completed: ...", statement with the reason), warning, success = false (CLI exit 1, result
   written, summary line "NOT COMPLETED"). A deflated rerun that cannot refactorize at sigma returns the
-  pairs found. Window targets (built on counts) still throw when no source can count.
+  pairs found. Window targets (built on counts) throw while they count their window ends and cuts;
+  since the review, from their first slice on a count that no source can make ends only that slice and
+  the other slices' pairs are returned with the certificate not completed. The error's code is
+  `out_of_memory_budget` when every source failed for memory, else `factorization_failed`.
 - Fault injection `certificate_fault_count` (bits: 1 counter cap 1 MB -> genuine INFO -19, 2 main-object
-  counts fail, 4 allowance 0, 8 rerun refactorization fails); tests `tests/cpp/test_certcost_faults.cpp`
-  (20 tests, real and complex: each path, both sources failing, window targets, the certifier's counter,
-  the genuine MUMPS -19 of a counter above its cap, `estimate(Single)`).
+  counts fail, 4 counter allowance 0, 8 refactorization at sigma fails (rerun, randomized check); since
+  the review the kind of the failures - 16 another MUMPS error, 32 `std::bad_alloc` - and 64: bits 1, 2
+  only from a window target's first slice on); tests `tests/cpp/test_certcost_faults.cpp` (31 tests, real
+  and complex: each path and failure kind, both sources failing and the error code, window targets
+  before and inside their slices, the certifier's counter after memory and other failures, the main
+  object standing in for the counter, the genuine MUMPS -19 of a counter above its cap,
+  `estimate(Single)`, the re-analysis rule).
 
 ### 2.3 ss-3dspectralwave2 at the default budget
 
@@ -113,6 +147,8 @@ python3 tools/run/guard.py --skip-busy-check --timeout 1500 --summary $o/guard.j
 | p8e-gpu01-c/run5 | 0 | 343.6 | 12.933 | 28620 / 11572 | 1 | 11521 | main (counter over allowance) | exact passed (10/10) |  |
 | p8e-gpu01-c/run6 | 0 | 314.0 | 11.87 | 27843 / 14352; 26955 / 10685 | 2 | 10620 | counter | exact passed (10/10) |  |
 | p8e-gpu01-c/run7 | 0 | 341.1 | 12.016 | 28503 / 11504 | 1 | 11444 | main (counter over allowance) | exact passed (10/10) |  |
+| fix2-gpu01/f4-1 (fault bit 4) | 0 | 319.9 | 12.069 | 27258 / 11157 | 1 | 11101 | main (counter forced over allowance; main check 9498 <= 11960, 11934 MB) | exact passed (10/10) |  |
+| fix2-gpu01/def-1 | 0 | 344.7 | 12.767 | 28624 / 11722 | 1 | 11688 | main (counter over allowance; main check 10016 <= 11969, 11937 MB) | exact passed (10/10) |  |
 
 - **Every run that got past the main analysis returned its ten pairs certified** (21/21: success,
   every eta <= 7.8e-12, exact certificate 10 = 10; the 22 eigenvalue sets of these and the earlier run
@@ -123,10 +159,17 @@ python3 tools/run/guard.py --skip-busy-check --timeout 1500 --summary $o/guard.j
   the out-of-core main object: those runs took 309-344 s against 294-326 s with the counter. With the
   P5c code the 15.1 GB estimate would have failed with INFO -19 and lost the pairs.
 - The main analysis' out-of-core estimate exceeded the cap in 4 of 25 analyses (13.8, 14.1, 14.1,
-  14.4 GB; P5c: 2 of 17). d0035c5 ended there (runs 4 and 8 of the first campaign, exit 2 after 20 s,
-  before any factorization - P5c's failure mode 2, not a count); be2efde re-analysed (gpu01 runs 1 and 6:
-  14.1 -> 11.0 GB and 14.4 -> 10.7 GB, +16 s) and both runs certified. 15/15 runs of the final code
-  returned certified pairs.
+  14.4 GB; P5c: 2 outliers in 17 analyses, 14.2 GB above the cap and 13.4 GB just below it - together
+  6 outliers of 13.4-14.4 GB in 42 analyses, 5 of them above the cap). d0035c5 ended there (runs 4 and 8
+  of the first campaign, exit 2 after 20 s, before any factorization - P5c's failure mode 2, not a
+  count); be2efde re-analysed (gpu01 runs 1 and 6: 14.1 -> 11.0 GB and 14.4 -> 10.7 GB, +16 s) and both
+  runs certified. 15/15 runs of the final code returned certified pairs.
+- Review fix (§8): the 9 runs that counted on the main object had INFOG(21) = 9.4-10.1 GB for its
+  factorization at sigma, below the count allowance (>= 11.2 GB) - the new check lets them count. The
+  two fix2 runs (above; the `main_count_check` event logs need, allowance and RSS) confirm it: with the
+  counter forced over the allowance (fault bit 4) and in a default run whose counter estimate (11688 MB)
+  exceeded the allowance, both main-object counts passed the check (need 9498 / 10016 MB against
+  11.93-11.97 GB, RSS 2.43-2.47 GB before each), certified, peaks 12.07 / 12.77 GiB.
 
 ### 2.4 Can MUMPS' estimates be made reproducible cheaply?
 
@@ -371,10 +414,10 @@ equal exact's within noise (§4: hsolve-auto vs hsolve). The default stays exact
 2. **ss-3dspectralwave2 at the 14 GiB CLI default** (§2.3): the counter's estimate (10.5-15.1 GB)
    often sits above the count allowance (0.95 of what the budget leaves, ~11.2-11.8 GB): in 9 of 21 runs
    the counts ran on the out-of-core main object instead, certified but ~10% slower (309-344 s vs
-   294-326 s). The main analysis' SCOTCH estimate exceeded the cap in 6 of 42 analyses (P5c and P8);
-   with up to two re-analyses a run now fails only if three analyses in a row miss (~0.3% by that
-   rate). P7's automatic budget (32 GiB under the guard) removes both on a 32 GB machine; on a 16 GB
-   machine the budget stays near today's.
+   294-326 s). The main analysis' SCOTCH estimate was an outlier (13.4-14.4 GB against 10.6-11.9 GB)
+   in 6 of 42 analyses (P5c and P8), 5 of them above the cap; with up to two re-analyses a run now
+   fails only if three analyses in a row miss (~0.2% at that rate). P7's automatic budget (32 GiB
+   under the guard) removes both on a 32 GB machine; on a 16 GB machine the budget stays near today's.
 3. **SCOTCH reproducibility** (§2.4): only a one-thread SCOTCH ordering is reproducible, at 2.6-3.7x the
    analysis time; handing a one-thread order to the main analysis as PERM_IN would make estimates
    (and with them the memory decisions and the blocktune width) reproducible - a factor / anaint decision.
@@ -386,3 +429,107 @@ equal exact's within noise (§4: hsolve-auto vs hsolve). The default stays exact
    which P7 resolves before the solve.
 5. **auto on general-B GHEP** (§6): the proven kappa is in place but auto never picks the randomized check
    on the data cases (their gaps give eps 0.01-0.14); not pursued further (the default stays exact).
+6. **The main-object count's memory is predicted, not bounded** (§2.1, §8): the check before a main
+   object stands in for the counter uses INFOG(21) of its last factorization; on the small analogue a
+   count grew the RSS by ~1.4x that (close to INFOG(18)), so near the threshold (0.47 GiB) a count can
+   still exceed the budget by ~13%. Where the main object is the preferred source (windows, nearest
+   without `counter_pays`) its counts run, as the solve's own factorizations, under the ICNTL(23) cap
+   fixed at the analysis, which the RSS growth after the analysis can exceed in the same way. A cap
+   lowered to the allowance for each count would need a factor API (ICNTL(23) per factorization) and
+   would not cover the memory MUMPS allocates beyond it either.
+
+## 8. Review fixes (branch p8-certcost-fix)
+
+Five findings of the P8 review, each verified on gpu01 (build lane, 8 threads, unless a slot is
+named), fixed with a regression test in `tests/cpp/test_certcost_faults.cpp` or corrected in the docs:
+
+1. **CountFailure's code.** It was always `out_of_memory_budget`, while the docs said "the last
+   failure's". Now `out_of_memory_budget` when every source that failed did so for memory (MUMPS
+   -13/-19, `std::bad_alloc`, an estimate over the allowance), else `factorization_failed` - independent
+   of which source was tried first (the CLI tag and the Python exception class follow). Test
+   `NoCountErrorCodeNamesTheKindOfFailure` (memory + memory, memory + bad_alloc, memory + other in both
+   orders, other + other).
+2. **The main-object fallback count and the budget** (§2.1). Verified: P8 head on the analogue,
+   `--memory-budget-gb 0.394`, peak 0.531 GiB (report; guard 0.54 GiB), against 0.31 GiB with
+   `--certificate off`. Fixed as in §2.2: the main object standing in for a failed counter releases its
+   factors and counts only if INFOG(21) of its last factorization fits the count allowance (else
+   `OutOfMemoryBudget`, and with no counter left the certificate is not completed). Analogue: not
+   completed at 0.31 GiB; ss-3dspectralwave2 (slot, 16 threads): certified both with the counter forced
+   out and in a default run (§2.3). Residual (§7 item 6): INFOG(21) underestimates a count's RSS growth
+   at the analogue's scale. Test `MainObjectStandingInForTheCounterMustFitTheBudget` (refused with no
+   room, counts with room; real and complex).
+3. **Window targets.** Verified: a CountFailure inside a slice (an anchor's gap point, a partial
+   cluster's verification counts - the window ends and cuts are all counted before the first slice)
+   ended `hs::solve` and discarded the completed slices. Now only that slice is abandoned (event
+   `slice_not_completed`, warning); the others are solved and returned, `success = false`, certificate
+   method exact, not passed, not rigorous, failure probability 1, note "not completed: ... slice(s)
+   [a, b]", statement naming the unsolved slices; a CountFailure before the first slice still ends
+   the solve (nothing solved yet). Test `WindowSliceCountFailureReturnsTheCompletedSlices`: smallest 5
+   of a spectrum whose 5th eigenvalue lies in 100 copies of 1.0 (a slice with 0.1, 0.2, 0.3, then a
+   partial cluster whose verification counts fail under fault bit 64): 3 pairs returned, count_inertia
+   5, count_found 3.
+4. **Fault injection and untested handlers.** Bit 8 now also fails the refactorization before a
+   randomized check (it said so, but did not); new kind bits 16 (FactorizationFailed) and 32
+   (`std::bad_alloc`) for bits 1, 2, 8, and 64 (late: window slices). The `std::bad_alloc` handlers of
+   the rerun's and the randomized check's refactorization were missing and are added. Tests:
+   `FailuresOfEveryKindMoveTheCountsToTheOtherSource`, `RandomizedCheckRefactorizationFailureLeavesTheVerdictToTheCounts`
+   (all three kinds), `CertifierCounterFailureOfAnotherKindLetsTheCountsTryTheirCounter` (auto picks
+   single counts on test_certint_fix's fill pencil; after a FactorizationFailed of the certifier's
+   counter the CountSource tries its own counter, after the genuine -19 it skips it).
+5. **Stale numbers.** SCOTCH outliers: 6 of 42 analyses, 13.4-14.4 GB, 5 above the cap (DESIGN §3.6-3,
+   steps.cpp, §2.3, §7). The proof budget: `kBoundsProofShare` limits the incomplete-Cholesky attempts
+   and the level-1 pattern only; the Lanczos estimate and the scaled copy S are not charged, so the
+   whole proof exceeds it - re-measured in the gpu01 slot (fix2 = P8's proof code, `certificate =
+   randomized`, 16 threads, 3 runs each; event `b_condition_bound`):
+
+   | case | seconds | budget_s | outcome |
+   |---|---|---|---|
+   | cav2d-rect-pert-1e5 | 0.023, 0.016, 0.017 | 0.021, 0.016, 0.016 | proven (level 1: kappa <= 9.1; level 0 twice: kappa <= 35.8) |
+   | ss-tem27623 | 0.026, 0.026, 0.048 | 0.024, 0.024, 0.032 | gershgorin (not proven) |
+
+   With a budget this close to an attempt's predicted time, the level used (and the kappa proven)
+   varies with the measured factorization time. Documented (certificate.hpp, DESIGN §3.5b); auto's
+   choices on the data cases are unchanged (exact everywhere, §6). The test of the re-analysis rule is
+   renamed `NonReproducibleOrderingIsAnalysedAgainUpToTwice`.
+
+**Default path unchanged.** The fixes touch the default configuration only where a count fails, so
+P8 head (91a9c01) against the fix (same md5 as fix2) on 8 nearest cases (case configs, CLI defaults,
+16 threads), ABBA, 5 repetitions, gpu01 slot, every run valid by tools/eval (80/80). A 3-repetition
+screen of 6 of them first gave 1.017 with yee-pec-cube-16 at 1.038 (ranges 0.211-0.215 vs
+0.207-0.227 s); the 5-repetition check below: 0.987 there. Machine-readable: `results/p8_fix_screen.json`.
+
+| case | n | type | node | head s [min-max] | fix s [min-max] | fix/head | valid head / fix | numeric # head / fix | block p head / fix | certificate fix |
+|---|---|---|---|---|---|---|---|---|---|---|
+| cav2d-rect-pert-1e5 | 99459 | GHEP | gpu01 | 0.295 [0.292-0.353] | 0.300 [0.299-0.300] | 1.016 | 5/5 / 5/5 | 3 / 3 | 2 / 2 | exact |
+| ss-qa8fk-qa8fm | 66127 | GHEP | gpu01 | 1.687 [1.680-1.723] | 1.688 [1.671-1.716] | 1.000 | 5/5 / 5/5 | 3 / 3 | 4 / 4 | exact |
+| ss-tem27623 | 27623 | GHEP | gpu01 | 0.598 [0.589-0.616] | 0.590 [0.586-0.615] | 0.986 | 5/5 / 5/5 | 4 / 4 | 4 / 4 | exact |
+| syn-lap3d-22 | 10648 | HEP | gpu01 | 0.142 [0.141-0.151] | 0.141 [0.138-0.144] | 0.995 | 5/5 / 5/5 | 3 / 3 | 4 / 4 | exact |
+| syn-mem27-46 | 97336 | HEP | gpu01 | 2.368 [2.359-2.372] | 2.394 [2.364-2.454] | 1.011 | 5/5 / 5/5 | 1 / 1 | 8 / 8 | exact |
+| syn-multiplicity-real-1e4 | 10000 | HEP | gpu01 | 0.096 [0.096-0.100] | 0.096 [0.095-0.099] | 0.996 | 5/5 / 5/5 | 3 / 3 | 4 / 4 | exact |
+| yee-pec-box-1e4 | 10064 | GHEP | gpu01 | 0.200 [0.197-0.205] | 0.204 [0.201-0.232] | 1.022 | 5/5 / 5/5 | 3 / 3 | 4 / 4 | exact |
+| yee-pec-cube-16 | 10800 | HEP | gpu01 | 0.217 [0.211-0.220] | 0.214 [0.210-0.250] | 0.987 | 5/5 / 5/5 | 3 / 3 | 4 / 4 | exact |
+
+Geometric mean of fix/head over the 8 cases valid in every run: **1.002**; faster by > 3%: 0; slower by > 3%: 0.
+
+Commands (gpu01; `S=$HOME/p8_p8-certcost/fix`; the scripts are throw-away copies in `$S`):
+
+```bash
+# analogue (build lane): RSS sampled every 5 ms around hsolve
+python3 tools/run/guard.py --skip-busy-check --mem-gb 4 --timeout 600 -- python3 $S/rss_trace.py rss.tsv -- \
+  $BIN --A data/cases/yee-pec-cube-32/A.npz --config <case config + "ordering": 5> --threads 8 \
+  --memory-budget-gb 0.394 --out OUT --log OUT/log.jsonl -q          # also 0.47; --certificate off
+# ss-3dspectralwave2 (slot): one guard, two nested runs (fault bit 4 config; the case config)
+python3 tools/run/guard.py --exclusive --timeout 2700 -- bash $S/spw_fix.sh $S/bin/hsolve_fix2 \
+  f4-1:$S/configs/spw-f4.json def-1:data/cases/ss-3dspectralwave2/config.json
+# proof time (slot)
+python3 tools/run/guard.py --exclusive --timeout 900 -- bash $S/bproof.sh $S/bin/hsolve_fix2 3 \
+  cav2d-rect-pert-1e5 ss-tem27623
+# regression check (slot; then tools.eval.sweep in the build lane and the table)
+python3 tools/run/guard.py --exclusive --timeout 1200 -- python3 tools/bench/ab_cases.py run \
+  --bin head=$S/bin/hsolve_p8head --bin fix=$S/bin/hsolve_fix3 --reps 0,1,2,3,4 --run-dir $S/screen2 \
+  cav2d-rect-pert-1e5 ss-qa8fk-qa8fm yee-pec-cube-16 syn-lap3d-22 yee-pec-box-1e4 syn-mem27-46 \
+  syn-multiplicity-real-1e4 ss-tem27623
+python3 tools/run/guard.py --skip-busy-check --mem-gb 12 --timeout 550 -- python -m tools.eval.sweep $S/screen2 \
+  --out $S/screen2/eval.md
+python tools/bench/ab_cases.py table --base head --new fix --md table.md --json results/p8_fix_screen.json $S/screen2
+```
