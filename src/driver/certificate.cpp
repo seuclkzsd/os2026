@@ -132,14 +132,17 @@ DenseMatrix<T> NearestCertifier<T>::deflation_block(const NearestWindow& w, cons
   return x;
 }
 
-// The randomized check needs kappa, and only a proven one counts for auto: the Lanczos estimate
-// of a general B's kappa (~0.1 s at n = 1e5) is computed only when the mode is randomized.
+// The randomized check needs kappa, and only a proven one certifies: the Lanczos estimate of a
+// general B's kappa (~0.1 s at n = 1e5) is computed only for a run() that asks for a screening
+// result (the solve path never runs the check without a proven kappa).
 template <class T>
-const StartScaling& NearestCertifier<T>::scaling() {
-  if (!scaling_)
-    scaling_ = std::make_unique<StartScaling>(
-        start_scaling_for<T>(pencil_.b(), 100.0, c_.cfg.certificate == CertificateMode::Randomized));
-  return *scaling_;
+const StartScaling& NearestCertifier<T>::scaling(bool estimate) {
+  if (!proven_scaling_)
+    proven_scaling_ = std::make_unique<StartScaling>(start_scaling_for<T>(pencil_.b(), 100.0, false));
+  if (proven_scaling_->rigorous || !estimate) return *proven_scaling_;
+  if (!estimated_scaling_)
+    estimated_scaling_ = std::make_unique<StartScaling>(start_scaling_for<T>(pencil_.b(), 100.0, true));
+  return *estimated_scaling_;
 }
 
 template <class T>
@@ -193,7 +196,8 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
   in.complex_scalars = is_complex_v<T>;
   in.factorize_s = timings_.factorize_s > 0.0 ? timings_.factorize_s : model_factor_s(est, in_size.order, threads);
   const double analysis = model_analysis_s(in_size.order, in_size.entries, static_cast<double>(est.factor_entries));
-  in.counter_analysis_s = analysis;
+  // The exact counts run on this certifier's counter once single counts built it (exact_counts).
+  in.counter_analysis_s = counter_ ? 0.0 : analysis;
   // A fresh counter analyses its double instance at construction and its single one at the first
   // single count; a counter of an earlier round has done both.
   in.single_analysis_s = counter_ ? (counter_->stats().single_counts > 0 ? 0.0 : analysis) : 2.0 * analysis;
@@ -226,7 +230,7 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
     }
   }
   if (in.epsilon > 0.0) {
-    const StartScaling& sc = scaling();
+    const StartScaling& sc = scaling(cfg.certificate == CertificateMode::Randomized);
     ch.kappa_rigorous = sc.rigorous;
     in.kappa = std::isfinite(sc.kappa) && sc.kappa >= 1.0 ? sc.kappa : 1.0;
     if (cfg.certificate != CertificateMode::Randomized && !sc.rigorous) {
@@ -247,7 +251,10 @@ CertificateChoice NearestCertifier<T>::choose(const NearestWindow& w, const Roun
   } else {
     const SingleWindow sw = single_window(w, pairs.all);  // wanted region: the selected pairs' disc
     if (sw.lower < sw.wanted_lower && sw.wanted_upper < sw.upper) {
-      const SingleCountValidity v = single_count_validity(pencil_, sw, single_rule());
+      // auto demands the safety margin over the rule's assumed backward error (kAutoSingleSafety)
+      SingleCountRule rule = single_rule();
+      if (cfg.certificate == CertificateMode::Auto) rule.backward_factor *= kAutoSingleSafety;
+      const SingleCountValidity v = single_count_validity(pencil_, sw, rule);
       in.single_valid = v.valid();
       ch.single_reason = v.reason;
     } else {
@@ -267,6 +274,18 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
   if (cfg.certificate == CertificateMode::Exact || cfg.certificate == CertificateMode::Off) return {};
   PhaseScope phase(c_.clock, Phase::Certificate);
   fallback_note_.clear();
+  if (cfg.certificate == CertificateMode::Randomized && pencil_.b() && !scaling(false).rigorous) {
+    // A general B: kappa can only be estimated, so a pass would be a SCREENING result, not a
+    // certificate - and the check costs more than the counts it cannot replace. Not run (the
+    // note goes into every round's statement).
+    fallback_note_ = "randomized check not run: the kappa of B is not proven (" + scaling(false).note +
+                     "), so a pass would be a screening result, not a certificate";
+    if (!randomized_failed_)
+      warn(c_, "certificate=randomized: the kappa of B is not proven (B neither diagonal nor diagonally "
+               "dominant); the exact counts certify instead of a screening-only randomized check");
+    randomized_failed_ = true;
+    return {};
+  }
   const Timer choice_timer;
   const CertificateChoice ch = choose(w, pairs);
   const double choice_s = choice_timer.seconds();
@@ -311,11 +330,17 @@ CheckOutcome NearestCertifier<T>::check(const NearestWindow& w, const RoundPairs
          {"choice_s", choice_s}});
   if (method == CertificateMethod::Randomized) {
     const CheckOutcome out = randomized(w, pairs, e.block_size, round);
+    if (out.verdict == CheckOutcome::Verdict::Passed && !c_.rep.certificate.rigorous) {
+      // Not reached with a proven kappa (above); a screening pass never becomes the verdict.
+      randomized_failed_ = true;
+      fallback_note_ = c_.rep.certificate.statement.substr(prefix().size());
+      return {};
+    }
     if (out.verdict != CheckOutcome::Verdict::Undecided) return out;
     // auto: the next cheapest method that certifies
     if (cfg.certificate == CertificateMode::Auto && e.exact_single_s < e.exact_s) method = CertificateMethod::ExactSingle;
   }
-  if (method == CertificateMethod::ExactSingle) return single(w, pairs.all);
+  if (method == CertificateMethod::ExactSingle) return single(w, pairs.all, kAutoSingleSafety);
   return {};
 }
 
@@ -325,7 +350,7 @@ CheckOutcome NearestCertifier<T>::run(CertificateMethod method, const NearestWin
   PhaseScope phase(c_.clock, Phase::Certificate);
   switch (method) {
     case CertificateMethod::Randomized: return randomized(w, pairs, choose(w, pairs).estimate.block_size, round);
-    case CertificateMethod::ExactSingle: return single(w, pairs.all);
+    case CertificateMethod::ExactSingle: return single(w, pairs.all, 1.0);
     case CertificateMethod::Exact: break;
   }
   return {};
@@ -369,7 +394,7 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   o.delta = cfg.certificate_delta;
   o.block_size = block_size;
   o.seed = cfg.seed + 7919u * static_cast<std::uint64_t>(round + 1);  // a fresh start block per round
-  set_start_scaling(o, scaling());
+  set_start_scaling(o, scaling(true));
   o.max_memory_bytes = check_budget_bytes();
   o.tol = cfg.tol * cfg.inner_tol_factor;
   ExclusionResult<T> res;
@@ -431,12 +456,12 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   if (!res.rigorous)
     warn(c_, "certificate: the randomized check passed as a SCREENING result, not a certificate (kappa of B is "
              "only estimated: " +
-                 scaling().note + ")");
+                 scaling(true).note + ")");
   return {CheckOutcome::Verdict::Passed, 0};
 }
 
 template <class T>
-CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>& all) {
+CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>& all, double safety) {
   InertiaCertificate& cert = c_.rep.certificate;
   single_failed_ = true;  // reset below on a verdict
   const SingleWindow sw = single_window(w, all);
@@ -444,27 +469,106 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
     fallback_note_ = "single counts: the window does not strictly contain the wanted region";
     return {};
   }
-  const SingleCountValidity v = single_count_validity(pencil_, sw, single_rule());
+  SingleCountRule rule = single_rule();
+  rule.backward_factor *= safety;
+  const SingleCountValidity v = single_count_validity(pencil_, sw, rule);
   if (!v.valid()) {
     fallback_note_ = "single counts do not certify this window: " + v.reason;
     return {};
   }
+  // nu(sigma) of the main factorization, an exact count when it is a double, full-rank one with
+  // null-pivot detection, taken while the object still holds K(sigma) (per-side check below).
+  if (!nu_sigma_taken_ && c_.held.shift == sigma_ && fac_.inertia().valid) {
+    nu_sigma_taken_ = true;
+    const bool exact = fac_.options().precision == FactorPrecision::Double && !fac_.options().blr;
+    if (exact && !detection_off_ && !c_.held.detection_off) nu_sigma_ = fac_.inertia().neg;
+  }
   // As the exact counts on a counter (MainFactors::Release): the main factors are needed again
   // only for a rerun, which refactorizes; the counts never hold both in memory.
   if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
-  if (!counter_) counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
-  const SingleCertificate s = single_precision_certificate(*counter_, pencil_, sw, single_rule());
+  if (!counter_) {
+    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
+    event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s},
+                                  {"incore_mb", counter_->estimate().incore_mb}, {"owner", std::string("certifier")}});
+  }
+  SingleCertificate s = single_precision_certificate(*counter_, pencil_, sw, rule);
   const auto found = static_cast<index_t>(sw.found.size());
+  const bool counted = s.lower.valid && s.upper.valid;
+  if (counted && (single_fault_lower_ != 0 || single_fault_upper_ != 0)) {  // fault injection (tests)
+    s.lower.neg += single_fault_lower_;
+    s.upper.neg += single_fault_upper_;
+    s.count = s.upper.neg - s.lower.neg;
+    s.certified = s.count == found;
+  }
+  // Per-side check against nu(sigma): nu(sigma) - nu_s(a) found pairs below sigma, nu_s(b) -
+  // nu(sigma) at or above it.
+  index_t found_below = 0;
+  for (double l : sw.found) found_below += l < sigma_ ? 1 : 0;
+  const bool sides_ok = !counted || nu_sigma_ < 0 ||
+                        (nu_sigma_ - s.lower.neg == found_below && s.upper.neg - nu_sigma_ == found - found_below);
   event(c_, "single_counts", {{"lower", w.lower}, {"upper", w.upper}, {"count", static_cast<std::int64_t>(s.count)},
                               {"found", static_cast<std::int64_t>(found)}, {"certified", s.certified},
-                              {"eta_lower", v.eta_lower}, {"eta_upper", v.eta_upper}, {"seconds", s.seconds}});
-  const bool counted = s.lower.valid && s.upper.valid;
-  if (!s.certified && !(counted && s.count > found)) {
-    std::ostringstream os;
+                              {"nu_lower", static_cast<std::int64_t>(counted ? s.lower.neg : -1)},
+                              {"nu_upper", static_cast<std::int64_t>(counted ? s.upper.neg : -1)},
+                              {"nu_sigma", static_cast<std::int64_t>(nu_sigma_)}, {"sides_ok", sides_ok},
+                              {"backward_factor", rule.backward_factor}, {"eta_lower", v.eta_lower},
+                              {"eta_upper", v.eta_upper}, {"seconds", s.seconds}});
+  std::ostringstream os;
+  os.precision(6);
+  if (!counted || s.count < found) {
     os << "single counts did not certify (valid " << counted << ", count " << s.count << " vs found " << found << ")";
     fallback_note_ = os.str();
     return {};
   }
+  if (s.certified && sides_ok) {
+    single_failed_ = false;
+    cert.performed = true;
+    cert.method = certificate_method_name(CertificateMethod::ExactSingle);
+    cert.lower = w.lower;
+    cert.upper = w.upper;
+    cert.count_inertia = s.count;
+    cert.count_found = found;
+    cert.passed = true;
+    cert.rigorous = true;
+    cert.failure_probability = 0.0;
+    os << prefix() << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", "
+       << w.upper << "] equal the " << found << " found pairs there"
+       << (nu_sigma_ >= 0 ? " (on either side of sigma, with the exact count at sigma)" : "")
+       << "; by the perturbation rule (verify.hpp; B = I or diagonal B, backward error of the single LDL^T assumed <= "
+       << rule.backward_factor
+       << " u_s ||K||_1, as double counts assume a backward-stable LDL^T) every eigenvalue in [a + eta_a, b - eta_b) "
+          "= ["
+       << w.lower + v.eta_lower << ", " << w.upper - v.eta_upper << ") is found, which holds the wanted ["
+       << sw.wanted_lower << ", " << sw.wanted_upper << "]";
+    cert.statement = os.str();
+    return {CheckOutcome::Verdict::Passed, 0};
+  }
+  // More counted than found, or per-side counts contradicting nu(sigma): double counts on the same
+  // counter decide (certificate.hpp). They are kept for the caller's exact counts (exact_counts).
+  index_t nu_a = 0, nu_b = 0;
+  if (!exact_counts(w.lower, w.upper, nu_a, nu_b)) {
+    os << "single counts nu(b) - nu(a) = " << s.count << " vs " << found
+       << " found pairs could not be checked in double (a window end is singular)";
+    fallback_note_ = os.str();
+    return {};
+  }
+  if (nu_a != s.lower.neg || nu_b != s.upper.neg) {
+    // The single LDL^T's backward error exceeded the rule's assumption here: not used again.
+    os << "single-precision counts nu_s(a) = " << s.lower.neg << ", nu_s(b) = " << s.upper.neg
+       << " disagree with the double counts nu(a) = " << nu_a << ", nu(b) = " << nu_b << " at the same ends [" << w.lower
+       << ", " << w.upper << "] (the backward error of the single LDL^T exceeded the rule's assumption; single counts "
+       << "are not used again in this solve)";
+    fallback_note_ = os.str();
+    warn(c_, "certificate: " + os.str());
+    return {};
+  }
+  if (s.count == found) {  // both precisions agree, nu(sigma) does not: the double counts certify
+    os << "single-precision counts per side of sigma contradict nu(sigma) = " << nu_sigma_
+       << " of the main factorization; the double counts confirm the single ones";
+    fallback_note_ = os.str();
+    return {};
+  }
+  // A deficit both precisions agree on: an eigenvalue in [a, b] is not found - rerun.
   single_failed_ = false;
   cert.performed = true;
   cert.method = certificate_method_name(CertificateMethod::ExactSingle);
@@ -472,33 +576,33 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   cert.upper = w.upper;
   cert.count_inertia = s.count;
   cert.count_found = found;
-  std::ostringstream os;
-  os.precision(6);
-  if (!s.certified) {
-    // A deficit (see certificate.hpp): rerun with the same method; the exact counts give the
-    // final verdict after the last rerun.
-    cert.passed = false;
-    cert.rigorous = false;
-    cert.failure_probability = 1.0;
-    os << prefix() << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", "
-       << w.upper << "] exceed the " << found << " found pairs there: an eigenvalue within [a - eta_a, b + eta_b) = ["
-       << w.lower - v.eta_lower << ", " << w.upper + v.eta_upper << ") is not found";
-    cert.statement = os.str();
-    fallback_note_ = os.str();  // in case the counts decide after all
-    return {CheckOutcome::Verdict::Missing, s.count - found};
+  cert.passed = false;
+  cert.rigorous = false;
+  cert.failure_probability = 1.0;
+  os << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", " << w.upper
+     << "] exceed the " << found << " found pairs there, and the double counts on the same InertiaCounter agree: "
+     << s.count - found << " eigenvalue(s) in the window are not found";
+  fallback_note_ = os.str();  // the statement if the exact counts decide after all (last round)
+  cert.statement = prefix() + os.str();
+  return {CheckOutcome::Verdict::Missing, s.count - found};
+}
+
+template <class T>
+bool NearestCertifier<T>::exact_counts(double a, double b, index_t& nu_a, index_t& nu_b) {
+  if (!counter_) return false;
+  if (!(kept_.counted && kept_.a == a && kept_.b == b)) {
+    PhaseScope phase(c_.clock, Phase::Certificate);
+    if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
+    const auto counts = counter_->count_pair(1.0, -a, 1.0, -b, true, FactorPrecision::Double);
+    kept_ = KeptCounts{a, b, counts.first.neg, counts.second.neg, true, counts.first.valid && counts.second.valid};
+    event(c_, "certifier_double_counts", {{"lower", a}, {"upper", b}, {"valid", kept_.valid},
+                                          {"nu_lower", static_cast<std::int64_t>(kept_.nu_a)},
+                                          {"nu_upper", static_cast<std::int64_t>(kept_.nu_b)}});
   }
-  cert.passed = true;
-  cert.rigorous = true;
-  cert.failure_probability = 0.0;
-  os << prefix() << "single-precision Sylvester counts nu(b) - nu(a) = " << s.count << " at [" << w.lower << ", "
-     << w.upper << "] equal the " << found
-     << " found pairs there; by the perturbation rule (verify.hpp; B = I or diagonal B, backward error of the "
-        "single LDL^T assumed <= 1e3 u_s ||K||_1, as double counts assume a backward-stable LDL^T) every "
-        "eigenvalue in [a + eta_a, b - eta_b) = ["
-     << w.lower + v.eta_lower << ", " << w.upper - v.eta_upper << ") is found, which holds the wanted ["
-     << sw.wanted_lower << ", " << sw.wanted_upper << "]";
-  cert.statement = os.str();
-  return {CheckOutcome::Verdict::Passed, 0};
+  if (!kept_.valid) return false;
+  nu_a = kept_.nu_a;
+  nu_b = kept_.nu_b;
+  return true;
 }
 
 template <class T>

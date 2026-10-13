@@ -117,18 +117,22 @@ struct SolverConfig {
   ///   randomized the randomized exclusion check (verify.hpp) on the factorization held at sigma,
   ///              p and s from certificate_cost; exact counts when it cannot make a statement
   ///              (gap too small, plan over the memory budget). With a general (non-diagonal,
-  ///              not diagonally dominant) B its kappa is only estimated: a passed check is then a
-  ///              SCREENING result (InertiaCertificate::rigorous = false), not a certificate;
+  ///              not diagonally dominant) B its kappa is only estimated, so a pass would only be
+  ///              a SCREENING result: the check is not run there and the exact counts certify (a
+  ///              warning says so) - no screening result is ever reported as the verdict;
   ///   auto       the method certificate_cost predicts cheapest among exact counts, single-
-  ///              precision counts (only where verify.hpp's rule certifies them) and the
-  ///              randomized check (only with a proven kappa), from measured times of this run
-  ///              (main factorization, solve calls of the Krylov run at its block width);
+  ///              precision counts (only where verify.hpp's rule certifies them with a 10x margin
+  ///              on its assumed backward error, certificate.hpp) and the randomized check (only
+  ///              with a proven kappa), from measured times of this run (main factorization, solve
+  ///              calls of the Krylov run at its block width);
   ///   off        none (inertia_check = off also turns it off).
-  /// A check that detects a missing pair triggers the deflated rerun and checks again; fewer than
-  /// k selected pairs rerun even after a passed check (it covers the found pairs only). Window
-  /// targets (interval / smallest / largest, and nearest targets handed to the windows by the
-  /// zero band) always count exactly: their count points are slice cuts and shifts. The report
-  /// states what was proven (method, rigorous, failure_probability, statement).
+  /// A check that detects a missing pair triggers the deflated rerun and checks again; single
+  /// counts that exceed the found pairs or contradict the exact count at sigma are checked by
+  /// double counts first. Fewer than k selected pairs rerun even after a passed check (it covers
+  /// the found pairs only). Window targets (interval / smallest / largest, and nearest targets
+  /// handed to the windows by the zero band) always count exactly: their count points are slice
+  /// cuts and shifts. The report states what was proven (method, rigorous, failure_probability,
+  /// statement).
   CertificateMode certificate = CertificateMode::Exact;
   double certificate_delta = 1e-12;  ///< randomized check: bound on the failure probability, (0, 1)
   /// FAULT INJECTION, for tests and measurements only (0 = off): after the first Krylov run of a
@@ -173,14 +177,16 @@ struct InertiaCertificate {
   index_t count_found = -1;    ///< distinct (B-orthogonal) computed eigenvectors in the window
   index_t endpoint_moves = 0;  ///< endpoints moved because inertia came back invalid
   bool passed = false;         ///< counts: count_inertia == count_found; randomized: the exclusion
-                               ///< check passed (no further eigenvalue within the window radius)
+                               ///< check passed (no further eigenvalue within the window radius,
+                               ///< kappa of B proven). Always a proof (rigorous): screening
+                               ///< results are never reported as the verdict
   std::string note;            ///< e.g. "not available for GHIEP"
   /// "exact" (double Sylvester counts), "exact_single" (single-precision counts under the
   /// perturbation rule of verify.hpp), "randomized" (exclusion check), "none" (not performed).
   std::string method = "none";
-  /// passed is a proof: true for counts; for the randomized check when its kappa is proven (B = I,
-  /// diagonal or diagonally dominant B) or its Krylov space covered the complement. false with
-  /// passed = true is a SCREENING result, not a certificate (statement says so).
+  /// passed is a proof: true for counts (exact_single: under the rule's assumed backward error,
+  /// stated); for the randomized check when its kappa is proven (B = I, diagonal or diagonally
+  /// dominant B) or its Krylov space covered the complement. false when not passed.
   bool rigorous = false;
   /// Bound on P(passed although a pair within the claimed radius is missing): 0 for counts, the
   /// achieved delta(s) of the randomized check (<= SolverConfig::certificate_delta), 1 = no statement.

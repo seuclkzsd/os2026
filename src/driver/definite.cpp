@@ -477,9 +477,15 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       warn(c, "certificate: the " + cert.method + " check finds " + std::to_string(quick.missing) +
                   " eigenvalue(s) missing near sigma; deflated rerun");
     } else {
-      const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-      const index_t nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
-      const index_t nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+      // Exact counts: on the certifier's InertiaCounter when its single counts built one (no
+      // second analysis; a window it counted to check single counts is not counted again).
+      index_t nu_a = 0, nu_b = 0;
+      const bool on_certifier = fast.exact_counts(a_end, b_end, nu_a, nu_b);
+      if (!on_certifier) {
+        const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
+        nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+        nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+      }
       cert.performed = true;
       cert.lower = a_end;
       cert.upper = b_end;
@@ -489,7 +495,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
         if (std::isfinite(l) && l >= a_end && l <= b_end && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
       cert.count_found = found;
       cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
-      fast.record_exact(counts.uses_counter());
+      fast.record_exact(on_certifier || counts.uses_counter());
       event(c, "certificate", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end}, {"upper", b_end},
                                {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
                                {"count_found", static_cast<std::int64_t>(found)}, {"passed", cert.passed},

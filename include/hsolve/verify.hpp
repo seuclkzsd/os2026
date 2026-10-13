@@ -294,7 +294,11 @@ StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety = 100.0, boo
 // The one non-rigorous input is c g: MUMPS' threshold pivoting has no useful a priori growth
 // bound. SingleCountRule::backward_factor = c g defaults to 1e3, i.e. eta ~ 6e-5 ||K||_1 / b_min,
 // against the largest miscount distance measured on the certpar test set, 5e-6 (scale + |s|)
-// (factor.hpp, InertiaCounter). For a general (non-diagonal) B no cheap rigorous bound on
+// (factor.hpp, InertiaCounter). A later measurement violated the default: on yee-pec-box-1e5 (16
+// threads, 1 of ~50 processes) single counts were off by 2 at ends 2.96e3 or more u_s ||K||_1 /
+// b_min away from every eigenvalue - c g is an assumption with no a priori bound, which callers
+// must guard (the driver: a 10x margin in auto, and double counts on any count above the found
+// pairs; src/driver/certificate.hpp). For a general (non-diagonal) B no cheap rigorous bound on
 // lambda_min(B) exists: the rule does not apply and no certificate is claimed.
 
 struct SingleCountRule {
