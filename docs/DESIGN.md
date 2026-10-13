@@ -892,9 +892,10 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
        INFOG(18) 316 MB），故恰在阈值附近仍可能超出：0.47 GiB 预算下第一次计数通过检查（231 对 234 MB）、峰值
        0.53 GiB（超约 13%），其后 RSS 不回落（JOB=−4 之后仍高约 160–175 MB），第二次被拒，证书未完成。
        ss-3dspectralwave2（14 GiB，16 线程）：故障位 4 强制计数器放不下时与默认配置下计数器估计超出余量时，两次主对象
-       计数的 INFOG(21) 9.5 / 10.0 GB 都在余量 11.9–12.0 GB 内（计数前 RSS 2.43–2.47 GB），都认证，峰值 12.07 / 12.77 GiB
-       （`results/p8_certcost.md` §2.3）；INFOG(18) 在该例为 12.3–12.6 GB，若以它为准反会拒绝能放下的计数。主对象为首选来源时（窗口目标；
-       nearest 在 `counter_pays` 为假时）照旧只受其 ICNTL(23) 约束，与求解自己的分解相同。
+       计数的 INFOG(21) 9.5 / 10.0 GB 都在余量 11.9–12.0 GB 内（计数前 RSS 2.43–2.47 GB），都认证，峰值
+       12.07 / 12.77 GiB（`results/p8_certcost.md` §2.3）；INFOG(18) 在该例为 12.3–12.6 GB，若以它为准反会拒绝能放下的
+       计数。主对象为首选来源时（窗口目标；nearest 在 `counter_pays` 为假时）照旧只受其 ICNTL(23) 约束，与求解自己的
+       分解相同（同样可能因分析之后增长的 RSS 而超出预算，`results/p8_certcost.md` §7）。
      - certifier 自己的计数器（单精度计数及其双精度复核、`exact_counts`）同样先查余量（单精度计数用
        `InertiaCounter::estimate(Single)`，§3.4）；失败后本次求解不再用它（`counter_failure()`），由精确计数下结论；
        失败属内存时 definite.cpp 让 `CountSource` 也不再建同一主元顺序上的计数器（`avoid_counter`），直接在主对象上数；
