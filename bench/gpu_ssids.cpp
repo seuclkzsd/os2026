@@ -48,9 +48,11 @@
 // used memory sampled every 5 ms through NVML (device-wide, so the GPU must be otherwise idle):
 // after the context, peak, and after the factorizations. --analyze-only 1 stops after the analysis
 // (estimates only).
-// Output: one JSON line on stdout. Run through tools/run/guard.py; G1 used (gpu02, one command line
-// per run, backends and repetitions interleaved by tools/bench/gpu_g1.sh):
-//   tools/dev/cluster_run.sh gpu02 -- tools/bench/gpu_g1.sh CASE...
+// Output: one JSON line on stdout. Run through tools/run/guard.py; the G1 numbers in
+// results/gpu_g1.md come from tools/bench/gpu_g1.sh (one process per backend variant, variants and
+// repetitions interleaved, every process in gpu02's measurement slot), e.g.
+//   tools/dev/cluster_run.sh gpu02 -- tools/bench/gpu_g1.sh --reps 3 syn-mem27-46 yee-pec-box-1e5
+//   (the exact invocations: results/gpu_g1.md, "Environment and commands")
 #include <cuda.h>
 #include <nvml.h>
 #include <omp.h>
