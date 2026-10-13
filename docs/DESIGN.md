@@ -35,6 +35,12 @@ P4 块宽的基，§3.6-3、§3.6-5）；收缩重跑在缺的对收敛后即结
 预留按峰值列计、报告实际块宽；新模块 src/blas（BLAS hook，默认链入 hsolve、route all，§3.8，实测见
 `docs/BLAS.md`）。
 
+v6（P8「certcost」，分支 p8-certcost）——证书的分解失败不再结束求解：计数源（主对象 / InertiaCounter）失败时换另一个，
+估计放不下预算余量的计数器不尝试，都不能计数时 nearest 返回已收敛的对、证书「已做但未完成」（§3.4、§3.6-8，
+`certificate_fault_count` 故障注入）；一般 HPD B 的 κ 与 λ_min(B) 由 IC + Gershgorin 证明（`prove_condition_bound`），
+随机检验与单精度计数因此也能在一般 B 上认证（§3.5b、§3.6-8）；并发端点计数（8 + 8 线程）的可行性与上界实测为
+负结果，未采用（§3.4）；MUMPS 的 SCOTCH 排序仅靠随机种子不能复现（§3.4）。实测见 `results/p8_certcost.md`。
+
 ---
 
 ## 1. 问题范围
@@ -501,13 +507,28 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
     结果标 `rigorous = false`、陈述写明「κ 为假设，筛查结果而非证书」。B = I 而给了 S 时检验自算
     κ = cond(S²)。`start_scaling_for(b, safety, estimate = false)`（P5）跳过一般 B 的 Lanczos 估计
     （n = 1e5 时约 0.1 s），返回 κ = +∞、`rigorous = false`——只要有证明的 κ 的调用方（driver）用它。
+  - **一般 HPD B 的证明的 κ**（P8，`prove_condition_bound`，src/driver/norms.*；driver 的 certifier 用它）：
+    W = diag(w)、wᵢ = fl(1/√bᵢᵢ)（证明所存的权，也就是起始缩放 S），则
+    λ_min(WBW) ≥ lower = `prove_positive_definite` 的下界（§3.6-1(b)：对 WBW − cI 的不完全 Cholesky L，
+    M = WBW − LLᴴ 的 Gershgorin 下界；M 由所存的浮点 L 与缩放元素算出，带 Higham 引理 3.1 的先验舍入界、2 倍余量，
+    对所存的 B 与 w 严格成立，不依赖选主分解的增长因子）；λ_max(WBW) ≤ upper = maxᵢ Σⱼ |bᵢⱼ| wᵢ wⱼ（Gershgorin），
+    每行算出的和乘 (1 + 2γ_{Nᵢ+4})：每项 fl(fl(|bᵢⱼ| wᵢ) wⱼ) 在精确乘积的 (1 + u)²（复数 |·| 另 2u）内，Nᵢ 个非负项
+    的和在 γ_{Nᵢ−1} 内（Higham §3.1），因子 2 为余量。于是 cond(WBW) ≤ κ = upper/lower·(1 + 4u)（商的舍入向外），
+    且 λ_min(B) ≥ b_min = lower/maxᵢ wᵢ²·(1 − 4u)（xᴴBx = yᴴ(WBW)y，y = W⁻¹x，‖y‖ ≥ ‖x‖/max wᵢ）。κ 只以 log κ
+    进入随机检验的步数，Gershgorin 上界足够。证明失败（θ < 0.1、破缺、Gershgorin 不正、超预算）时不作结论。
+    driver 只在随机检验或单精度计数（在 b_min 取最好可能值 min bᵢᵢ 时）可能比精确计数便宜、或模式为 randomized 时
+    才算它，时间预算为精确计数预测时间的 `kBoundsProofShare` = 0.25（成功的证明在数据测例上 0.004–0.08 s）。
+    ss-qa8fk-qa8fm：lower 0.0358、upper 4.22、κ ≤ 118、b_min 1.26e-6（16 线程 0.084 s）；auto 在该例上仍选精确计数
+    （随机检验 ε = 0.14、预测不比精确计数便宜；单精度规则的 η ≈ 254 远大于窗口宽 2），见 `results/p8_certcost.md` §5。
 - 单精度计数规则：`single_count_validity` / `single_precision_certificate`：B = I 或对角 B > 0 时，单精度
   LDLᵀ 计数是 K + E 的精确惯性，‖E‖ ≤ c·g·u_s·‖K‖₁；把窗口两端各收缩 η = ‖E‖/min bᵢᵢ 后若所有已找到
   特征值（含误差棒）都在收缩窗口内且计数相等，则认证。唯一非严格输入是 c·g = 1e3
   （`SingleCountRule::backward_factor`；MUMPS 阈值选主无可用的先验增长界）。P5 的一次实测违反了它：
   yee-pec-box-1e5（16 线程，约 50 个进程中的 1 个）上单精度计数在离每个特征值都至少 2.96e3·u_s·‖K‖₁/b_min
   的端点数错 2 个——c·g 是没有先验上界的假设，调用方必须设防（driver：auto 的 10 倍余量、多于找到数时
-  双精度复核，§3.6-8）。一般 B 不适用、不声称证书。`SingleCountRule::a_norm_1`（≥ 0 时）是调用方已知的
+  双精度复核，§3.6-8）。一般 B 只在调用方给出**证明的** λ_min(B) ≥ `SingleCountRule::b_min_proven` > 0（P8，
+  `prove_condition_bound` 的 b_min）时适用：Weyl 论证在 B^{−1/2} 合同下同样成立，η = c·g·u_s·(‖A‖₁ + |s|·‖B‖₁)/b_min；
+  否则不适用、不声称证书。`SingleCountRule::a_norm_1`（≥ 0 时）是调用方已知的
   ‖A‖₁，省去每个窗口一次 O(nnz(A)) 计算。
 - `certificate_cost`：由已测得的分解时间、单次作用时间等预测 exact（主对象重分解对 / 计数器对）、
   single、randomized（p ∈ {1, 2, 4, 8} 中最快且计划在预算内者）的秒数并推荐；randomized 须比最好的
@@ -757,7 +778,7 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    - **exact**（默认）：两端的双精度 Sylvester 计数，count_inertia = ν(b) − ν(a) 与 count_found（窗口内不同
      B-正交向量数）相等即通过（计数规则与来源见下）。
    - **exact_single**（只由 auto 选）：同样两次计数，用 InertiaCounter 的单精度 LDLᵀ，只在 §3.5b 的扰动规则
-     （B = I 或对角 B）以 10 倍余量认证该窗口时——假定的后向误差 `kAutoSingleSafety` × 1e3 = 1e4·u_s·‖K‖₁
+     （B = I、对角 B，或 P8 起 λ_min(B) 有证明的一般 B）以 10 倍余量认证该窗口时——假定的后向误差 `kAutoSingleSafety` × 1e3 = 1e4·u_s·‖K‖₁
      （yee-pec-box-1e5 上实测的误数发生在 ≥ 2.96e3·u_s·‖K‖₁/b_min 处），每个已找到的特征值与所需区域都离端点
      η 以上。单精度计数多于找到数、或两侧与主分解的精确计数 ν(σ)（主分解为双精度、非 BLR、带零主元检测时）
      矛盾（ν(σ) − ν_s(a) 个应在 [a, σ)、ν_s(b) − ν(σ) 个在 [σ, b]）时，先在同一计数器上做双精度计数复核：
@@ -770,8 +791,9 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      target.sigma）与 r' 之间：1/r_c = 1/r_edge − 0.01·(1/r_edge − 1/r')（`kClaimFraction`）。检验通过且 r_c 内
      找到的个数等于认证的个数时，以概率 ≥ 1 − δ，r_c 内恰有这么多特征值、都由已找到的对逼近，所以选中的对
      就是最近的 k 个；检出（补空间上有新的 Ritz 值）触发重跑；不能下结论（谱隙太窄、计划超出内存预算、
-     收缩块被拒）时交给精确计数，以后各轮不再试。只在 κ(B) 有证明（B = I、对角 B、对角占优 B）时运行：一般
-     B 的 κ 只能估计，通过只是筛查结果——此时不运行，由精确计数出证书并告警，陈述写明原因；**筛查结果从不
+     收缩块被拒）时交给精确计数，以后各轮不再试。只在 κ(B) 有证明（B = I、对角 B、对角占优 B，P8 起还有
+     `prove_condition_bound` 能证明的一般 HPD B，§3.5b）时运行：证明不了的一般 B 的 κ 只能估计，通过只是筛查结果——
+     此时不运行，由精确计数出证书并告警，陈述写明原因；**筛查结果从不
      作为报告的结论**。最后一轮仍检出时由精确计数下最终结论（精确计数能通过的求解不会因随机检验失败）。
    - **auto**：每轮用 `certificate_cost`（§3.5b）以本次运行**实测**的主分解时间与 Krylov 运行一次回代调用的
      时间（按其块宽换算到单列）预测三种方法的秒数，选最便宜且能认证者：randomized 只在 κ 有证明、且比最好的
@@ -819,6 +841,31 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
        0.05–0.14 s 证书时间（5–13%，含其分析），峰值 RSS 比主因子常驻低 21–26%、比主对象计数低
        2–7%；证书仍有两次计数分解，占这些测例总时间的 30–40%（P4 时 hsolve 在真实三维 nearest 测例上慢于
        SLEPc 的主因；P5 的 exact_single 与 randomized 即为此而来）。
+   - **计数失败不结束求解**（P8，`CountSource`、`NearestCertifier`、definite.cpp）：证书的某次分解失败——MUMPS
+     内存不足（INFO −13、ICNTL(23) 上限下的 −19，`OutOfMemoryBudget`）、其它 MUMPS 错误（工作区重试用尽、−9 …，
+     `FactorizationFailed`）或 `std::bad_alloc`——只淘汰该计数来源，不淘汰求解（Internal、InvalidInput、Singular
+     仍照常抛出）：
+     - `CountSource::count`：首选来源失败（事件 `count_source`、告警）后，本次求解不再用它，同一计数改在另一来源上做：
+       计数器失败 → 主对象重分解（主分解精确时）；主对象失败 → 计数器。计数器在**每次计数前**先查其分析估计
+       INFOG(16)：超过计数余量 `count_allowance_mb` = min(0.95·(memory_budget − 当前 RSS), 分解上限) 时先释放常驻的
+       主因子再查，仍超就不尝试（在 ICNTL(23) 下它要么 INFO −19，要么——MUMPS 刚好在上限下时——让进程超出预算：
+       ss-3dspectralwave2 在 14 GiB 下计数器估计 14.5 GB 对上限 13.5 GB 失败，13.6 GB 时运行成功但峰值 RSS 15.1 GiB）。
+     - certifier 自己的计数器（单精度计数及其双精度复核、`exact_counts`）同样先查余量（单精度计数用
+       `InertiaCounter::estimate(Single)`，§3.4）；失败后本次求解不再用它（`counter_failure()`），由精确计数下结论；
+       失败属内存时 definite.cpp 让 `CountSource` 也不再建同一主元顺序上的计数器（`avoid_counter`），直接在主对象上数。
+     - 随机检验需要的 σ 处重分解、或其回代失败：不能下结论，交给精确计数（同 P5 的不能下结论）。
+     - 两个来源都不能计数（`CountFailure`）：nearest 返回已收敛的对，报告证书「已做但未完成」：performed = true、
+       passed = false、rigorous = false、failure_probability = 1、count_inertia = −1、count_found = 窗口内找到数、
+       note 以 "not completed" 开头、statement 写明原因与「对未经认证」，告警，success = false（CLI 退出码 1，结果照写）。
+       收缩重跑在 σ 处重分解失败时同样返回已找到的对（事件 `rerun_failed`、告警、statement 注明）。窗口目标的计数
+       就是解法本身：两个来源都失败时照旧抛出（错误码为最后一次失败的）。
+     - 故障注入 `certificate_fault_count`（只用于测试与测量，`docs/FORMATS.md` §2）：位 1 = 每个 InertiaCounter 的
+       ICNTL(23) 设为 1 MB（计数在 MUMPS 内真实地 INFO −19）；位 2 = 主对象计数抛 OutOfMemoryBudget；位 4 = 计数余量
+       为 0（计数器预判放不下）；位 8 = 重跑的 σ 处重分解失败。`tests/cpp/test_certcost_faults.cpp` 对实数与复数覆盖
+       每条路径（含两者都失败、窗口目标、certifier 计数器）。
+     - 实测：yee-pec-cube-32（METIS）在 0.394 GiB 预算下复现了 ss-3dspectralwave2 的失败方式（主因子外存、计数器估计
+       300 MB 超出余量；P5c 代码 rc = 2 「INFO(1)=−19」），P8 代码改在主对象上计数并认证；ss-3dspectralwave2 本身见
+       `results/p8_certcost.md` §2。
    - 窗口目标（interval / smallest / largest）总是精确计数——它们的计数点就是切点与位移，`certificate =
      randomized` / `off` 被忽略并告警；零带干扰时转交窗口的 nearest 同样精确计数。报告的 method 为 exact。
    - GHIEP 无惯性证书（报告中注明，method 为 none）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。
