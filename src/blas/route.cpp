@@ -193,16 +193,25 @@ const RealBlas& real_blas() noexcept {
   return rb;
 }
 
+// CPUID (x86 only: the SIMD kernels exist only there; elsewhere the portable loops run).
 bool cpu_has_avx512f() noexcept {
   if (env_flag("HS_BLAS_NO_AVX512")) return false;
+#if HS_BLAS_X86
   __builtin_cpu_init();
   return __builtin_cpu_supports("avx512f") != 0;
+#else
+  return false;
+#endif
 }
 
 bool cpu_has_avx2_fma() noexcept {
   if (env_flag("HS_BLAS_NO_AVX2")) return false;
+#if HS_BLAS_X86
   __builtin_cpu_init();
   return __builtin_cpu_supports("avx2") != 0 && __builtin_cpu_supports("fma") != 0;
+#else
+  return false;
+#endif
 }
 
 Isa best_isa() noexcept {

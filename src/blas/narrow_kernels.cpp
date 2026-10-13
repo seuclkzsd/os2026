@@ -10,9 +10,9 @@
 // simd_kernels.hpp for a vector traits type and compiled here twice - AVX-512F (V512, 8 doubles
 // per register) and AVX2 + FMA (V256, 4 doubles) - each set of functions with its own
 // target("...") attribute (no global -m flags: the rest of the binary stays x86-64 baseline).
-// Isa::Portable runs the plain C++ loops below (reference and fallback). Provenance of the SIMD
+// Isa::Portable runs the plain C++ loops below (reference and fallback; on non-x86 CPUs the only
+// kernels compiled, whatever Isa the caller passes). Provenance of the SIMD
 // code: simd_kernels.hpp and docs/BLAS.md (adapted from OpenBLAS 0.3.34, BSD-3-Clause).
-#include <immintrin.h>
 #include <omp.h>
 
 #include <algorithm>
@@ -20,6 +20,10 @@
 #include <memory>
 
 #include "blas/blas_hook.hpp"
+
+#if HS_BLAS_X86
+#include <immintrin.h>
+#endif
 
 namespace hs::blas {
 namespace {
@@ -223,6 +227,7 @@ void trsm_small_portable(bool upper, bool trans, bool unit, fint m, fint n, cons
 }
 
 // ------------------------------------------------------------------------------- SIMD kernels
+#if HS_BLAS_X86
 
 #define HS_T512 __attribute__((target("avx512f"), always_inline)) inline
 #define HS_T256 __attribute__((target("avx2,fma"), always_inline)) inline
@@ -306,16 +311,23 @@ using V = V256;
 #undef HS_T512
 #undef HS_T256
 
+#endif  // HS_BLAS_X86
+
 // Rows [i0, i1) of C = alpha * op(A) * B + beta * C on the given instruction set.
 void nn_rows(Isa isa, fint i0, fint i1, fint n, fint k, double alpha, const double* a, fint lda,
              const double* b, fint ldb, double beta, double* c, fint ldc) {
   switch (isa) {
+#if HS_BLAS_X86
     case Isa::Avx512:
       avx512::nn_rows(i0, i1, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
       break;
     case Isa::Avx2:
       avx2::nn_rows(i0, i1, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
       break;
+#else
+    case Isa::Avx512:
+    case Isa::Avx2:
+#endif
     case Isa::Portable:
       nn_rows_portable(i0, i1, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
       break;
@@ -325,12 +337,17 @@ void nn_rows(Isa isa, fint i0, fint i1, fint n, fint k, double alpha, const doub
 void tn_rows(Isa isa, fint i0, fint i1, fint n, fint k, double alpha, const double* a, fint lda,
              const double* b, fint ldb, double beta, double* c, fint ldc) {
   switch (isa) {
+#if HS_BLAS_X86
     case Isa::Avx512:
       avx512::tn_rows(i0, i1, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
       break;
     case Isa::Avx2:
       avx2::tn_rows(i0, i1, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
       break;
+#else
+    case Isa::Avx512:
+    case Isa::Avx2:
+#endif
     case Isa::Portable:
       tn_rows_portable(i0, i1, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
       break;
@@ -367,12 +384,17 @@ void small_trsm_left(Isa isa, char uplo, char trans, char diag, fint m, fint n, 
   const bool tr = !(trans == 'N' || trans == 'n');
   const bool unit = diag == 'U' || diag == 'u';
   switch (isa) {
+#if HS_BLAS_X86
     case Isa::Avx512:
       avx512::trsm_small(upper, tr, unit, m, n, a, lda, b, ldb);
       break;
     case Isa::Avx2:
       avx2::trsm_small(upper, tr, unit, m, n, a, lda, b, ldb);
       break;
+#else
+    case Isa::Avx512:
+    case Isa::Avx2:
+#endif
     case Isa::Portable:
       trsm_small_portable(upper, tr, unit, m, n, a, lda, b, ldb);
       break;

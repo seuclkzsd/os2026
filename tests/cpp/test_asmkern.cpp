@@ -45,6 +45,23 @@ using hs::blas::RouteConfig;
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
+// What the CPU reports (the hook's SIMD kernels exist on x86 only).
+bool cpu_avx2_fma() {
+#if HS_BLAS_X86
+  return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+  return false;
+#endif
+}
+
+bool cpu_avx512f() {
+#if HS_BLAS_X86
+  return __builtin_cpu_supports("avx512f") != 0;
+#else
+  return false;
+#endif
+}
+
 std::vector<double> random_vec(std::size_t n, std::uint64_t seed) {
   std::mt19937_64 g(seed);
   std::uniform_real_distribution<double> u(-1.0, 1.0);
@@ -193,7 +210,7 @@ TEST(BlasHookConfig, ForcedFallbackWithoutAvx512) {
   const auto a = random_vec(static_cast<std::size_t>(m) * k, 1);
   const auto b = random_vec(static_cast<std::size_t>(k) * n, 2);
   const auto c0 = random_vec(static_cast<std::size_t>(m) * n, 3);
-  const bool has_avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+  const bool has_avx2 = cpu_avx2_fma();
   {
     EnvGuard g("HS_BLAS_NO_AVX512", "1");
     EXPECT_FALSE(hs::blas::cpu_has_avx512f());
@@ -227,7 +244,7 @@ TEST(BlasHookConfig, ForcedFallbackWithoutAvx512) {
   }
   {
     EnvGuard g("HS_BLAS_NO_AVX512", "0");
-    EXPECT_EQ(hs::blas::cpu_has_avx512f(), __builtin_cpu_supports("avx512f") != 0);
+    EXPECT_EQ(hs::blas::cpu_has_avx512f(), cpu_avx512f());
     EXPECT_EQ(hs::blas::cpu_has_avx2_fma(), has_avx2);
   }
 }

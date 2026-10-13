@@ -36,6 +36,17 @@
 #include <cstdint>
 #include <string>
 
+// The hook's SIMD kernels (AVX-512F, AVX2 + FMA) are x86-64 code; on other architectures only the
+// portable loops are compiled and cpu_has_avx512f() / cpu_has_avx2_fma() are false
+// (-DHS_BLAS_X86=0 compiles that variant on x86 too, to check it).
+#ifndef HS_BLAS_X86
+#if defined(__x86_64__) || defined(__i386__)
+#define HS_BLAS_X86 1
+#else
+#define HS_BLAS_X86 0
+#endif
+#endif
+
 namespace hs::blas {
 
 using fint = int;             // Fortran INTEGER (LP64)
@@ -98,7 +109,7 @@ const RealBlas& real_blas() noexcept;
 enum class Isa { Portable = 0, Avx2 = 1, Avx512 = 2 };
 const char* isa_name(Isa isa) noexcept;
 
-/// AVX-512F (and the OS saving its state) per CPUID, unless the environment variable
+/// AVX-512F (and the OS saving its state) per CPUID (false on non-x86), unless the environment variable
 /// HS_BLAS_NO_AVX512 is set to anything but "" or "0" (tests force the fallback with it). Not
 /// cached: reads the environment at every call.
 bool cpu_has_avx512f() noexcept;
