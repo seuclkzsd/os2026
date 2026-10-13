@@ -24,8 +24,10 @@
 //     python3 tools/run/guard.py --exclusive --timeout 600 --
 //       build/release/bench_anaint_orderings --case data/cases/$c --ordering $o --threads 16
 //   4 threads (P5: the 1-thread work of hsolve's nested dissection, the shape fits, the 16 / 4
-//   thread ratios), 3 interleaved repetitions:
-//     python3 tools/run/guard.py --skip-busy-check --cores 28-31 --mem-gb 14 --timeout 900 --
+//   thread ratios), 3 interleaved repetitions. Taken on slot cores 28-31 before the slot lock
+//   existed (src/driver/steps.cpp says what rests on them); timed runs on slot cores must hold the
+//   slot now (docs/DESIGN.md §6), so a reproduction runs, per measurement:
+//     python3 tools/run/guard.py --exclusive --cores 16-19 --timeout 900 --
 //       build/release/bench_anaint_orderings --case data/cases/$c --ordering $o --threads 4 --nd-serial 1
 // (gpu02, 2x Xeon Silver 4314; the driver's choice per case comes from bench_anaint_decide).
 #include <omp.h>

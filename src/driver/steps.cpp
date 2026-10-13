@@ -451,7 +451,9 @@ int nd_ordering(const SolverConfig& cfg) { return cfg.deterministic ? 5 : 3; }
 
 // What a solve does with its factors (PlannedWork), from the end-to-end runs of the data cases
 // (hsolve CLI at 6a3d7c1, 4 threads, report op_applies / factor_stats; all nearest targets):
-//   * HEP / GHEP nearest, block width p = block_size_for(k): column applications ~ 40 + 4k for
+//   * HEP / GHEP nearest, block width p = block_size_for(cfg, k), the P4 width (the run itself
+//     takes the blocktune rule's width, which needs the factorization this plan prices; the
+//     constants were measured with the P4 widths): column applications ~ 40 + 4k for
 //     p = 4 (32 cases, k = 10..26: measured / model median 1.04, range 0.50..1.48), 2k + 12 for
 //     p = 1 (k = 6, 7: 0.92, 1.19); one factorization at sigma, B's inertia one more while
 //     undecided, two certificate counts;
@@ -937,7 +939,22 @@ index_t rerun_block_size(index_t p, index_t missing) {
   return std::max<index_t>(std::max<index_t>(p, 1), std::min<index_t>(kMaxAutoBlockSize, (missing + 1) / 2 * 2));
 }
 
-// Auto block width, from end-to-end runs of p = 1, 4, 8 (ncv auto) on the 30 HEP/GHEP data cases
+// An auto width enters capped at the P4 width: a rerun wants missing + 2 pairs, the regime in
+// which the P4 measurements below found 8 slower than 4, whereas the blocktune rule picks 8 for
+// the main run's k = 10..12 pairs. Measured (gpu01 slot, 16 threads, 5 interleaved runs,
+// certificate_fault_drop = 1, rule width 8 in the main run; rerun phase = refactorization at
+// sigma + rerun iterations, both ending with the missing pair): rerun at 8 -> 4 on
+// ss-2cubes_sphere 1.301 -> 1.197 s (168 -> 100 applications), yee-pec-cube-32 0.788 -> 0.735 s,
+// syn-mem27-46 (certificate auto) 0.235 -> 0.185 s, yee-bloch-1e4 (auto) 0.165 -> 0.131 s; no
+// overlap of the ranges. Against the integration tree (rerun at 8, no lead_nev) the whole solve
+// is 1.05x, 1.09x, 1.33x and 1.14x faster there.
+index_t rerun_block_size(const SolverConfig& cfg, index_t p, index_t missing) {
+  return rerun_block_size(cfg.block_size > 0 ? p : std::min(p, kMaxAutoBlockSize), missing);
+}
+
+// P4 auto block width (spectrum slices and plan_work; nearest-target runs take the blocktune rule
+// below, whose measurements and calibration are in src/eigen/block_rule.cpp), from end-to-end
+// runs of p = 1, 4, 8 (ncv auto) on the 30 HEP/GHEP data cases
 // (bench reproduction: tools/run/guard.py + hsolve --block-size, medians of 3 interleaved runs,
 // 4 threads; the full table is in the drvint report). Iterate-phase time p = 1 -> 4 -> 8:
 //   3-D, 1e5 (syn-mem27-46, yee-pec-cube-32, yee-pec-box-1e5, ss-2cubes_sphere, ss-qa8fk-qa8fm,
@@ -962,8 +979,40 @@ index_t block_size_for(const SolverConfig& cfg, index_t nev) {
   return nev >= kAutoBlockMinNev ? kMaxAutoBlockSize : 1;
 }
 
+// Nearest targets (P5c blocktune): the rule prices each width's block step from the shift's
+// factor entries, n, nnz(B) and the scalar type at 16 threads and keeps p >= 4 from nev >= 8 on
+// (block_rule.hpp; calibrated without the BLAS hook: 0.98x .. 1.19x against the P4 width there).
+// In the P5c integration tree (BLAS hook, route all) the wired default against the P4 width, one
+// binary, bench/blocktune_fix_e2e.cpp --p 0,4 / --p 0,1 on its 12 cases, 16 threads in the
+// measurement slot, three campaigns of 3 - 5 interleaved runs, pooled medians, every run valid by
+// tools/eval: gains where it moves 4 -> 8 on multiple eigenvalues (yee-pec-cube-32 1.08x,
+// syn-mem27-46 1.05x) or 1 -> 2 at k = 6, 7 (cav2d-square-1e4 1.08x, cav2d-rect-pert-1e5 1.02x);
+// losses where it moves 4 -> 8 on distinct ones (ss-2cubes_sphere 0.96x, yee-pec-box-1e5 0.97x,
+// yee-bloch-1e4 0.98x; with HS_BLAS_ROUTE=off 1.00x, 0.98x, 1.03x: the hook's narrow kernels made
+// the p <= 4 solves cheaper than the rule's step model assumes); the six cases where both widths
+// are 4 within +-1 %; geometric mean 1.01x. Never slower than p = 1 (blocktune: 1.03x .. 2.45x).
+// Since then the step from 4 to 8 needs a modelled gain of kRuleWideMargin = 10 % (review of the
+// integration, 20 definite data cases in the slot, block_rule.cpp "BLAS hook"): ss-2cubes_sphere,
+// yee-pec-box-1e5 and syn-lap3d-aniso-1e5 run at 4, the multiplicity cases keep 8.
+index_t block_size_for(const SolverConfig& cfg, const eigen_detail::ShiftInvertShape& shape) {
+  if (cfg.block_size > 0) return cfg.block_size;
+  return eigen_detail::recommended_block_size(shape);
+}
+
+// The memory plan reserves the P4 width (internal.hpp). The p = 8 basis reserved for nearest
+// targets in the P5c integration shrank the factorization cap by 27 n-vectors at k = 10..12: on
+// syn-near-singular-complex-1e5 (AMD, 4 threads; factors in core 142 MB, out of core 74 MB)
+// budgets of 0.3692 and 0.3706 GiB held the factors in core beside the P4 basis (cap 143..145 MB)
+// but sent them out of core beside the p = 8 one (cap 102 / 105 MB; out_of_core = off:
+// OutOfMemoryBudget), where the rule then picked 4 anyway. With the P4 plan the auto width runs
+// in core there like --block-size 4.
+index_t reserved_block_size(const SolverConfig& cfg) {
+  return std::min(cfg.block_size > 0 ? cfg.block_size : kMaxAutoBlockSize, kMaxAutoBlockSize);
+}
+
 template <class T>
-index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p) {
+index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p,
+                       index_t warn_below) {
   const double vec = static_cast<double>(n) * sizeof(T);
   const double avail =
       c.cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
@@ -973,14 +1022,40 @@ index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_
   const index_t wanted = std::max<index_t>(p, 1);
   p = wanted;
   while (p > 1 && bytes(p) > 0.9 * avail) p /= 2;
-  if (p < wanted)
-    warn(c, "Krylov block size reduced from " + std::to_string(wanted) + " to " + std::to_string(p) +
-                " by the memory budget");
+  if (p < wanted) {
+    if (p < (warn_below > 0 ? warn_below : wanted))
+      warn(c, "Krylov block size reduced from " + std::to_string(wanted) + " to " + std::to_string(p) +
+                  " by the memory budget");
+    else
+      event(c, "block_size_fit", {{"wanted", static_cast<std::int64_t>(wanted)},
+                                  {"used", static_cast<std::int64_t>(p)}, {"avail_mb", avail / 1e6}});
+  }
   return p;
 }
 
+template <class T>
+KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, index_t n) {
+  const index_t k =
+      cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
+  const index_t indefinite = ghiep_reserve_columns<T>(cfg, n);
+  const auto columns = [&](index_t p) {
+    const index_t ncv = std::max(
+        cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k + 16) + 1, k + 32),
+        lanczos_basis_columns(n, 0, std::min(n, k), cfg.ncv, p));
+    const index_t definite = ncv + 6 * k;
+    return type == ProblemType::GeneralizedIndefinite ? indefinite
+           : type == ProblemType::Auto                ? std::max(definite, indefinite)
+                                                      : definite;
+  };
+  KrylovReservation r;
+  r.block_size = reserved_block_size(cfg);
+  r.columns = columns(r.block_size);
+  return r;
+}
+
 #define HS_INSTANTIATE_DRIVER_BLOCKS(T)                                                                     \
-  template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t);
+  template index_t fit_block_size<T>(Ctx&, index_t, index_t, index_t, index_t, index_t, index_t);         \
+  template KrylovReservation krylov_reservation<T>(const SolverConfig&, ProblemType, index_t);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_BLOCKS)
 #undef HS_INSTANTIATE_DRIVER_BLOCKS
 

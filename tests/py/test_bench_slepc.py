@@ -708,6 +708,19 @@ def test_compare_slepc_config_and_hsolve_command(tmp_path):
     assert cfg_doc["inertia_check"] == "off" and cfg_doc["target"]["mode"] == "interval"
     assert cmd[cmd.index("--config") + 1] == str(out.parent / "config-hsolve-nocert.json")
     assert "--B" not in cmd and cmd[cmd.index("--threads") + 1] == "2"
+    # hsolve-auto: the case config with certificate=auto, written next to the result like nocert's
+    out = tmp_path / "raw" / "hsolve-auto"
+    cmd = compare.hsolve_command(c, "hsolve-auto", out, 2, args, None)
+    cfg_doc = json.loads((out.parent / "config-hsolve-auto.json").read_text())
+    assert cfg_doc == {**c.config, "certificate": "auto"}
+    assert cmd[cmd.index("--config") + 1] == str(out.parent / "config-hsolve-auto.json")
+    # plain hsolve runs the case's own config.json
+    cmd = compare.hsolve_command(c, "hsolve", tmp_path / "raw" / "hsolve", 2, args, None)
+    assert cmd[cmd.index("--config") + 1] == str(c.path / "config.json")
+    with pytest.raises(SystemExit, match="unknown hsolve variant"):
+        compare.hsolve_command(c, "hsolve-fast", tmp_path / "raw" / "x", 2, args, None)
+    with pytest.raises(SystemExit, match="unknown solver"):   # before any run (and before the guard check)
+        compare.main(["tiny", "--tag", "t", "--root", str(tmp_path), "--solvers", "hsolve,hsolve-exact"])
     ph = compare.hsolve_phases({"factor_stats": {"analyze_s": 1.0, "factorize_s": 2.0, "factorizations": 3,
                                                  "rhs_solved": 40, "solve_s": 0.5},
                                 "time_iterate_s": 4.0, "time_verify_s": 0.3})

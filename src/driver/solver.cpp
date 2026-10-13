@@ -267,23 +267,19 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
   //    Krylov-Schur peak plus the bases held for the union refinement (indefinite); both while the
   //    type is still open.
   const double budget = cfg.memory_budget_gb * 1073741824.0;
-  const index_t k_guess = cfg.target.mode == TargetMode::Interval ? std::min<index_t>(n, 64) : cfg.target.k;
-  // Definite path: the block Lanczos basis of the auto block width (DESIGN §3.6-3; block layout of
-  // eigen.hpp). A wider explicit block_size is not reserved here: the factorization has priority,
-  // and fit_block_size() halves the width (with a warning) when its basis does not fit what the
-  // factors leave.
-  const index_t p_guess = std::min(cfg.block_size > 0 ? cfg.block_size : driver::kMaxAutoBlockSize,
-                                   driver::kMaxAutoBlockSize);
-  const index_t ncv_guess =
-      std::max(cfg.ncv > 0 ? cfg.ncv : std::max<index_t>(2 * (k_guess + 16) + 1, k_guess + 32),
-               driver::lanczos_basis_columns(n, 0, std::min(n, k_guess), cfg.ncv, p_guess));
-  const index_t definite_columns = ncv_guess + 6 * k_guess;
-  const index_t indefinite_columns = driver::ghiep_reserve_columns<T>(cfg, n);
-  const index_t reserve_columns = type == ProblemType::GeneralizedIndefinite ? indefinite_columns
-                                  : type == ProblemType::Auto ? std::max(definite_columns, indefinite_columns)
-                                                              : definite_columns;
-  const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(reserve_columns);
-  const double cap_mb = (budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0)) - krylov_bytes) * 0.95 / 1e6;
+  // Definite path: the block Lanczos basis of the P4 width (reserved_block_size; DESIGN §3.6-3;
+  // block layout of eigen.hpp). A wider width - an explicit block_size, or the blocktune rule's
+  // 8 for a nearest target, picked after the factorization - is not reserved: the factorization
+  // has priority, and fit_block_size() takes the wider width only where the factors leave room
+  // for its basis.
+  const double free_bytes =
+      budget - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  const driver::KrylovReservation reserve = driver::krylov_reservation<T>(cfg, type, n);
+  const double krylov_bytes = static_cast<double>(n) * sizeof(T) * static_cast<double>(reserve.columns);
+  const double cap_mb = (free_bytes - krylov_bytes) * 0.95 / 1e6;
+  event(c, "memory_plan", {{"reserved_block_size", static_cast<std::int64_t>(reserve.block_size)},
+                           {"reserved_columns", static_cast<std::int64_t>(reserve.columns)},
+                           {"krylov_mb", krylov_bytes / 1e6}, {"cap_mb", cap_mb}});
   if (cap_mb <= 0)
     HS_THROW(OutOfMemoryBudget, "matrices and Krylov basis alone exceed memory_budget_gb = " << cfg.memory_budget_gb);
   const FactorOptions fopts = driver::factor_options_from(cfg, cap_mb);

@@ -288,7 +288,8 @@ TEST(DriverCounter, CounterPaysRule) {
 
 // An explicit block width far beyond what the budget holds is reduced by fit_block_size (warning)
 // instead of failing up front: the reservation before the analysis only covers the auto width.
-// GHIEP ignores block_size (single-vector general Krylov-Schur).
+// GHIEP runs take ghiep_block_size (min(block_size, nev, 64, n / 16) for an explicit width),
+// halved by their own memory fit; the report states the width of the first run.
 TEST(DriverBlocks, ExplicitBlockWidthBeyondTheBudgetIsReduced) {
   const index_t nx = 50, ny = 41, n = nx * ny;
   auto a = hs::test::laplacian_2d<double>(nx, ny);
@@ -321,7 +322,10 @@ TEST(DriverBlocks, ExplicitBlockWidthBeyondTheBudgetIsReduced) {
   cfg.memory_budget_gb = budget_gb();
   const auto g = hs::solve(a, &b, cfg);
   EXPECT_EQ(g.report.problem, hs::ProblemType::GeneralizedIndefinite);
-  EXPECT_EQ(g.report.block_size, 1);
+  // 2048 capped at nev = 10. Before the GHIEP path wrote SolveReport::block_size it stayed 1.
+  ASSERT_EQ(hs::driver::ghiep_block_size(cfg, n, 10), 10);
+  EXPECT_GT(g.report.block_size, 1);
+  EXPECT_LE(g.report.block_size, hs::driver::ghiep_block_size(cfg, n, 10));
   EXPECT_EQ(g.eigenvalues.size() + g.complex_eigenvalues.size(), 10u);
 }
 

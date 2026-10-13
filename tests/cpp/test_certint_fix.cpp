@@ -435,6 +435,38 @@ TYPED_TEST(CertintFixTyped, SingleCountsPerSideMustMatchTheCountAtSigma) {
   EXPECT_EQ(events(path + ".2", "single_counts").at(0)["sides_ok"], true);
 }
 
+// certint deferred finding 8: single counts that certify at once pay one counter analysis (the
+// single instance; the double one is deferred to a double count), and auto's cost inputs say so:
+// one analysis for the single path of a fresh certifier, the exact counts' analysis until the
+// counter's double instance exists.
+TYPED_TEST(CertintFixTyped, SingleCountsPayOneCounterAnalysis) {
+  using T = TypeParam;
+  auto s = solved_laplacian<T>(hs::CertificateMode::Auto);
+  const std::string path = ::testing::TempDir() + "/certint_fix_one_analysis.jsonl";
+  {
+    Rig<T> rig(*s, {}, path);
+    const auto fresh = rig.certifier.choose(s->window, {s->all}).inputs;
+    EXPECT_GT(fresh.counter_analysis_s, 0.0);
+    EXPECT_EQ(fresh.single_analysis_s, fresh.counter_analysis_s);  // one analysis (P5b: two)
+    EXPECT_EQ(rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {s->all}, 0).verdict,
+              hs::driver::CheckOutcome::Verdict::Passed);
+    const auto after_single = rig.certifier.choose(s->window, {s->all}).inputs;
+    EXPECT_EQ(after_single.single_analysis_s, 0.0);
+    EXPECT_EQ(after_single.counter_analysis_s, fresh.counter_analysis_s);  // double still deferred
+    ASSERT_TRUE(rig.count_exactly(s->window, 8));  // double counts on the same counter
+    EXPECT_EQ(rig.certifier.choose(s->window, {s->all}).inputs.counter_analysis_s, 0.0);
+  }
+  const auto single = events(path, "single_counts");
+  ASSERT_EQ(single.size(), 1u);
+  EXPECT_EQ(single[0]["certified"], true);
+  EXPECT_EQ(single[0]["counter_analyses"], 1);
+  const auto counter = events(path, "inertia_counter");
+  ASSERT_EQ(counter.size(), 1u);
+  EXPECT_EQ(counter[0]["double_deferred"], true);
+  EXPECT_EQ(counter[0]["analyze_s"], 0.0);
+  EXPECT_EQ(events(path, "certifier_double_counts").size(), 1u);
+}
+
 // auto on a 3-D-fill pencil (timings that make single counts the cheapest): a real deficit (one
 // copy of the double eigenvalue removed) is confirmed by the double counts - verdict Missing, the
 // statement names the auto prediction once (it was repeated when the counts decided after a

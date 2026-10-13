@@ -72,14 +72,25 @@ struct SolverConfig {
   double inner_tol_factor = 0.1;    ///< Krylov tolerance = tol * inner_tol_factor
   index_t ncv = 0;                  ///< 0 = auto
   index_t block_size = 0;           ///< Krylov block width p of the shift-invert Lanczos runs (HEP /
-                                    ///< GHEP, incl. slices; KrylovSchurOptions::block_size): 0 = auto
-                                    ///< (src/driver/internal.hpp block_size_for: p = 4 for runs of
-                                    ///< >= 8 wanted pairs, else 1; depends on nev only), 1 = single
-                                    ///< vector. A deflated certificate rerun missing m pairs uses
-                                    ///< max(p, min(4, m rounded up to even)) (rerun_block_size), so
-                                    ///< it gets all missing copies of a multiple eigenvalue by
-                                    ///< construction only up to that width. p is halved (warning)
-                                    ///< while the block basis does not fit the memory budget.
+                                    ///< GHEP, incl. slices; KrylovSchurOptions::block_size): 0 = auto,
+                                    ///< 1 = single vector. Auto (src/driver/internal.hpp
+                                    ///< block_size_for): nearest targets take the blocktune rule
+                                    ///< (src/eigen/block_rule.hpp recommended_block_size: p in
+                                    ///< {1, 2, 4, 8} from n, nev, the entries of the shift's
+                                    ///< factors, nnz(B) and the scalar type, calibrated at 16
+                                    ///< threads; p >= 4 from 8 wanted pairs on; no timing enters);
+                                    ///< spectrum slices (interval / smallest / largest, windowed
+                                    ///< nearest) p = 4 for >= 8 wanted pairs of the slice, else 1.
+                                    ///< A deflated certificate rerun missing m pairs uses
+                                    ///< max(q, min(4, m rounded up to even)) (rerun_block_size),
+                                    ///< q = p for a configured width, min(p, 4) for the auto one,
+                                    ///< so it gets all missing copies of a multiple eigenvalue by
+                                    ///< construction only up to that width; it asks for m + 2
+                                    ///< pairs but ends once the m nearest have converged. The
+                                    ///< memory plan reserves the basis of min(p, 4) only (auto: 4);
+                                    ///< p is halved while its basis does not fit beside the
+                                    ///< factors (warning, except for an auto width that stays at
+                                    ///< or above the reserved one).
                                     ///< GHIEP (src/driver/indefinite.cpp): auto p = 2 for n >= 2e4
                                     ///< and nev >= 4, else 1; a configured p is capped at nev, 64
                                     ///< and n/16, probes (nev <= 2) stay single-vector, and p is

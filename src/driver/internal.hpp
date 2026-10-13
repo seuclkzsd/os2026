@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "driver/norms.hpp"
+#include "eigen/block_rule.hpp"
 #include "hsolve/dense.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/factor.hpp"
@@ -446,20 +447,59 @@ CostModel make_cost_model(const FactorEstimate& est, index_t n, int threads, boo
 /// then runs one single-vector cycle over it). ncv: SolverConfig::ncv (0 = auto).
 index_t lanczos_basis_columns(index_t n, index_t d, index_t nev, index_t ncv, index_t p);
 
-/// Block width of the auto rule, used for runs of at least kAutoBlockMinNev wanted pairs.
+/// Block width of the P4 auto rule, used for runs of at least kAutoBlockMinNev wanted pairs; also
+/// the cap of a deflated rerun's width (rerun_block_size).
 constexpr index_t kMaxAutoBlockSize = 4;
 constexpr index_t kAutoBlockMinNev = 8;
 
-/// Block width of a shift-invert Lanczos run of the definite path for nev wanted pairs:
-/// cfg.block_size if > 0, else the auto rule kMaxAutoBlockSize for nev >= kAutoBlockMinNev and 1
-/// below (measurements in steps.cpp). Deterministic (no timing enters).
+/// Block width of the P4 auto rule for nev wanted pairs: cfg.block_size if > 0, else
+/// kMaxAutoBlockSize for nev >= kAutoBlockMinNev and 1 below (measurements in steps.cpp). Used
+/// where no factorization of the run's shift exists or the blocktune rule was not calibrated:
+/// spectrum slices (per-slice nev) and the ordering choice's work plan (plan_work, before the
+/// analysis). Deterministic (no timing enters).
 index_t block_size_for(const SolverConfig& cfg, index_t nev);
+
+/// Block width of a nearest-target shift-invert Lanczos run (solve_nearest) once its shift is
+/// factorized: cfg.block_size if > 0, else eigen_detail::recommended_block_size(shape), one of
+/// eigen_detail::kRuleWidths (the blocktune rule, calibrated at 16 threads on nearest-target
+/// runs: src/eigen/block_rule.cpp), with shape = {n, nev, FactorStats::factor_entries of the
+/// shift's factorization, nnz(B) (0 for B = I), scalar type}. Deterministic: a pure function of
+/// the shape, no timing enters (block_rule.hpp, "Reproducibility").
+index_t block_size_for(const SolverConfig& cfg, const eigen_detail::ShiftInvertShape& shape);
+
+/// Block width whose Lanczos basis the memory plan reserves before the analysis (solver.cpp step
+/// 3): the P4 width, min(cfg.block_size or kMaxAutoBlockSize when 0, kMaxAutoBlockSize), for every
+/// target. The factorization has priority: a wider width - an explicit one, or the blocktune
+/// rule's 8 for a nearest target (block_size_for(cfg, shape)) - is not reserved; after the
+/// factorization fit_block_size takes it only where the factors leave room for its basis, and
+/// otherwise halves it (an auto width down to the reserved one without a warning). Reserving the
+/// p = 8 basis instead shrank the factorization cap by its extra columns (27 n-vectors at k =
+/// 10..12), so factors that fit beside the P4 basis went out of core or failed the budget.
+index_t reserved_block_size(const SolverConfig& cfg);
+
+/// The Krylov part of the memory plan (solver.cpp step 3): n-vectors of T the solve path keeps
+/// beside the factors, reserved before the analysis.
+struct KrylovReservation {
+  index_t block_size = 1;  ///< width whose block Lanczos basis is reserved (definite path)
+  index_t columns = 0;     ///< reserved n-vectors
+};
+
+/// Reservation for problem type `type` (Auto: the larger of both paths) and order n: definite
+/// path the Lanczos basis of reserved_block_size(cfg) (lanczos_basis_columns, at least the
+/// single-vector basis of 2 (k + 16) + 1 vectors) plus 6 k candidate / result columns, k =
+/// target.k or min(n, 64) for intervals; GHIEP ghiep_reserve_columns. The P4 plan for every
+/// width: a budget that held it before P5c still holds.
+template <class T>
+KrylovReservation krylov_reservation(const SolverConfig& cfg, ProblemType type, index_t n);
 
 /// p, halved while the basis of a run of width p (lanczos_basis_columns, plus `extra_columns`
 /// n-vectors the caller keeps, e.g. the candidate block X, AX, BX) would not fit the memory left
-/// in the budget (warning when reduced).
+/// in the budget. A reduction below `warn_below` (0: p, i.e. any reduction) warns; one that stops
+/// at or above it only logs the event block_size_fit (an auto width beyond the reserved one,
+/// reserved_block_size).
 template <class T>
-index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p);
+index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_columns, index_t p,
+                       index_t warn_below = 0);
 
 /// Block width of a deflated rerun that misses `missing` pairs after a run with width p:
 /// max(p, min(kMaxAutoBlockSize, missing rounded up to even)), so that a random start block has
@@ -467,6 +507,11 @@ index_t fit_block_size(Ctx& c, index_t n, index_t nev, index_t d, index_t extra_
 /// one run finds them all (eigen.hpp, block mode). More missing copies than the width are left to
 /// rounding and further reruns; see steps.cpp for why it is capped.
 index_t rerun_block_size(index_t p, index_t missing);
+
+/// The same for a run of the configured width: an explicit cfg.block_size keeps its run width p;
+/// an auto width enters capped at kMaxAutoBlockSize (the blocktune rule's p = 8 pays on the main
+/// run's k pairs, not on a rerun's few: steps.cpp).
+index_t rerun_block_size(const SolverConfig& cfg, index_t p, index_t missing);
 
 /// Ritz estimates of the ends of the spectrum of the pencil (from inside): lowest two and
 /// highest two Ritz values of a short Lanczos run (A alone for B = I, B^{-1}A otherwise).

@@ -100,6 +100,8 @@ Dimensions validate(index_t n, const KrylovSchurOptions<T>& o) {
              "invariant subspace of a non-normal operator is not invariant); rerun with a larger "
              "nev/ncv instead");
   }
+  if (o.lead_nev != 0)
+    HS_THROW(InvalidInput, "krylov_schur_general: lead_nev is not supported (Hermitian solver only)");
   if (o.block_size < 1)
     HS_THROW(InvalidInput, "krylov_schur_general: block_size=" << o.block_size << " < 1");
   if (n < 1) HS_THROW(InvalidInput, "krylov_schur_general: empty operator");

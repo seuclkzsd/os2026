@@ -16,6 +16,11 @@
 // rule's pick.
 // This is the CLI's computation after loading (apps/hsolve_cli.cpp calls hs::solve the same way);
 // output files and tools/eval are left out.
+// Superseded (P5c): the "rule" entry reads SolveReport::factor_stats, i.e. the LAST factorization
+// of the warm-up solve (after certificate counts / reruns), not the main shift's factorization the
+// driver's rule sees, and since the P5c integration p = 0 is the rule itself for nearest targets
+// (driver block_size_for(cfg, ShiftInvertShape)). Use bench/blocktune_fix_e2e.cpp (the CLI as
+// tools/bench/compare.py runs it, the main shift's entries from the "factorization" event).
 //
 // Usage (timed: the measurement slot, 16 threads = the judging configuration):
 //   python3 tools/run/guard.py --exclusive --timeout 2700 --

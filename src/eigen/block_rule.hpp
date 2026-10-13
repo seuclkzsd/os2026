@@ -29,16 +29,21 @@
 // calibration shapes keep their pick for entries within +-10 % (test
 // LanczosBlockRuleFix.PinnedPicksSurviveTheOrderingSpread).
 //
-// Driver hook-up (an interface request: src/driver is not this module's). The P4 rule
-// (internal.hpp block_size_for(cfg, nev): 4 for nev >= 8, else 1) has no factor statistics, so:
-//   1. call recommended_block_size(ShiftInvertShape) where the main shift's factorization exists
-//      (solve_nearest after factorize_near: FactorStats::factor_entries of that factorization,
-//      nnz(B), n, nev, scalar type), for SolverConfig::block_size == 0 only;
-//   2. reserve the basis of the widest width the rule returns (kRuleWidths.back() = 8, against
-//      kMaxAutoBlockSize = 4 in solver.cpp's p_guess today) in the memory budget before the
-//      factorization, or fit_block_size halves 8 -> 4 with a warning on memory-tight runs;
+// Driver hook-up (P5c integration, src/driver/internal.hpp): the P4 rule (block_size_for(cfg,
+// nev): 4 for nev >= 8, else 1) has no factor statistics, so
+//   1. solve_nearest calls block_size_for(cfg, ShiftInvertShape) after factorize_near: for
+//      SolverConfig::block_size == 0 this rule on {n, nev, FactorStats::factor_entries of the
+//      main shift's factorization, nnz(B), scalar type};
+//   2. the memory plan before the factorization (krylov_reservation) reserves the basis of the
+//      P4 width 4 only: the factorization has priority (reserving the p = 8 basis shrank the
+//      factorization cap and sent factors out of core that fit beside the P4 basis);
+//      fit_block_size takes 8 after the factorization only where the factors leave room for its
+//      basis, and otherwise halves it to 4 without a warning;
 //   3. the rule is calibrated on nearest-target runs (k wanted pairs next to sigma); spectrum
 //      slicing (per-slice nev, definite.cpp) keeps the P4 rule until measured.
+// BLAS hook (src/blas, route all, the default since P5c): its narrow kernels speed up the p <= 4
+// solves the step model timed without it, so the model overrates the step from 4 to 8; that step
+// needs the wider margin kRuleWideMargin (measurements in block_rule.cpp).
 // Scalar-independent; thread-safe (pure functions).
 #pragma once
 
@@ -90,11 +95,15 @@ double relative_block_steps(index_t p, index_t nev);
 /// Relative advantage a wider width needs over every narrower candidate (the step model is no
 /// better than that), so p = 1 stays unless blocks clearly pay.
 inline constexpr double kRuleMargin = 0.05;
+/// The same for widths above kRuleFloorWidth (8 over 4): the model, timed without the BLAS hook,
+/// overrates that step with it (block_rule.cpp, "BLAS hook").
+inline constexpr double kRuleWideMargin = 0.10;
 
 /// The width minimizing step_cost[i] * relative_block_steps(kRuleWidths[i], nev) over the widths
 /// whose block layout fits an operator of order n (eigen_detail::block_dimensions with the
 /// automatic ncv, as the driver runs it; p = 1 always fits); a width replaces the best narrower one
-/// only when it is cheaper by kRuleMargin. Then the floor: nev >= kRuleFloorMinNev raises the
+/// only when it is cheaper by kRuleMargin (kRuleWideMargin for widths above kRuleFloorWidth). Then
+/// the floor: nev >= kRuleFloorMinNev raises the
 /// result to kRuleFloorWidth if that layout fits. step_cost: any unit, measured or modelled (all
 /// positive and finite, else InvalidInput). nev >= 1, n >= nev (else InvalidInput).
 index_t recommended_block_size(index_t n, index_t nev, const WidthTable& step_cost);

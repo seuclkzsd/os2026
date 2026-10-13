@@ -10,8 +10,10 @@
 // DIR holds A.npz (and B.npz) and config.json. Output: one JSON line per thread count - type,
 // work (factorizations, counts, solve calls, block), choice (FactorOptions::ordering), candidates
 // ("ordering:a|p/score s[/analysis wall s]", a = analysed, p = predicted), p4_choice (0 AMD,
-// 3 SCOTCH). The per-case choices quoted in src/driver/steps.cpp come from
-//   python3 tools/run/guard.py --skip-busy-check --cores 28-31 --mem-gb 14 --timeout 900 --
+// 3 SCOTCH). The per-case choices quoted in src/driver/steps.cpp come from runs of (deterministic:
+// no timing enters a choice, so the build/test lane - docs/DESIGN.md §6 - is the place; the
+// original runs used slot cores before the slot lock existed)
+//   python3 tools/run/guard.py --skip-busy-check --mem-gb 10 --timeout 900 --
 //     build/release/bench_anaint_decide --case data/cases/$c --threads 4,8,16
 #include <omp.h>
 #include <unistd.h>
