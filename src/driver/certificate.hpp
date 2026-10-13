@@ -60,6 +60,20 @@
 // Detected, new_count Ritz values beyond the pass threshold) definite.cpp runs its deflated rerun
 // and checks again with the same method. Detection of an eigenvalue in (r_c, r'] (an unconverged
 // Ritz hint placed the window end too far) is not an error.
+//
+// Failures (P8). A factorization of the checks that fails - MUMPS out of memory (INFO -13, -19
+// under the ICNTL(23) cap), another MUMPS error, std::bad_alloc - never ends the solve:
+//   * this certifier's InertiaCounter (single counts, the double check of single counts,
+//     exact_counts) is abandoned for the solve (counter_failure()); so is one whose estimate
+//     exceeds count_allowance_mb (internal.hpp) - it is not even tried. The exact counts then
+//     come from definite.cpp's CountSource, which skips its own counter too after a memory
+//     failure (same pivot order, same working memory) and counts on the main object;
+//   * a randomized check whose refactorization at sigma or whose solves fail leaves the verdict to
+//     the counts;
+//   * when no count can be made (CountFailure), record_not_completed() reports the certificate as
+//     performed but not completed and definite.cpp returns the converged pairs uncertified
+//     (success = false); a deflated rerun that cannot refactorize at sigma returns the pairs found.
+// The fault bits of SolverConfig::certificate_fault_count exercise each path.
 #pragma once
 
 #include <memory>
@@ -178,13 +192,29 @@ class NearestCertifier {
   /// caller); on_counter: the counts came from an InertiaCounter.
   void record_exact(bool on_counter);
 
+  /// Report fields when no count could be made at this round's window [a, b] (CountFailure: every
+  /// count source failed, `why`): the certificate was performed but not completed - passed =
+  /// false, rigorous = false, failure_probability = 1, count_inertia = -1 (nothing counted),
+  /// count_found = `found`, method "exact" (the counts that failed), and a statement and note that
+  /// say the found pairs are returned uncertified (docs/FORMATS.md §3).
+  void record_not_completed(double a, double b, index_t found, const std::string& why);
+
+  /// Why this certifier's InertiaCounter could not count (its single or double counts failed, or
+  /// its estimate did not fit the count allowance); "" while it did not fail.
+  const std::string& counter_failure() const { return counter_failure_; }
+  /// The failure was one of memory (OutOfMemoryBudget, std::bad_alloc): another InertiaCounter on
+  /// the same pivot order (CountSource's) would not fit either.
+  bool counter_memory_failure() const { return counter_memory_failure_; }
+
   /// The exact (double-precision) counts nu(a), nu(b) of a window on this certifier's
   /// InertiaCounter, which single counts built (its double instance deferred: analysed at the
   /// first double count): no second counter and no main-object factorization. Counted with null-pivot
   /// detection at a and b themselves (gap midpoints, as count_below with s_is_gap); the last
   /// window's counts are kept, so a window counted to check single counts is not counted again.
-  /// false: no counter yet, or K(a) / K(b) flagged singular - the caller counts (count_below).
-  /// Releases the main factors first (MainFactors::Release); Phase::Certificate.
+  /// false: no counter yet, K(a) / K(b) flagged singular, or the counter failed (its estimate
+  /// over count_allowance_mb, a MUMPS error: counter_failure(); not tried again) - the caller
+  /// counts (count_below on its CountSource). Releases the main factors first
+  /// (MainFactors::Release); Phase::Certificate.
   bool exact_counts(double a, double b, index_t& nu_a, index_t& nu_b);
 
   /// The auto choice for window w (no side effect besides the start scaling, computed once:
@@ -247,6 +277,10 @@ class NearestCertifier {
   index_t nu_sigma_ = -1;
   bool nu_sigma_taken_ = false;
   index_t single_fault_lower_ = 0, single_fault_upper_ = 0;  ///< see inject_single_miscount
+  std::string counter_failure_;          ///< see counter_failure()
+  bool counter_memory_failure_ = false;  ///< see counter_memory_failure()
+  /// Records a failure of counter_ (its counts are not tried again in this solve).
+  void counter_failed(const std::string& why, bool memory);
   bool randomized_failed_ = false;  ///< an earlier round's check could not decide: not again
   bool single_failed_ = false;      ///< single counts could not decide (invalid / below found /
                                     ///< contradicted by double counts): not again

@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "driver/projection.hpp"
@@ -381,7 +383,14 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   }
   const DenseMatrix<T> x = deflation_block(w, pairs);
   const index_t m = x.cols();
-  refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
+  try {
+    refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
+  } catch (const Error& err) {
+    if (!count_failure(err)) throw;
+    fallback_note_ = std::string("randomized check could not run: the refactorization at sigma failed (") +
+                     to_string(err.code()) + ": " + err.what() + ")";
+    return {};
+  }
   SolveRefinement refine;
   if (fac_.options().precision == FactorPrecision::Single || fac_.options().blr) {
     refine.max_steps = 10;
@@ -402,8 +411,9 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   try {
     res = exclusion_check<T>(op, b_op.get(), x, sigma_, rad.claim, o);
   } catch (const Error& err) {
-    // Rejected input (e.g. a rank-deficient X) or memory: the exact counts decide instead.
-    if (err.code() != Error::Code::InvalidInput && err.code() != Error::Code::OutOfMemoryBudget) throw;
+    // Rejected input (e.g. a rank-deficient X), memory or a MUMPS solve error: the exact counts
+    // decide instead.
+    if (err.code() != Error::Code::InvalidInput && !count_failure(err)) throw;
     fallback_note_ = std::string("randomized check could not run (") + to_string(err.code()) + "): " + err.what();
     return {};
   }
@@ -484,16 +494,41 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
     const bool exact = fac_.options().precision == FactorPrecision::Double && !fac_.options().blr;
     if (exact && !detection_off_ && !c_.held.detection_off) nu_sigma_ = fac_.inertia().neg;
   }
+  if (!counter_failure_.empty()) {
+    fallback_note_ = "single counts not made: the InertiaCounter failed earlier (" + counter_failure_ + ")";
+    return {};
+  }
   // As the exact counts on a counter (MainFactors::Release): the main factors are needed again
   // only for a rerun, which refactorizes; the counts never hold both in memory.
   if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
-  if (!counter_) {
-    // The double instance only for a check of the single counts (exact_counts): deferred.
-    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options(), /*defer_double_analysis=*/true);
-    event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s}, {"double_deferred", true},
-                                  {"owner", std::string("certifier")}});
+  SingleCertificate s;
+  try {
+    if (!counter_) {
+      // The double instance only for a check of the single counts (exact_counts): deferred.
+      counter_ =
+          std::make_unique<InertiaCounter<T>>(fac_, counter_options(c_, fac_), /*defer_double_analysis=*/true);
+      event(c_, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s}, {"double_deferred", true},
+                                    {"owner", std::string("certifier")}});
+    }
+    // The single counts' working memory must fit what the budget leaves (count_allowance_mb).
+    const double need = counter_->estimate(FactorPrecision::Single).incore_mb;
+    const double allowance = count_allowance_mb(c_, fac_.options().max_memory_mb);
+    if (need > allowance)
+      HS_THROW(OutOfMemoryBudget, "single-precision InertiaCounter: its in-core estimate "
+                                      << need << " MB exceeds the " << allowance
+                                      << " MB the memory budget leaves for a count");
+    s = single_precision_certificate(*counter_, pencil_, sw, rule);
+  } catch (const Error& err) {
+    if (!count_failure(err)) throw;
+    counter_failed(std::string("single counts: ") + to_string(err.code()) + ": " + err.what(),
+                   err.code() == Error::Code::OutOfMemoryBudget);
+    fallback_note_ = "single counts failed (" + counter_failure_ + ")";
+    return {};
+  } catch (const std::bad_alloc&) {
+    counter_failed("single counts: allocation failure (std::bad_alloc)", true);
+    fallback_note_ = "single counts failed (" + counter_failure_ + ")";
+    return {};
   }
-  SingleCertificate s = single_precision_certificate(*counter_, pencil_, sw, rule);
   const auto found = static_cast<index_t>(sw.found.size());
   const bool counted = s.lower.valid && s.upper.valid;
   if (counted && (single_fault_lower_ != 0 || single_fault_upper_ != 0)) {  // fault injection (tests)
@@ -550,8 +585,8 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
   // counter decide (certificate.hpp). They are kept for the caller's exact counts (exact_counts).
   index_t nu_a = 0, nu_b = 0;
   if (!exact_counts(w.lower, w.upper, nu_a, nu_b)) {
-    os << "single counts nu(b) - nu(a) = " << s.count << " vs " << found
-       << " found pairs could not be checked in double (a window end is singular)";
+    os << "single counts nu(b) - nu(a) = " << s.count << " vs " << found << " found pairs could not be checked in double ("
+       << (counter_failure_.empty() ? std::string("a window end is singular") : counter_failure_) << ")";
     fallback_note_ = os.str();
     return {};
   }
@@ -592,11 +627,34 @@ CheckOutcome NearestCertifier<T>::single(const NearestWindow& w, const Block<T>&
 
 template <class T>
 bool NearestCertifier<T>::exact_counts(double a, double b, index_t& nu_a, index_t& nu_b) {
-  if (!counter_) return false;
+  if (!counter_ || !counter_failure_.empty()) return false;
   if (!(kept_.counted && kept_.a == a && kept_.b == b)) {
     PhaseScope phase(c_.clock, Phase::Certificate);
     if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
-    const auto counts = counter_->count_pair(1.0, -a, 1.0, -b, true, FactorPrecision::Double);
+    std::pair<Inertia, Inertia> counts;
+    try {
+      // The double counts' working memory must fit what the budget leaves (count_allowance_mb);
+      // estimate() analyses the deferred double instance.
+      const double need = counter_->estimate().incore_mb;
+      const double allowance = count_allowance_mb(c_, fac_.options().max_memory_mb);
+      if (need > allowance)
+        HS_THROW(OutOfMemoryBudget, "InertiaCounter: its in-core estimate "
+                                        << need << " MB exceeds the " << allowance
+                                        << " MB the memory budget leaves for a count");
+      counts = counter_->count_pair(1.0, -a, 1.0, -b, true, FactorPrecision::Double);
+    } catch (const Error& err) {
+      if (!count_failure(err)) throw;
+      counter_failed(std::string("double counts: ") + to_string(err.code()) + ": " + err.what(),
+                     err.code() == Error::Code::OutOfMemoryBudget);
+    } catch (const std::bad_alloc&) {
+      counter_failed("double counts: allocation failure (std::bad_alloc)", true);
+    }
+    if (!counter_failure_.empty()) {
+      // The caller counts on its CountSource; the statement says why.
+      fallback_note_ += (fallback_note_.empty() ? "" : "; ") + std::string("the certifier's InertiaCounter failed (") +
+                        counter_failure_ + ")";
+      return false;
+    }
     kept_ = KeptCounts{a, b, counts.first.neg, counts.second.neg, true, counts.first.valid && counts.second.valid};
     event(c_, "certifier_double_counts", {{"lower", a}, {"upper", b}, {"valid", kept_.valid},
                                           {"nu_lower", static_cast<std::int64_t>(kept_.nu_a)},
@@ -622,6 +680,41 @@ void NearestCertifier<T>::record_exact(bool on_counter) {
      << "): nu(b) - nu(a) = " << cert.count_inertia << " eigenvalue(s) in [" << cert.lower << ", " << cert.upper
      << "], " << cert.count_found << " distinct found pair(s) there";
   if (cert.passed) os << ": every eigenvalue in the window is found";
+  cert.statement = os.str();
+  fallback_note_.clear();
+}
+
+template <class T>
+void NearestCertifier<T>::counter_failed(const std::string& why, bool memory) {
+  counter_failure_ = why;
+  counter_memory_failure_ = memory;
+  counter_.reset();  // its analyses and whatever workspace MUMPS kept
+  kept_ = KeptCounts{};
+  event(c_, "certifier_counter_failed", {{"reason", why}, {"memory", memory},
+                                         {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
+}
+
+template <class T>
+void NearestCertifier<T>::record_not_completed(double a, double b, index_t found, const std::string& why) {
+  InertiaCertificate& cert = c_.rep.certificate;
+  cert.performed = true;
+  cert.method = certificate_method_name(CertificateMethod::Exact);
+  cert.lower = a;
+  cert.upper = b;
+  cert.count_inertia = -1;
+  cert.count_found = found;
+  cert.passed = false;
+  cert.rigorous = false;
+  cert.failure_probability = 1.0;
+  cert.note = "not completed: no inertia count possible";
+  std::ostringstream os;
+  os.precision(6);
+  os << prefix();
+  if (!fallback_note_.empty()) os << fallback_note_ << "; then ";
+  os << "no double-precision Sylvester count could be made at the window [" << a << ", " << b << "] (" << why
+     << "): the certificate is NOT completed, and the " << found
+     << " found pair(s) there are returned uncertified - no statement about eigenvalues near sigma that were not "
+        "found";
   cert.statement = os.str();
   fallback_note_.clear();
 }

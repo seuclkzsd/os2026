@@ -454,6 +454,17 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
                                                     fac.options().threads, 2);
   CountSource<T> counts(fac, pencil, on_counter, MainFactors::Release);
   NearestCertifier<T> fast(c, pencil, fac, sigma, detection_off, scale, n2a, n2b, timings);
+  // A count or rerun factorization that fails (MUMPS out of memory or another MUMPS error) never
+  // ends the solve: counts move to the other source (CountSource), and when no count can be made,
+  // or the deflated rerun cannot refactorize at sigma, the pairs found so far are returned with
+  // the certificate not completed (success = false; DESIGN §3.6-8).
+  bool not_completed = false;
+  auto found_in = [&](double lo, double hi) {
+    index_t found = 0;
+    for (double l : run.all.lambda)
+      if (std::isfinite(l) && l >= lo && l <= hi && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
+    return found;
+  };
   for (int round = 0; want_cert && round < 3; ++round) {
     if (sel.size() == 0) break;
     const double tiny = 1e-12 * std::max(scale, std::abs(t.sigma));
@@ -494,19 +505,34 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       // Exact counts: on the certifier's InertiaCounter when its single counts built one (no
       // second analysis; a window it counted to check single counts is not counted again).
       index_t nu_a = 0, nu_b = 0;
-      const bool on_certifier = fast.exact_counts(a_end, b_end, nu_a, nu_b);
-      if (!on_certifier) {
-        const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-        nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
-        nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+      bool on_certifier = false;
+      try {
+        on_certifier = fast.exact_counts(a_end, b_end, nu_a, nu_b);
+        if (!on_certifier) {
+          // The certifier's InertiaCounter (same pivot order) did not fit: neither would another.
+          if (fast.counter_memory_failure())
+            counts.avoid_counter(c, "the certifier's InertiaCounter on the same pivot order failed (" +
+                                        fast.counter_failure() + ")");
+          const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
+          nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+          nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+        }
+      } catch (const CountFailure& e) {
+        const index_t found = found_in(a_end, b_end);
+        fast.record_not_completed(a_end, b_end, found, e.what());
+        not_completed = true;
+        event(c, "certificate_counts_failed", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end},
+                                               {"upper", b_end}, {"found", static_cast<std::int64_t>(found)},
+                                               {"reason", std::string(e.what())}});
+        warn(c, "certificate not completed: no inertia count possible (" + std::string(e.what()) + "); the " +
+                    std::to_string(sel.size()) + " converged pair(s) are returned uncertified");
+        break;
       }
       cert.performed = true;
       cert.lower = a_end;
       cert.upper = b_end;
       cert.count_inertia = nu_b - nu_a;
-      index_t found = 0;
-      for (double l : run.all.lambda)
-        if (std::isfinite(l) && l >= a_end && l <= b_end && !(zero_tol >= 0 && std::abs(l) <= zero_tol)) ++found;
+      const index_t found = found_in(a_end, b_end);
       cert.count_found = found;
       cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
       fast.record_exact(on_certifier || counts.uses_counter());
@@ -538,7 +564,20 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
     // restart at widths 4 and 8, whole solve 4.65 .. 4.81 s (the review: 1000 restarts, ~200 s).
     const index_t nev_rerun = std::min<index_t>(n - run.all.size(), missing + 2);
     if (nev_rerun < 1) break;
-    refactorize_at(c, fac, sigma, detection_off);
+    try {
+      if (fault(cfg, kFaultRefactorization))
+        HS_THROW(OutOfMemoryBudget, "fault injection (certificate_fault_count & 8): refactorization at sigma");
+      refactorize_at(c, fac, sigma, detection_off);
+    } catch (const Error& e) {
+      if (!count_failure(e)) throw;
+      const std::string why = std::string(to_string(e.code())) + ": " + e.what();
+      event(c, "rerun_failed", {{"round", static_cast<std::int64_t>(round)}, {"reason", why}});
+      warn(c, "certificate: the deflated rerun for " + std::to_string(missing) +
+                  " missing pair(s) is not possible (the refactorization at sigma failed: " + why +
+                  "); the pairs found so far are returned");
+      cert.statement += "; the deflated rerun for the missing pair(s) failed (refactorization at sigma: " + why + ")";
+      break;
+    }
     DenseMatrix<T> defl = run.all.x;
     const index_t d = defl.cols();
     const index_t p_rerun =
@@ -549,7 +588,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
   if (cert.performed && cert.passed && sel.size() < std::min<index_t>(k, n))
     cert.statement += "; but only " + std::to_string(sel.size()) + " of " + std::to_string(k) +
                       " pairs were found: the window covers the found pairs, not the k-th nearest eigenvalue";
-  if (cert.performed && !cert.passed) {
+  if (cert.performed && !cert.passed && !not_completed) {
     if (cert.count_inertia < 0)
       warn(c, "certificate failed: the " + cert.method + " check still finds eigenvalues missing near sigma");
     else if (cert.count_inertia < cert.count_found)

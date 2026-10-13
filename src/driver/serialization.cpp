@@ -176,6 +176,7 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "certificate") c.certificate = enum_parse<CertificateMode>(v, k);
     else if (key == "certificate_delta") c.certificate_delta = get_number(v, k);
     else if (key == "certificate_fault_drop") c.certificate_fault_drop = get_integer<index_t>(v, k);
+    else if (key == "certificate_fault_count") c.certificate_fault_count = get_integer<index_t>(v, k);
     else if (key == "zero_filter_tol") c.zero_filter_tol = get_number(v, k);
     else if (key == "complex_tol") c.complex_tol = get_number(v, k);
     else if (key == "max_shift_retries") c.max_shift_retries = get_integer<index_t>(v, k);
@@ -196,6 +197,8 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
   if (!(c.certificate_delta > 0.0) || !(c.certificate_delta < 1.0))
     HS_THROW(InvalidInput, "config: certificate_delta must be in (0, 1)");
   if (c.certificate_fault_drop < 0) HS_THROW(InvalidInput, "config: certificate_fault_drop must be >= 0");
+  if (c.certificate_fault_count < 0 || c.certificate_fault_count > 15)
+    HS_THROW(InvalidInput, "config: certificate_fault_count must be a sum of the bits 1, 2, 4, 8 (0..15)");
   // ICNTL(7) = 1 means "pivot order given by the caller": the config cannot give one.
   if (c.ordering != kOrderingNestedDissection && (c.ordering < -1 || c.ordering > 7 || c.ordering == 1))
     HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive), a MUMPS ICNTL(7) value 0 or 2..7, or "
@@ -232,6 +235,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"certificate", enum_name(c.certificate)},
             {"certificate_delta", c.certificate_delta},
             {"certificate_fault_drop", c.certificate_fault_drop},
+            {"certificate_fault_count", c.certificate_fault_count},
             {"zero_filter_tol", c.zero_filter_tol},
             {"complex_tol", c.complex_tol},
             {"max_shift_retries", c.max_shift_retries}};

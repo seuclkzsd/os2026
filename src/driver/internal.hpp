@@ -14,6 +14,7 @@
 #include "eigen/block_rule.hpp"
 #include "hsolve/dense.hpp"
 #include "hsolve/eigen.hpp"
+#include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
 #include "hsolve/log.hpp"
 #include "hsolve/solver.hpp"
@@ -182,6 +183,53 @@ enum class MainFactors {
   Release,
 };
 
+// ------------------------------------------------------------------------------ count failures
+
+/// FAULT INJECTION bits of SolverConfig::certificate_fault_count (tests and measurements only):
+/// every InertiaCounter of the solve gets a 1 MB working-memory cap (ICNTL(23)), so its counts
+/// fail inside MUMPS with INFO(1) = -19 (OutOfMemoryBudget), as the counter of ss-3dspectralwave2
+/// did at the 14 GiB budget;
+constexpr index_t kFaultCounterCounts = 1;
+/// counts on the main factorization object throw OutOfMemoryBudget before they factorize;
+constexpr index_t kFaultMainCounts = 2;
+/// the count allowance (count_allowance_mb) is 0: every InertiaCounter is predicted not to fit;
+constexpr index_t kFaultCountAllowance = 4;
+/// the refactorization of the main object at the working shift for a deflated rerun (or a
+/// randomized check after counts moved it) throws OutOfMemoryBudget.
+constexpr index_t kFaultRefactorization = 8;
+constexpr index_t kFaultCountMask = 15;
+inline bool fault(const SolverConfig& cfg, index_t bit) { return (cfg.certificate_fault_count & bit) != 0; }
+
+/// A factorization error that ends one count source or one refactorization, not the solve:
+/// MUMPS out of memory (INFO -13, -19, an ICNTL(23) cap; OutOfMemoryBudget) or any other MUMPS
+/// failure (workspace retries exhausted, -9 ...; FactorizationFailed). Bugs (Internal), invalid
+/// input and singular shifts are not.
+inline bool count_failure(const Error& e) {
+  return e.code() == Error::Code::OutOfMemoryBudget || e.code() == Error::Code::FactorizationFailed;
+}
+
+/// No inertia count could be made at a point: every count source failed (CountSource::count).
+/// The nearest certificate catches it and returns its converged pairs uncertified (definite.cpp);
+/// window targets, built on counts, end with it. Its code is that of the last failure.
+class CountFailure : public Error {
+ public:
+  using Error::Error;
+};
+
+/// Share of the memory the budget leaves beside the process (memory_budget_gb - current RSS) that
+/// one count's working memory may take, as the factorization cap leaves 5% of the free memory.
+constexpr double kCountMemoryShare = 0.95;
+
+/// MB the working memory of an inertia count may take now: kCountMemoryShare of what
+/// SolverConfig::memory_budget_gb leaves beside the current RSS, and at most the factorization cap
+/// `cap_mb` (> 0; the counter's ICNTL(23)). 0 under kFaultCountAllowance.
+double count_allowance_mb(const Ctx& c, double cap_mb);
+
+/// The options of an InertiaCounter on the main object `fac` (its threads, scaling, cap ...), with
+/// the 1 MB cap of kFaultCounterCounts.
+template <class T>
+FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac);
+
 /// Where the Sylvester counts of a solve path come from (DESIGN §3.6-8):
 ///   * the main factorization object, refactorized at each count point: it then holds K(s)
 ///     (Ctx::held), which a Krylov run at s reuses (one-sided slice anchors);
@@ -190,8 +238,17 @@ enum class MainFactors {
 ///     main factors; MainFactors says whether those are released before a count (then they are
 ///     refactorized when needed again, as with main-object counts).
 /// Inexact main factors (single precision, BLR) always count on the counter: their own inertia is
-/// that of the rounded / compressed matrix. Not thread-safe; the pencil and the main object must
-/// outlive it.
+/// that of the rounded / compressed matrix.
+/// Robustness (P8): a source whose count fails (count_failure: MUMPS out of memory or another
+/// MUMPS error, std::bad_alloc) is abandoned for the rest of the solve (warning, event
+/// count_source) and the count is retried on the other one - the counter after a failed
+/// main-object count, the main object (exact factors only) after a failed counter. A counter whose
+/// in-core estimate (MUMPS INFOG(16) of its inertia-only analysis) exceeds count_allowance_mb -
+/// after releasing the main factors when they are resident - is not even tried: under its
+/// ICNTL(23) cap it would fail with INFO -19 or, when MUMPS stays just below the cap, run the
+/// process above its budget (ss-3dspectralwave2, 14 GiB: 14.5 GB estimated against a 13.5 GB
+/// cap failed; 13.6 GB ran at a peak RSS of 15.1 GiB). When neither source can count, count()
+/// throws CountFailure. Not thread-safe; the pencil and the main object must outlive it.
 template <class T>
 class CountSource {
  public:
@@ -205,17 +262,32 @@ class CountSource {
 
   SparseFactorization<T>& fac() { return fac_; }
   const ShiftedPencil<T>& pencil() const { return pencil_; }
-  bool uses_counter() const { return use_counter_; }
+  /// The source of the last count (before any count: the preferred one).
+  bool uses_counter() const { return last_on_counter_; }
   /// Inertia of K(s) = A - s B (valid == false: K(s) numerically singular). Main object: Ctx::held
-  /// describes the factorization it now holds. Charged to Phase::Certificate.
+  /// describes the factorization it now holds. Charged to Phase::Certificate. Throws CountFailure
+  /// when no source can count (see the class comment).
   Inertia count(Ctx& c, double s, bool detection);
+  /// Abandon the counter before trying it (why: e.g. another InertiaCounter on the same pivot
+  /// order failed for memory - the certifier's, NearestCertifier::counter_failure()).
+  void avoid_counter(Ctx& c, const std::string& why);
+  /// Why sources were abandoned ("" while none was).
+  std::string failures() const;
 
  private:
+  Inertia count_on_main(Ctx& c, double s, bool detection);
+  Inertia count_on_counter(Ctx& c, double s, bool detection);
+  void abandon(Ctx& c, bool counter, const std::string& why);
+
   SparseFactorization<T>& fac_;
   const ShiftedPencil<T>& pencil_;
   bool use_counter_ = false;
+  bool main_exact_ = true;  ///< the main factors are double precision, full rank (not BLR)
+  bool last_on_counter_ = false;
   MainFactors main_ = MainFactors::KeepWithinCap;
   std::unique_ptr<InertiaCounter<T>> counter_;
+  bool counter_failed_ = false, main_failed_ = false;
+  std::string counter_why_, main_why_;
 };
 
 /// Rule for the nearest target's certificate (`counts` counts, exact main factor): an

@@ -152,6 +152,15 @@ struct SolverConfig {
   /// farthest selected ones with their Ritz hints - so that the solve must find them missing (a
   /// check detecting a copy, or fewer than k selected pairs) and the deflated rerun recover them.
   index_t certificate_fault_drop = 0;
+  /// FAULT INJECTION, for tests and measurements only (0 = off): a sum of bits making the
+  /// factorizations of the certificate fail, so that every recovery path can be exercised
+  /// (src/driver/internal.hpp kFault*): 1 every InertiaCounter gets a 1 MB working-memory cap
+  /// (its counts fail in MUMPS with INFO -19); 2 counts on the main factorization object fail
+  /// (OutOfMemoryBudget); 4 InertiaCounters are predicted not to fit the memory left (count
+  /// allowance 0); 8 the refactorization at the working shift for a deflated rerun fails. A count
+  /// that fails moves to the other count source; with none left the nearest target returns its
+  /// pairs with the certificate performed but not passed (docs/FORMATS.md §3).
+  index_t certificate_fault_count = 0;
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
   double complex_tol = 1e-8;      ///< GHIEP: a pair is complex only if |Im lambda| >

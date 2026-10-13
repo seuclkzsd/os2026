@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <new>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -230,50 +231,148 @@ void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool dete
 
 // ------------------------------------------------------------------------------ inertia counts
 
+double count_allowance_mb(const Ctx& c, double cap_mb) {
+  if (fault(c.cfg, kFaultCountAllowance)) return 0.0;
+  const double free_bytes = c.cfg.memory_budget_gb * 1073741824.0 -
+                            static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  double mb = kCountMemoryShare * std::max(0.0, free_bytes) / 1e6;
+  if (cap_mb > 0) mb = std::min(mb, cap_mb);
+  return mb;
+}
+
+template <class T>
+FactorOptions counter_options(const Ctx& c, const SparseFactorization<T>& fac) {
+  FactorOptions o = fac.options();
+  if (fault(c.cfg, kFaultCounterCounts)) o.max_memory_mb = 1.0;  // MUMPS INFO -19 at every count
+  return o;
+}
+
 template <class T>
 CountSource<T>::CountSource(SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, bool prefer_counter,
                             MainFactors main)
     : fac_(fac), pencil_(pencil), main_(main) {
-  const bool exact = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
-  use_counter_ = prefer_counter || !exact;
+  main_exact_ = fac.options().precision == FactorPrecision::Double && !fac.options().blr;
+  use_counter_ = prefer_counter || !main_exact_;
+  last_on_counter_ = use_counter_;
 }
 
 template <class T>
 CountSource<T>::~CountSource() = default;
 
+// The preferred source first; a source that failed is not tried again in this solve (whatever
+// stopped it - the memory its working set needs, a MUMPS error - would stop it again: an
+// InertiaCounter's analysis on a given pivot order is deterministic, and so is the main object's).
 template <class T>
 Inertia CountSource<T>::count(Ctx& c, double s, bool detection) {
   PhaseScope phase(c.clock, Phase::Certificate);
-  if (!use_counter_) {
-    c.held = FactorHeld{};
-    fac_.set_null_pivot_detection(detection);
-    Inertia in;
-    if (fac_.factorize(1.0, -s)) in = fac_.inertia();
-    fac_.set_null_pivot_detection(true);
-    if (in.valid) c.held = FactorHeld{s, !detection};
-    return in;
+  for (;;) {
+    const bool counter_ok = !counter_failed_;
+    const bool main_ok = main_exact_ && !main_failed_;
+    if (!counter_ok && !main_ok) break;
+    const bool on_counter = use_counter_ ? counter_ok : !main_ok;
+    try {
+      const Inertia in = on_counter ? count_on_counter(c, s, detection) : count_on_main(c, s, detection);
+      last_on_counter_ = on_counter;
+      return in;
+    } catch (const Error& e) {
+      if (!count_failure(e)) throw;
+      abandon(c, on_counter, std::string(to_string(e.code())) + ": " + e.what());
+    } catch (const std::bad_alloc&) {
+      abandon(c, on_counter, "allocation failure (std::bad_alloc)");
+    }
   }
+  throw CountFailure(Error::Code::OutOfMemoryBudget,
+                     "no inertia count possible at s = " + fmt(s) + " (" + failures() + ")");
+}
+
+template <class T>
+Inertia CountSource<T>::count_on_main(Ctx& c, double s, bool detection) {
+  if (fault(c.cfg, kFaultMainCounts))
+    HS_THROW(OutOfMemoryBudget, "fault injection (certificate_fault_count & 2): count on the main factorization");
+  c.held = FactorHeld{};
+  fac_.set_null_pivot_detection(detection);
+  Inertia in;
+  try {
+    if (fac_.factorize(1.0, -s)) in = fac_.inertia();
+  } catch (...) {
+    fac_.set_null_pivot_detection(true);
+    throw;
+  }
+  fac_.set_null_pivot_detection(true);
+  if (in.valid) c.held = FactorHeld{s, !detection};
+  return in;
+}
+
+template <class T>
+Inertia CountSource<T>::count_on_counter(Ctx& c, double s, bool detection) {
   const double cap = fac_.options().max_memory_mb;
   if (!counter_) {
     // Inertia-only instance on the main analysis' pivot order.
-    counter_ = std::make_unique<InertiaCounter<T>>(fac_, fac_.options());
+    counter_ = std::make_unique<InertiaCounter<T>>(fac_, counter_options(c, fac_));
     event(c, "inertia_counter", {{"analyze_s", counter_->stats().analyze_s},
                                  {"incore_mb", counter_->estimate().incore_mb}, {"cap_mb", cap}});
   }
+  const double counter_mb = counter_->estimate().incore_mb;
   // The counter's working memory comes on top of resident main factors. Decided before every
   // count: the main object may hold factors again since the last one (refactorized for a rerun,
   // a rescue, a slice shift).
-  if (fac_.inertia().valid) {
+  auto release_main = [&](bool over_cap, const char* why) {
     const double main_mb = fac_.stats().factor_mb_used;
-    const bool over_cap = cap > 0 && main_mb + counter_->estimate().incore_mb > cap;
-    if ((main_ == MainFactors::Release || over_cap) && fac_.release_factors()) {
-      c.held = FactorHeld{};
-      event(c, "main_factors_released", {{"main_mb", main_mb}, {"counter_mb", counter_->estimate().incore_mb},
-                                         {"cap_mb", cap}, {"over_cap", over_cap}});
-    }
+    if (!(fac_.inertia().valid && fac_.release_factors())) return false;
+    c.held = FactorHeld{};
+    event(c, "main_factors_released", {{"main_mb", main_mb}, {"counter_mb", counter_mb}, {"cap_mb", cap},
+                                       {"over_cap", over_cap}, {"why", std::string(why)}});
+    return true;
+  };
+  if (fac_.inertia().valid) {
+    const bool over_cap = cap > 0 && fac_.stats().factor_mb_used + counter_mb > cap;
+    if (main_ == MainFactors::Release || over_cap) release_main(over_cap, over_cap ? "cap" : "policy");
   }
+  // The counter must fit what the budget leaves now (CountSource comment); resident main factors
+  // go first.
+  double allowance = count_allowance_mb(c, cap);
+  if (counter_mb > allowance && release_main(false, "allowance")) allowance = count_allowance_mb(c, cap);
+  if (counter_mb > allowance)
+    HS_THROW(OutOfMemoryBudget, "InertiaCounter: its in-core estimate " << counter_mb << " MB exceeds the "
+                                                                        << allowance
+                                                                        << " MB the memory budget leaves for a count");
   return counter_->count(1.0, -s, detection);
 }
+
+template <class T>
+void CountSource<T>::abandon(Ctx& c, bool counter, const std::string& why) {
+  (counter ? counter_failed_ : main_failed_) = true;
+  (counter ? counter_why_ : main_why_) = why;
+  if (counter) counter_.reset();  // its analysis and whatever workspace MUMPS kept
+  const bool other = counter ? main_exact_ && !main_failed_ : !counter_failed_;
+  event(c, "count_source",
+        {{"failed", std::string(counter ? "inertia_counter" : "main_factorization")},
+         {"next", std::string(!other ? "none" : counter ? "main_factorization" : "inertia_counter")},
+         {"reason", why}, {"rss_mb", static_cast<double>(current_rss_bytes()) / 1e6}});
+  if (other)
+    warn(c, std::string("certificate counts: the ") + (counter ? "InertiaCounter" : "main factorization") +
+                " could not count (" + why + "); counting on the " +
+                (counter ? "main factorization" : "InertiaCounter") + " instead");
+}
+
+template <class T>
+void CountSource<T>::avoid_counter(Ctx& c, const std::string& why) {
+  if (!counter_failed_) abandon(c, true, why);
+}
+
+template <class T>
+std::string CountSource<T>::failures() const {
+  std::string s;
+  if (counter_failed_) s += "InertiaCounter: " + counter_why_;
+  if (main_failed_) s += (s.empty() ? "" : "; ") + std::string("main factorization: ") + main_why_;
+  if (!main_exact_) s += (s.empty() ? "" : "; ") + std::string("the main factors are inexact (single / BLR)");
+  return s;
+}
+
+#define HS_INSTANTIATE_COUNTER_OPTIONS(T) \
+  template FactorOptions counter_options<T>(const Ctx&, const SparseFactorization<T>&);
+HS_FOR_EACH_SCALAR(HS_INSTANTIATE_COUNTER_OPTIONS)
+#undef HS_INSTANTIATE_COUNTER_OPTIONS
 
 bool counter_pays(const SolverConfig& cfg, const FactorEstimate& e, const MumpsInputSize& in, int threads,
                   index_t counts) {
