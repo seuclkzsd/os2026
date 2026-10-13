@@ -94,23 +94,27 @@ hs::CsrMatrix<T> shifted_laplacian(std::vector<double>& w) {
 TEST(BlocktuneDriver, NearestAutoWidthIsTheRulesPick) {
   hs::SolverConfig cfg;
   ASSERT_EQ(cfg.block_size, 0);
-  const ShiftInvertShape box = shape(109744, 10, 5.376e7, 109744, false);   // yee-pec-box-1e5
+  const ShiftInvertShape cube = shape(92256, 12, 4.584e7, 0, false);        // yee-pec-cube-32
   const ShiftInvertShape cav = shape(99459, 6, 3.871e6, 495751, false);     // cav2d-rect-pert-1e5
   const ShiftInvertShape qa8 = shape(66127, 10, 2.795e7, 1660579, false);   // ss-qa8fk-qa8fm
-  ASSERT_EQ(hs::eigen_detail::recommended_block_size(box), 8);
+  // yee-pec-box-1e5: 4 since the BLAS hook measurements (kRuleWideMargin), 8 before
+  const ShiftInvertShape pec = shape(109744, 10, 5.376e7, 109744, false);
+  ASSERT_EQ(hs::eigen_detail::recommended_block_size(cube), 8);
   ASSERT_EQ(hs::eigen_detail::recommended_block_size(cav), 2);
   ASSERT_EQ(hs::eigen_detail::recommended_block_size(qa8), 4);
-  EXPECT_EQ(hs::driver::block_size_for(cfg, box), 8);
+  ASSERT_EQ(hs::eigen_detail::recommended_block_size(pec), 4);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, cube), 8);
   EXPECT_EQ(hs::driver::block_size_for(cfg, cav), 2);
   EXPECT_EQ(hs::driver::block_size_for(cfg, qa8), 4);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, pec), 4);
   // the P4 widths of the same nev (slices, plan_work)
-  EXPECT_EQ(hs::driver::block_size_for(cfg, box.nev), 4);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, cube.nev), 4);
   EXPECT_EQ(hs::driver::block_size_for(cfg, cav.nev), 1);
   cfg.block_size = 3;
-  EXPECT_EQ(hs::driver::block_size_for(cfg, box), 3);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, cube), 3);
   EXPECT_EQ(hs::driver::block_size_for(cfg, cav), 3);
   cfg.block_size = 1;
-  EXPECT_EQ(hs::driver::block_size_for(cfg, box), 1);
+  EXPECT_EQ(hs::driver::block_size_for(cfg, cube), 1);
 }
 
 // The memory plan reserves the P4 width for every target (P5c integration review: the p = 8

@@ -94,6 +94,28 @@ constexpr double kOrthoSinglePerRow = 0.772e-9;
 // from 4 to 8 or from 1 to 2, and ss-2cubes_sphere is the one case where p = 8 is slower than 4
 // (1.6 %; distinct eigenvalues, p = 8 needs 184 applications against 108): the 4 / 8 choice of the
 // model cannot see the multiplicities that make 8 pay on syn-mem27-46 and yee-pec-cube-32.
+//
+// BLAS hook (P5c integration: src/blas linked into hsolve, route all by default). The constants
+// above were timed without it; its narrow kernels make the p <= 4 solves cheaper. Step time
+// (iteration time / block steps) of 8 against 4 in the integration's end-to-end runs
+// (ss-2cubes_sphere, yee-pec-box-1e5, yee-bloch-1e4, syn-mem27-46, yee-pec-cube-32): 1.27..1.33,
+// modelled 1.12..1.23 - the model overrates the step from 4 to 8 by ~10 %. The rule against the
+// P4 width (hsolve CLI --block-size 0 vs 4, one binary at 482eba6, 16 threads in the gpu01
+// slot, 5 interleaved runs, 20 definite nearest data cases, all 200 runs certified; total time,
+// speed-up of the rule's 8) by the modelled cost(8) / cost(4) of the shape:
+//   0.79..0.80: syn-mem125-46 1.128x, ss-si34h36 1.008x;
+//   0.88..0.89: yee-pec-cube-32 1.084x, syn-mem27-46 1.047x (multiple eigenvalues), against
+//     yee-photonic-rods-1e4 0.975x, yee-photonic-spheres-1e4 0.971x, yee-bloch-1e4 0.975x;
+//   0.92..0.94: yee-pec-box-1e5 0.982x, syn-lap3d-aniso-1e5 0.991x, ss-2cubes_sphere 0.960x.
+// The model cannot tell multiplicities apart, so a recalibration with the hook (8 then never pays
+// on distinct eigenvalues) would give back the 1.05..1.13x of the multiplicity cases. Instead the
+// step beyond the floor width needs kRuleWideMargin = 10 %: the third group moves to 4, the others
+// keep 8. Confirmed (same slot and protocol, the rule with and without the wider margin and the
+// P4 width interleaved): the moved cases run 1.020x (ss-2cubes_sphere), 1.058x (yee-pec-box-1e5)
+// and 1.008x (syn-lap3d-aniso-1e5) faster than at 8; geometric mean against the P4 width over
+// those and four cases that keep 8: 1.001 -> 1.017. The calibration shapes keep their picks within
+// +-10 % of their factor entries (cost(8) / cost(4) at most 0.898 for the 8-picks, at least 0.907
+// for the moved ones).
 
 /// Average basis size of a step of a width-p run with the automatic ncv (block_dimensions).
 double average_basis(index_t n, index_t nev, index_t p) {
@@ -204,7 +226,8 @@ index_t recommended_block_size(index_t n, index_t nev, const WidthTable& step_co
     const index_t p = kRuleWidths[i];
     if (!block_dimensions(s, p, true).feasible) break;  // wider ones do not fit either
     const double cost = step_cost[i] * relative_block_steps(p, nev);
-    if (cost < (1.0 - kRuleMargin) * best_cost) {
+    const double margin = p > kRuleFloorWidth ? kRuleWideMargin : kRuleMargin;
+    if (cost < (1.0 - margin) * best_cost) {
       best = p;
       best_cost = cost;
     }

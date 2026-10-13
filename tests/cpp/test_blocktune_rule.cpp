@@ -97,6 +97,14 @@ TEST(LanczosBlockRule, ChoiceFollowsTheCostTimesSteps) {
       relative_block_steps(2, nev) / relative_block_steps(4, nev) * (1.0 - kRuleMargin);
   EXPECT_EQ(recommended_block_size(n, nev, WidthTable{2, c2, c4_tie * 1.001, 100}), 2);
   EXPECT_EQ(recommended_block_size(n, nev, WidthTable{2, c2, c4_tie * 0.999, 100}), 4);
+  // Beyond the floor width the step needs the wider margin: 8 against 4.
+  const double c8_tie =
+      relative_block_steps(4, nev) / relative_block_steps(8, nev) * (1.0 - hs::eigen_detail::kRuleWideMargin);
+  EXPECT_EQ(recommended_block_size(n, nev, WidthTable{100, 100, 1.0, c8_tie * 1.001}), 4);
+  EXPECT_EQ(recommended_block_size(n, nev, WidthTable{100, 100, 1.0, c8_tie * 0.999}), 8);
+  // ... which kRuleMargin alone would have passed.
+  const double c8_narrow = relative_block_steps(4, nev) / relative_block_steps(8, nev) * (1.0 - kRuleMargin);
+  ASSERT_LT(c8_tie * 1.001, c8_narrow);
   // Any unit: scaling all costs changes nothing.
   for (double s : {1e-9, 1.0, 1e9}) {
     EXPECT_EQ(recommended_block_size(n, nev, WidthTable{1.2 * s, 1.0 * s, 1.05 * s, 1.4 * s}), 4);
@@ -205,23 +213,25 @@ struct Pinned {
 
 TEST(LanczosBlockRule, PicksOnTheCalibrationShapesArePinned) {
   // Iteration time of the pick vs p = 1 and vs the best width, 16 threads (block_rule.cpp):
-  // 3-D: p = 4 / 8; little fill per row (2-D meshes, random sparse patterns, complex): p = 2 for
-  // nev < 8, the floor p = 4 from nev = 8 on.
+  // 3-D: p = 4 / 8 (8 only for a modelled gain of kRuleWideMargin over 4: ss-2cubes_sphere,
+  // syn-lap3d-aniso-1e5 and yee-pec-box-1e5 took 8 before the BLAS hook measurements); little fill
+  // per row (2-D meshes, random sparse patterns, complex): p = 2 for nev < 8, the floor p = 4 from
+  // nev = 8 on.
   const Pinned cases[] = {
       {"cav2d-rect-pert-1e5", 99459, 6, 3.871e6, 495751, false, 2},
       {"cav2d-square-1e4", 9976, 7, 3.418e5, 34984, false, 2},
-      {"ss-2cubes_sphere", 101492, 10, 4.422e7, 0, false, 8},
+      {"ss-2cubes_sphere", 101492, 10, 4.422e7, 0, false, 4},
       {"ss-qa8fk-qa8fm", 66127, 10, 2.795e7, 1660579, false, 4},
       {"ss-tem152078", 152078, 10, 6.786e7, 6459330, false, 4},
       {"ss-tem27623", 27623, 10, 5.751e6, 439469, false, 4},
       {"syn-ghep-near-singular-real-1e5", 100000, 10, 2.611e6, 469406, false, 4},
-      {"syn-lap3d-aniso-1e5", 97200, 12, 3.651e7, 0, false, 8},
+      {"syn-lap3d-aniso-1e5", 97200, 12, 3.651e7, 0, false, 4},
       {"syn-mem27-46", 97336, 12, 5.402e7, 0, false, 8},
       {"syn-multiplicity-real-1e4", 10000, 14, 2.399e5, 0, false, 4},
       {"syn-near-singular-complex-1e5", 100000, 10, 6.401e6, 0, true, 4},
       {"syn-zero-cluster-real-1e5", 100000, 21, 2.401e6, 0, false, 4},
       {"yee-bloch-1e4", 10080, 10, 1.408e7, 0, true, 8},
-      {"yee-pec-box-1e5", 109744, 10, 5.376e7, 109744, false, 8},
+      {"yee-pec-box-1e5", 109744, 10, 5.376e7, 109744, false, 4},
       {"yee-pec-cube-32", 92256, 12, 4.584e7, 0, false, 8},
   };
   for (const Pinned& c : cases) {

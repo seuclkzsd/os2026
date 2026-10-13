@@ -991,6 +991,9 @@ index_t block_size_for(const SolverConfig& cfg, index_t nev) {
 // yee-bloch-1e4 0.98x; with HS_BLAS_ROUTE=off 1.00x, 0.98x, 1.03x: the hook's narrow kernels made
 // the p <= 4 solves cheaper than the rule's step model assumes); the six cases where both widths
 // are 4 within +-1 %; geometric mean 1.01x. Never slower than p = 1 (blocktune: 1.03x .. 2.45x).
+// Since then the step from 4 to 8 needs a modelled gain of kRuleWideMargin = 10 % (review of the
+// integration, 20 definite data cases in the slot, block_rule.cpp "BLAS hook"): ss-2cubes_sphere,
+// yee-pec-box-1e5 and syn-lap3d-aniso-1e5 run at 4, the multiplicity cases keep 8.
 index_t block_size_for(const SolverConfig& cfg, const eigen_detail::ShiftInvertShape& shape) {
   if (cfg.block_size > 0) return cfg.block_size;
   return eigen_detail::recommended_block_size(shape);

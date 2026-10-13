@@ -41,9 +41,9 @@
 //      basis, and otherwise halves it to 4 without a warning;
 //   3. the rule is calibrated on nearest-target runs (k wanted pairs next to sigma); spectrum
 //      slicing (per-slice nev, definite.cpp) keeps the P4 rule until measured.
-// End to end with the driver and the BLAS hook (src/blas, route all; steps.cpp): the 4 -> 8 moves
-// on distinct eigenvalues lose 2 - 4 % there (the hook's narrow kernels speed up the p <= 4
-// solves the calibration timed without it): the step model wants a recalibration with the hook.
+// BLAS hook (src/blas, route all, the default since P5c): its narrow kernels speed up the p <= 4
+// solves the step model timed without it, so the model overrates the step from 4 to 8; that step
+// needs the wider margin kRuleWideMargin (measurements in block_rule.cpp).
 // Scalar-independent; thread-safe (pure functions).
 #pragma once
 
@@ -95,11 +95,15 @@ double relative_block_steps(index_t p, index_t nev);
 /// Relative advantage a wider width needs over every narrower candidate (the step model is no
 /// better than that), so p = 1 stays unless blocks clearly pay.
 inline constexpr double kRuleMargin = 0.05;
+/// The same for widths above kRuleFloorWidth (8 over 4): the model, timed without the BLAS hook,
+/// overrates that step with it (block_rule.cpp, "BLAS hook").
+inline constexpr double kRuleWideMargin = 0.10;
 
 /// The width minimizing step_cost[i] * relative_block_steps(kRuleWidths[i], nev) over the widths
 /// whose block layout fits an operator of order n (eigen_detail::block_dimensions with the
 /// automatic ncv, as the driver runs it; p = 1 always fits); a width replaces the best narrower one
-/// only when it is cheaper by kRuleMargin. Then the floor: nev >= kRuleFloorMinNev raises the
+/// only when it is cheaper by kRuleMargin (kRuleWideMargin for widths above kRuleFloorWidth). Then
+/// the floor: nev >= kRuleFloorMinNev raises the
 /// result to kRuleFloorWidth if that layout fits. step_cost: any unit, measured or modelled (all
 /// positive and finite, else InvalidInput). nev >= 1, n >= nev (else InvalidInput).
 index_t recommended_block_size(index_t n, index_t nev, const WidthTable& step_cost);

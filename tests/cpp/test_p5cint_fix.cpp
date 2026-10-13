@@ -253,9 +253,9 @@ hs::CsrMatrix<double> dense_with_spectrum(const std::vector<double>& w) {
 TEST(P5cIntFixRerun, AutoWidthRerunTakesTheP4Width) {
   std::vector<double> w;
   for (int j = 0; j < 12; ++j) w.push_back((j % 2 ? 1.0 : -1.0) * (0.05 + 0.02 * j));
-  for (int i = 0; i < 700; ++i) w.push_back(1.0 + 4.0 * i / 699.0);
-  for (int i = 0; i < 300; ++i) w.push_back(-1.0 - 4.0 * i / 299.0);
-  const auto a = dense_with_spectrum(w);
+  for (int i = 0; i < 900; ++i) w.push_back(1.0 + 4.0 * i / 899.0);
+  for (int i = 0; i < 488; ++i) w.push_back(-1.0 - 4.0 * i / 487.0);
+  const auto a = dense_with_spectrum(w);  // n = 1400: modelled cost(8) / cost(4) ~ 0.86
   for (const index_t configured : {0, 8}) {
     auto cfg = nearest_cfg(0.0, 12);
     cfg.block_size = configured;
