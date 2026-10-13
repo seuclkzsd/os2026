@@ -709,26 +709,39 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 - `tools/dev/cluster_run.sh HOST [--wip | --allow-dirty] -- CMD`：把当前 worktree 的 HEAD 推到
   `wt/<name>`，在节点的 `$HOME/os2026-wt/<name>` 检出该提交，经 `env/run.sh` 运行 CMD；`--wip` 用
   `git stash create` 的临时提交传送未提交的已跟踪改动（不动工作区、索引与 stash 列表）；调用方的
-  `HS_CORES`、`HS_JOBS`、`HS_MEM_GB`、`HS_MAX_SHARED_MEM_GB`、`HS_MIN_AVAIL_GB` 被转发。同一 `<name>`
-  不得同时在两个节点上构建（home 共享）。
-- 每节点上限：`env/hosts/<host>.sh` 设 `HS_CORES=16-31`（NUMA node 1 的 16 个物理核）、`HS_MEM_GB=60`、
-  `HS_MAX_SHARED_MEM_GB=64`；`env/activate.sh` 按短主机名加载它。
+  `HS_CORES`、`HS_JOBS`、`HS_MEM_GB`、`HS_MIN_AVAIL_GB`、`HS_LOCK_WAIT_S` 被转发（调度上限不转发）。
+  同一 `<name>` 不得同时在两个节点上构建（home 共享）。
+- **节点调度**（`env/hosts/<host>.sh`，`env/activate.sh` 按短主机名加载；由 guard 强制执行）。单次运行的
+  规格与评测机一致：16 核、32 GiB。同一节点上同时跑多个这样的运行会互相拖慢、计时失真，也会把机器
+  占满，因此每个节点分两条道：
+  - **测量槽**：NUMA node 1 的 16 个物理核 `16-31`（`HS_MEASURE_CORES`），同一时刻只允许一个运行。
+    凡绑到这些核的运行都必须 `guard.py --exclusive`（节点本地 flock）。不给 `--cores`/`--mem-gb` 时
+    默认取整个槽与 32 GiB（`HS_MEM_CAP_GB`）；须给 `--timeout`，且不超过 `HS_SLOT_MAX_S=2700` 秒，
+    防止一个运行长期占槽，长扫描要拆成多次。等锁超过 `--lock-wait`（默认 `HS_LOCK_WAIT_S=300` 秒）
+    返回 75 并打印持有者（目录、命令、开始时间）；`guard.py --status` 查看槽是否空闲。少于 16 线程的
+    缩放实验也在槽内做（如 `--cores 16-19`），以独占整个 socket。
+  - **构建/测试道**：NUMA node 0 的 8 核 `8-15`（默认 `HS_CORES`），`HS_JOBS=4`，单次 RSS ≤ 12 GiB
+    （`HS_MEM_GB`、`HS_MAX_SHARED_MEM_GB`）。用于编译、单元测试与冒烟运行，不用于计时。
+  - 任何运行 RSS 都不得超过 32 GiB。每节点最多两个调用方时，我们最多占 24/32 物理核、约 56 GiB，
+    节点其余资源留给其它作业。
 - 两种 CPU 上 OpenBLAS 的乘积末位可能不同（§5 逐位测试以 CPU 型号为键）。
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：
 - 默认绑定 NUMA node1 的 16 个物理核 `24-30,33-41`，进程树 RSS 上限 30 GiB；系统可用内存低于
   12 GiB 时只终止「大」进程树（≥ max(2 GiB, mem_gb/4)），小的构建/测试不受连带。
 - 峰值内存报告取采样和、内核高水位 VmHWM 之和、ru_maxrss 三者最大值（不漏短时尖峰）。
-- 重型实验加 `--exclusive`（全机串行）；单元测试用 `--skip-busy-check`。
-- 多 agent 并行阶段：每个 agent 使用不相交的 `HS_CORES`（各 2 核）与 `HS_JOBS=2`，并设置
-  `HS_MAX_SHARED_MEM_GB=8`（超过 8 GiB 的运行必须 `--exclusive`）。
+- 重型实验加 `--exclusive`（全机串行）；单元测试用 `--skip-busy-check`。计时运行不要加
+  `--skip-busy-check`：槽内的核若被别的进程占用，guard 会拒绝启动。
+- 多 agent 并行阶段（开发服务器）：每个 agent 使用不相交的 `HS_CORES`（各 2 核）与 `HS_JOBS=2`，并设置
+  `HS_MAX_SHARED_MEM_GB=8`（超过 8 GiB 的运行必须 `--exclusive`）。集群节点上改用上面的测量槽与构建道。
 - 预估内存（MUMPS 分析）超过 28 GiB 的实验不运行，记录并上报。
 - **MPI 绑核**：`mpiexec --bind-to core` 无视 guard 的 cpuset（40,41 下 SLEPc 的 rank 被绑到 CPU 0/48
   与 1/49）。需要绑核的 MPI 运行用 `tools/bench/baseline_slepc.py --bind core`（每个 rank 绑到继承
   cpuset 中自己的一块），或其它在继承 cpuset 内自绑的方式。
-- 嵌套 guard（如 tune_slepc 每个试验一个 guard、外层再一个）：`--exclusive` 只给外层，内层带
-  `--exclusive` 会永远等待外层持有的锁；外层超时终止时内层的 mpiexec 进程组目前不会被一起终止
-  （guard 只处理 KeyboardInterrupt），须手工清理。
+- 嵌套 guard（如 tune_slepc 每个试验一个 guard、外层再一个）：外层 `--exclusive` 持锁时向子进程导出
+  `HS_SLOT_HELD`，内层 guard 共用这把锁（内层的 `--exclusive` 不再等锁，内存上限按单次运行上限算）。
+  guard 收到 SIGTERM/SIGHUP 时终止整个进程树（被 nohup 忽略的 SIGHUP 仍然忽略）；外层超时终止时，
+  内层的 mpiexec 进程组仍由内层 guard 负责。
 
 ## 7. 版本管理
 - `main` 始终可编译、测试全过。功能在分支（或 worktree）开发，合并前须通过评审与测试。

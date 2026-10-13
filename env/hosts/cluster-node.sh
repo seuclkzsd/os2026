@@ -6,6 +6,15 @@
 export HS_CONDA_BIN="${HS_CONDA_BIN:-/share/apps/anaconda3/bin/conda}"
 export HS_CONDA_ENV="${HS_CONDA_ENV:-$HOME/envs/os2026}"
 export HS_REF_ENV="${HS_REF_ENV:-$HOME/envs/os2026-ref}"   # SLEPc baseline (tools/bench)
-export HS_CORES="${HS_CORES:-16-31}"                      # 16 physical cores = NUMA node 1
-export HS_MEM_GB="${HS_MEM_GB:-60}"                       # per-run RSS limit (tools/run/guard.py)
-export HS_MAX_SHARED_MEM_GB="${HS_MAX_SHARED_MEM_GB:-64}" # total budget for parallel jobs
+# Scheduling (docs/DESIGN.md §6, tools/run/guard.py): one run at a time in the measurement slot,
+# sized like the judging machine (16 cores, 32 GiB); builds, unit tests and smoke runs share a small
+# lane on the other socket. With two callers per node that is at most 24 of the 32 physical cores
+# and ~56 GiB; the rest of the node stays free for other work.
+export HS_MEASURE_CORES="${HS_MEASURE_CORES:-16-31}"      # NUMA node 1: guard --exclusive only
+export HS_MEM_CAP_GB="${HS_MEM_CAP_GB:-32}"               # per-run RSS ceiling (any run)
+export HS_SLOT_MAX_S="${HS_SLOT_MAX_S:-2700}"             # longest run holding the slot
+export HS_LOCK_WAIT_S="${HS_LOCK_WAIT_S:-300}"            # then exit 75 and name the holder
+export HS_CORES="${HS_CORES:-8-15}"                       # build/test lane: 8 cores of NUMA node 0
+export HS_JOBS="${HS_JOBS:-4}"                            # build parallelism per caller
+export HS_MEM_GB="${HS_MEM_GB:-12}"                       # default RSS limit outside the slot
+export HS_MAX_SHARED_MEM_GB="${HS_MAX_SHARED_MEM_GB:-12}" # RSS ceiling outside the slot

@@ -76,12 +76,14 @@ python3 tools/run/guard.py --mem-gb 30 --timeout 3600 -- ./build/release/hsolve 
 ```bash
 tools/dev/deploy_cluster.sh gpu01                       # 环境、代码（git remote "cluster"）、测例数据
 tools/dev/cluster_run.sh gpu02 -- tools/dev/build.sh release          # 在节点上编译当前 worktree 的提交
-tools/dev/cluster_run.sh gpu02 -- python3 tools/run/guard.py -- ...   # 在节点上运行（核与内存见 env/hosts/）
+tools/dev/cluster_run.sh gpu02 -- python3 tools/run/guard.py --exclusive --timeout 900 -- ...  # 在测量槽里计时运行
 tools/dev/cluster_run.sh gpu02 --wip -- tools/dev/test.sh release     # 连同未提交的已跟踪改动一起传过去
 ```
 
-每个节点默认用 NUMA node 1 的 16 核（`HS_CORES=16-31`）、单次运行进程树 RSS 上限 60 GiB；调用方设置的
-`HS_CORES`、`HS_JOBS`、`HS_MEM_GB` 等会被转发，便于并行作业分用不相交的核。SLEPc 环境的离线重建细节见
+单次运行的规格与评测机一致：16 核、32 GiB。每个节点有一个**测量槽**（NUMA node 1 的 16 核 `16-31`，
+同一时刻只允许一个运行，用 `guard.py --exclusive --timeout <s>` 占用，`guard.py --status` 查看占用情况）
+和一条**构建/测试道**（`8-15`，`HS_JOBS=4`，单次 ≤ 12 GiB），后者用于编译、测试与冒烟运行，计时只在
+测量槽里做。规则由 guard 强制执行，详见 `docs/DESIGN.md` §6。SLEPc 环境的离线重建细节见
 `docs/DEPENDENCIES.md`。
 
 ## 目录
