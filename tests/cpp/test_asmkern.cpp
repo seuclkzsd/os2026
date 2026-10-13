@@ -5,9 +5,11 @@
 // beta = 0 rule (C not read) -, the narrow kernels and the small triangular solve on every
 // instruction set the CPU has (portable, AVX2, AVX-512) against a long-double reference / the real
 // dtrsm, bitwise independence of the thread count, the forced fallbacks without AVX-512 / AVX2
-// (HS_BLAS_NO_AVX512, HS_BLAS_NO_AVX2), concurrent use from many threads, and the profiler's
-// helpers.
+// (HS_BLAS_NO_AVX512, HS_BLAS_NO_AVX2), concurrent use from many threads, the lookup of the real
+// routines (also in libraries opened with dlopen(RTLD_LOCAL), as under Python), and the
+// profiler's helpers.
 // The real BLAS is the test executable's (OpenBLAS), found by the hook through dlsym(RTLD_NEXT).
+#include <dlfcn.h>
 #include <gtest/gtest.h>
 #include <omp.h>
 #include <stdlib.h>
@@ -771,6 +773,41 @@ TEST(BlasHookRouter, ConcurrentCallsAreThreadSafe) {
     if (c != serial1[n - 1]) ++bad_omp;
   }
   EXPECT_EQ(bad_omp, 0);
+}
+
+// ------------------------------------------------------------------- lookup of the real routines
+
+// In the test executable (no hook symbols) the next definition of dgemm_ is the global one, the
+// real BLAS's, and real_blas() uses it.
+TEST(BlasHookResolve, NextDefinitionIsTheGlobalBlas) {
+  void* p = hs::blas::next_definition("dgemm_");
+  ASSERT_NE(p, nullptr);
+  EXPECT_EQ(p, dlsym(RTLD_DEFAULT, "dgemm_"));
+  EXPECT_EQ(reinterpret_cast<void*>(hs::blas::real_blas().dgemm), p);
+  EXPECT_FALSE(hs::blas::real_blas().library.empty());
+  EXPECT_EQ(hs::blas::next_definition("hs_no_such_symbol_xyz"), nullptr);
+}
+
+// A library opened with dlopen(RTLD_LOCAL) is outside the global scope that dlsym(RTLD_NEXT /
+// RTLD_DEFAULT) searches - MUMPS and the BLAS under the Python module - and the fallback still
+// finds its definitions, skipping the object it is told to skip. The library here is the hook's
+// own shared object, whose hs::blas functions the executable does not export.
+TEST(BlasHookResolve, FindsDefinitionsInLocallyOpenedLibraries) {
+  void* lib = dlopen(HSOLVE_BLASHOOK_SO, RTLD_LAZY | RTLD_LOCAL);
+  ASSERT_NE(lib, nullptr) << dlerror();
+  const char* sym = "_ZN2hs4blas15next_definitionEPKc";  // hs::blas::next_definition(const char*)
+  void* in_lib = dlsym(lib, sym);
+  ASSERT_NE(in_lib, nullptr);
+  ASSERT_EQ(dlsym(RTLD_DEFAULT, sym), nullptr) << "the executable exports " << sym;
+  EXPECT_EQ(hs::blas::find_loaded_definition(sym, nullptr), in_lib);
+  Dl_info info{};
+  ASSERT_NE(dladdr(in_lib, &info), 0);
+  EXPECT_EQ(hs::blas::find_loaded_definition(sym, info.dli_fbase), nullptr);
+  // dgemm_ is defined by the hook object too; skipping it leaves the real BLAS.
+  void* real = hs::blas::find_loaded_definition("dgemm_", info.dli_fbase);
+  EXPECT_EQ(real, dlsym(RTLD_DEFAULT, "dgemm_"));
+  EXPECT_NE(real, dlsym(lib, "dgemm_"));
+  dlclose(lib);
 }
 
 // ---------------------------------------------------------------------------------- profiler

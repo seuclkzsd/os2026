@@ -13,8 +13,10 @@
 //   * the hsolve executable when configured with -DHSOLVE_BLAS_HOOK=ON: definitions in the
 //     executable are preferred by the dynamic linker for MUMPS' calls.
 // Use one or the other, not both (the calls would pass through the hook twice).
-// The real routines are found with dlsym(RTLD_NEXT, name): the next definition after the object
-// that holds the hook (the BLAS library, or another preloaded BLAS such as BLIS or libxsmmext).
+// The real routines are the next definitions after the object that holds the hook
+// (next_definition: dlsym(RTLD_NEXT, name) - the BLAS library, or another preloaded BLAS such as
+// BLIS or libxsmmext - or, when the BLAS and MUMPS were loaded with dlopen(RTLD_LOCAL) as under
+// the Python module, the first loaded object that defines the name).
 //
 // Configuration: environment variable HS_BLAS_ROUTE (parse_route_config), read once per process.
 // Default (unset or "off"): every call is forwarded unchanged.
@@ -60,7 +62,21 @@ using Dnrm2Fn = double (*)(const fint*, const double*, const fint*);
 using IdamaxFn = fint (*)(const fint*, const double*, const fint*);
 }
 
-/// The real BLAS behind the hook (dlsym(RTLD_NEXT), resolved on first use). A routine that cannot
+/// The next definition of `name` after the object that holds the hook, or nullptr when there is
+/// none: dlsym(RTLD_NEXT, name), which searches the global scope (the executable and the libraries
+/// loaded with it, incl. LD_PRELOAD), else find_loaded_definition skipping the hook's own object.
+/// The fallback is needed under Python: the extension module, MUMPS and the BLAS are opened with
+/// dlopen(RTLD_LOCAL), outside the global scope, while a preloaded hook still interposes on their
+/// calls (the global scope is searched first).
+void* next_definition(const char* name) noexcept;
+
+/// The definition of `name` that the first loaded object with a file name (load order of
+/// dl_iterate_phdr, so the main program is not asked) finds in its dependency tree
+/// (dlsym(handle)), not counting definitions in the object loaded at `skip_base` (nullptr: skip
+/// none); nullptr when no object defines it.
+void* find_loaded_definition(const char* name, const void* skip_base) noexcept;
+
+/// The real BLAS behind the hook (next_definition, resolved on first use). A routine that cannot
 /// be found aborts the process with a message on stderr: a Fortran BLAS call has no way to report
 /// an error, and continuing would compute garbage.
 struct RealBlas {

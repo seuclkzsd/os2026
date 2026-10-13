@@ -4,9 +4,8 @@
 //
 // dgemm_ / dtrsm_ / dgemv_ go through the router with the process configuration
 // (HS_BLAS_ROUTE); the level-1 routines MUMPS uses are forwarded unchanged and only timed.
-// dmumps_c / smumps_c set the profiler phase around the real call (dlsym(RTLD_NEXT)); MUMPS calls
+// dmumps_c / smumps_c set the profiler phase around the real call (next_definition); MUMPS calls
 // are serialized by hsolve's MUMPS call lock, so one process-wide phase is enough.
-#include <dlfcn.h>
 #include <dmumps_c.h>
 #include <smumps_c.h>
 #include <unistd.h>
@@ -50,7 +49,7 @@ using SmumpsFn = void (*)(SMUMPS_STRUC_C*);
 
 template <class Fn>
 Fn next_symbol(const char* name) {
-  void* p = dlsym(RTLD_NEXT, name);
+  void* p = hs::blas::next_definition(name);
   if (p == nullptr) {
     const std::string msg = std::string("hsolve BLAS hook: no definition of ") + name + "\n";
     [[maybe_unused]] const ssize_t rc = ::write(2, msg.data(), msg.size());

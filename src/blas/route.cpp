@@ -1,5 +1,6 @@
 // BLAS hook: real-BLAS resolution, configuration and the router (blas_hook.hpp).
 #include <dlfcn.h>
+#include <link.h>
 #include <omp.h>
 #include <unistd.h>
 
@@ -28,7 +29,7 @@ namespace {
 }
 
 void* resolve_next(const char* name) noexcept {
-  void* p = dlsym(RTLD_NEXT, name);
+  void* p = next_definition(name);
   if (p == nullptr)
     fatal(std::string("no definition of ") + name +
           " after the hook (is a BLAS library loaded after it?)");
@@ -142,6 +143,34 @@ void splitk_gemm_tn(int threads, fint m, fint n, fint k, double alpha, const dou
 }
 
 }  // namespace
+
+void* find_loaded_definition(const char* name, const void* skip_base) noexcept {
+  // Names first, lookups afterwards: dl_iterate_phdr holds the loader's lock during the callback.
+  std::vector<std::string> objects;
+  dl_iterate_phdr(
+      [](dl_phdr_info* info, std::size_t, void* data) -> int {
+        if (info->dlpi_name != nullptr && info->dlpi_name[0] != '\0')
+          static_cast<std::vector<std::string>*>(data)->emplace_back(info->dlpi_name);
+        return 0;
+      },
+      &objects);
+  for (const std::string& obj : objects) {
+    void* h = dlopen(obj.c_str(), RTLD_LAZY | RTLD_NOLOAD);  // already loaded: no side effects
+    if (h == nullptr) continue;                              // e.g. the vDSO
+    void* p = dlsym(h, name);
+    dlclose(h);
+    Dl_info di{};
+    if (p != nullptr && dladdr(p, &di) != 0 && di.dli_fbase != skip_base) return p;
+  }
+  return nullptr;
+}
+
+void* next_definition(const char* name) noexcept {
+  if (void* p = dlsym(RTLD_NEXT, name)) return p;
+  Dl_info self{};
+  if (dladdr(reinterpret_cast<void*>(&next_definition), &self) == 0) return nullptr;
+  return find_loaded_definition(name, self.dli_fbase);
+}
 
 const RealBlas& real_blas() noexcept {
   static const RealBlas rb = [] {
