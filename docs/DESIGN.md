@@ -381,13 +381,23 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
   - 步数比 `relative_block_steps(p, nev)`：互不相同特征值时块步数相对 p = 1 作用次数之比，p = 2 / 4 / 8 在
     nev ≤ 5 时为 0.69 / 0.56 / 0.49、nev ≥ 22 时为 0.58 / 0.40 / 0.29，其间按 nev 线性插值（表取自
     nev = 1、2、3、5、7、10–12、21–26 的实测）。
-  - 更宽的块须比每个更窄的候选便宜 `kRuleMargin` = 5% 才替换；块布局放不下（n 太小）的宽度不考虑；
+  - 更宽的块须比每个更窄的候选便宜 `kRuleMargin` = 5% 才替换，宽于 `kRuleFloorWidth` 的（8 对 4）须便宜
+    `kRuleWideMargin` = 10%（P5c 集成，见下）；块布局放不下（n 太小）的宽度不考虑；
     下限：nev ≥ `kRuleFloorMinNev` = 8 时至少 `kRuleFloorWidth` = 4（P4 的自动块宽）——重特征值在运行前
     看不见，而它们让更宽的块划算（低填充重特征值测例上 p = 4 比 p = 2 快 12–22%，低填充互异测例上 p = 2
     比 p = 4 快 0–8%）。
-  - 结果（16 线程）：61 个（测例, nev）点上所选宽度与最佳宽度的迭代时间之比几何平均 1.035，没有一点慢于
-    p = 1；端到端（`bench/blocktune_fix_e2e.cpp`，12 个测例，5 次交错，155 次运行全部有效）相对 p = 1
-    快 1.03–2.45×，相对 P4 自动块宽 0.98–1.19×（ss-2cubes_sphere 选 p = 8 慢 1.6%）。
+  - 结果（16 线程，标定时不带 BLAS hook）：61 个（测例, nev）点上所选宽度与最佳宽度的迭代时间之比几何平均
+    1.035，没有一点慢于 p = 1；端到端（`bench/blocktune_fix_e2e.cpp`，12 个测例，5 次交错，155 次运行全部有效）
+    相对 p = 1 快 1.03–2.45×，相对 P4 自动块宽 0.98–1.19×（ss-2cubes_sphere 选 p = 8 慢 1.6%）。
+  - BLAS hook（§3.8，P5c 默认）的窄核使 p ≤ 4 的回代变便宜，模型因此高估了从 4 到 8 的收益：集成树中 8 对 4
+    的实测每步时间比 1.27–1.33，模型 1.12–1.23。20 个定性 nearest 数据测例（CLI `--block-size 0` 对 4，gpu01
+    测量槽 16 线程，5 次交错，200 次运行全部认证）按模型的 cost(8)/cost(4)：0.79–0.80 时 8 快 1.008–1.128×；
+    0.88–0.89 时重特征值测例快（yee-pec-cube-32 1.084×、syn-mem27-46 1.047×），互异的慢（yee-bloch-1e4、
+    yee-photonic-rods / -spheres-1e4 0.971–0.975×）；0.92–0.94 时都慢（yee-pec-box-1e5 0.982×、syn-lap3d-aniso-1e5
+    0.991×、ss-2cubes_sphere 0.960×）。模型分不出重数，带 hook 重新标定会让 8 在互异谱上从不划算、也丢掉重特征值
+    测例的 1.05–1.13×；所以只给 4 → 8 加宽余量到 10%：最后一组改选 4（比选 8 快 1.020×、1.058×、1.008×），
+    其余保留 8；这三例与四个保留 8 的测例上相对 P4 块宽的几何平均 1.001 → 1.017。标定形状的选择在因子条目
+    ±10% 内不变（选 8 者 cost(8)/cost(4) ≤ 0.898，改选 4 者 ≥ 0.907）。
   - 可复现性：p 只取决于输入。每次分析都给出同一排序时（AMD、METIS、自研嵌套剖分）因子条目、从而 p 逐次
     相同；SCOTCH（自适应排序在其得分最好时选它，§3.6-3b）的条目在三维数据测例上逐次运行相差 2.2–8.8%，处在
     两种宽度分界附近的形状可能在不同运行中得到不同 p（两者都有效、在容差内一致，同 SCOTCH 排序本身；标定
@@ -560,12 +570,17 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    - smallest / largest 的惯性搜索以谱两端的 Ritz 估计为种子：30 步 Lanczos（A；有 B 时为 B 内积下
      的 B⁻¹A，B 的分解复用主分析，对角 B 直接求逆）。
 3. **内存预算**（显式公式）：分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·c_res)/1e6。
-   预留列数 c_res 按分析前已知的问题类型（§3.6-1(a)）：定性路径（HEP/GHEP）ncv_g + 6k_g，k_g = k
-   （interval：min(n, 64)），ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），
-   `lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，p_g = block_size > 0 ? min(block_size, 4) : 8——自动时
-   预留块宽规则最宽的块（`eigen_detail::kRuleWidths.back()`，§3.6-5），更宽的显式 block_size 不预留（分解
-   优先，运行时再按剩余内存减半，见下）；GHIEP 为 `ghiep_reserve_columns`（P5：第一次运行的
-   `krylov_schur_general_peak_columns`，块宽取 `ghiep_block_size`，单精度/BLR 另加修正工作区 2p，再加后续
+   预留列数 c_res（`krylov_reservation`，事件 `memory_plan` 记下预留的块宽、列数、MB 与 cap）按分析前已知的
+   问题类型（§3.6-1(a)）：定性路径（HEP/GHEP）ncv_g + 6k_g，k_g = k（interval：min(n, 64)），
+   ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），`lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，
+   p_g = `reserved_block_size` = min(block_size > 0 ? block_size : 4, 4)——每种目标都只预留 P4 块宽的基。
+   更宽的块宽——显式的 block_size，或块宽规则在 nearest 运行上选的 8（§3.6-5，分解之后才知道）——不预留：
+   分解优先，运行时只在因子留出的内存放得下其基时才用（见下）。P5c 集成时曾为自动块宽预留 p = 8 的基，cap
+   因此少了 27 个 n-向量（k = 10..12）：syn-near-singular-complex-1e5（AMD，4 线程，因子内存内 142 MB、外存
+   74 MB）在 0.3692 / 0.3706 GiB 的预算下，P4 的基旁 cap 为 143–145 MB、因子在内存内，p = 8 的基旁只有
+   102 / 105 MB——因子转外存（`out_of_core = off` 时 OutOfMemoryBudget），而规则随后仍选了 4；故改回 P4 的预留。
+   GHIEP 为 `ghiep_reserve_columns`（P5：第一次运行的 `krylov_schur_general_peak_columns`，块宽取
+   `ghiep_block_size`，单精度/BLR 另加修正工作区 2p，再加后续
    运行分解期间保留的普通运行 Schur 基与并集精修基各 m 列，m = min(n, nev + 1（实）/ nev（复））；类型
    未定时取两者之大。cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap
    作为 ICNTL(23) 传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
@@ -578,7 +593,9 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    **块基的运行时适配**（P4）：HEP/GHEP 每次运行前 `fit_block_size` 把 p 减半（告警），直到
    `lanczos_basis_columns`（p = 1：d + ncv + 2；p > 1：d + 块布局 ncv + 2p，块布局放不下时 d + n_free + 2）
    加调用方保留的列（候选块 X、AX、BX 与返回向量：4·nev，重跑另加 3d）的字节 ≤ 0.9·(budget − 当前
-   RSS)。GHIEP 同理：峰值列 `krylov_schur_general_peak_columns` 加修正工作区 2np（开修正时）
+   RSS)。例外（P5c）：nearest 的自动块宽减到不低于预留的块宽（规则的 8 → 4）时不告警，只记事件
+   `block_size_fit`（想要的与用的块宽、可用 MB）；再往下减、以及显式块宽与重跑的任何减半仍告警。
+   GHIEP 同理：峰值列 `krylov_schur_general_peak_columns` 加修正工作区 2np（开修正时）
    ≤ 0.9·(budget − 当前 RSS)（当前 RSS 含活的分解与此前运行的 Schur 基），每种减法只告警一次。更后面
    运行（探测、单边运行、重跑）的基不预留，由这里的减半适配。
    **GHIEP 后处理**（P4 前约 88 B·n·m，wg-square-1e6 上 +1.15 GB 的尖峰决定全程峰值）现在只保留各次
@@ -672,10 +689,12 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    - HEP/GHEP（`block_size_for`）：配置 > 0 时用配置值（显式值优先）。自动时：
      - nearest 的单位移运行（P5c）：在 σ 处的主分解（`factorize_near` 之后）上用块宽规则
        `recommended_block_size`（§3.5），形状取 {n, nev, 该分解的 `FactorStats::factor_entries`, nnz(B)（B = I
-       时 0）, 标量类型}，p ∈ {1, 2, 4, 8}，nev ≥ 8 时至少 4。规则只读确定量（不做计时探测：选择、从而特征
-       向量都不随机器负载变化；SCOTCH 排序下因子条目的逐次波动见 §3.5）。分析前的内存预留按规则最宽的
-       p = 8（§3.6-3），放不下时运行前减半。依据（16 线程测量槽，§3.5）：端到端相对 p = 1 快 1.03–2.45×，
-       相对 P4 自动块宽 0.98–1.19×。
+       时 0）, 标量类型}，p ∈ {1, 2, 4, 8}，nev ≥ 8 时至少 4，8 须比 4 有 10% 的模型收益。规则只读确定量（不做
+       计时探测：选择、从而特征向量都不随机器负载变化；SCOTCH 排序下因子条目的逐次波动见 §3.5）。分析前的内存
+       预留只按 P4 块宽（§3.6-3）：规则的 8 只在因子留出的内存放得下其基时使用，否则不告警地减到 4（再往下才
+       告警）。依据（16 线程测量槽，§3.5）：标定时端到端相对 p = 1 快 1.03–2.45×，相对 P4 自动块宽
+       0.98–1.19×；带 BLAS hook 的集成树中改选 4 的三例比选 8 快 1.008–1.058×，保留 8 的重特征值测例比 P4 快
+       1.05–1.13×，yee-bloch-1e4 与 yee-photonic-*-1e4 选 8 比 P4 慢 2.5–3%。
      - 谱切片与单边运行（每片的 nev，含零带干扰时转交窗口的 nearest）：P4 规则，nev ≥ 8 时 p = 4，否则 1
        ——块宽规则只在 nearest 运行上标定。
      报告的 `block_size` 是第一次运行的块宽（经内存适配后）。证书收缩重跑缺 m 对时宽度为 `rerun_block_size`
@@ -693,7 +712,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      作用）；n ≈ 1e4 时收益在噪声内。报告的 `block_size`（P5）是第一次运行（普通运行，或 σ 在零带内时
      的第一次单边运行；之前的探测运行按规则是单向量）经内存适配后的块宽，各次运行的块宽见事件日志
      `krylov_schur.block_size`。
-   - 两条路径都在每次运行前按 §3.6-3 的剩余内存把 p 减半（告警）。
+   - 两条路径都在每次运行前按 §3.6-3 的剩余内存把 p 减半（告警；nearest 的自动块宽减到预留的 P4 块宽时
+     不告警，§3.6-3）。
 6. **精修**：HEP/GHEP 在原问题上做**秩揭示** Rayleigh–Ritz：B-Gram 矩阵 XᴴBX 做特征分解，丢弃小于
    最大特征值 1e-8 倍的方向（跨片去重时 1e-4），在剩余的 B-正交基上解投影铅笔。同一向量算两次、或
    补救把两列推到同一特征向量上，只留一份——「找到的对数」恒为不同 B-正交向量数，重复向量不可能
@@ -834,7 +854,9 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
     `time_certificate_s`，P5 起 `certificate` 另有 `method`、`rigorous`、`failure_probability`、`solves`、
     `seconds`、`statement`；Python 接口的报告同源）。`factor_stats` 只统计主分解对象，InertiaCounter 的
     分析与计数只体现在 `time_certificate_s` 与事件日志（`inertia_counter`、`main_factors_released`；P5：
-    `certificate_choice`、`randomized_check`、`single_counts`、`certifier_double_counts`）。
+    `certificate_choice`、`randomized_check`、`single_counts`、`certifier_double_counts`）。P5c 另有内存与块宽的
+    事件 `memory_plan`（分析前预留的块宽、列数、MB 与分解上限，§3.6-3）与 `block_size_fit`（自动块宽不告警的
+    减半）；每次 Krylov 运行的事件 `lanczos` 记下块宽与 `lead`（§3.6-8）。
 
 ### 3.7 util（`include/hsolve/log.hpp`、`include/hsolve/util.hpp`）
 - `Logger`：JSON lines 写文件 + 人类可读 stderr；事件名小写下划线，字段扁平。
