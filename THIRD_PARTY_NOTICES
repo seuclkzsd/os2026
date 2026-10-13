@@ -1,0 +1,258 @@
+hsolve - THIRD-PARTY NOTICES
+============================
+
+本文件汇总 hsolve 包含、链接或调用的第三方软件的版权声明与许可证要求随附的文本（分发 hsolve 的源码或
+二进制时随附）。版本、用途与调用方式见 docs/DEPENDENCIES.md；从 OpenBLAS 改编的 BLAS hook 核见
+docs/BLAS.md §7。
+
+This file collects the copyright notices and license texts of the third-party software that hsolve
+contains, links or calls, as their licenses require them to accompany source or binary
+distributions. Versions, purposes and how each component is called: docs/DEPENDENCIES.md.
+
+Contents
+  Part 1  Code adapted into hsolve's own sources
+          1.1  OpenBLAS kernels (src/blas)                        BSD-3-Clause
+  Part 2  Header-only libraries compiled into hsolve binaries
+          2.1  nlohmann/json 3.12                                 MIT
+          2.2  CLI11 2.7                                          BSD-3-Clause
+          2.3  pybind11 3.1 (Python extension module only)       BSD-3-Clause
+  Part 3  Libraries hsolve links at run time (installed from conda-forge, not in this repository)
+          3.1  MUMPS 5.8.2                                        CeCILL-C (parts BSD-3-Clause)
+          3.2  OpenBLAS 0.3.34 (BLAS and LAPACK)                  BSD-3-Clause
+          3.3  METIS 5.1.0 (through MUMPS)                        Apache-2.0
+          3.4  SCOTCH 7.0 (through MUMPS)                         CeCILL-C
+          3.5  zlib 1.3                                           zlib
+          3.6  GCC runtime libraries                              GPL-3.0 with the GCC Runtime Library Exception
+  Part 4  Used only for tests, tools or experiments (not part of the hsolve binaries)
+
+
+===================================================================================================
+Part 1. Code adapted into hsolve's own sources
+===================================================================================================
+
+1.1 OpenBLAS kernels - src/blas/narrow_kernels.cpp, src/blas/simd_kernels.hpp
+---------------------------------------------------------------------------------------------------
+The narrow dgemm kernels of hsolve's BLAS hook (module src/blas; linked into the hsolve executable
+by default, and built as libhsolve_blashook.so) adapt the structure of these OpenBLAS 0.3.34 files:
+  * kernel/x86_64/dgemv_n_microk_skylakex-4.c (the NN column-group update)
+      Copyright (c) 2014, The OpenBLAS Project
+  * kernel/x86_64/dgemm_small_kernel_nn_skylakex.c, kernel/x86_64/dgemm_small_kernel_tn_skylakex.c
+    (the TN register block and its REDUCE_4 reduction)
+      Copyright (c) 2021, The OpenBLAS Project
+The small triangular solve of the hook is hsolve's own code (loop orders of the reference BLAS).
+License (BSD-3-Clause; the same text in all three files):
+
+  Copyright (c) 2014, The OpenBLAS Project
+  Copyright (c) 2021, The OpenBLAS Project
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without modification, are permitted
+  provided that the following conditions are met:
+  1. Redistributions of source code must retain the above copyright notice, this list of
+     conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice, this list of
+     conditions and the following disclaimer in the documentation and/or other materials provided
+     with the distribution.
+  3. Neither the name of the OpenBLAS project nor the names of its contributors may be used to
+     endorse or promote products derived from this software without specific prior written
+     permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+  IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+  FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE OPENBLAS PROJECT OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+  DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+  IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+  OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+===================================================================================================
+Part 2. Header-only libraries compiled into hsolve binaries
+===================================================================================================
+
+2.1 nlohmann/json 3.12 - reports and JSON-lines logs (libhsolve, hsolve, the Python module)
+---------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2013-2025 Niels Lohmann
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+2.2 CLI11 2.7 - command line of the hsolve executable (apps/)
+---------------------------------------------------------------------------------------------------
+  CLI11 2.7.2 Copyright (c) 2017-2026 University of Cincinnati, developed by Henry
+  Schreiner under NSF AWARD 1414736. All rights reserved.
+
+  Redistribution and use in source and binary forms of CLI11, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice, this
+     list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its contributors
+     may be used to endorse or promote products derived from this software without
+     specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+  ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+  ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+2.3 pybind11 3.1 - the Python extension module hsolve._hsolve (python/) only
+---------------------------------------------------------------------------------------------------
+  Copyright (c) 2016 Wenzel Jakob <wenzel.jakob@epfl.ch>, All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice, this
+     list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+  3. Neither the name of the copyright holder nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+===================================================================================================
+Part 3. Libraries hsolve links at run time
+===================================================================================================
+These are installed from conda-forge into the project environment (env/environment.yml; offline
+copies on the cluster nodes, docs/DEPENDENCIES.md) and are not contained in this repository. Their
+full license texts ship with the conda packages (info/licenses/ of each package in the conda
+package cache) and are available at the URLs given. Whoever redistributes hsolve together with
+these libraries must include the texts their licenses require.
+
+3.1 MUMPS 5.8.2 (sequential version, conda-forge mumps-seq) - sparse LDL^T factorization, inertia
+---------------------------------------------------------------------------------------------------
+  Copyright 1991-2026 CERFACS, CNRS, ENS Lyon, INP Toulouse, Inria,
+  Mumps Technologies, University of Bordeaux.
+
+  This version of MUMPS is provided to you free of charge. It is
+  released under the CeCILL-C license
+  (see doc/CeCILL-C_V1-en.txt, doc/CeCILL-C_V1-fr.txt, and
+  https://cecill.info/licences/Licence_CeCILL-C_V1-en.html),
+  except for variants of AMD ordering and [sdcz]MUMPS_TRUNCATED_RRQR
+  derived from the LAPACK package distributed under BSD 3-clause
+  license (see headers of ana_orderings.F and [sdcz]lr_core.F),
+  and except for the external and optional ordering PORD provided
+  in a separate directory PORD (see PORD/README for License information).
+
+3.2 OpenBLAS 0.3.34 (OpenMP build, conda-forge libopenblas) - BLAS and LAPACK
+---------------------------------------------------------------------------------------------------
+  Copyright (c) 2011-2014, The OpenBLAS Project
+  All rights reserved.
+  License: BSD-3-Clause, the conditions and disclaimer of section 1.1 with this copyright line.
+  OpenBLAS includes the reference LAPACK, Copyright (c) 1992-2023 The University of Tennessee and
+  The University of Tennessee Research Foundation, (c) 2000-2023 The University of California
+  Berkeley, (c) 2006-2023 The University of Colorado Denver; BSD-3-Clause (modified), text in
+  info/licenses/lapack-netlib/LICENSE of the package and at https://www.netlib.org/lapack/LICENSE.txt.
+
+3.3 METIS 5.1.0 - fill-reducing ordering, called by MUMPS only (ICNTL(7) = 5)
+---------------------------------------------------------------------------------------------------
+  Copyright 1995-2013, Regents of the University of Minnesota
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+  implied. See the License for the specific language governing
+  permissions and limitations under the License.
+
+3.4 SCOTCH 7.0 - fill-reducing ordering, called by MUMPS only (ICNTL(7) = 3)
+---------------------------------------------------------------------------------------------------
+  Copyright 2004,2007-2012,2014-2016,2018-2021,2024 IPB, Universite de Bordeaux, INRIA & CNRS
+  This software is governed by the CeCILL-C license under French law and abiding by the rules of
+  distribution of free software (https://cecill.info/licences/Licence_CeCILL-C_V1-en.html).
+
+3.5 zlib 1.3 - decompression of .npz files (src/io)
+---------------------------------------------------------------------------------------------------
+  (C) 1995-2026 Jean-loup Gailly and Mark Adler
+
+  This software is provided 'as-is', without any express or implied
+  warranty.  In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not
+     claim that you wrote the original software. If you use this software
+     in a product, an acknowledgment in the product documentation would be
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not be
+     misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source distribution.
+
+  Jean-loup Gailly        Mark Adler
+  jloup@gzip.org          madler@alumni.caltech.edu
+
+3.6 GCC runtime libraries (libstdc++, libgcc, libgomp, libgfortran; GCC 13 toolchain)
+---------------------------------------------------------------------------------------------------
+  Copyright (C) Free Software Foundation, Inc.
+  GNU General Public License version 3 with the GCC Runtime Library Exception, version 3.1
+  (https://www.gnu.org/licenses/gcc-exception-3.1.html): code compiled by GCC and linked with
+  these libraries may be distributed under terms of the distributor's choice.
+
+
+===================================================================================================
+Part 4. Used only for tests, tools or experiments
+===================================================================================================
+Not part of the hsolve library, executable or Python module; listed for completeness
+(docs/DEPENDENCIES.md has versions and uses):
+  * GoogleTest 1.18 (C++ unit tests): BSD-3-Clause, Copyright 2008, Google Inc.
+  * NumPy 2.4 / SciPy 1.17 (case generators, evaluation, baselines; runtime dependencies of the
+    Python front end, not linked into it): BSD-3-Clause.
+  * Comparison baseline environment os2026-ref (tools/bench only): PETSc / SLEPc 3.26
+    (BSD-2-Clause), MUMPS 5.8.2 MPI (CeCILL-C), OpenMPI 5 (BSD-3-Clause), libfabric 1.22
+    (BSD-2-Clause / GPL-2.0 dual), PT-SCOTCH (CeCILL-C), ParMETIS (University of Minnesota license,
+    non-profit research only).
+  * BLAS experiments (tools/deps, built from pinned source tarballs, never distributed with
+    hsolve): OpenBLAS 0.3.34, BLIS 2.1, LIBXSMM 1.17, all BSD-3-Clause.
+  * Public test matrices from the SuiteSparse Matrix Collection: CC-BY 4.0 (citations in the case
+    metadata generated by tools/gen).
