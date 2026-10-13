@@ -21,8 +21,9 @@
 // BLIS or libxsmmext - or, when the BLAS and MUMPS were loaded with dlopen(RTLD_LOCAL) as under
 // the Python module, the first loaded object that defines the name).
 //
-// Configuration: environment variable HS_BLAS_ROUTE (parse_route_config), read once per process.
-// Default (unset or "off"): every call is forwarded unchanged.
+// Configuration: environment variable HS_BLAS_ROUTE (parse_route_config), read once per process;
+// unset: the build's default (CMake HSOLVE_BLAS_ROUTE_DEFAULT, "all" unless configured otherwise);
+// "off": every call is forwarded unchanged.
 //
 // Thread safety: every function here may be called concurrently from any number of threads
 // (MUMPS' L0-OpenMP subtrees call BLAS from inside parallel regions). Process-level state: the
