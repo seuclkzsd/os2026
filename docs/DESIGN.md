@@ -481,12 +481,15 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    `results/p7_membudget.md`：计划内的量（规划时的 RSS、Krylov 预留、ICNTL(23) 上限下 MUMPS 的估计）
    都在预算内，L 的其余部分容纳计划外的量（线程栈与 BLAS 缓冲、回代工作区、碎片）。
    P7 前固定 14 GB：1e6 的三维测例（syn-mem27-100，因子 15.9 GB）在 32 GB 机器上也走外存，274.6 s，
-   而内存内 125.1 s。
+   而内存内 125.1 s。P7 实测（16 线程，3 次中位数）：32 GiB 上限下 syn-mem27-100 与 yee-pec-box-1e6
+   改为内存内，比 14 GB 默认快 1.83× / 1.71×；16 GiB 下照旧外存、同速；1e5 测例决策与时间不变。
    分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·(ncv_g +
    6k_g))/1e6，k_g = k（interval：min(n, 64)），ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），
    `lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，p_g = min(block_size > 0 ? block_size : 4, 4)——即只为
    自动块宽预留块基，更宽的显式 block_size 不预留（分解优先，运行时再按剩余内存减半，见下）；
-   cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap 作为 ICNTL(23)
+   cap ≤ 0 即抛 OutOfMemoryBudget。分析会常驻自己的结构（MUMPS 符号数据与输入副本：n = 5e5 的三维测例
+   0.8 GB，1e6 时 0.9–1.2 GB，规划时看不到），P7 起分析之后 cap 减去进程此间增长的 0.95 倍再做决定
+   （事件 `memory_replan`，`SparseFactorization::set_max_memory_mb`）。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap 作为 ICNTL(23)
    传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
    改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。`out_of_core = auto` 时内存内
    分解若仍因内存失败（INFO −13/−19，或 cap 下工作区重试长不够——估计偏低，如延迟主元），改用外存
