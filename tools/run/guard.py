@@ -165,6 +165,30 @@ def try_lock(fd) -> bool:
         return False
 
 
+def blocking_lock(fd, wait_s: float) -> bool:
+    """Block in flock for at most wait_s seconds (0 = no limit). A blocked waiter is woken as soon as
+    the holder releases, so the holder's next run (a new process) does not overtake it."""
+    if wait_s <= 0:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return True
+
+    def expire(_signum, _frame):
+        raise TimeoutError
+
+    old = signal.signal(signal.SIGALRM, expire)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, wait_s)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            return True
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    except TimeoutError:      # also when it fired just after the lock was taken: the caller closes fd
+        return False
+    finally:
+        signal.signal(signal.SIGALRM, old)
+
+
 def acquire_slot(wait_s: float, cmd: list[str]):
     """Take the machine-wide lock, waiting at most wait_s seconds (0 = no limit); None on timeout.
     The holder records itself in OWNER_PATH for waiting runs and --status."""
@@ -172,12 +196,9 @@ def acquire_slot(wait_s: float, cmd: list[str]):
     if not try_lock(fd):
         limit = f" up to {wait_s:.0f} s" if wait_s > 0 else ""
         print(f"[guard] waiting{limit} for exclusive lock {LOCK_PATH}: {slot_owner()}", file=sys.stderr, flush=True)
-        deadline = time.time() + wait_s if wait_s > 0 else None
-        while not try_lock(fd):
-            if deadline is not None and time.time() >= deadline:
-                fd.close()
-                return None
-            time.sleep(0.5)
+        if not blocking_lock(fd, wait_s):
+            fd.close()
+            return None
     record = {"pid": os.getpid(), "dir": os.path.basename(os.getcwd()),
               "since": time.strftime("%Y-%m-%d %H:%M:%S"), "cmd": cmd}
     tmp = f"{OWNER_PATH}.{os.getpid()}"
