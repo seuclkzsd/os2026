@@ -237,9 +237,17 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     3 次 SCOTCH 分析估计在每个测例上都有变化，METIS（固定种子）在任何测例上都没有（1888a72，
     `bench_drvint_fix_ordering`）。`FactorOptions::deterministic` 只覆盖分解与回代；driver 的
     `deterministic = true` 因此在自适应排序中改用 METIS（§3.6-3b）。
-- 错误约定：工作区不足（−8,−9,−14,−15,−17,−20）由 `factorize` 内部重试 ≤3 次（ICNTL(14) 翻倍，
-  计入 `workspace_retries`）后抛 FactorizationFailed；−13/−19（分配失败 / 超 ICNTL(23) 上限）抛
-  OutOfMemoryBudget；其它负 INFO 抛 FactorizationFailed（消息含 INFO(1)/INFO(2)）。
+- 错误约定：工作区不足（−8,−9,−14,−15,−17,−20），以及工作区预留低于 cap 时的 −19，由 `factorize`
+  内部重试 ≤3 次（ICNTL(14) 翻倍、预留随之增长，最后一次给满 cap；计入 `workspace_retries`）后抛
+  FactorizationFailed；−13/−19（分配失败 / 预留已是 cap 仍超）抛 OutOfMemoryBudget；其它负 INFO 抛
+  FactorizationFailed（消息含 INFO(1)/INFO(2)）。
+- **工作区预留**（P7 评审修正）：ICNTL(23) > 0 时 MUMPS 按 ICNTL(23) 而不是按估计确定工作区，地址空间
+  随之增长上限的一半到大部分（虚拟预留，常驻只增 INFOG(21)；syn-mem27-46 16 线程、cap 10125 MB：VmPeak
+  10.1 GiB 而峰值 RSS 0.85 GiB）。RLIMIT_AS（`ulimit -v`）把预留全额计入，P7 时 cap 取到上限的约 0.8
+  就失败（INFO −13，或 OpenBLAS 分配不到缓冲而段错误）。所以 `factorize` 给 MUMPS 的 ICNTL(23) 是
+  min(cap, (1 + ICNTL(14)/100)·估计 + 32 MB)——内存内用 INFOG(16)、外存用 INFOG(26)，按估计定额，
+  cap 只作上限；重试时随 ICNTL(14) 增长，最后一次给满 cap（`FactorStats::workspace_reserved_mb`；
+  InertiaCounter 的计数实例同样按其自己的估计）。
 - `scaling` 默认 ICNTL(8)=7（每次分解重算缩放），使一次分析服务不同位移。
 - `FactorEstimate`：INFOG(20)（因子条目估计）、INFOG(16/17) 内存、INFOG(26/27) 外存、
   INFOG(36/38) BLR 估计（仅当分析时启用 BLR，否则 −1）、RINFOG(1) flops。
@@ -325,8 +333,12 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
   返回列可能 ‖r‖ > rel_tol·‖BX‖，调用方须读 `last_relative_residual()` / `last_backward_error()`。
   **单精度或 BLR 分解必须配合修正**（否则特征对只是扰动矩阵的特征对，后向误差停在 1e-7 / blr_tol）。
   单精度仅当 σ 与所有特征值的相对距离 ≳ 1e-6‖K‖ 时可用（修正收敛需 eps_s·cond(K) < 1），否则修正
-  停滞或发散（实测 syn-mem27-46、σ = 0：10 步后 ‖r‖/‖Bx‖ ≈ 5e-6）。**driver 目前不检查**
-  `last_relative_residual()`，也不会自动换精度（§3.6-3、§3.6-5）。修正工作区 2·n·p 标量。
+  停滞或发散（实测 syn-mem27-46、σ = 0：10 步后 ‖r‖/‖Bx‖ ≈ 5e-6）。`last_apply_converged()`（P7）
+  报告上一次 apply 的每列是否以「达到 rel_tol 或舍入水平」结束（false：某列因修正被拒或步数用尽而
+  停下，返回的是扰动矩阵的算子）。driver 用 `DriverShiftInvert` 包装它：非精确因子的每次 apply 都
+  检查，未收敛且相对残差仍高于 Krylov 容差 tol·inner_tol_factor（修正目标的 10 倍：在可达精度处停滞
+  只是略差，wg-square-1e5 1.08e-12 对 1e-12；eps·cond(K) ≥ 1 时残差停在 1e-5 以上，syn-mem27-46
+  2.4e-5）即放弃该次尝试、改用双精度因子重解（§3.6-3「非精确因子」）。修正工作区 2·n·p 标量。
 - `FactorSolveOperator(factor)`（P4）：y = K⁻¹x，一次 p 列回代（任意精度的因子，不乘 B、不修正），
   如 LOBPCG / JD 的预条件子；构造检查与重分解防护同 ShiftInvertOperator。测试与 bench 中的局部副本
   （`test_jacobi_davidson.cpp`、`bench/lobpcg_jd_memory.cpp`）尚未换成它。
@@ -566,7 +578,7 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
          S 上 Lanczos 有 Ritz 值 < −1e-10·max|Ritz| 则证明 B 不定。**预算**：时间 `kBProofBudget` = 0.5 ×
          主分析估计下一次 B 分解的模型时间（`factorization_s`），每次尝试与填充级 1 模式的两个构造阶段都在
          运行前按预测时间扣除，余额不够即不做（S 上的 Lanczos 与 θ 过门槛后存储的 S 都是 O(nnz(B))，不计入
-         预算）；内存 min(预算 − 当前 RSS, 分解上限)，在分配任何东西之前检查
+         预算）；内存 min(预算 − 当前占用, 分解上限)，在分配任何东西之前检查
          （S 只在能与最小的尝试一起放下时才存；填充级 1 模式先按 O(n) 的界、再按第一遍数出的精确条目数定价）。
          16 线程实测（`bench/anaint_bproof.cpp`）：失败的证明 0.001–0.09 s，最差比例是 ss-tem27623 的 0.054 s
          对 B 的分解 0.058 s；成功的 0.004–0.08 s，对 0.026–0.20 s。棱元铅笔（ss-tem*）上证明失败。失败的
@@ -584,7 +596,33 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      调用。
    - smallest / largest 的惯性搜索以谱两端的 Ritz 估计为种子：30 步 Lanczos（A；有 B 时为 B 内积下
      的 B⁻¹A，B 的分解复用主分析，对角 B 直接求逆）。
-3. **内存预算**（显式公式）：分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·c_res)/1e6。
+3. **内存预算**（P7：默认由机器决定）：`memory_budget_gb` 默认 `"auto"`（= 0，`kMemoryBudgetAuto`），
+   取进程最小内存上限 L 的一部分：budget = max(0.5, min(0.85·L, L − 1)) GiB（`kAutoBudgetFraction`、
+   `kAutoBudgetHeadroomGb`、`kAutoBudgetFloorGb`；`resolve_memory_budget`）。L 来自
+   `detect_memory_limits`（util.hpp）：内存 cgroup（v2 `memory.max`、v1 `memory.limit_in_bytes` 与
+   `memory.stat` 的 `hierarchical_memory_limit`，沿 /proc/self/cgroup 的路径取最小；容器内路径不存在
+   时读挂载点根）、调用方声明的 `HSOLVE_MEMORY_LIMIT_GB`（GiB；`tools/run/guard.py` 把它设为本次运行
+   的 RSS 上限：测量槽 32、构建道 12）、有限的 RLIMIT_AS / RLIMIT_DATA、MemTotal（不用 MemAvailable：
+   决策不随别的进程此刻占了多少而变）；都读不到时 14 GiB（P7 前的固定默认）。显式数值（config / CLI /
+   Python）仍优先；超过 L 时告警。报告 `memory{budget_gb, source, limit_gb, limit_source, measure,
+   reserved_gb, limits[]}` 与事件 `memory_budget` 记录预算、来源与每个来源的值。系数的标定（峰值 RSS 对
+   预算，最大测例）见 `results/p7_membudget.md`：计划内的量（规划时的占用、Krylov 预留、ICNTL(23) 上限下
+   MUMPS 的估计）都在预算内，L 的其余部分容纳计划外的量（回代工作区、证书计数器的分析、碎片）。
+   **度量**（P7 评审修正）：预算按 L 所限的量计（`MemoryBudget::measure`，`measure_of`）：cgroup、
+   `HSOLVE_MEMORY_LIMIT_GB`、MemTotal 限常驻内存（RSS）；RLIMIT_AS 限地址空间（VmSize），RLIMIT_DATA 限
+   VmData（Linux ≥ 4.7）。地址空间里有大块只预留不使用的部分：进程启动时（尚未计算）OpenBLAS 线程池的
+   缓冲（gpu02，16 线程：VmSize 2.2 GB 而 RSS 6 MB；8 线程 1.1 GB），线程池启动后的 malloc arena 与线程栈
+   （syn-mem27-80 载入后 VmSize 3.5 GB 而 RSS 0.18 GB），它们在规划前就已存在、不随问题增长；之后地址
+   空间只随分析（+1.2 GB，RSS +0.8 GB）、MUMPS 的预留（cap 内）与 Krylov 基增长。所以每线程另留余量
+   并无必要，而地址空间（或 VmData）上限下预算 = R +
+   max(0.5, min(0.85·(L − R), L − R − 1))，R = 解析预算时该度量超出 RSS 的部分（`reserved_gb`）；预算在
+   诊断（已跑过并行区，线程与 arena 已建）之后才解析。规划、分析后的重新规划与所有"预算 − 当前占用"
+   （块宽、切片、B 的证明、随机检验）都用同一度量（`driver::memory_in_use` / `budget_left`）。配置的数值
+   预算指常驻内存。
+   P7 前固定 14 GB：1e6 的三维测例（syn-mem27-100，因子 15.9 GB）在 32 GB 机器上也走外存，274.6 s，
+   而内存内 125.1 s。P7 实测（16 线程，3 次中位数）：32 GiB 上限下 syn-mem27-100 与 yee-pec-box-1e6
+   改为内存内，比 14 GB 默认快 1.83× / 1.71×；16 GiB 下照旧外存、同速；1e5 测例决策与时间不变。
+   分析前 factor_cap_MB = 0.95·(budget − 当前占用 − n·sizeof(T)·c_res)/1e6。
    预留列数 c_res（`krylov_reservation`，事件 `memory_plan` 记下预留的块宽、列数、MB 与 cap）按分析前已知的
    问题类型（§3.6-1(a)）：定性路径（HEP/GHEP）ncv_g + 6k_g，k_g = k（interval：min(n, 64)），
    ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），`lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，
@@ -597,21 +635,39 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    GHIEP 为 `ghiep_reserve_columns`（P5：第一次运行的 `krylov_schur_general_peak_columns`，块宽取
    `ghiep_block_size`，单精度/BLR 另加修正工作区 2p，再加后续
    运行分解期间保留的普通运行 Schur 基与并集精修基各 m 列，m = min(n, nev + 1（实）/ nev（复））；类型
-   未定时取两者之大。cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap
-   作为 ICNTL(23) 传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
-   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。BLR 与单精度只由配置开启
-   （`blr = on`、`factor_precision = single`），driver **不**自动降级（P0 设计的「BLR → 单精度」降级链
-   未实现）。
-   窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前 RSS)，
+   未定时取两者之大。cap ≤ 0 即抛 OutOfMemoryBudget。
+   分析会常驻自己的结构（MUMPS 符号数据与输入副本：n = 5e5 的三维测例
+   0.8 GB，1e6 时 0.9–1.2 GB，规划时看不到），P7 起分析之后 cap 减去进程此间增长的 0.95 倍再做决定
+   （事件 `memory_replan`，`SparseFactorization::set_max_memory_mb`）。`analyze` 后估计 ≤ cap 才做内存内分解，cap 是
+   MUMPS 工作区的上限（超限变成 INFO=−19 而不是被系统杀掉；实际给的 ICNTL(23) 见 §3.4 工作区预留）；
+   否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
+   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。`out_of_core = auto` 时内存内
+   分解若仍因内存失败（INFO −13/−19，或 cap 下工作区重试长不够——估计偏低，如延迟主元），改用外存
+   重做并保持（`FactorOptions::ooc_on_memory_error`，`factor_stats.ooc_switches`）。外存运行仍需
+   外存工作内存与证书的只计惯性计数（InertiaCounter 总在内存内，工作内存与外存估计相当：
+   syn-mem27-100 7.2 GB 对 7.3 GB）都 ≤ cap。
+   **非精确因子**（P7）：`factor_precision = single`（或 `blr = on`）的因子每次算子 apply 都经双精度
+   修正，且受检查——修正未收敛（`DriverShiftInvert`，§3.4b）、非精确因子在某位移关掉零主元检测后
+   仍奇异（单精度的检测阈值 1e-4‖K‖ 也会标出单精度分辨不了的近邻特征值：cav2d-rect-pert-1e5 有 16 个
+   零主元，修正仍 3 步收敛；所以 `factorize_near` 对非精确因子不做扰动，而是关检测在 σ 处重分解，由
+   每次 apply 的检查裁决），或结果不被接受（有对超 tol、证书失败）时，`driver::InexactFactorFailure`
+   放弃这次尝试，从诊断之后以双精度、同一主元顺序（`set_pivot_order`，免第二次排序）重解（重解前
+   `malloc_trim` 把放弃的尝试释放的堆还给系统，否则新的规划把它算作占用：n = 27000 时 57 MB 中的
+   41 MB）；报告 `precision{requested, used, blr, decision, fallback, fallback_reason, attempt_s}`，
+   放弃的尝试时间计入各阶段，auto 的 `decision` 与其告警保留。单精度因此只用于省内存（因子 0.51–0.67 倍），从不返回错误结果；它本身更慢（P6：端到端
+   0.35–0.59 倍）。`factor_precision = auto`：分析（双精度）后若双精度内存内估计 > cap 而
+   `out_of_core ≠ on`，以同一主元顺序分析单精度对象，其内存内估计 ≤ cap 才改用单精度
+   （`choose_precision`），否则双精度外存。默认仍为 double；auto 的实测取舍见 `results/p7_membudget.md`。
+   窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前占用)，
    否则 OutOfMemoryBudget；一片的工作集约 7·c·n·sizeof(T)（基 ~2c，Rayleigh–Ritz 的 X/AX/BX 与乘积
    临时量 4c，选中块 c）限制片大小 c；**无固定特征值个数上限**（P2 的 max(2000, n/2) 已废）。
    **块基的运行时适配**（P4）：HEP/GHEP 每次运行前 `fit_block_size` 把 p 减半（告警），直到
    `lanczos_basis_columns`（p = 1：d + ncv + 2；p > 1：d + 块布局 ncv + 2p，块布局放不下时 d + n_free + 2）
    加调用方保留的列（候选块 X、AX、BX 与返回向量：4·nev，重跑另加 3d）的字节 ≤ 0.9·(budget − 当前
-   RSS)。例外（P5c）：nearest 的自动块宽减到不低于预留的块宽（规则的 8 → 4）时不告警，只记事件
+   占用)。例外（P5c）：nearest 的自动块宽减到不低于预留的块宽（规则的 8 → 4）时不告警，只记事件
    `block_size_fit`（想要的与用的块宽、可用 MB）；再往下减、以及显式块宽与重跑的任何减半仍告警。
    GHIEP 同理：峰值列 `krylov_schur_general_peak_columns` 加修正工作区 2np（开修正时）
-   ≤ 0.9·(budget − 当前 RSS)（当前 RSS 含活的分解与此前运行的 Schur 基），每种减法只告警一次。更后面
+   ≤ 0.9·(budget − 当前占用)（当前占用含活的分解与此前运行的 Schur 基），每种减法只告警一次。更后面
    运行（探测、单边运行、重跑）的基不预留，由这里的减半适配。
    **GHIEP 后处理**（P4 前约 88 B·n·m，wg-square-1e6 上 +1.15 GB 的尖峰决定全程峰值）现在只保留各次
    运行的 Schur 基（Ritz 向量当即丢弃），投影铅笔按 8 列一块形成（不物化 n×m 的 AW、BW），候选按
@@ -701,7 +757,7 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    判定、照常扰动，不告警、不计 shift_retries。
 5. **迭代求解**：内层容差 = tol × inner_tol_factor；θ → λ = σ + 1/θ。nearest 恰好收敛 k 对
    （nev = k；完备性由证书负责，不靠多算余量）。主分解为单精度 / BLR 时算子带双精度迭代修正
-   （≤ 10 步，rel_tol = 0.1·tol·inner_tol_factor；driver 不检查修正是否收敛，§3.4b）。
+   （≤ 10 步，rel_tol = 0.1·tol·inner_tol_factor；每次 apply 检查收敛，未收敛即改用双精度重解，§3.4b、§3.6-3）。
    **块 Krylov**（P4，`SolverConfig::block_size`，0 = 自动，1 = 单向量；报告 `block_size`）：
    - HEP/GHEP（`block_size_for`）：配置 > 0 时用配置值（显式值优先）。自动时：
      - nearest 的单位移运行（P5c）：在 σ 处的主分解（`factorize_near` 之后）上用块宽规则
@@ -1030,7 +1086,9 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：
 - 默认绑定 NUMA node1 的 16 个物理核 `24-30,33-41`，进程树 RSS 上限 30 GiB；系统可用内存低于
-  12 GiB 时只终止「大」进程树（≥ max(2 GiB, mem_gb/4)），小的构建/测试不受连带。
+  12 GiB 时只终止「大」进程树（≥ max(2 GiB, mem_gb/4)），小的构建/测试不受连带。RSS 上限（与外层
+  guard 或调用方已声明的较小值取小）作为 `HSOLVE_MEMORY_LIMIT_GB` 导出给子进程，hsolve 的自动内存
+  预算由它推出（§3.6-3）。
 - 峰值内存报告取采样和、内核高水位 VmHWM 之和、ru_maxrss 三者最大值（不漏短时尖峰）。
 - 重型实验加 `--exclusive`（全机串行）；单元测试用 `--skip-busy-check`。计时运行不要加
   `--skip-busy-check`：槽内的核若被别的进程占用，guard 会拒绝启动。
@@ -1064,4 +1122,5 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P2 | driver + CLI；端到端测试；测例集与首轮实验（对比 scipy 基线） |
 | P3 | **已完成**：低内存输入装配与无映射铅笔；确定性正交化（融合 CGS2、DGKS、块 CGS2）；MUMPS 约定补充与 InertiaCounter；块 Krylov-Schur（eigen 层）；LOBPCG / JD；谱切片与惯性搜索的单边目标、零带切除、GHIEP 零簇移位放置；互斥分阶段计时；Python 接口；评测工具（汇总、合并参考、scipy 基线）。**未做**：SpMV SIMD；GHIEP 重特征值的块 Krylov（一般 Krylov-Schur 仍只支持 p = 1）——二者 P4 完成 |
 | P4 | **已完成**（6a3d7c1）：稀疏核运行时分派（AVX-512）与融合修正残差、修正的舍入水平停止与活跃列回代、`FactorSolveOperator`；自研并行嵌套剖分（factor 层）与 ICNTL(15) 块分析；一般 Krylov-Schur 块模式与峰值列函数；src/verify（随机排除检验、单精度计数规则、代价模型）；driver：块 Krylov 默认（HEP/GHEP p = 4、GHIEP p = 2 的规则）、InertiaCounter 证书与 certificate 阶段、确定性排序模型（deterministic 用 METIS）、B 的 O(nnz) 筛查、GHIEP 后处理内存（wg-square-1e6 峰值 2.89 → 1.77 GB）；SLEPc 调优器与公平对比工具；集群节点部署。**未做**：JD + 单精度因子的内存受限回退；verify 接入 driver；自研嵌套剖分接入自适应排序；driver 检查单精度/BLR 修正是否收敛；16 核独占重测（SLEPc 调优与对比、排序、回代、GHIEP 块宽）；故障场景验证矩阵 |
-| P5 | **集成中**（P5c，p5c-integration）：verify 接入 driver（certificate = exact / randomized / auto / off，单精度计数的双精度复核）；输入检查与 B 正定性检验链（分析前的廉价检验、IC + Gershgorin 严格证明）；自适应排序的 16 线程代价模型，自研嵌套剖分作为候选与 `ordering = 10`；σ₀ 处的零主元簇规则；块宽规则 `recommended_block_size` 与块步快路径 `try_fast`，nearest 运行按规则取块宽（内存只预留 P4 块宽的基）；收缩重跑以 `lead_nev` 在缺的对收敛后结束、自动块宽之后至多用 P4 块宽；certifier 的 InertiaCounter 推迟双精度实例的分析；GHIEP 内存预留按峰值列计、报告实际块宽；BLAS hook（src/blas，默认链入、route all）；以上都在 16 核测量槽下测量。**未做**：JD + 单精度因子的内存受限回退；driver 检查单精度/BLR 修正是否收敛；SCOTCH 固定种子（之后可按其估计比较）；更好的嵌套剖分分隔子与 ND 功的预测（ss-tem152078）；一般 B 的 κ 证明（如分解 B − μ·diag(B)），使随机检验与单精度计数也适用于一般 HPD B；块宽规则在 BLAS hook 下的重新标定（现以 `kRuleWideMargin` 补偿，yee-bloch-1e4、yee-photonic-* 选 8 仍比 4 慢 2.5–3%）与用于切片；故障场景验证矩阵 |
+| P5 | **已完成**（P5c，main 34cbfd4）：verify 接入 driver（certificate = exact / randomized / auto / off，单精度计数的双精度复核）；输入检查与 B 正定性检验链（分析前的廉价检验、IC + Gershgorin 严格证明）；自适应排序的 16 线程代价模型，自研嵌套剖分作为候选与 `ordering = 10`；σ₀ 处的零主元簇规则；块宽规则 `recommended_block_size` 与块步快路径 `try_fast`，nearest 运行按规则取块宽（内存只预留 P4 块宽的基）；收缩重跑以 `lead_nev` 在缺的对收敛后结束、自动块宽之后至多用 P4 块宽；certifier 的 InertiaCounter 推迟双精度实例的分析；GHIEP 内存预留按峰值列计、报告实际块宽；BLAS hook（src/blas，默认链入、route all）；以上都在 16 核测量槽下测量。**未做**：JD + 单精度因子的内存受限回退；SCOTCH 固定种子（之后可按其估计比较）；更好的嵌套剖分分隔子与 ND 功的预测（ss-tem152078）；一般 B 的 κ 证明（如分解 B − μ·diag(B)），使随机检验与单精度计数也适用于一般 HPD B；块宽规则在 BLAS hook 下的重新标定（现以 `kRuleWideMargin` 补偿，yee-bloch-1e4、yee-photonic-* 选 8 仍比 4 慢 2.5–3%）与用于切片；故障场景验证矩阵 |
+| P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |

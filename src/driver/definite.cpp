@@ -124,12 +124,7 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
                  index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out, index_t lead = 0) {
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
-  SolveRefinement refine;
-  if (fac.options().precision == FactorPrecision::Single || fac.options().blr) {
-    refine.max_steps = 10;
-    refine.rel_tol = c.cfg.tol * c.cfg.inner_tol_factor * 0.1;
-  }
-  ShiftInvertOperator<T> op(fac, pencil, sigma, refine);
+  DriverShiftInvert<T> op(c.cfg, fac, pencil, sigma);  // inexact factors: refined and checked
   std::unique_ptr<CsrOperator<T>> b_op;
   if (b) b_op = std::make_unique<CsrOperator<T>>(*b);
   KrylovSchurOptions<T> ko;
@@ -1488,8 +1483,7 @@ Solution<T> WindowSolver<T>::solve() {
   // ---- 2. Memory: the n x required output plus one slice's working set must fit the budget.
   {
     const double vec = static_cast<double>(n_) * sizeof(T);
-    const double avail =
-        cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+    const double avail = budget_left(c_);
     // + up to 4 pairs per slice found just outside it (see step 3)
     const double out_bytes =
         vec * static_cast<double>(required + 4 * (total / std::max<index_t>(c_target_, 1) + 2) + 8);
@@ -1523,8 +1517,7 @@ Solution<T> WindowSolver<T>::solve() {
     // slice (counts cannot split it), whose output and working set must fit the budget.
     Slice& s = slices_[i];
     const double need_bytes = 8.0 * static_cast<double>(n_) * sizeof(T) * static_cast<double>(s.count());
-    const double avail =
-        cfg.memory_budget_gb * 1073741824.0 - static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+    const double avail = budget_left(c_);
     if (need_bytes > 0.9 * avail)
       HS_THROW(OutOfMemoryBudget, "the target ends inside a cluster of " << s.count() << " eigenvalues in [" << s.lo.s
                                                                          << ", " << s.hi.s

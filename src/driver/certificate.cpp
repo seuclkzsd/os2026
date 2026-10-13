@@ -147,8 +147,7 @@ const StartScaling& NearestCertifier<T>::scaling(bool estimate) {
 
 template <class T>
 double NearestCertifier<T>::check_budget_bytes() const {
-  const double avail = c_.cfg.memory_budget_gb * 1073741824.0 -
-                       static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  const double avail = budget_left(c_);
   // ExclusionOptions: 0 means "no limit", so an exhausted budget is one byte, not zero.
   return std::max(1.0, kCheckMemoryShare * avail);
 }
@@ -382,12 +381,7 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   const DenseMatrix<T> x = deflation_block(w, pairs);
   const index_t m = x.cols();
   refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
-  SolveRefinement refine;
-  if (fac_.options().precision == FactorPrecision::Single || fac_.options().blr) {
-    refine.max_steps = 10;
-    refine.rel_tol = cfg.tol * cfg.inner_tol_factor * 0.1;
-  }
-  ShiftInvertOperator<T> op(fac_, pencil_, sigma_, refine);
+  DriverShiftInvert<T> op(cfg, fac_, pencil_, sigma_);  // inexact factors: refined and checked
   std::unique_ptr<CsrOperator<T>> b_op;
   if (pencil_.b()) b_op = std::make_unique<CsrOperator<T>>(*pencil_.b());
   ExclusionOptions o;

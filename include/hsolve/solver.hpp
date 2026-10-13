@@ -20,6 +20,7 @@
 #include "hsolve/log.hpp"
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
+#include "hsolve/util.hpp"
 
 namespace hs {
 
@@ -53,6 +54,9 @@ enum class Method {
 };
 
 enum class Toggle { Auto, On, Off };
+
+/// SolverConfig::memory_budget_gb value that derives the budget from the machine (the default).
+inline constexpr double kMemoryBudgetAuto = 0.0;
 
 /// Completeness check of a nearest target (SolverConfig::certificate; src/driver/certificate.hpp).
 enum class CertificateMode {
@@ -101,7 +105,22 @@ struct SolverConfig {
   index_t max_restarts = 1000;
   std::uint64_t seed = 2026;
   int threads = 0;                  ///< 0 = OMP_NUM_THREADS / all available
-  double memory_budget_gb = 14.0;   ///< refuse factorizations predicted to exceed this
+  /// Memory the solve plans with, GiB (DESIGN §3.6-3): factors in core if their estimate fits,
+  /// else out of core, else OutOfMemoryBudget (nothing allocated); Krylov block widths and slice
+  /// sizes fit into what is left. 0 (kMemoryBudgetAuto, the default) = auto: a share of the
+  /// smallest memory limit of the process - memory cgroup, HSOLVE_MEMORY_LIMIT_GB, RLIMIT_AS /
+  /// RLIMIT_DATA, MemTotal (resolve_memory_budget; report.memory says which); > 0: exactly this.
+  double memory_budget_gb = kMemoryBudgetAuto;
+  /// Arithmetic of the shift factorizations (DESIGN §3.4b, §3.6-3; its purpose is memory, not
+  /// speed). double (default): always. single: single-precision factors (0.51-0.67x the memory of
+  /// double) refined in double precision in every operator application - slower (P6: 0.35-0.59x
+  /// end to end). A single run is checked: every refined application must converge (to within
+  /// tol * inner_tol_factor), a single factor that is singular even without null-pivot detection
+  /// is not used, and the result must be accepted (every pair within tol, the certificate
+  /// passed); otherwise the solve starts again with double factors on the same
+  /// pivot order (report.precision: fallback and why). The same holds for blr = on. auto: double,
+  /// unless its factors do not fit in core within the budget while single ones do - then single,
+  /// with the same checks and fallback (measured trade-off: results/p7_membudget.md).
   FactorPrecision factor_precision = FactorPrecision::Double;
   int ordering = -1;                ///< -1: adaptive AMD / nested dissection by cost model (DESIGN
                                     ///< §3.6-3b; nested dissection = SCOTCH, METIS if deterministic);
@@ -152,12 +171,90 @@ struct SolverConfig {
   /// farthest selected ones with their Ritz hints - so that the solve must find them missing (a
   /// check detecting a copy, or fewer than k selected pairs) and the deflated rerun recover them.
   index_t certificate_fault_drop = 0;
+  /// FAULT INJECTION, for tests only (false = off): the result of an attempt with inexact factors
+  /// (single precision, BLR) is not accepted - its first pair is marked above tol - so that the
+  /// solve starts again with double factors (report.precision.fallback), as for a real miss.
+  bool inexact_fault_reject = false;
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
   double complex_tol = 1e-8;      ///< GHIEP: a pair is complex only if |Im lambda| >
                                   ///< complex_tol*max(|lambda|, scale) AND its real projection fails
                                   ///< the backward-error test while the complex pair passes
   index_t max_shift_retries = 5;
+};
+
+/// The automatic budget (resolve_memory_budget) of a run whose smallest memory limit is L GiB:
+///   budget = max(kAutoBudgetFloorGb, min(kAutoBudgetFraction * L, L - kAutoBudgetHeadroomGb)).
+/// The plan (DESIGN §3.6-3) keeps its predictions - the memory in use at planning time, Krylov
+/// basis, MUMPS' estimate under the ICNTL(23) cap - within the budget; the rest of L covers what
+/// it does not predict (calibration: results/p7_membudget.md). The budget is charged in the
+/// measure of L (MemoryBudget::measure); an address-space (or VmData) limit first sets aside what
+/// the process reserves there without using it, and the formula applies to the rest of L
+/// (MemoryBudget::reserved_gb).
+inline constexpr double kAutoBudgetFraction = 0.85;
+inline constexpr double kAutoBudgetHeadroomGb = 1.0;
+/// Below this no automatic budget goes, whatever the limit (tiny machines: a plan needs room).
+inline constexpr double kAutoBudgetFloorGb = 0.5;
+/// Budget when no limit is readable at all (no cgroup, environment, rlimit or /proc/meminfo): the
+/// fixed default before P7.
+inline constexpr double kAutoBudgetFallbackGb = 14.0;
+
+/// The memory budget a solve plans with.
+struct MemoryBudget {
+  double gb = 0.0;  ///< GiB
+  /// "config" (a configured budget); auto: the source of the limit it derives from ("cgroup",
+  /// "env", "rlimit_as", "rlimit_data", "mem_total"), or "default" (no limit readable).
+  std::string source;
+  /// The smallest limit found (MemoryLimits::gib; for auto the L of the formula), GiB; -1: none.
+  /// Also probed for a configured budget, so that one above the limit can be reported.
+  double limit_gb = -1.0;
+  std::string limit_source;               ///< MemoryLimits::source
+  std::vector<MemoryLimitSource> limits;  ///< every source probed (detect_memory_limits)
+  /// What the budget is charged with: the measure of the limit an automatic budget derives from
+  /// (measure_of(source): the address space for RLIMIT_AS, VmData for RLIMIT_DATA), resident
+  /// memory otherwise - a configured budget states resident memory.
+  MemoryMeasure measure = MemoryMeasure::Resident;
+  /// Address-space / VmData budget: what the process held in that measure beyond its resident
+  /// memory when the budget was resolved, GiB - reserved, never touched: BLAS buffers, malloc
+  /// arenas, thread stacks (3.4 GB at 16 threads). It does not grow with the problem, so the
+  /// formula's share applies to the rest of the limit: budget = reserved + share(L - reserved).
+  /// 0 for a resident budget.
+  double reserved_gb = 0.0;
+};
+
+/// configured_gb > 0: that budget; kMemoryBudgetAuto: from the limits (formula above), where an
+/// address-space or VmData limit first sets aside `reserved_gib` (MemoryBudget::reserved_gb).
+/// Throws InvalidInput for a negative or non-finite configured_gb.
+MemoryBudget resolve_memory_budget(double configured_gb, const MemoryLimits& limits,
+                                   double reserved_gib = 0.0);
+/// The same with the limits of this process (detect_memory_limits()) and, for an address-space
+/// or VmData limit, its current reservation beyond resident memory.
+MemoryBudget resolve_memory_budget(double configured_gb);
+
+/// The memory budget of a solve, as resolved (SolveReport::memory).
+struct MemoryReport {
+  double budget_gb = 0.0;                 ///< MemoryBudget::gb
+  std::string source;                     ///< MemoryBudget::source
+  double limit_gb = -1.0;                 ///< MemoryBudget::limit_gb
+  std::string limit_source;               ///< MemoryBudget::limit_source
+  std::vector<MemoryLimitSource> limits;  ///< MemoryBudget::limits
+  MemoryMeasure measure = MemoryMeasure::Resident;  ///< MemoryBudget::measure
+  double reserved_gb = 0.0;                         ///< MemoryBudget::reserved_gb
+};
+
+/// The arithmetic of the factorizations (SolverConfig::factor_precision) and its checks
+/// (SolveReport::precision).
+struct PrecisionReport {
+  FactorPrecision requested = FactorPrecision::Double;  ///< SolverConfig::factor_precision
+  FactorPrecision used = FactorPrecision::Double;       ///< of the factors of the returned result
+  bool blr = false;  ///< the returned result's factors are block low-rank
+  /// auto: what the choice compared (the in-core estimates against the factorization cap);
+  /// otherwise empty.
+  std::string decision;
+  bool fallback = false;        ///< an inexact attempt (single / BLR) was abandoned for double
+  std::string fallback_reason;  ///< why (refinement that did not converge, a singular single
+                                ///< factor, pairs not accepted, certificate failed)
+  double attempt_s = 0.0;       ///< wall time of the abandoned attempt (inside the phase times)
 };
 
 /// Per-eigenpair verification record.
@@ -269,6 +366,8 @@ struct SolveReport {
                                     ///< completeness checks of nearest targets (randomized
                                     ///< exclusion check, single counts, the auto choice)
   std::int64_t peak_rss_bytes = 0;
+  MemoryReport memory;        ///< the memory budget and where it came from
+  PrecisionReport precision;  ///< factor arithmetic, its checks and fallback
   // results
   std::vector<PairReport> pairs;
   InertiaCertificate certificate;

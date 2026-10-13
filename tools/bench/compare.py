@@ -124,10 +124,13 @@ SOLVERS = (*HSOLVE_VARIANTS, "slepc")
 
 
 def hsolve_command(c: case.Case, solver: str, out: Path, ncores: int, args, target: dict | None) -> list[str]:
+    """hsolve's command line for case c. No --memory-budget-gb: hsolve runs its default automatic
+    budget, derived from the cap its guard enforces (--mem-gb, exported as HSOLVE_MEMORY_LIMIT_GB),
+    as it would under the judge's limit (DESIGN §3.6-3)."""
     if solver not in HSOLVE_VARIANTS:
         raise SystemExit(f"unknown hsolve variant {solver} (known: {', '.join(HSOLVE_VARIANTS)})")
     cmd = [str(HSOLVE), "--A", str(c.path / "A.npz"), "--config", str(c.path / "config.json"),
-           "--out", str(out), "--threads", str(ncores), "--memory-budget-gb", str(args.mem_gb * 0.9), "-q"]
+           "--out", str(out), "--threads", str(ncores), "-q"]
     if c.B is not None:
         cmd[3:3] = ["--B", str(c.path / "B.npz")]
     if HSOLVE_VARIANTS[solver] or target is not None:

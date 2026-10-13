@@ -43,7 +43,8 @@ BLAS 调用改用自带的 AVX-512 / AVX2 窄核、L0 层之上的大调用并�
 ```
 
 常用覆盖参数（覆盖 config.json 中的同名键，见 `docs/FORMATS.md` §2）：`--tol`、`--threads`、
-`--memory-budget-gb`、`--precision double|single`、`--slice-size N`（每个位移至多 N 个特征值，0 = 自动）、
+`--memory-budget-gb GiB|auto`（默认 auto：由 cgroup / `HSOLVE_MEMORY_LIMIT_GB` / ulimit / 物理内存中最小的上限推出，
+约 0.85 倍）、`--precision double|single|auto`（单精度只为省内存，未达标时自动以双精度重解）、`--slice-size N`（每个位移至多 N 个特征值，0 = 自动）、
 `--block-size N`（Krylov 块宽，0 = 自动：HEP/GHEP 的 nearest 运行由块宽规则按 σ 处分解的因子条目等在
 1/2/4/8 中选、需求 ≥ 8 对时至少 4、8 须比 4 有 10% 的模型收益，切片需求 ≥ 8 对时 4；GHIEP n ≥ 2e4 且
 ≥ 4 对时 2；1 = 单向量）、

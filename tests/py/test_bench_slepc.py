@@ -708,6 +708,8 @@ def test_compare_slepc_config_and_hsolve_command(tmp_path):
     assert cfg_doc["inertia_check"] == "off" and cfg_doc["target"]["mode"] == "interval"
     assert cmd[cmd.index("--config") + 1] == str(out.parent / "config-hsolve-nocert.json")
     assert "--B" not in cmd and cmd[cmd.index("--threads") + 1] == "2"
+    # the automatic budget from the guard's cap, as the judge would run it (no configured budget)
+    assert "--memory-budget-gb" not in cmd and "memory_budget_gb" not in cfg_doc
     # hsolve-auto: the case config with certificate=auto, written next to the result like nocert's
     out = tmp_path / "raw" / "hsolve-auto"
     cmd = compare.hsolve_command(c, "hsolve-auto", out, 2, args, None)

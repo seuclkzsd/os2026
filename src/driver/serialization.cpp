@@ -47,7 +47,7 @@ struct EnumNames<Method> {
 template <>
 struct EnumNames<FactorPrecision> {
   static constexpr std::pair<FactorPrecision, const char*> kList[] = {
-      {FactorPrecision::Double, "double"}, {FactorPrecision::Single, "single"}};
+      {FactorPrecision::Double, "double"}, {FactorPrecision::Single, "single"}, {FactorPrecision::Auto, "auto"}};
 };
 template <>
 struct EnumNames<Toggle> {
@@ -100,6 +100,7 @@ json factor_options_json(const FactorOptions& o) {
           {"threads", o.threads},                {"mem_relax_pct", o.mem_relax_pct},
           {"max_memory_mb", o.max_memory_mb},    {"blr", o.blr},                 {"blr_tol", o.blr_tol},
           {"blr_estimates", o.blr_estimates},    {"out_of_core", o.out_of_core}, {"ooc_dir", o.ooc_dir},
+          {"ooc_on_memory_error", o.ooc_on_memory_error},
           {"null_pivot_tol", o.null_pivot_tol},  {"verbosity", o.verbosity},
           {"deterministic", o.deterministic}};
 }
@@ -120,9 +121,11 @@ json factor_stats_json(const FactorStats& s) {
             {"flops", s.estimate.flops}}},
           {"factor_entries", s.factor_entries},
           {"factor_mb_used", s.factor_mb_used},
+          {"workspace_reserved_mb", s.workspace_reserved_mb},
           {"null_pivots", s.null_pivots},
           {"delayed_pivots", s.delayed_pivots},
           {"workspace_retries", s.workspace_retries},
+          {"ooc_switches", s.ooc_switches},
           {"last_info1", s.last_info1},
           {"last_info2", s.last_info2}};
 }
@@ -162,7 +165,12 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "max_restarts") c.max_restarts = get_integer<index_t>(v, k);
     else if (key == "seed") c.seed = get_integer<std::uint64_t>(v, k);
     else if (key == "threads") c.threads = get_integer<int>(v, k);
-    else if (key == "memory_budget_gb") c.memory_budget_gb = get_number(v, k);
+    else if (key == "memory_budget_gb") {
+      // A number of GiB, or "auto" (= 0, kMemoryBudgetAuto): derived from the machine.
+      if (v.is_string() && v.get<std::string>() == "auto") c.memory_budget_gb = kMemoryBudgetAuto;
+      else if (v.is_number()) c.memory_budget_gb = v.get<double>();
+      else HS_THROW(InvalidInput, "config: 'memory_budget_gb' must be a number of GiB or \"auto\"");
+    }
     else if (key == "factor_precision") c.factor_precision = enum_parse<FactorPrecision>(v, k);
     else if (key == "ordering") c.ordering = get_integer<int>(v, k);
     else if (key == "deterministic") {
@@ -176,6 +184,10 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "certificate") c.certificate = enum_parse<CertificateMode>(v, k);
     else if (key == "certificate_delta") c.certificate_delta = get_number(v, k);
     else if (key == "certificate_fault_drop") c.certificate_fault_drop = get_integer<index_t>(v, k);
+    else if (key == "inexact_fault_reject") {
+      if (!v.is_boolean()) HS_THROW(InvalidInput, "config: 'inexact_fault_reject' must be true/false");
+      c.inexact_fault_reject = v.get<bool>();
+    }
     else if (key == "zero_filter_tol") c.zero_filter_tol = get_number(v, k);
     else if (key == "complex_tol") c.complex_tol = get_number(v, k);
     else if (key == "max_shift_retries") c.max_shift_retries = get_integer<index_t>(v, k);
@@ -192,7 +204,8 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
       c.max_shift_retries < 0)
     HS_THROW(InvalidInput,
              "config: ncv, block_size, slice_size, threads, max_shift_retries must be >= 0 and max_restarts >= 1");
-  if (!(c.memory_budget_gb > 0.0)) HS_THROW(InvalidInput, "config: memory_budget_gb must be > 0");
+  if (!(c.memory_budget_gb >= 0.0) || !std::isfinite(c.memory_budget_gb))
+    HS_THROW(InvalidInput, "config: memory_budget_gb must be > 0, or \"auto\" / 0 (from the machine's limits)");
   if (!(c.certificate_delta > 0.0) || !(c.certificate_delta < 1.0))
     HS_THROW(InvalidInput, "config: certificate_delta must be in (0, 1)");
   if (c.certificate_fault_drop < 0) HS_THROW(InvalidInput, "config: certificate_fault_drop must be >= 0");
@@ -221,7 +234,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"max_restarts", c.max_restarts},
             {"seed", c.seed},
             {"threads", c.threads},
-            {"memory_budget_gb", c.memory_budget_gb},
+            {"memory_budget_gb", c.memory_budget_gb > 0 ? json(c.memory_budget_gb) : json("auto")},
             {"factor_precision", enum_name(c.factor_precision)},
             {"ordering", c.ordering},
             {"deterministic", c.deterministic},
@@ -232,6 +245,7 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"certificate", enum_name(c.certificate)},
             {"certificate_delta", c.certificate_delta},
             {"certificate_fault_drop", c.certificate_fault_drop},
+            {"inexact_fault_reject", c.inexact_fault_reject},
             {"zero_filter_tol", c.zero_filter_tol},
             {"complex_tol", c.complex_tol},
             {"max_shift_retries", c.max_shift_retries}};
@@ -262,6 +276,9 @@ std::string SolveReport::to_json(int indent) const {
                         {"op_applies", sl.op_applies},
                         {"passed", sl.passed}});
   }
+  json limits_j = json::array();
+  for (const auto& l : memory.limits)
+    limits_j.push_back({{"name", l.name}, {"gib", l.gib > 0 ? json(l.gib) : json(nullptr)}, {"detail", l.detail}});
   json j = {{"schema_version", 1},
             {"solver", "hsolve"},
             {"version", hs::version()},
@@ -291,6 +308,22 @@ std::string SolveReport::to_json(int indent) const {
             {"time_verify_s", time_verify_s},
             {"time_certificate_s", time_certificate_s},
             {"peak_rss_bytes", peak_rss_bytes},
+            {"memory",
+             {{"budget_gb", memory.budget_gb},
+              {"source", memory.source},
+              {"limit_gb", memory.limit_gb},
+              {"limit_source", memory.limit_source},
+              {"measure", to_string(memory.measure)},
+              {"reserved_gb", memory.reserved_gb},
+              {"limits", limits_j}}},
+            {"precision",
+             {{"requested", enum_name(precision.requested)},
+              {"used", enum_name(precision.used)},
+              {"blr", precision.blr},
+              {"decision", precision.decision},
+              {"fallback", precision.fallback},
+              {"fallback_reason", precision.fallback_reason},
+              {"attempt_s", precision.attempt_s}}},
             {"pairs", pairs_j},
             {"certificate",
              {{"performed", certificate.performed},

@@ -46,7 +46,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
   "max_restarts": 1000,
   "seed": 2026,
   "threads": 0,
-  "memory_budget_gb": 14.0,
+  "memory_budget_gb": "auto",
   "factor_precision": "double",
   "ordering": -1,
   "deterministic": false,
@@ -66,13 +66,29 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 枚举取值：`target.mode ∈ {nearest, interval, smallest, largest}`（interval 用 `lower`/`upper`）；
 `problem ∈ {auto, standard, generalized_definite, generalized_indefinite}`；
 `method ∈ {auto, shift_invert_lanczos, shift_invert_krylov_schur, lanczos}`；
-`factor_precision ∈ {double, single}`；`blr / out_of_core / inertia_check / inertia_counter ∈ {auto, on, off}`；
+`factor_precision ∈ {double, single, auto}`；`blr / out_of_core / inertia_check / inertia_counter ∈ {auto, on, off}`；
 `certificate ∈ {exact, randomized, auto, off}`。
 
 取值与语义（校验见 `parse_config`；算法见 `docs/DESIGN.md` §3.6）：
 - `tol ∈ (0, 1)`；`inner_tol_factor ∈ (0, 1]`；`ncv, block_size, slice_size, threads, max_shift_retries ≥ 0`；
-  `max_restarts ≥ 1`；`memory_budget_gb > 0`；`certificate_delta ∈ (0, 1)`；`certificate_fault_drop ≥ 0`；
-  `ordering ∈ {−1, 0, 2..7, 10}`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
+  `max_restarts ≥ 1`；`memory_budget_gb > 0`（GiB）或 `"auto"` / `0`；`certificate_delta ∈ (0, 1)`；
+  `certificate_fault_drop ≥ 0`；`ordering ∈ {−1, 0, 2..7, 10}`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
+- `memory_budget_gb`（P7）：`"auto"`（默认；`0` 同义，`config_to_json` 写作 `"auto"`）= 由进程的最小
+  内存上限 L 推出：max(0.5, min(0.85·L, L − 1)) GiB；L 取内存 cgroup（v2 `memory.max`、v1
+  `memory.limit_in_bytes` / `hierarchical_memory_limit`）、环境变量 `HSOLVE_MEMORY_LIMIT_GB`（GiB，调用方
+  声明；`tools/run/guard.py` 导出其 RSS 上限）、有限的 RLIMIT_AS / RLIMIT_DATA、MemTotal 中最小者，都读不到
+  时 14。数值（GiB = 2^30 字节）= 就用它（P7 前的配置照旧有效）；超过 L 时告警。预算决定因子内存内 /
+  外存 / 拒绝（OutOfMemoryBudget，未分配），以及 Krylov 块宽与切片大小（DESIGN §3.6-3）；报告
+  `memory` 记录结果与来源（§3）。自动预算按 L 所限的量计：RLIMIT_AS 为地址空间、RLIMIT_DATA 为 VmData，
+  其余为常驻内存；地址空间 / VmData 上限先扣除进程已预留而未使用的部分 R（BLAS 缓冲、malloc arena、
+  线程栈），预算 = R + max(0.5, min(0.85·(L − R), L − R − 1))。数值预算指常驻内存。
+- `factor_precision`（P7）：`double`（默认）；`single` = 单精度因子（因子内存 0.51–0.67 倍）、每次算子
+  apply 双精度修正，更慢；运行受检查（修正须收敛、单精度因子关检测后不得奇异、结果须被接受），否则以双精度
+  同一主元顺序重解，不会返回错误结果；`auto` = 双精度因子在预算内放不进内存而单精度放得进时才用单精度
+  （同样受检查与回退）。报告 `precision` 记录请求、实际与回退（§3）；BLR（`blr = on`）同样受检查与回退。
+- `inexact_fault_reject`（P7 评审修正）：**故障注入，仅供测试**，默认 false。为 true 时非精确因子
+  （单精度 / BLR）的尝试结果被判为不接受（第一对标为超 tol），求解以双精度重解（`precision.fallback`），
+  与真实未达标同一路径；对双精度因子无作用（`certificate_fault_drop` 见下）。
 - `block_size`（P4）：整数 ≥ 0，位移反演 Krylov 运行的块宽 p；0（默认）= 自动，1 = 单向量。
   HEP/GHEP：配置 > 0 时直接使用；自动时 nearest 的运行用块宽规则（P5c，`recommended_block_size`：由 n、
   需求对数、σ 处主分解的因子条目、nnz(B) 与标量类型在 {1, 2, 4, 8} 中选，需求 ≥ 8 对时至少 4，8 须比 4 有
@@ -124,12 +140,13 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 
 **CLI 覆盖参数**（`hsolve --A A.npz [--B B.npz] [--config config.json] --out DIR [...]`，覆盖配置文件
 中的对应键，合并后整体再校验）：`--sigma S`（nearest）、`--k K`、`--interval LO HI`、
-`--smallest K`、`--largest K`、`--tol`、`--threads`（0 = 全部）、`--memory-budget-gb`、
-`--precision double|single`、`--slice-size N`（→ `slice_size`）、`--block-size N`（→ `block_size`，
+`--smallest K`、`--largest K`、`--tol`、`--threads`（0 = 全部）、`--memory-budget-gb GiB|auto`、
+`--precision double|single|auto`、`--slice-size N`（→ `slice_size`）、`--block-size N`（→ `block_size`，
 0 = 自动，1 = 单向量；HEP/GHEP 的 Lanczos 与 GHIEP 的 Krylov-Schur 都用）、`--zero-filter-tol TOL`
 （→ `zero_filter_tol`，< 0 关闭）、`--certificate exact|randomized|auto|off`（P5，→ `certificate`）；
-另有 `--log FILE`（JSON-lines 事件日志）、`-v/--verbose`、`-q/--quiet`、`--version`。stdout 摘要的证书行
-注明方法（计数时为窗口、两个计数与结论；随机检验时为找到数、结论与失败概率）。退出码：0 = 全部达标
+另有 `--log FILE`（JSON-lines 事件日志；P7 起每条记录带进程当时的 `rss_mb` 与峰值 `peak_rss_mb`，以及地址
+空间 `vm_mb`（VmSize）与其峰值 `peak_vm_mb`（VmPeak））、`-v/--verbose`、`-q/--quiet`、`--version`。stdout
+摘要的证书行注明方法（计数时为窗口、两个计数与结论；随机检验时为找到数、结论与失败概率）。退出码：0 = 全部达标
 （且证书通过），1 = 完成但未达标，2 = 错误。
 
 ## 3. 求解结果目录（`hsolve --out DIR`，scipy 基线同格式）
@@ -146,7 +163,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 solver, version, n, nnz_a, nnz_b, complex_scalars, problem, norm2_a, norm2_b, scale, hermitian_defect_a,
 hermitian_defect_b, method, sigma_requested, sigma_used, shift_retries, block_size, factor_options{...},
 factor_stats{...}, restarts, op_applies, time_total_s, time_setup_s, time_factor_s, time_iterate_s, time_verify_s,
-time_certificate_s, peak_rss_bytes, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
+time_certificate_s, peak_rss_bytes, memory{...}, precision{...}, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
 backward_error, accepted}], certificate{performed, lower, upper, count_inertia, count_found,
 endpoint_moves, passed, note, method, rigorous, failure_probability, solves, seconds, statement},
 slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
@@ -195,6 +212,21 @@ slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
   （nev = 1）也列在这里。
 - `zero_cluster_dim`：GHIEP 需要时计算的零簇维数（A 的零主元数），未计算为 −1。
 - `zero_modes_filtered`：被 `zero_filter_tol` 排除的特征值个数（HEP/GHEP 窗口为惯性计数所得）。
+- `memory`（P7）：`{budget_gb, source, limit_gb, limit_source, measure, reserved_gb, limits[{name, gib,
+  detail}]}`——本次运行规划用的预算（GiB）；`source` = `config`（配置的数值）或自动预算所据上限的来源
+  （`cgroup`、`env`、`rlimit_as`、`rlimit_data`、`mem_total`），都读不到时 `default`；`limit_gb` /
+  `limit_source` 为探测到的最小上限（无则 −1 / ""，配置数值时也探测）；`measure` 为预算所计的量
+  （`resident` = RSS；`address_space` = VmSize，预算来自 RLIMIT_AS 时；`data` = VmData，来自 RLIMIT_DATA
+  时），`reserved_gb` 为该量下已预留未使用的部分（resident 时 0；见 §2 `memory_budget_gb`）；`limits`
+  按上述顺序列出每个来源（`gib` 为 null 表示该来源不设限，`detail` 说明读自何处或为何不设限）。因子是否
+  走外存见 `factor_options.out_of_core`；内存内分解因内存失败后改走外存的次数见
+  `factor_stats.ooc_switches`（`factor_options.ooc_on_memory_error` 为真时）；最后一次分解给 MUMPS 的
+  工作区预留（ICNTL(23)，MB；cap 或更少，无 cap 时 0）见 `factor_stats.workspace_reserved_mb`。
+- `precision`（P7）：`{requested, used, blr, decision, fallback, fallback_reason, attempt_s}`——请求的
+  `factor_precision`、返回结果所用因子的精度（`double` / `single`）与是否 BLR；`decision` 为 auto 的依据
+  （各精度内存内估计对 cap；auto 选了单精度而尝试被放弃时仍保留），否则空；`fallback` 为真时非精确
+  （单精度 / BLR）尝试被放弃并以双精度重解，
+  `fallback_reason` 说明原因，`attempt_s` 为被放弃尝试的墙钟时间（已计入各阶段时间）。
 
 ## 4. 评测输出（`tools/eval`）
 

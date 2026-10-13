@@ -356,7 +356,8 @@ hsolve = 默认配置（certificate = exact），hsolve-auto = certificate = aut
   GHEP 0.808、GHIEP 0.808），总时间 514.8 → 453.6 s；只有 ss-tem152078 慢 6.7%（排序模型选了自研 ND，
   分析比 SCOTCH 多 0.6 s）。
 - ss-3dspectralwave2 在 CLI 默认 14 GiB 内存预算下会随机失败（out-of-core，MUMPS 内存估计逐次波动约 30%，
-  新旧二进制都会），见 `results/p5c_measurements.md` §2.2；内存预算按运行环境自动设定的工作在 P7 进行。
+  新旧二进制都会），见 `results/p5c_measurements.md` §2.2。P7 起内存预算默认按运行环境的上限自动设定
+  （32 GiB 上限下约 27 GiB），1e6 三维测例在 32 GiB 下改为内存内、快 1.71–1.83×（`results/p7_membudget.md`）。
 - 本节未覆盖：16 以外的线程数、无 AVX-512 的 CPU。
 
 ### 9.2 P4 记录：对调优后的 SLEPc（2 核与 4 核）

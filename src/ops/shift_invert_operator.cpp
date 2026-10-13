@@ -88,6 +88,7 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
   apply_b(pencil_->b(), n, x, ldx, y, ldy, p, KernelOptions{kernels_, &scratch_});
   if (refinement_.max_steps == 0) {
     factor_->solve(y, p, ldy);
+    last_converged_ = true;
     return;
   }
 
@@ -168,6 +169,9 @@ void ShiftInvertOperator<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy
   }
   last_rel_residual_ = p > 0 ? *std::max_element(rel.begin(), rel.end()) : 0.0;
   last_backward_error_ = p > 0 ? *std::max_element(omega.begin(), omega.end()) : 0.0;
+  last_converged_ = true;
+  for (index_t k = 0; k < p; ++k)
+    last_converged_ = last_converged_ && (rel[k] <= refinement_.rel_tol || omega[k] <= floor);
 }
 
 template <class T>

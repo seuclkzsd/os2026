@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "hsolve/error.hpp"
+#include "hsolve/util.hpp"
 
 namespace hs {
 namespace {
@@ -61,6 +62,14 @@ void Logger::event(const std::string& name, std::initializer_list<LogField> fiel
     j["t"] = t;
     j["event"] = name;
     for (const auto& [k, v] : fields) j[k] = to_json_value(v);
+    // The process's resident and peak memory at every event (P7): a memory timeline of the run
+    // (a field of the same name set by the caller wins).
+    if (!j.contains("rss_mb")) j["rss_mb"] = static_cast<double>(current_rss_bytes()) / 1e6;
+    if (!j.contains("peak_rss_mb")) j["peak_rss_mb"] = static_cast<double>(peak_rss_bytes()) / 1e6;
+    // ... and its address space (what RLIMIT_AS limits: reservations count in full).
+    if (!j.contains("vm_mb"))
+      j["vm_mb"] = static_cast<double>(memory_in_use_bytes(MemoryMeasure::AddressSpace)) / 1e6;
+    if (!j.contains("peak_vm_mb")) j["peak_vm_mb"] = static_cast<double>(peak_address_space_bytes()) / 1e6;
     (*file_) << j.dump() << '\n';
     file_->flush();
   }

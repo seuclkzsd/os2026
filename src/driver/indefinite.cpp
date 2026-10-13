@@ -104,7 +104,7 @@ constexpr index_t kMaxConfiguredBlock = 64;
 /// Runs with at most this many wanted pairs (the side probes, nev = 2) stay single-vector whatever
 /// is configured: they only locate a shift, and a block would multiply their basis for nothing.
 constexpr index_t kMaxProbeNev = 2;
-/// Share of the memory left in the budget (memory_budget_gb - current RSS) a run's block basis may
+/// Share of the memory left in the budget (memory_budget_gb - memory in use) a run's block basis may
 /// take (fit_block_size); the rest is headroom for the solves' own workspace.
 constexpr double kBlockMemoryShare = 0.9;
 
@@ -157,7 +157,7 @@ index_t ghiep_reserve_columns(const SolverConfig& cfg, index_t n) {
   const index_t min_ncv = std::min(n, ko.nev + (is_complex_v<T> ? 1 : 2));
   ko.ncv = cfg.ncv >= min_ncv ? cfg.ncv : 0;
   ko.block_size = ghiep_block_size(cfg, n, ko.nev);
-  const bool refinement = cfg.factor_precision == FactorPrecision::Single || cfg.blr == Toggle::On;
+  const bool refinement = cfg.factor_precision != FactorPrecision::Double || cfg.blr == Toggle::On;
   const index_t m = std::min(n, ko.nev + (is_complex_v<T> ? 0 : 1));
   return krylov_schur_general_peak_columns<T>(n, ko) + (refinement ? 2 * ko.block_size : 0) + 2 * m;
 }
@@ -175,8 +175,7 @@ index_t fit_block_size(Ctx& c, index_t n, KrylovSchurOptions<T> ko, bool refinem
   const index_t wanted = ko.block_size;
   if (wanted <= 1) return wanted;
   const double vec = static_cast<double>(n) * static_cast<double>(sizeof(T));
-  const double avail = c.cfg.memory_budget_gb * 1073741824.0 -
-                       static_cast<double>(std::max<std::int64_t>(current_rss_bytes(), 0));
+  const double avail = budget_left(c);
   auto bytes = [&](index_t q) {
     ko.block_size = q;
     return vec * static_cast<double>(krylov_schur_general_peak_columns<T>(n, ko) + (refinement ? 2 * q : 0));
@@ -213,12 +212,8 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   run.sigma = factorize_near(c, fac, sigma0, scale, detection_off);
   run.which = which;
   run.nev = std::min<index_t>(pencil.order(), nev);
-  SolveRefinement refine;
-  if (fac.options().precision == FactorPrecision::Single || fac.options().blr) {
-    refine.max_steps = 10;
-    refine.rel_tol = cfg.tol * cfg.inner_tol_factor * 0.1;
-  }
-  ShiftInvertOperator<T> op(fac, pencil, run.sigma, refine);
+  DriverShiftInvert<T> op(cfg, fac, pencil, run.sigma);  // inexact factors: refined and checked
+  const bool refinement = inexact_factor(fac.options());
   KrylovSchurOptions<T> ko;
   ko.nev = run.nev;
   ko.ncv = cfg.ncv;
@@ -226,7 +221,7 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   ko.tol = tol > 0 ? tol : cfg.tol * cfg.inner_tol_factor;
   ko.seed = cfg.seed;
   ko.block_size = ghiep_block_size(cfg, pencil.order(), ko.nev);
-  ko.block_size = fit_block_size(c, pencil.order(), ko, refine.max_steps > 0);
+  ko.block_size = fit_block_size(c, pencil.order(), ko, refinement);
   run.block_size = ko.block_size;
   {
     PhaseScope phase(c.clock, Phase::Iterate);

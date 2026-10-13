@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <cstring>
 #include <sstream>
 
 #ifdef _OPENMP
@@ -33,6 +34,53 @@ std::int64_t current_rss_bytes() {
   std::fclose(f);
   if (got != 2) return -1;
   return static_cast<std::int64_t>(pages_rss) * sysconf(_SC_PAGESIZE);
+}
+
+namespace {
+
+// A "Key:   value kB" line of /proc/self/status, bytes; -1 if absent or unreadable.
+std::int64_t status_kib_field(const char* key) {
+  std::FILE* f = std::fopen("/proc/self/status", "r");
+  if (!f) return -1;
+  const std::size_t len = std::strlen(key);
+  char line[256];
+  std::int64_t bytes = -1;
+  while (std::fgets(line, sizeof(line), f)) {
+    if (std::strncmp(line, key, len) != 0 || line[len] != ':') continue;
+    long long kib = 0;
+    if (std::sscanf(line + len + 1, "%lld", &kib) == 1) bytes = static_cast<std::int64_t>(kib) * 1024;
+    break;
+  }
+  std::fclose(f);
+  return bytes;
+}
+
+}  // namespace
+
+std::int64_t memory_in_use_bytes(MemoryMeasure measure) {
+  switch (measure) {
+    case MemoryMeasure::Resident: return current_rss_bytes();
+    case MemoryMeasure::AddressSpace: return status_kib_field("VmSize");
+    case MemoryMeasure::Data: return status_kib_field("VmData");
+  }
+  return -1;
+}
+
+std::int64_t peak_address_space_bytes() { return status_kib_field("VmPeak"); }
+
+MemoryMeasure measure_of(const std::string& source) {
+  if (source == "rlimit_as") return MemoryMeasure::AddressSpace;
+  if (source == "rlimit_data") return MemoryMeasure::Data;
+  return MemoryMeasure::Resident;
+}
+
+const char* to_string(MemoryMeasure measure) {
+  switch (measure) {
+    case MemoryMeasure::Resident: return "resident";
+    case MemoryMeasure::AddressSpace: return "address_space";
+    case MemoryMeasure::Data: return "data";
+  }
+  return "?";
 }
 
 int max_threads() {

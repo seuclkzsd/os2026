@@ -142,6 +142,35 @@ def test_nested_exclusive_shares_the_held_lock(tmp_path):
     assert json.loads(r.stdout.strip().splitlines()[-1]) == {"aff": [int(SLOT)], "held": str(lock)}
 
 
+PRINT_LIMIT = [sys.executable, "-c", "import os; print(os.environ.get('HSOLVE_MEMORY_LIMIT_GB'))"]
+
+
+def test_child_memory_limit_takes_the_smaller_declared_cap():
+    sys.path.insert(0, str(GUARD.parent))
+    import guard
+    assert guard.child_memory_limit(32.0, None) == 32.0
+    assert guard.child_memory_limit(32.0, "") == 32.0
+    assert guard.child_memory_limit(32.0, "16") == 16.0      # an enclosing guard's smaller cap
+    assert guard.child_memory_limit(12.0, "32") == 12.0      # this guard's own cap is smaller
+    for bad in ("abc", "-4", "0", "nan", "inf"):
+        assert guard.child_memory_limit(8.0, bad) == 8.0
+
+
+@pytest.mark.parametrize("inherited, expected", [("", "0.5"), ("0.25", "0.25"), ("64", "0.5"), ("x", "0.5")])
+def test_the_child_is_told_the_memory_cap(tmp_path, inherited, expected):
+    # hsolve derives its automatic memory budget from HSOLVE_MEMORY_LIMIT_GB (docs/DESIGN.md §3.6-3)
+    r = _guard(tmp_path / "l", ["--mem-gb", "0.5"], PRINT_LIMIT, HSOLVE_MEMORY_LIMIT_GB=inherited)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == expected
+
+
+def test_nested_guard_passes_on_the_smaller_cap(tmp_path):
+    inner = [sys.executable, str(GUARD), "--skip-busy-check", "--mem-gb", "1", "--", *PRINT_LIMIT]
+    r = _guard(tmp_path / "l", ["--mem-gb", "0.75"], inner, HSOLVE_MEMORY_LIMIT_GB="")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().splitlines()[-1] == "0.75"
+
+
 def _start_sleeper(tmp_path, ignore_hup=False):
     pidfile = tmp_path / "child.pid"
     summary = tmp_path / "summary.json"
