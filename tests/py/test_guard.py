@@ -103,6 +103,21 @@ def test_busy_slot_gives_up_and_names_the_holder(tmp_path):
     assert _run_status(status, lock).startswith("free")
 
 
+def test_waiting_run_gets_the_slot_when_it_is_released(tmp_path):
+    lock = tmp_path / "l"
+    with open(lock, "a") as fd:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        waiter = subprocess.Popen([sys.executable, str(GUARD), "--skip-busy-check", "--exclusive", "--timeout", "30",
+                                   "--lock-wait", "30", "--", "true"], env=_env(lock),
+                                  stderr=subprocess.PIPE, text=True)
+        time.sleep(1.0)
+        assert waiter.poll() is None                  # still waiting
+    t0 = time.time()                                  # released
+    assert waiter.wait(timeout=30) == 0
+    assert time.time() - t0 < 5
+    assert "waiting up to 30 s" in waiter.stderr.read()
+
+
 def _run_status(cmd, lock):
     return subprocess.run(cmd, env=_env(lock), capture_output=True, text=True, timeout=30, check=True).stdout
 
