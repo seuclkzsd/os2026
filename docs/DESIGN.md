@@ -219,9 +219,17 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     3 次 SCOTCH 分析估计在每个测例上都有变化，METIS（固定种子）在任何测例上都没有（1888a72，
     `bench_drvint_fix_ordering`）。`FactorOptions::deterministic` 只覆盖分解与回代；driver 的
     `deterministic = true` 因此在自适应排序中改用 METIS（§3.6-3b）。
-- 错误约定：工作区不足（−8,−9,−14,−15,−17,−20）由 `factorize` 内部重试 ≤3 次（ICNTL(14) 翻倍，
-  计入 `workspace_retries`）后抛 FactorizationFailed；−13/−19（分配失败 / 超 ICNTL(23) 上限）抛
-  OutOfMemoryBudget；其它负 INFO 抛 FactorizationFailed（消息含 INFO(1)/INFO(2)）。
+- 错误约定：工作区不足（−8,−9,−14,−15,−17,−20），以及工作区预留低于 cap 时的 −19，由 `factorize`
+  内部重试 ≤3 次（ICNTL(14) 翻倍、预留随之增长，最后一次给满 cap；计入 `workspace_retries`）后抛
+  FactorizationFailed；−13/−19（分配失败 / 预留已是 cap 仍超）抛 OutOfMemoryBudget；其它负 INFO 抛
+  FactorizationFailed（消息含 INFO(1)/INFO(2)）。
+- **工作区预留**（P7 评审修正）：ICNTL(23) > 0 时 MUMPS 按 ICNTL(23) 而不是按估计确定工作区，地址空间
+  随之增长约整个上限（虚拟预留，常驻只增 INFOG(21)；syn-mem27-46 16 线程、cap 10125 MB：VmPeak
+  10.1 GiB 而峰值 RSS 0.85 GiB）。RLIMIT_AS（`ulimit -v`）把预留全额计入，P7 时 cap 取到上限的约 0.8
+  就失败（INFO −13，或 OpenBLAS 分配不到缓冲而段错误）。所以 `factorize` 给 MUMPS 的 ICNTL(23) 是
+  min(cap, (1 + ICNTL(14)/100)·估计 + 32 MB)——内存内用 INFOG(16)、外存用 INFOG(26)，即 MUMPS 无上限
+  时自己的定额，cap 只作上限（`FactorStats::workspace_reserved_mb`；InertiaCounter 的计数实例同样按其
+  自己的估计）。
 - `scaling` 默认 ICNTL(8)=7（每次分解重算缩放），使一次分析服务不同位移。
 - `FactorEstimate`：INFOG(20)（因子条目估计）、INFOG(16/17) 内存、INFOG(26/27) 外存、
   INFOG(36/38) BLR 估计（仅当分析时启用 BLR，否则 −1）、RINFOG(1) flops。
@@ -476,21 +484,33 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    时读挂载点根）、调用方声明的 `HSOLVE_MEMORY_LIMIT_GB`（GiB；`tools/run/guard.py` 把它设为本次运行
    的 RSS 上限：测量槽 32、构建道 12）、有限的 RLIMIT_AS / RLIMIT_DATA、MemTotal（不用 MemAvailable：
    决策不随别的进程此刻占了多少而变）；都读不到时 14 GiB（P7 前的固定默认）。显式数值（config / CLI /
-   Python）仍优先；超过 L 时告警。报告 `memory{budget_gb, source, limit_gb, limit_source, limits[]}`
-   与事件 `memory_budget` 记录预算、来源与每个来源的值。系数的标定（峰值 RSS 对预算，最大测例）见
-   `results/p7_membudget.md`：计划内的量（规划时的 RSS、Krylov 预留、ICNTL(23) 上限下 MUMPS 的估计）
-   都在预算内，L 的其余部分容纳计划外的量（线程栈与 BLAS 缓冲、回代工作区、碎片）。
+   Python）仍优先；超过 L 时告警。报告 `memory{budget_gb, source, limit_gb, limit_source, measure,
+   reserved_gb, limits[]}` 与事件 `memory_budget` 记录预算、来源与每个来源的值。系数的标定（峰值 RSS 对
+   预算，最大测例）见 `results/p7_membudget.md`：计划内的量（规划时的占用、Krylov 预留、ICNTL(23) 上限下
+   MUMPS 的估计）都在预算内，L 的其余部分容纳计划外的量（回代工作区、证书计数器的分析、碎片）。
+   **度量**（P7 评审修正）：预算按 L 所限的量计（`MemoryBudget::measure`，`measure_of`）：cgroup、
+   `HSOLVE_MEMORY_LIMIT_GB`、MemTotal 限常驻内存（RSS）；RLIMIT_AS 限地址空间（VmSize），RLIMIT_DATA 限
+   VmData（Linux ≥ 4.7）。地址空间里有大块只预留不使用的部分：进程启动时（尚未计算）OpenBLAS 线程池的
+   缓冲（gpu02，16 线程：VmSize 2.2 GB 而 RSS 6 MB；8 线程 1.1 GB），线程池启动后的 malloc arena 与线程栈
+   （syn-mem27-80 载入后 VmSize 3.5 GB 而 RSS 0.18 GB），它们在规划前就已存在、不随问题增长；之后地址
+   空间只随分析（+1.2 GB，RSS +0.8 GB）、MUMPS 的预留（cap 内）与 Krylov 基增长。所以每线程另留余量
+   并无必要，而地址空间（或 VmData）上限下预算 = R +
+   max(0.5, min(0.85·(L − R), L − R − 1))，R = 解析预算时该度量超出 RSS 的部分（`reserved_gb`）；预算在
+   诊断（已跑过并行区，线程与 arena 已建）之后才解析。规划、分析后的重新规划与所有"预算 − 当前占用"
+   （块宽、切片、B 的证明、随机检验）都用同一度量（`driver::memory_in_use` / `budget_left`）。配置的数值
+   预算指常驻内存。
    P7 前固定 14 GB：1e6 的三维测例（syn-mem27-100，因子 15.9 GB）在 32 GB 机器上也走外存，274.6 s，
    而内存内 125.1 s。P7 实测（16 线程，3 次中位数）：32 GiB 上限下 syn-mem27-100 与 yee-pec-box-1e6
    改为内存内，比 14 GB 默认快 1.83× / 1.71×；16 GiB 下照旧外存、同速；1e5 测例决策与时间不变。
-   分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·(ncv_g +
+   分析前 factor_cap_MB = 0.95·(budget − 当前占用 − n·sizeof(T)·(ncv_g +
    6k_g))/1e6，k_g = k（interval：min(n, 64)），ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），
    `lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，p_g = min(block_size > 0 ? block_size : 4, 4)——即只为
    自动块宽预留块基，更宽的显式 block_size 不预留（分解优先，运行时再按剩余内存减半，见下）；
    cap ≤ 0 即抛 OutOfMemoryBudget。分析会常驻自己的结构（MUMPS 符号数据与输入副本：n = 5e5 的三维测例
    0.8 GB，1e6 时 0.9–1.2 GB，规划时看不到），P7 起分析之后 cap 减去进程此间增长的 0.95 倍再做决定
-   （事件 `memory_replan`，`SparseFactorization::set_max_memory_mb`）。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap 作为 ICNTL(23)
-   传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
+   （事件 `memory_replan`，`SparseFactorization::set_max_memory_mb`）。`analyze` 后估计 ≤ cap 才做内存内分解，cap 是
+   MUMPS 工作区的上限（超限变成 INFO=−19 而不是被系统杀掉；实际给的 ICNTL(23) 见 §3.4 工作区预留）；
+   否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
    改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。`out_of_core = auto` 时内存内
    分解若仍因内存失败（INFO −13/−19，或 cap 下工作区重试长不够——估计偏低，如延迟主元），改用外存
    重做并保持（`FactorOptions::ooc_on_memory_error`，`factor_stats.ooc_switches`）。外存运行仍需
@@ -501,20 +521,21 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    仍奇异（单精度的检测阈值 1e-4‖K‖ 也会标出单精度分辨不了的近邻特征值：cav2d-rect-pert-1e5 有 16 个
    零主元，修正仍 3 步收敛；所以 `factorize_near` 对非精确因子不做扰动，而是关检测在 σ 处重分解，由
    每次 apply 的检查裁决），或结果不被接受（有对超 tol、证书失败）时，`driver::InexactFactorFailure`
-   放弃这次尝试，从诊断之后以双精度、同一主元顺序（`set_pivot_order`，免第二次排序）重解；报告
-   `precision{requested, used, blr, decision, fallback, fallback_reason, attempt_s}`，放弃的尝试时间
-   计入各阶段。单精度因此只用于省内存（因子 0.51–0.67 倍），从不返回错误结果；它本身更慢（P6：端到端
+   放弃这次尝试，从诊断之后以双精度、同一主元顺序（`set_pivot_order`，免第二次排序）重解（重解前
+   `malloc_trim` 把放弃的尝试释放的堆还给系统，否则新的规划把它算作占用：n = 27000 时 57 MB 中的
+   41 MB）；报告 `precision{requested, used, blr, decision, fallback, fallback_reason, attempt_s}`，
+   放弃的尝试时间计入各阶段，auto 的 `decision` 与其告警保留。单精度因此只用于省内存（因子 0.51–0.67 倍），从不返回错误结果；它本身更慢（P6：端到端
    0.35–0.59 倍）。`factor_precision = auto`：分析（双精度）后若双精度内存内估计 > cap 而
    `out_of_core ≠ on`，以同一主元顺序分析单精度对象，其内存内估计 ≤ cap 才改用单精度
    （`choose_precision`），否则双精度外存。默认仍为 double；auto 的实测取舍见 `results/p7_membudget.md`。
-   窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前 RSS)，
+   窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前占用)，
    否则 OutOfMemoryBudget；一片的工作集约 7·c·n·sizeof(T)（基 ~2c，Rayleigh–Ritz 的 X/AX/BX 与乘积
    临时量 4c，选中块 c）限制片大小 c；**无固定特征值个数上限**（P2 的 max(2000, n/2) 已废）。
    **块基的运行时适配**（P4）：HEP/GHEP 每次运行前 `fit_block_size` 把 p 减半（告警），直到
    `lanczos_basis_columns`（p = 1：d + ncv + 2；p > 1：d + 块布局 ncv + 2p，块布局放不下时 d + n_free + 2）
    加调用方保留的列（候选块 X、AX、BX 与返回向量：4·nev，重跑另加 3d）的字节 ≤ 0.9·(budget − 当前
-   RSS)。GHIEP 同理：峰值列 `krylov_schur_general_peak_columns` 加修正工作区 2np（开修正时）
-   ≤ 0.9·(budget − 当前 RSS)（当前 RSS 含活的分解与此前运行的 Schur 基），每种减法只告警一次。GHIEP
+   占用)。GHIEP 同理：峰值列 `krylov_schur_general_peak_columns` 加修正工作区 2np（开修正时）
+   ≤ 0.9·(budget − 当前占用)（当前占用含活的分解与此前运行的 Schur 基），每种减法只告警一次。GHIEP
    的分析前预留仍按上面的 ncv_g 公式，未按 `krylov_schur_general_peak_columns` 计。
    **GHIEP 后处理**（P4 前约 88 B·n·m，wg-square-1e6 上 +1.15 GB 的尖峰决定全程峰值）现在只保留各次
    运行的 Schur 基（Ritz 向量当即丢弃），投影铅笔按 8 列一块形成（不物化 n×m 的 AW、BW），候选按
