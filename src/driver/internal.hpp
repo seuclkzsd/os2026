@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,7 +16,9 @@
 #include "hsolve/dense.hpp"
 #include "hsolve/eigen.hpp"
 #include "hsolve/factor.hpp"
+#include "hsolve/linear_operator.hpp"
 #include "hsolve/log.hpp"
+#include "hsolve/operator.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
@@ -141,7 +144,65 @@ MumpsInputSize mumps_input_size(const ShiftedPencil<T>& pencil);
 
 // ------------------------------------------------------------------------------ factorization
 
+/// The main factorization's options: cfg's precision (auto: double - choose_precision may switch
+/// to single after the analysis), ordering, threads, BLR, out-of-core, and the in-core cap cap_mb
+/// as ICNTL(23); out_of_core = auto also retries a factorization that fails for memory out of core
+/// (FactorOptions::ooc_on_memory_error).
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb);
+
+/// FactorPrecision::Auto (DESIGN §3.6-3): `fac` holds the main analysis in double precision. When
+/// its in-core estimate exceeds the factorization cap (FactorOptions::max_memory_mb) and
+/// out_of_core is not forced on, a single-precision object is analysed on the same pivot order
+/// and replaces `fac` if its own in-core estimate fits the cap (else the double object stays, and
+/// analyze_within_budget sends it out of core). Records the decision in report.precision.decision
+/// and the event precision_choice. Charged to Phase::Factor.
+template <class T>
+void choose_precision(Ctx& c, std::unique_ptr<SparseFactorization<T>>& fac, const ShiftedPencil<T>& pencil,
+                      double sigma0);
+
+// ------------------------------------------------------------------------------ inexact factors
+
+/// A single-precision or block low-rank factorization: its solves need refinement and its inertia
+/// is that of a perturbed matrix (DESIGN §3.4b).
+inline bool inexact_factor(const FactorOptions& o) { return o.precision != FactorPrecision::Double || o.blr; }
+
+/// Thrown where an inexact main factorization cannot serve the run: a refined operator application
+/// that did not converge (eps_factor * cond(K) too large at the shift), or an inexact factorization
+/// flagged singular. hs::solve catches it and solves again with double factors
+/// (SolverConfig::factor_precision); it never leaves hs::solve.
+class InexactFactorFailure : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
+/// Refinement of shift-invert applications with an inexact factor: at most kInexactRefineSteps
+/// corrections, down to kInexactRefineTolFactor * tol * inner_tol_factor relative residual.
+constexpr int kInexactRefineSteps = 10;
+constexpr double kInexactRefineTolFactor = 0.1;
+
+/// The refinement policy of shift-invert applications with `factor`: none for an exact factor.
+SolveRefinement shift_invert_refinement(const SolverConfig& cfg, const FactorOptions& factor);
+
+/// The driver's shift-invert operator K(sigma)^{-1} B on the factorization `fac` holds at sigma:
+/// ShiftInvertOperator with shift_invert_refinement, and with an inexact factor every application
+/// is checked - one whose refinement did not converge (ShiftInvertOperator::last_apply_converged)
+/// throws InexactFactorFailure: its result would be the operator of a perturbed matrix, and the
+/// Krylov run, the randomized check and the eigenpairs built on it could not be trusted.
+template <class T>
+class DriverShiftInvert final : public LinearOperator<T> {
+ public:
+  DriverShiftInvert(const SolverConfig& cfg, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil,
+                    double sigma)
+      : op_(fac, pencil, sigma, shift_invert_refinement(cfg, fac.options())), checked_(inexact_factor(fac.options())) {}
+  index_t size() const override { return op_.size(); }
+
+ protected:
+  void do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) override;
+
+ private:
+  ShiftInvertOperator<T> op_;
+  bool checked_;
+};
 
 /// Factorize K(sigma0) (DESIGN §3.6-4): perturb the shift by 1e-8 * max(scale, |sigma0|) on null
 /// pivots of one eigenvalue (isolated eigenvalue at sigma0), and factorize at sigma0 without

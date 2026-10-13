@@ -382,12 +382,7 @@ CheckOutcome NearestCertifier<T>::randomized(const NearestWindow& w, const Round
   const DenseMatrix<T> x = deflation_block(w, pairs);
   const index_t m = x.cols();
   refactorize_at(c_, fac_, sigma_, detection_off_);  // no-op unless counts moved the main object
-  SolveRefinement refine;
-  if (fac_.options().precision == FactorPrecision::Single || fac_.options().blr) {
-    refine.max_steps = 10;
-    refine.rel_tol = cfg.tol * cfg.inner_tol_factor * 0.1;
-  }
-  ShiftInvertOperator<T> op(fac_, pencil_, sigma_, refine);
+  DriverShiftInvert<T> op(cfg, fac_, pencil_, sigma_);  // inexact factors: refined and checked
   std::unique_ptr<CsrOperator<T>> b_op;
   if (pencil_.b()) b_op = std::make_unique<CsrOperator<T>>(*pencil_.b());
   ExclusionOptions o;

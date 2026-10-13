@@ -157,7 +157,7 @@ index_t ghiep_reserve_columns(const SolverConfig& cfg, index_t n) {
   const index_t min_ncv = std::min(n, ko.nev + (is_complex_v<T> ? 1 : 2));
   ko.ncv = cfg.ncv >= min_ncv ? cfg.ncv : 0;
   ko.block_size = ghiep_block_size(cfg, n, ko.nev);
-  const bool refinement = cfg.factor_precision == FactorPrecision::Single || cfg.blr == Toggle::On;
+  const bool refinement = cfg.factor_precision != FactorPrecision::Double || cfg.blr == Toggle::On;
   const index_t m = std::min(n, ko.nev + (is_complex_v<T> ? 0 : 1));
   return krylov_schur_general_peak_columns<T>(n, ko) + (refinement ? 2 * ko.block_size : 0) + 2 * m;
 }
@@ -213,12 +213,8 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   run.sigma = factorize_near(c, fac, sigma0, scale, detection_off);
   run.which = which;
   run.nev = std::min<index_t>(pencil.order(), nev);
-  SolveRefinement refine;
-  if (fac.options().precision == FactorPrecision::Single || fac.options().blr) {
-    refine.max_steps = 10;
-    refine.rel_tol = cfg.tol * cfg.inner_tol_factor * 0.1;
-  }
-  ShiftInvertOperator<T> op(fac, pencil, run.sigma, refine);
+  DriverShiftInvert<T> op(cfg, fac, pencil, run.sigma);  // inexact factors: refined and checked
+  const bool refinement = inexact_factor(fac.options());
   KrylovSchurOptions<T> ko;
   ko.nev = run.nev;
   ko.ncv = cfg.ncv;
@@ -226,7 +222,7 @@ KsRun<T> ks_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pen
   ko.tol = tol > 0 ? tol : cfg.tol * cfg.inner_tol_factor;
   ko.seed = cfg.seed;
   ko.block_size = ghiep_block_size(cfg, pencil.order(), ko.nev);
-  ko.block_size = fit_block_size(c, pencil.order(), ko, refine.max_steps > 0);
+  ko.block_size = fit_block_size(c, pencil.order(), ko, refinement);
   run.block_size = ko.block_size;
   {
     PhaseScope phase(c.clock, Phase::Iterate);

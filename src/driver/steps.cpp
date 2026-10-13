@@ -92,14 +92,75 @@ void append_columns(DenseMatrix<T>& dst, const DenseMatrix<T>& src) {
 
 FactorOptions factor_options_from(const SolverConfig& cfg, double cap_mb) {
   FactorOptions o;
-  o.precision = cfg.factor_precision;
+  // auto analyses in double; choose_precision may switch to single on the estimates
+  o.precision = cfg.factor_precision == FactorPrecision::Single ? FactorPrecision::Single : FactorPrecision::Double;
   o.ordering = cfg.ordering < 0 ? 7 : cfg.ordering;  // adaptive (-1) is resolved by adaptive_analysis
   o.deterministic = cfg.deterministic;
   o.threads = cfg.threads > 0 ? cfg.threads : max_threads();
   o.blr = cfg.blr == Toggle::On;
   o.out_of_core = cfg.out_of_core == Toggle::On;
+  o.ooc_on_memory_error = cfg.out_of_core == Toggle::Auto;
   o.max_memory_mb = cap_mb > 0 ? cap_mb : 0.0;
   return o;
+}
+
+// ------------------------------------------------------------------------------ inexact factors
+
+SolveRefinement shift_invert_refinement(const SolverConfig& cfg, const FactorOptions& factor) {
+  SolveRefinement r;
+  if (inexact_factor(factor)) {
+    r.max_steps = kInexactRefineSteps;
+    r.rel_tol = cfg.tol * cfg.inner_tol_factor * kInexactRefineTolFactor;
+  }
+  return r;
+}
+
+template <class T>
+void DriverShiftInvert<T>::do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) {
+  op_.apply(x, ldx, y, ldy, p);
+  if (checked_ && !op_.last_apply_converged()) {
+    std::ostringstream os;
+    os.precision(3);
+    os << "the refinement of an operator application at sigma = " << op_.sigma()
+       << " did not converge (relative residual " << op_.last_relative_residual() << ", backward error "
+       << op_.last_backward_error() << "): eps_factor * cond(K) is too large at this shift";
+    throw InexactFactorFailure(os.str());
+  }
+}
+
+// FactorPrecision::Auto. The single object reuses the double analysis' pivot order (given-order
+// analysis: 0.5-0.6 s at n = 1e6, internal.hpp), so both estimates describe the same elimination.
+template <class T>
+void choose_precision(Ctx& c, std::unique_ptr<SparseFactorization<T>>& fac, const ShiftedPencil<T>& pencil,
+                      double sigma0) {
+  PhaseScope phase(c.clock, Phase::Factor);
+  const FactorEstimate de = fac->estimate();
+  const double cap = fac->options().max_memory_mb;
+  std::string& decision = c.rep.precision.decision;
+  if (fac->options().precision != FactorPrecision::Double || fac->options().blr) {
+    decision = "double analysis expected";
+  } else if (!(cap > 0) || de.incore_mb <= cap) {
+    decision = "double: in-core estimate " + fmt(de.incore_mb) + " MB fits the cap " + fmt(cap) + " MB";
+  } else if (c.cfg.out_of_core == Toggle::On) {
+    decision = "double: out_of_core = on";
+  } else {
+    FactorOptions so = fac->options();
+    so.precision = FactorPrecision::Single;
+    auto single = make_mumps_factorization<T>(so);
+    single->set_pivot_order(fac->pivot_order());
+    single->analyze(pencil, 1.0, -sigma0);
+    const FactorEstimate se = single->estimate();
+    const bool fits = se.incore_mb <= cap;
+    decision = std::string(fits ? "single" : "double") + ": in-core estimates double " + fmt(de.incore_mb) +
+               " MB, single " + fmt(se.incore_mb) + " MB, cap " + fmt(cap) + " MB" +
+               (fits ? "" : " (single does not fit either: double out of core)");
+    if (fits) fac = std::move(single);
+    event(c, "precision_choice", {{"double_incore_mb", de.incore_mb}, {"double_ooc_mb", de.ooc_mb},
+                                  {"single_incore_mb", se.incore_mb}, {"single_ooc_mb", se.ooc_mb},
+                                  {"cap_mb", cap}, {"single", fits}});
+  }
+  if (fac->options().precision == FactorPrecision::Single)
+    warn(c, "factor_precision auto: single-precision factors (" + decision + ")");
 }
 
 // ------------------------------------------------------------------------------ run-time models
@@ -178,6 +239,13 @@ double factorize_near(Ctx& c, SparseFactorization<T>& fac, double sigma0, double
     return sigma0;
   }
   const index_t nulls = fac.stats().null_pivots;
+  // An inexact factor flagged singular: its threshold (single_null_pivot_tol, factor.hpp) flags
+  // K within ~1e-4 ||K|| of singular, where its refinement would not converge; the shift
+  // perturbation and the detection-off path below are calibrated for double factors only.
+  if (inexact_factor(fac.options()))
+    throw InexactFactorFailure("the " + std::string(fac.options().blr ? "BLR" : "single-precision") +
+                               " factorization of A - sigma B is flagged singular at sigma = " + fmt(sigma0) + " (" +
+                               std::to_string(nulls) + " null pivots)");
   const bool cluster = !on_eigenvalue && near_null_eigenvalues(nulls, is_complex_v<T>) >= 2;
   const bool may_perturb = c.cfg.max_shift_retries > 0;
   const double perturbed = sigma0 + 1e-8 * std::max(scale, std::abs(sigma0));
@@ -224,8 +292,11 @@ bool try_refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool 
 
 template <class T>
 void refactorize_at(Ctx& c, SparseFactorization<T>& fac, double sigma, bool detection_off) {
-  if (!try_refactorize_at(c, fac, sigma, detection_off))
-    HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
+  if (try_refactorize_at(c, fac, sigma, detection_off)) return;
+  if (inexact_factor(fac.options()))
+    throw InexactFactorFailure("the inexact refactorization at the working shift " + fmt(sigma) +
+                               " is flagged singular");
+  HS_THROW(Internal, "refactorization at the working shift " << sigma << " failed");
 }
 
 // ------------------------------------------------------------------------------ inertia counts
@@ -908,7 +979,10 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   template MumpsInputSize mumps_input_size<T>(const ShiftedPencil<T>&);                                     \
   template OrderingInput ordering_input<T>(const ShiftedPencil<T>&);                                       \
   template std::unique_ptr<SparseFactorization<T>> adaptive_analysis<T>(                                    \
-      Ctx&, const FactorOptions&, const ShiftedPencil<T>&, double, const PlannedWork&);
+      Ctx&, const FactorOptions&, const ShiftedPencil<T>&, double, const PlannedWork&);                    \
+  template void choose_precision<T>(Ctx&, std::unique_ptr<SparseFactorization<T>>&, const ShiftedPencil<T>&, \
+                                    double);                                                                \
+  template class DriverShiftInvert<T>;
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_DRIVER_STEPS)
 #undef HS_INSTANTIATE_DRIVER_STEPS
 

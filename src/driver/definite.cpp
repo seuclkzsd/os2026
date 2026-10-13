@@ -124,12 +124,7 @@ void lanczos_run(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pe
                  index_t nev, index_t p, const DenseMatrix<T>* deflation, DefiniteRun<T>& out, index_t lead = 0) {
   const CsrMatrix<T>& a = pencil.a();
   const CsrMatrix<T>* b = pencil.b();
-  SolveRefinement refine;
-  if (fac.options().precision == FactorPrecision::Single || fac.options().blr) {
-    refine.max_steps = 10;
-    refine.rel_tol = c.cfg.tol * c.cfg.inner_tol_factor * 0.1;
-  }
-  ShiftInvertOperator<T> op(fac, pencil, sigma, refine);
+  DriverShiftInvert<T> op(c.cfg, fac, pencil, sigma);  // inexact factors: refined and checked
   std::unique_ptr<CsrOperator<T>> b_op;
   if (b) b_op = std::make_unique<CsrOperator<T>>(*b);
   KrylovSchurOptions<T> ko;

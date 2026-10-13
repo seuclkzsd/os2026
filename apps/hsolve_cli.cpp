@@ -93,11 +93,11 @@ int run(const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b, const hs::SolverCo
 int main(int argc, char** argv) {
   CLI::App app{"hsolve - eigensolver for large sparse Hermitian (indefinite) eigenproblems"};
   std::string a_path, b_path, config_path, out_dir = "hsolve_out", log_path;
-  double sigma = 0.0, tol = 0.0, budget = 0.0, zero_filter = 0.0;
+  double sigma = 0.0, tol = 0.0, zero_filter = 0.0;
   long long k = 0, smallest = 0, largest = 0, slice_size = 0, block_size = 0;
   std::vector<double> interval;
   int threads = -1;
-  std::string precision, certificate;
+  std::string precision, certificate, budget;
   bool verbose = false, quiet = false, version = false;
 
   app.add_option("--A", a_path, "matrix A (.npz scipy sparse, .npy dense, .mtx)")->required();
@@ -111,8 +111,13 @@ int main(int argc, char** argv) {
   auto* o_large = app.add_option("--largest", largest, "k algebraically largest");
   auto* o_tol = app.add_option("--tol", tol, "backward-error tolerance");
   auto* o_threads = app.add_option("--threads", threads, "threads (0 = all available)");
-  auto* o_budget = app.add_option("--memory-budget-gb", budget, "memory budget in GiB");
-  auto* o_prec = app.add_option("--precision", precision, "factorization precision: double|single");
+  auto* o_budget = app.add_option("--memory-budget-gb", budget,
+                                  "memory budget in GiB, or auto (default: a share of the smallest memory limit of "
+                                  "the process - cgroup, HSOLVE_MEMORY_LIMIT_GB, rlimit, MemTotal)");
+  auto* o_prec = app.add_option("--precision", precision,
+                                "factorization precision: double | single (half the factor memory, slower; checked, "
+                                "falls back to double) | auto (single only when double does not fit in core)")
+                     ->check(CLI::IsMember({"double", "single", "auto"}));
   auto* o_slice = app.add_option("--slice-size", slice_size, "max eigenvalues per shift in sliced targets (0 = auto)");
   auto* o_block = app.add_option("--block-size", block_size,
                                  "Krylov block width of the shift-invert runs - HEP/GHEP Lanczos and GHIEP "
@@ -155,7 +160,23 @@ int main(int argc, char** argv) {
     if (*o_large) cfg.target.mode = hs::TargetMode::Largest, cfg.target.k = static_cast<hs::index_t>(largest);
     if (*o_tol) cfg.tol = tol;
     if (*o_threads) cfg.threads = threads;
-    if (*o_budget) cfg.memory_budget_gb = budget;
+    if (*o_budget) {  // "auto" or a number of GiB (range checked with the merged configuration below)
+      std::size_t used = 0;
+      double gb = 0.0;
+      if (budget == "auto") {
+        used = budget.size();
+        gb = hs::kMemoryBudgetAuto;
+      } else {
+        try {
+          gb = std::stod(budget, &used);
+        } catch (const std::exception&) {
+          used = 0;
+        }
+      }
+      if (budget.empty() || used != budget.size())
+        HS_THROW(InvalidInput, "--memory-budget-gb must be a number of GiB or auto, got '" << budget << "'");
+      cfg.memory_budget_gb = gb;
+    }
     if (*o_slice) cfg.slice_size = static_cast<hs::index_t>(slice_size);
     if (*o_block) cfg.block_size = static_cast<hs::index_t>(block_size);
     if (*o_zero) cfg.zero_filter_tol = zero_filter;
