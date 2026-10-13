@@ -647,7 +647,7 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    运行分解期间保留的普通运行 Schur 基与并集精修基各 m 列，m = min(n, nev + 1（实）/ nev（复））；类型
    未定时取两者之大。cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap
    作为 ICNTL(23) 传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
-   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）——P8 起逐次不同的排序（SCOTCH，§3.4）先再分析一次（告警）：ss-3dspectralwave2 在默认 14 GiB 下外存估计多为 10.6–11.9 GB，21 次分析中有 3 次 13.4–14.2 GB，对上限 13.49 GB。BLR 与单精度只由配置开启
+   改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）——P8 起逐次不同的排序（SCOTCH，§3.4）先再分析（至多两次，告警）：ss-3dspectralwave2 在默认 14 GiB 下外存估计多为 10.6–11.9 GB，P5c 与 P8 的 29 次分析中有 5 次 13.4–14.2 GB，对上限 13.49 GB。BLR 与单精度只由配置开启
    （`blr = on`、`factor_precision = single`），driver **不**自动降级（P0 设计的「BLR → 单精度」降级链
    未实现）。
    窗口目标（§3.6-8b）在计数之后另查：n×m 输出加每片至多 4 对余量须 ≤ 0.9·(budget − 当前 RSS)，

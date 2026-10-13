@@ -422,9 +422,11 @@ index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, doub
 // estimate fits the cap, else out-of-core if allowed and fitting, else OutOfMemoryBudget.
 // An ordering that differs from analysis to analysis (SCOTCH, taken_on_prediction: multithreaded,
 // not reproducible even with its random state reset, factor.hpp) whose estimate does not fit is
-// analysed once more before giving up (P8): its estimates scatter by up to ~30% - ss-3dspectralwave2
-// at the default 14 GiB budget had out-of-core estimates of 10.6..11.9 GB in most analyses and
-// 13.4..14.2 GB in 3 of 21, against a cap of 13.49 GB (results/p8_certcost.md §2.3).
+// analysed again, up to kMaxReanalyses times, before giving up (P8): its estimates scatter by up to
+// ~30% - ss-3dspectralwave2 at the default 14 GiB budget had out-of-core estimates of 10.6..11.9 GB
+// in most analyses and 13.4..14.2 GB in 5 of 29 (P5c and P8), against a cap of 13.49 GB
+// (results/p8_certcost.md §2.3); each re-analysis costs one ordering (16 s there).
+constexpr int kMaxReanalyses = 2;
 template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed) {
@@ -443,7 +445,7 @@ void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPen
       warn(c, "factor estimate " + fmt(est.incore_mb) + " MB exceeds the budget; using out-of-core factors");
       return;
     }
-    if (attempt == 0 && taken_on_prediction(fac.options().ordering)) {
+    if (attempt < kMaxReanalyses && taken_on_prediction(fac.options().ordering)) {
       warn(c, "factor estimate " + fmt(est.incore_mb) + " MB (out-of-core " + fmt(est.ooc_mb) +
                   " MB) exceeds the budget of " + fmt(cap_mb) + " MB; analysing again (the ordering differs from run "
                   "to run)");

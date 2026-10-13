@@ -451,7 +451,8 @@ hs::FactorEstimate est(double incore, double ooc) {
 }
 
 // A SCOTCH analysis (orderings differ from run to run) that fits the budget neither in core nor out
-// of core is analysed once more; a reproducible ordering, or a second miss, ends with the error.
+// of core is analysed again, at most twice; a reproducible ordering, or a third miss, ends with the
+// error.
 TEST(DriverAnalysisRetry, NonReproducibleOrderingIsAnalysedAgainOnce) {
   const auto a = hs::identity<double>(1);
   const hs::ShiftedPencil<double> pencil(a, nullptr);
@@ -466,10 +467,16 @@ TEST(DriverAnalysisRetry, NonReproducibleOrderingIsAnalysedAgainOnce) {
     EXPECT_TRUE(f.options().out_of_core);
     EXPECT_TRUE(has_warning(rep, "analysing again"));
   }
-  {  // twice too large: the error, after one retry
-    ScriptedFactorization f(hs::driver::kOrderingScotch, {est(3000, 1400), est(3100, 1300)});
+  {  // the third analysis fits
+    ScriptedFactorization f(hs::driver::kOrderingScotch, {est(3000, 1400), est(3100, 1300), est(2900, 980)});
+    hs::driver::analyze_within_budget(c, f, pencil, 0.0, true);
+    EXPECT_EQ(f.analyses, 3);
+    EXPECT_TRUE(f.options().out_of_core);
+  }
+  {  // three times too large: the error, after two re-analyses
+    ScriptedFactorization f(hs::driver::kOrderingScotch, {est(3000, 1400), est(3100, 1300), est(3000, 1100)});
     EXPECT_THROW(hs::driver::analyze_within_budget(c, f, pencil, 0.0, true), hs::Error);
-    EXPECT_EQ(f.analyses, 2);
+    EXPECT_EQ(f.analyses, 3);
   }
   {  // METIS (fixed seed): the same estimate again - no retry
     ScriptedFactorization f(5, {est(3000, 1400), est(3000, 900)});
