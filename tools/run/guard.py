@@ -108,6 +108,18 @@ def busy_cores(cpus: list[int], window: float = 1.0, threshold: float = 50.0) ->
     return busy
 
 
+def with_siblings(cpus: list[int]) -> list[int]:
+    """cpus plus their hyperthread siblings: a job on a sibling slows a pinned run as much as one on
+    the core itself."""
+    out = set(cpus)
+    for c in cpus:
+        try:
+            out.update(parse_cpulist(Path(f"/sys/devices/system/cpu/cpu{c}/topology/thread_siblings_list").read_text()))
+        except OSError:
+            pass
+    return sorted(out)
+
+
 def mem_available_gb() -> float:
     with open("/proc/meminfo") as f:
         for line in f:
@@ -308,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_SLOT_BUSY
 
     if not args.skip_busy_check:
-        busy = busy_cores(cpus)
+        busy = busy_cores(with_siblings(cpus))
         if len(busy) > max(1, len(cpus) // 8):
             print(f"[guard] refusing to start: pinned cores busy {busy}; "
                   f"choose other cores with --cores", file=sys.stderr)

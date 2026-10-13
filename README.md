@@ -69,7 +69,7 @@ compare.py 对每次运行都用 `tools/eval` 判定有效性，只在双方每�
 python3 tools/run/guard.py --mem-gb 30 --timeout 3600 -- ./build/release/hsolve ...
 ```
 
-## 集群节点（gpu01 / gpu02 / c001）
+## 集群节点（gpu01 / gpu02，空闲时 c001–c005）
 
 节点为 CentOS 7、无外网，环境由本机 conda 包缓存离线重建（详见脚本头注释）：
 
@@ -83,7 +83,8 @@ tools/dev/cluster_run.sh gpu02 --wip -- tools/dev/test.sh release     # 连同�
 单次运行的规格与评测机一致：16 核、32 GiB。每个节点有一个**测量槽**（NUMA node 1 的 16 核 `16-31`，
 同一时刻只允许一个运行，用 `guard.py --exclusive --timeout <s>` 占用，`guard.py --status` 查看占用情况）
 和一条**构建/测试道**（`8-15`，`HS_JOBS=4`，单次 ≤ 12 GiB），后者用于编译、测试与冒烟运行，计时只在
-测量槽里做。规则由 guard 强制执行，详见 `docs/DESIGN.md` §6。SLEPc 环境的离线重建细节见
+测量槽里做。规则由 guard 强制执行，详见 `docs/DESIGN.md` §6。`tools/dev/cluster_nodes.sh [--pick]` 列出各节点是否空闲
+（c001–c005 与其他用户共用，只在空闲时用）。SLEPc 环境的离线重建细节见
 `docs/DEPENDENCIES.md`。
 
 ## 目录

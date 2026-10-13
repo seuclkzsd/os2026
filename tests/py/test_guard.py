@@ -38,6 +38,16 @@ def _summary(stderr):
     return json.loads(stderr.strip().splitlines()[-1].split("[guard] ", 1)[1])
 
 
+def test_busy_check_covers_hyperthread_siblings():
+    sys.path.insert(0, str(GUARD.parent))
+    import guard
+    cpus = guard.with_siblings([int(SLOT)])
+    assert int(SLOT) in cpus
+    sib = Path(f"/sys/devices/system/cpu/cpu{SLOT}/topology/thread_siblings_list")
+    if sib.exists():
+        assert cpus == guard.parse_cpulist(sib.read_text())
+
+
 def test_without_policy_any_core_runs_unlocked(tmp_path):
     r = _guard(tmp_path / "l", ["--cores", SLOT], PRINT_AFFINITY)
     assert r.returncode == 0, r.stderr

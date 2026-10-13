@@ -702,7 +702,8 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 
 ## 6. 资源与实验规范
 **计算位置**（P4 收尾起）：本机（开发服务器，共享，2×Xeon Gold 6336Y，48 物理核，125 GB）不再做
-编译、测试与实验，只做编辑、git 与合并；全部计算在集群节点 gpu01 / gpu02 上进行：
+编译、测试与实验，只做编辑、git 与合并；全部计算在集群节点 gpu01 / gpu02 上进行，c001–c005（与
+gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 - 节点：2×Xeon Silver 4314（2×16 核，AVX-512），251 GB，CentOS 7（glibc 2.17），无外网，home 目录
   各节点共享。`tools/dev/deploy_cluster.sh HOST` 由本机 conda 包缓存离线重建两个环境
   （`docs/DEPENDENCIES.md`）、建裸仓库（git remote `cluster`）与克隆、拷贝测例数据。
@@ -724,6 +725,9 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
     （`HS_MEM_GB`、`HS_MAX_SHARED_MEM_GB`）。用于编译、单元测试与冒烟运行，不用于计时。
   - 任何运行 RSS 都不得超过 32 GiB。每节点最多两个调用方时，我们最多占 24/32 物理核、约 56 GiB，
     节点其余资源留给其它作业。
+  - 选节点：`tools/dev/cluster_nodes.sh` 列出各节点的槽状态、槽所在 socket（含超线程）与整机的忙碌
+    逻辑 CPU 数和可用内存；`--pick` 给出一个空闲节点（槽空闲、该 socket 无忙碌 CPU、可用内存 ≥ 64 GiB）。
+    guard 的忙碌检查也覆盖被绑核的超线程兄弟。c001–c005 上有其他用户作业时不在该节点计时。
 - 两种 CPU 上 OpenBLAS 的乘积末位可能不同（§5 逐位测试以 CPU 型号为键）。
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：

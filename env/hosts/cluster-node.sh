@@ -1,4 +1,4 @@
-# Cluster nodes gpu01 / gpu02 / c001: 2x Xeon Silver 4314 (2 x 16 cores, AVX-512), 251 GB, CentOS 7
+# Cluster nodes gpu01 / gpu02 / c001-c005: 2x Xeon Silver 4314 (2 x 16 cores, AVX-512), 251 GB, CentOS 7
 # (glibc 2.17), no internet. The environments were created offline from the development server's
 # conda package cache (conda list --explicit --md5 -> file:// URLs; see docs/DEPENDENCIES.md):
 #   conda create -p $HOME/envs/os2026 --offline --file os2026.local.explicit.txt   (same for os2026-ref)
