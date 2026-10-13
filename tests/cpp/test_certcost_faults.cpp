@@ -11,6 +11,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -411,6 +412,76 @@ TYPED_TEST(FactorInertiaCounterEstimateTyped, SingleEstimateBeforeTheFirstCount)
     EXPECT_EQ(single.neg, exact.neg) << s;
   }
   EXPECT_EQ(counter.stats().analyses, 2);  // no third analysis for the counts
+}
+
+// ------------------------------------------------------------- the main analysis' budget decision
+
+/// Test double: every analyze() takes the next scripted estimate.
+class ScriptedFactorization final : public hs::SparseFactorization<double> {
+ public:
+  ScriptedFactorization(int ordering, std::vector<hs::FactorEstimate> script) : script_(std::move(script)) {
+    options_.ordering = ordering;
+    options_.max_memory_mb = 1000.0;
+  }
+  void analyze(const hs::ShiftedPencil<double>&, double, double) override { ++analyses; }
+  hs::FactorEstimate estimate() const override {
+    return script_[static_cast<std::size_t>(std::min<int>(analyses, static_cast<int>(script_.size())) - 1)];
+  }
+  bool factorize(double, double) override { return false; }
+  void solve(double*, index_t, index_t) override {}
+  hs::Inertia inertia() const override { return {}; }
+  void set_out_of_core(bool on) override { options_.out_of_core = on; }
+  void set_null_pivot_detection(bool) override {}
+  const hs::FactorStats& stats() const override { return stats_; }
+  const hs::FactorOptions& options() const override { return options_; }
+  index_t order() const override { return 1; }
+  int analyses = 1;  ///< the caller's analysis (already_analyzed = true)
+
+ private:
+  std::vector<hs::FactorEstimate> script_;
+  hs::FactorOptions options_;
+  hs::FactorStats stats_;
+};
+
+hs::FactorEstimate est(double incore, double ooc) {
+  hs::FactorEstimate e;
+  e.incore_mb = incore;
+  e.ooc_mb = ooc;
+  return e;
+}
+
+// A SCOTCH analysis (orderings differ from run to run) that fits the budget neither in core nor out
+// of core is analysed once more; a reproducible ordering, or a second miss, ends with the error.
+TEST(DriverAnalysisRetry, NonReproducibleOrderingIsAnalysedAgainOnce) {
+  const auto a = hs::identity<double>(1);
+  const hs::ShiftedPencil<double> pencil(a, nullptr);
+  hs::SolverConfig cfg;
+  hs::SolveReport rep;
+  hs::driver::PhaseClock clock;
+  hs::driver::Ctx c{cfg, nullptr, rep, clock};
+  {  // second SCOTCH analysis fits out of core
+    ScriptedFactorization f(hs::driver::kOrderingScotch, {est(3000, 1400), est(3000, 900)});
+    hs::driver::analyze_within_budget(c, f, pencil, 0.0, true);
+    EXPECT_EQ(f.analyses, 2);
+    EXPECT_TRUE(f.options().out_of_core);
+    EXPECT_TRUE(has_warning(rep, "analysing again"));
+  }
+  {  // twice too large: the error, after one retry
+    ScriptedFactorization f(hs::driver::kOrderingScotch, {est(3000, 1400), est(3100, 1300)});
+    EXPECT_THROW(hs::driver::analyze_within_budget(c, f, pencil, 0.0, true), hs::Error);
+    EXPECT_EQ(f.analyses, 2);
+  }
+  {  // METIS (fixed seed): the same estimate again - no retry
+    ScriptedFactorization f(5, {est(3000, 1400), est(3000, 900)});
+    EXPECT_THROW(hs::driver::analyze_within_budget(c, f, pencil, 0.0, true), hs::Error);
+    EXPECT_EQ(f.analyses, 1);
+  }
+  {  // fits at once: one analysis, in core
+    ScriptedFactorization f(hs::driver::kOrderingScotch, {est(900, 400)});
+    hs::driver::analyze_within_budget(c, f, pencil, 0.0, true);
+    EXPECT_EQ(f.analyses, 1);
+    EXPECT_FALSE(f.options().out_of_core);
+  }
 }
 
 }  // namespace

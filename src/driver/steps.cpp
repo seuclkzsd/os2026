@@ -420,6 +420,11 @@ index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, doub
 
 // Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3): in-core if the
 // estimate fits the cap, else out-of-core if allowed and fitting, else OutOfMemoryBudget.
+// An ordering that differs from analysis to analysis (SCOTCH, taken_on_prediction: multithreaded,
+// not reproducible even with its random state reset, factor.hpp) whose estimate does not fit is
+// analysed once more before giving up (P8): its estimates scatter by up to ~30% - ss-3dspectralwave2
+// at the default 14 GiB budget had out-of-core estimates of 10.6..11.9 GB in most analyses and
+// 13.4..14.2 GB in 3 of 21, against a cap of 13.49 GB (results/p8_certcost.md §2.3).
 template <class T>
 void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPencil<T>& pencil, double sigma0,
                            bool already_analyzed) {
@@ -427,19 +432,27 @@ void analyze_within_budget(Ctx& c, SparseFactorization<T>& fac, const ShiftedPen
     PhaseScope phase(c.clock, Phase::Factor);
     fac.analyze(pencil, 1.0, -sigma0);
   }
-  const FactorEstimate est = fac.estimate();
-  event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
-                        {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
-  const double cap_mb = fac.options().max_memory_mb;
-  if (cap_mb > 0 && est.incore_mb > cap_mb) {
+  for (int attempt = 0;; ++attempt) {
+    const FactorEstimate est = fac.estimate();
+    event(c, "analysis", {{"factor_entries", static_cast<std::int64_t>(est.factor_entries)},
+                          {"incore_mb", est.incore_mb}, {"ooc_mb", est.ooc_mb}, {"flops", est.flops}});
+    const double cap_mb = fac.options().max_memory_mb;
+    if (!(cap_mb > 0 && est.incore_mb > cap_mb)) return;
     if (c.cfg.out_of_core != Toggle::Off && est.ooc_mb <= cap_mb) {
       fac.set_out_of_core(true);
       warn(c, "factor estimate " + fmt(est.incore_mb) + " MB exceeds the budget; using out-of-core factors");
-    } else {
-      HS_THROW(OutOfMemoryBudget, "predicted factorization memory " << est.incore_mb << " MB (out-of-core "
-                                                                    << est.ooc_mb << " MB) exceeds the budget of "
-                                                                    << cap_mb << " MB");
+      return;
     }
+    if (attempt == 0 && taken_on_prediction(fac.options().ordering)) {
+      warn(c, "factor estimate " + fmt(est.incore_mb) + " MB (out-of-core " + fmt(est.ooc_mb) +
+                  " MB) exceeds the budget of " + fmt(cap_mb) + " MB; analysing again (the ordering differs from run "
+                  "to run)");
+      PhaseScope phase(c.clock, Phase::Factor);
+      fac.analyze(pencil, 1.0, -sigma0);
+      continue;
+    }
+    HS_THROW(OutOfMemoryBudget, "predicted factorization memory " << est.incore_mb << " MB (out-of-core " << est.ooc_mb
+                                                                  << " MB) exceeds the budget of " << cap_mb << " MB");
   }
 }
 
