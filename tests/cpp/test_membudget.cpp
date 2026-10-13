@@ -384,7 +384,7 @@ TEST(DriverMemoryBudget, ABudgetBelowTheInCoreFactorsGivesAValidOutOfCoreRun) {
   std::size_t j = 40;  // the widest gap among w[40..100] (a cube: many multiple eigenvalues)
   for (std::size_t i = 40; i < 100; ++i)
     if (w[i + 1] - w[i] > w[j + 1] - w[j]) j = i;
-  const double sigma = 0.5 * (w[j] + w[j + 1]);
+  const double sigma = w[j] + 0.3 * (w[j + 1] - w[j]);  // not mid-way: equidistant multiplets would tie
   auto cfg = nearest(sigma, 8);
   cfg.ordering = 0;  // AMD: one analysis, the same estimate in both runs
   cfg.memory_budget_gb = 8.0;

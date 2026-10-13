@@ -143,7 +143,7 @@ TEST(OpsShiftInvertConvergence, RefinementThatCannotConvergeIsReported) {
 TEST(DriverInexactFactors, SingleAtAWellSeparatedShiftStaysSingle) {
   auto g = shifted_grid(60, 61, 2.0);
   const std::size_t j = widest_gap(g.w, 1000, 2500);
-  const double sigma = 0.5 * (g.w[j] + g.w[j + 1]);
+  const double sigma = g.w[j] + 0.3 * (g.w[j + 1] - g.w[j]);
   const auto sol = hs::solve(g.a, nullptr, nearest(sigma, 10, hs::FactorPrecision::Single));
   expect_valid(sol);
   EXPECT_EQ(sol.report.precision.requested, hs::FactorPrecision::Single);
@@ -334,7 +334,7 @@ TEST(DriverAutoPrecision, AutoTakesSingleFactorsWhenOnlyTheyFitInCore) {
   const auto a = laplacian_3d(m);
   const auto w = laplacian_3d_eigenvalues(m);
   const std::size_t j = widest_gap(w, 40, 100);  // a cube: many multiple eigenvalues
-  const double sigma = 0.5 * (w[j] + w[j + 1]);
+  const double sigma = w[j] + 0.3 * (w[j + 1] - w[j]);  // not mid-way: equidistant multiplets would tie
   hs::ShiftedPencil<double> pencil(a, nullptr);
   const Estimates e = estimates(pencil, sigma);
   auto cfg = nearest(sigma, 8, hs::FactorPrecision::Auto);
