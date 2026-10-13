@@ -334,16 +334,10 @@ std::pair<double, double> predicted_shape(int ordering, const FactorEstimate& am
 
 /// The choice step of adaptive_analysis: given the candidates (at least one analysed), the index
 /// of the one to take if it is analysed, or to analyse next. Scores ties go to the earlier
-/// candidate; a candidate must beat an earlier one by kOrderingMargin of its score (hsolve's nested
-/// dissection, not analysed yet, against SCOTCH: with kNdAnalysisRisk of its analysis added; uses
-/// `ordering`, `analysed`, `analysis_s`, `score_s`). Pure function.
+/// candidate; a candidate must beat an earlier one by kOrderingMargin of its score. Pure function.
 std::size_t choose_ordering(const std::vector<OrderingCandidate>& candidates);
 /// A later candidate must score below (1 - kOrderingMargin) times an earlier one to be preferred.
 constexpr double kOrderingMargin = 0.05;
-/// hsolve's nested dissection, not analysed yet, competes with SCOTCH with this fraction of its
-/// predicted analysis added to its score (its 16-thread analysis is the least certain prediction
-/// of the model; steps.cpp).
-constexpr double kNdAnalysisRisk = 0.5;
 
 /// The analysis loop of adaptive_analysis on candidates priced by callbacks (pure: testable without
 /// MUMPS). cand[0] must be AMD; candidates' `ordering` set. analyse(i) gives candidate i its actual
