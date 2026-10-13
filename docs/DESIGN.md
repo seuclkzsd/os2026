@@ -23,6 +23,15 @@ v4（P4 合并后，6a3d7c1）——稀疏核运行时分派（Reference / Porta
 （`block_size`）、InertiaCounter 证书计数与第五个互斥阶段 certificate、确定性的排序代价模型、B 的
 O(nnz) 正定性筛查、GHIEP 块运行与后处理内存；集群节点部署。实测汇总在 `results/p4_measurements.md`。
 
+v5（P5c 集成，p5c-integration 1bd75f9 加 driver 的块宽接线）——src/verify 接入 driver：nearest 的完备性检验
+`certificate = exact | randomized | auto | off`（单精度计数先经双精度复核、auto 选单精度计数要求 10 倍余量、
+随机检验只在 κ(B) 有证明时出结论、选中对少于 k 时也重跑，§3.6-8）；输入检查（缩放的厄密缺陷、拒绝零矩阵与
+非有限值、恢复线程数）与 B 的正定性检验链（分析之前的廉价检验、IC + Gershgorin 严格证明及其预算，§3.6-1）；
+自适应排序改为 16 线程标定的代价模型（候选 AMD / SCOTCH / 自研嵌套剖分 / METIS / PORD，config 可直接用
+`ordering = 10`，§3.6-3b）；σ₀ 处按零主元数识别稠密簇（§3.6-4）；块宽规则 `recommended_block_size` 与块步的
+单投影快路径 `try_fast`（§3.5、§3.6-5）；GHIEP 的分析前内存预留按峰值列计、报告实际块宽；新模块 src/blas
+（BLAS hook，默认链入 hsolve、route all，§3.8，实测见 `docs/BLAS.md`）。
+
 ---
 
 ## 1. 问题范围
@@ -46,10 +55,10 @@ O(nnz) 正定性筛查、GHIEP 块运行与后处理内存；集群节点部署�
 apps/hsolve_cli            命令行：读配置 → 调 driver → 写结果（docs/FORMATS.md §3）
 python/                    pybind11 进程内接口 hsolve._hsolve + hsolve 包（docs/PYTHON.md）
         │
-src/driver   诊断、策略、位移管理、谱切片与单边目标、零簇处理、惯性证书、精修、残差验证、报告(JSON)
-        │
+src/driver   诊断、策略、位移管理、谱切片与单边目标、零簇处理、完备性检验（惯性证书与 certificate 模式）、
+        │    精修、残差验证、报告(JSON)
 src/verify   完备性检验构件：随机排除检验、单精度计数规则、代价模型（verify.hpp；依赖 eigen、factor、
-        │    sparse、linalg；driver 尚未调用，P5 接入）
+        │    sparse、linalg；driver 的 nearest 证书经 src/driver/certificate.* 调用，§3.6-8）
 src/eigen    厚重启 Lanczos（厄密 Krylov-Schur）与一般 Krylov-Schur（GHIEP），二者都有块模式
         │    block_size；LOBPCG、Jacobi-Davidson（eigen_iterative.hpp）
         │        ↑ 只依赖 include/hsolve/linear_operator.hpp、eigen.hpp 与 src/linalg
@@ -62,6 +71,10 @@ src/sparse   CsrMatrix 工具、SpMV/SpMM 与融合残差 shifted_residual（运
 src/linalg   DenseMatrix、BLAS/LAPACK 封装、随机向量、确定性归约、CGS2 / 块 CGS2 正交化（dense_ops）
 src/io       npy / npz / mtx 读写（流式、低内存装配）、三角存储恢复、厄密性检查与厄密化
 src/util     错误、日志(JSON lines)、计时、内存(RSS)
+
+src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出的稠密 BLAS 调用按形状改道到窄核 /
+             并行切分，其余原样转发真实 BLAS；默认链入 hsolve 可执行文件，或以 libhsolve_blashook.so
+             预加载（§3.8，docs/BLAS.md）
 ```
 
 - 下层模块（io / sparse / linalg / factor / ops / eigen / verify）**不打印、不依赖日志**；统计信息
@@ -173,7 +186,8 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   `orthogonalize_block_cgs2_workspace_bytes(k, p)`（≈ max(2 MB, 32·8(k·p·d + p))，d = 1 实 / 2 复）。
   n = 2e5、k = 64、p = 8、两遍时比 8 次逐列调用快 2.9–4.6×（对旧 BLAS2 实现 3.5–7.0×）。
 - eigen 的 `BlockOrthonormalizer`（`src/eigen/block_ortho.*`：块 CGS2 + M 内积 Cholesky-QR，两遍，
-  块 Krylov-Schur 专用；一般 Krylov-Schur 块模式的回退核）与 `eigen_detail::block_cgs_cholqr2`
+  块 Krylov-Schur 专用；一般 Krylov-Schur 块模式的回退核；P5c 起另有单投影快路径 `try_fast`，§3.5）与
+  `eigen_detail::block_cgs_cholqr2`
   （`src/eigen/block_general.*`：本节的 `orthogonalize_block_cgs2` + 两次 Cholesky-QR，一般块模式的
   快路径，§3.5）是同类核，暂归 eigen；是否并入 dense_ops 由 lead 决定。
 
@@ -194,8 +208,9 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     逐位可复现；**driver 默认 `SolverConfig::deterministic = false`**（ICNTL(48)=1，L0-OpenMP 子树
     并行：三角回代约快 1.75×，结果只在容差内可复现，574d114）。L0-OpenMP 下分解必须用其分析时的
     线程数，否则 INFO(1) = −58：`analyze()` 固定 ICNTL(16)（threads = 0 取分析时的
-    `omp_get_max_threads()`）。逐位复现还需可复现的排序（P4 起 driver 的 `deterministic = true`
-    自动满足：排序决策确定、嵌套剖分用 METIS，§3.6-3b；显式 SCOTCH 不可复现，见下）。
+    `omp_get_max_threads()`）。逐位复现还需可复现的排序（driver 的 `deterministic = true` 自动满足：
+    沿用 P4 的排序规则，AMD 或固定种子的 METIS，§3.6-3b；显式 `ordering = 10`（自研嵌套剖分，排列与线程数
+    无关）也可复现；显式 SCOTCH 不可复现，见下）。
   - ICNTL(24)=1 时 MUMPS 不报错而是修补零主元（INFOG(28)），之后的回代会丢掉该方向 ⇒
     **INFO(1)==−10 或 INFOG(28)>0 一律视为奇异：`factorize` 返回 false**，`solve` 拒绝执行，
     `inertia().valid=false`（计数仍填），对象保持已分析状态以便扰动位移后重分解。
@@ -247,12 +262,16 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   2-D Laplacian 24 个精确特征值位移中漏 1 个，漏检的计数落在 [#below, #below + 重数] 内），故
   valid == true 只在位移位于谱隙时才是证书——端点仍须放在谱隙中点。单精度计数（smumps；3-D 测例快
   45–53%）是被 O(eps_s·‖K‖) 扰动矩阵的精确计数：距最近特征值 δ·(scale + |s|) 内会数错（实测到
-  δ ≈ 1.6e-6，稠密复谱 5e-6；δ ≥ 1e-5 从未出错），只能作筛查值。
+  δ ≈ 1.6e-6，稠密复谱 5e-6；δ ≥ 1e-5 从未出错），单独只能作筛查值。
 - **driver 的用法**（P4，§3.6-8 `CountSource`）：nearest 证书在模型判定计数器划算时
   （`counter_pays`）、以及主分解为单精度/BLR 时在 InertiaCounter 上计数，每次计数前释放主因子；
   窗口/切片默认在主对象上计数（计数点兼作单边位移），只在主因子 INFOG(21) + 计数器估计超过上限时
   释放。4 线程端到端实测：证书时间比主对象计数少 0.05–0.14 s（5–13%），峰值 RSS 低 2–7%
-  （667d8e9）。单精度筛查计数 driver 不用（规则见 §3.5b）。
+  （667d8e9）。P5 起 `certificate = auto` 在 §3.5b 的规则带 10 倍余量成立时用单精度计数（证书方法
+  exact_single）：它们在 certifier 自建的 InertiaCounter 上做，可疑时在同一计数器上以双精度复核，同一
+  计数器随后也服务该轮的精确计数（不再建第二个计数器、不再分析一次；§3.6-8）。新建计数器在构造时分析
+  其双精度实例、首次单精度计数时分析单精度实例；单精度计数一次通过时双精度实例的分析没有用到
+  （yee-pec-box-1e5 约 0.075 s），推迟它的惰性构造是 factor 模块的待办。
 - **自研嵌套剖分**（P4，`compute_ordering`、`OrderingOptions`、`src/factor/ordering*.cpp`，无新依赖）：
   - 动机：MUMPS 内的排序是串行的（METIS/SCOTCH 占其分析的 90–97%；SCOTCH_PTHREAD_NUMBER 无效）；
     METIS/SCOTCH 不能直接链接（只是 libdmumps 的间接依赖，ld 拒绝间接 DSO，dlopen 需要 glibc 2.28
@@ -274,10 +293,14 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     分析 3.0 → 0.30 s；Bloch Yee（3% 复耦合）METIS flops 2.24e12 → 2.69e12，故默认关）；
     `FactorStats::block_analysis` 记录是否生效。
   - 实测（2 线程，`results/p4_measurements.md` §2）：分析比 MUMPS 串行 METIS 快 1.3–1.6×（串行时
-    慢 1.2–1.35×），flops 在 METIS 的 −7..+12% 内；16 线程只有 Brent 估计（W/16 + C），未实测。
+    慢 1.2–1.35×），flops 在 METIS 的 −7..+12% 内（16 线程的实测见下）。
     按 driver 实付（分析 + 3 次分解 + 回代）计，yee-pec-box-1e5 上 2 线程打平，二维测例 AMD 最好。
-    **driver 尚未使用**：config 的 `ordering` 只接受 −1..7，自适应排序的嵌套剖分分支是 SCOTCH /
-    METIS（§3.6-3b）；是否作默认须在评测线程数下测量。
+  - **driver 的用法**（P5）：config `ordering = 10` 直接使用它；自适应排序（`ordering = −1`）把它列为
+    候选之一，由 16 线程代价模型选择（§3.6-3b）。16 线程实测（`bench/anaint_orderings.cpp`，测量槽）：
+    分析的串行比例约 0.38（4 线程时 0.19；16 线程的分析只比 4 线程快 1.14 倍，29 个测例中位数）；高填充
+    三维测例（Yee 网格、ss-ge87h76、ss-tem152078）上 SCOTCH 的因子只需它的 0.80–0.95 倍 flops，因此候选
+    顺序中 SCOTCH 在它之前。分隔子质量与排序的并行扩展是 factor 模块的待办（ss-tem152078 上它的排序
+    1.24 s，SCOTCH 的整个分析 0.73 s）。
 
 ### 3.4b ops（`include/hsolve/operator.hpp`）
 - 稀疏乘积走 §3.2 的内核，构造参数 `KernelPath kernels`（默认 Auto；Reference 只换稀疏乘积，修正
@@ -330,10 +353,42 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     循环精确求解（n − d 次作用）。
   - 重数 ≤ p 的特征值的全部副本一轮内找到；超出 p 的副本只能靠舍入进入（同 p = 1）。
   - 内存：基 n·(d + ncv + p) 标量（store_bv 时加倍），无 store_bv 时另加 n·p 的 M·W 工作区；自动 ncv
-    更大（nev = 12、p = 8：ncv = 64，基 72 列，p = 1 时 29 列）。每步 3 次块 M 作用（store_bv 2 次）。
-  - driver 的用法（P4，§3.6-5）：HEP/GHEP 的每次位移反演运行用 `block_size_for`（自动：nev ≥ 8 时
-    p = 4，否则 1），证书收缩重跑宽度 max(p, min(4, 缺数上取偶))。P3 的 eigen 层测量（相同精度下
+    更大（nev = 12、p = 8：ncv = 64，基 72 列，p = 1 时 29 列）。
+  - **块步的正交化**（P5c，`BlockTuning::fast_ortho`，默认开）：没有 deflation 块时，每步先试单投影快路径
+    `BlockOrthonormalizer::try_fast`——对 V 做行块化的块 CGS（与线程数无关；DGKS 判据要求时才做第二遍），
+    再在块内做两次 Cholesky-QR（CholQR2，M·Q1 由 (M W1) R1⁻¹ 得到，不再作用一次 M）。它只接受列缩放后
+    W1 的 2-范数条件数 ≤ `kMaxFastCond` = 64、没有列损失超过其份额、‖G2 − I‖_F ≤ 0.5 且
+    |R(i,i)| > ratio·before(i) 的块；store_bv 模式总是拒绝。被拒绝的块、以及有 deflation 块（只在 1e-8 内
+    正交归一，不满足快路径的前提）时的每一步，走两遍核 `run()`。每步块 M 作用：`try_fast` 2 或 3 次，
+    `run()` 3 次（store_bv 2 次）。实测（`bench/blocktune_sweep.cpp`，16 线程测量槽，17 个 HEP/GHEP 测例，
+    p = 2..8）：块运行的正交化时间降 28–76%，迭代时间降 3–24%，残差同量级、作用次数在逐次运行的波动内。
+    `BlockTuning`（布局参数 extra_blocks、min_auto_ncv、keep_fraction 与 fast_ortho）与 `BlockRunStats`
+    （各种步核的次数）只供测量与测试；16 线程的布局变体扫描是负结果（几何平均 −0.9%），默认布局不变。
+  - driver 的用法（§3.6-5）：nearest 的位移反演运行用块宽规则（下），切片与单边运行仍用 P4 规则（nev ≥ 8
+    时 p = 4，否则 1），证书收缩重跑宽度 max(p, min(4, 缺数上取偶))。P3 的 eigen 层测量（相同精度下
     几何平均 1.36–1.41×）由 driver 端到端测量取代（`results/p4_measurements.md` §3）。
+- **块宽规则**（P5c，`src/eigen/block_rule.*`，eigen 内部、供 driver 用；纯函数，不读计时）：
+  `recommended_block_size(ShiftInvertShape{n, nev, factor_entries, nnz_b, complex_scalars})`，
+  factor_entries 为该运行位移处分解的因子条目（复数为实嵌入的），在 p ∈ `kRuleWidths` = {1, 2, 4, 8} 中
+  选 步数比 × 每步代价 最小者：
+  - 每步代价 `modelled_step_seconds`：一次 p 列回代 apply(p) = a + b·p（p = 1 时 1.1·(a + b)，MUMPS 的
+    单右端回代走另一条 BLAS2 路径），a、b 由因子条目、n_eff（复数 2n）与小波前项 n_eff²/条目拟合；加一步
+    块正交化（按自动 ncv 下平均基大小与 nnz(B) + n_eff）。常数在 16 线程测量槽标定（`bench/blocktune_sweep.cpp`，
+    17 个测例），16 线程以外未专门测量。
+  - 步数比 `relative_block_steps(p, nev)`：互不相同特征值时块步数相对 p = 1 作用次数之比，p = 2 / 4 / 8 在
+    nev ≤ 5 时为 0.69 / 0.56 / 0.49、nev ≥ 22 时为 0.58 / 0.40 / 0.29，其间按 nev 线性插值（表取自
+    nev = 1、2、3、5、7、10–12、21–26 的实测）。
+  - 更宽的块须比每个更窄的候选便宜 `kRuleMargin` = 5% 才替换；块布局放不下（n 太小）的宽度不考虑；
+    下限：nev ≥ `kRuleFloorMinNev` = 8 时至少 `kRuleFloorWidth` = 4（P4 的自动块宽）——重特征值在运行前
+    看不见，而它们让更宽的块划算（低填充重特征值测例上 p = 4 比 p = 2 快 12–22%，低填充互异测例上 p = 2
+    比 p = 4 快 0–8%）。
+  - 结果（16 线程）：61 个（测例, nev）点上所选宽度与最佳宽度的迭代时间之比几何平均 1.035，没有一点慢于
+    p = 1；端到端（`bench/blocktune_fix_e2e.cpp`，12 个测例，5 次交错，155 次运行全部有效）相对 p = 1
+    快 1.03–2.45×，相对 P4 自动块宽 0.98–1.19×（ss-2cubes_sphere 选 p = 8 慢 1.6%）。
+  - 可复现性：p 只取决于输入。每次分析都给出同一排序时（AMD、METIS、自研嵌套剖分）因子条目、从而 p 逐次
+    相同；SCOTCH（自适应排序在其得分最好时选它，§3.6-3b）的条目在三维数据测例上逐次运行相差 2.2–8.8%，处在
+    两种宽度分界附近的形状可能在不同运行中得到不同 p（两者都有效、在容差内一致，同 SCOTCH 排序本身；标定
+    形状的选择在条目 ±10% 内不变，测试 `LanczosBlockRuleFix.PinnedPicksSurviveTheOrderingSpread`）。
 - `krylov_schur_general`：欧氏内积，实数用实 Schur 形（dgees/dtrsen），共轭对永不拆开：
   m ∈ {nev, nev+1}，共轭对相邻、正虚部在前，nconv 不拆对，schur_form 无被截断的 2×2 块，
   前 nconv 列 Schur 基张成（近似）不变子空间。**不支持 deflation**（非正规算子的不变子空间的
@@ -398,9 +453,9 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     极低内存的最小/最大 k 个）。
 
 ### 3.5b verify（`include/hsolve/verify.hpp`，P4）
-完备性检验的构件，用回代代替分解，供 driver 的策略 certificate = exact | randomized | auto 使用。
-**driver 尚未调用**（接入在 P5；在此之前 `hs::solve` 的证书仍是 §3.6-8 的精确计数）。依赖 eigen
-（`lanczos_krylov_schur`）、factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程数时确定。
+完备性检验的构件，用回代代替分解，供 driver 的策略 certificate = exact | randomized | auto 使用
+（P5 起由 nearest 证书调用，`src/driver/certificate.*`，§3.6-8）。依赖 eigen（`lanczos_krylov_schur`）、
+factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程数时确定。
 - `exclusion_check(op, b_inner, X, σ, r, opt)`：B 正定（或 B = I），持有 K = A − σB 的分解，
   Op = K⁻¹B。问：除 X 张成的已找到特征对外，σ 的半径 r 内是否还有特征值（|θ| ≥ 1/r）？
   - 严格界：X 先 B-正交归一（Cholesky-QR，列均衡后的秩检验）；耦合 e = ‖Op X − X H11‖_B 由一次块
@@ -418,43 +473,79 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
   - κ 的严格性：`start_scaling_for(B)`：B = I 时 κ = 1；对角 B 取 S = B^{-1/2}、κ = 1（精确）；对角
     占优时 Gershgorin 上下界（严格）；否则只是估计（100 × Gershgorin 上界 / Lanczos 下界估计），
     结果标 `rigorous = false`、陈述写明「κ 为假设，筛查结果而非证书」。B = I 而给了 S 时检验自算
-    κ = cond(S²)。
+    κ = cond(S²)。`start_scaling_for(b, safety, estimate = false)`（P5）跳过一般 B 的 Lanczos 估计
+    （n = 1e5 时约 0.1 s），返回 κ = +∞、`rigorous = false`——只要有证明的 κ 的调用方（driver）用它。
 - 单精度计数规则：`single_count_validity` / `single_precision_certificate`：B = I 或对角 B > 0 时，单精度
   LDLᵀ 计数是 K + E 的精确惯性，‖E‖ ≤ c·g·u_s·‖K‖₁；把窗口两端各收缩 η = ‖E‖/min bᵢᵢ 后若所有已找到
-  特征值（含误差棒）都在收缩窗口内且计数相等，则认证。唯一非严格输入是 c·g = 1e3（MUMPS 阈值选主
-  无可用的先验增长界；有 certpar 实测支持，未证明）。一般 B 不适用、不声称证书。
+  特征值（含误差棒）都在收缩窗口内且计数相等，则认证。唯一非严格输入是 c·g = 1e3
+  （`SingleCountRule::backward_factor`；MUMPS 阈值选主无可用的先验增长界）。P5 的一次实测违反了它：
+  yee-pec-box-1e5（16 线程，约 50 个进程中的 1 个）上单精度计数在离每个特征值都至少 2.96e3·u_s·‖K‖₁/b_min
+  的端点数错 2 个——c·g 是没有先验上界的假设，调用方必须设防（driver：auto 的 10 倍余量、多于找到数时
+  双精度复核，§3.6-8）。一般 B 不适用、不声称证书。`SingleCountRule::a_norm_1`（≥ 0 时）是调用方已知的
+  ‖A‖₁，省去每个窗口一次 O(nnz(A)) 计算。
 - `certificate_cost`：由已测得的分解时间、单次作用时间等预测 exact（主对象重分解对 / 计数器对）、
   single、randomized（p ∈ {1, 2, 4, 8} 中最快且计划在预算内者）的秒数并推荐；randomized 须比最好的
-  精确方案快 `preference` = 1.2 倍才推荐。
+  精确方案快 `preference` = 1.2 倍才推荐。单精度路径的分析另计 `single_analysis_s`（< 0 时取
+  counter_analysis_s；新建计数器要分析双精度与单精度两个实例）。
 - 实测（2 线程，`results/p4_measurements.md` §5）：完整 X 全部通过、删掉一个副本或最远特征值全部
   检出；随机检验只在分解贵（三维填充）**且**谱隙宽时占优（syn-mem27-46 比认证的单精度计数快 3.3×，
   yee-pec-cube-32 1.3×），窄谱隙（yee-pec-box-1e5，ε = 0.15）与廉价分解（1e4 测例）上更慢；代价模型
   在 7 个测例上都推荐了实测最快的认证方法。
 
 ### 3.6 driver（`include/hsolve/solver.hpp`）
-实现：`solver.cpp`（编排）、`steps.cpp`（共用步骤：位移、计数、分析与预算、自适应排序、代价模型）、
-`definite.cpp`（HEP/GHEP：最近 k 个与窗口/谱切片）、`indefinite.cpp`（GHIEP）、`internal.hpp`。
+实现：`solver.cpp`（编排、输入检查、B 的正定性检验链）、`steps.cpp`（共用步骤：位移、计数、分析与预算、
+自适应排序与其代价模型）、`definite.cpp`（HEP/GHEP：最近 k 个与窗口/谱切片）、`certificate.*`（nearest 的
+快速完备性检验与 auto 选择，P5）、`norms.*`（范数估计与 B 正定性的严格证明）、`indefinite.cpp`（GHIEP）、
+`internal.hpp`。
 
 0. **计时契约**：`PhaseClock` 把 `hs::solve` 的每一时刻记入且只记入一个阶段（嵌套作用域取最内层），
-   共五个互斥阶段：setup（输入检查、范数估计、问题类型判定、规划）、factor（所有符号分析——含自适应
-   排序的 AMD 探测——与位移、B（正定性检测）、A（GHIEP 零主元计数）的数值分解）、iterate（Krylov
-   求解：回代、正交化、重启）、verify（Rayleigh–Ritz、残差、补救、选择、证书簿记）、certificate
-   （P4：HEP/GHEP 路径的全部 Sylvester 惯性计数 `count_below`——证书端点、窗口端点、切点、簇检查——
-   不论计数在主对象上重分解还是在 InertiaCounter 上做，含计数器自身的分析）。因此
+   共五个互斥阶段：setup（输入检查、范数估计、分析之前的 B 廉价检验、问题类型判定、规划）、factor
+   （所有符号分析——含自适应排序的 AMD 探测与其它候选的分析——B 正定性的严格证明，以及位移、B（正定性
+   检测）、A（GHIEP 零主元计数）的数值分解）、iterate（Krylov 求解：回代、正交化、重启）、verify
+   （Rayleigh–Ritz、残差、补救、选择、证书簿记）、certificate（HEP/GHEP 路径的全部 Sylvester 惯性计数
+   `count_below`——证书端点、窗口端点、切点、簇检查——不论计数在主对象上重分解还是在 InertiaCounter 上
+   做，含计数器自身的分析；P5 起还有 nearest 的其它完备性检验：随机排除检验、单精度计数与其双精度复核、
+   auto 的选择。例外：主对象计数之后随机检验需要在 σ 处重分解时，该分解计入 factor）。因此
    `time_total_s == time_setup_s + time_factor_s + time_iterate_s + time_verify_s + time_certificate_s`，
-   各项非负。GHIEP 没有惯性计数，time_certificate_s = 0；`inertia_check = off` 的 nearest 亦为 0。
-1. **诊断**：规模、nnz、实/复（A 复 B 实时 `to_complex`）、厄密缺陷（`hs::hermitian_defect`，超
-   `hermitian_tol` 抛错，> 0 时取 `hermitian_part`）、‖A‖₂/‖B‖₂ 估计（~30 步 Lanczos 的最大
-   |Ritz 值|：它是 ‖·‖₂ 的**下界**，从而 η 是真实后向误差的**上界**，验收偏保守）、
-   scale = ‖A‖₂/‖B‖₂。文件输入已由 io 用缩放算法精确厄密化；内存输入（Python）只经过这里未缩放的
-   缺陷，元素 ≲ 1e-154 或 ≳ 1e154 时会下溢/溢出（已知差距，`docs/PYTHON.md` §4、§7）。
-   `threads > 0` 时 `omp_set_num_threads(threads)`（不恢复；Python 前端自己恢复）。
-   B 正定性（`problem = auto` 时）在符号分析之后判定，依次：对角 B 直接看符号（免分解）；O(nnz) 筛查
-   （P4，`screen_definiteness`）——每行严格对角占优且对角为正 ⇒ HPD（Gershgorin），任一对角元 ≤ 0
-   （eᵢᴴBeᵢ ≤ 0）⇒ 非 HPD（GHIEP，不需其惯性）；其余在主分析上分解 0·A + 1·B 读惯性（主对象为双精度
-   非 BLR；否则 `compute_inertia`）。数据测例中只有 cav2d-square-1e4 被筛查判定；波导与其它 GHEP 质量
-   矩阵对角为正但不占优，仍要分解 B（cav2d-rect-pert-1e5 上 0.07 s / 0.62 s，wg-square-1e5 上
-   0.10 s / 1.36 s，4 线程）。
+   各项非负。GHIEP 没有惯性计数，time_certificate_s = 0；`inertia_check = off` 或 `certificate = off` 的
+   nearest 亦为 0。
+1. **诊断**：
+   - **输入检查**（P5，`hermitian_input`）：非方阵、空矩阵抛 InvalidInput；任一存储值非有限（报出位置）或
+     矩阵全零（A = 0：每个特征值都是 0；B = 0：没有有限特征值）抛 InvalidInput。厄密缺陷
+     ‖M−Mᴴ‖_F/‖M‖_F 用缩放平方和计算（`io::hermitian_defect_scaled`，与 `hs::load_matrix` 同一规则，任意
+     量级都准确），超 `hermitian_tol` 抛 NotHermitian；按值比较不是精确厄密（某个 m_ij ≠ conj(m_ji)）时
+     取 `hermitian_part`。内存输入（Python）与文件输入因此在任何量级下处理相同（P4 时内存输入用未缩放的
+     缺陷，元素 ≲ 1e-154 或 ≳ 1e154 时下溢 / 溢出）。规模、nnz、实/复（A 复 B 实时 `to_complex`）。
+   - ‖A‖₂/‖B‖₂ 估计（~30 步 Lanczos 的最大 |Ritz 值|：它是 ‖·‖₂ 的**下界**，从而 η 是真实后向误差的
+     **上界**，验收偏保守）、scale = ‖A‖₂/‖B‖₂。
+   - `threads > 0` 时把调用线程的 OpenMP 线程数设为 threads，`hs::solve` 返回或抛出时恢复原值
+     （`OmpThreadsScope`，P5：库调用不改变宿主进程的设置）。
+   - **B 的正定性**（`problem = auto` 且给了 B；显式给定的类型不检验）：
+     (a) **分析之前的廉价检验**（`test_b_definiteness`，O(nnz(B))，setup 阶段），依次：对角 B 看对角的符号；
+         每行严格对角占优且对角为正 ⇒ HPD（Gershgorin）；任一对角元 ≤ 0（eᵢᴴBeᵢ ≤ 0）⇒ 非 HPD；B 的范数
+         估计 Lanczos 有 Ritz 值 < −`kIndefiniteRitz`·‖B‖₂（1e-10）⇒ 非 HPD（不重正交的 Lanczos 的 Ritz 值
+         只差 O(eps‖B‖₂) 地留在谱的凸包内）。Lee–Sun–Cendes 波导的 B 由最后一项立即判定（P4 时要分解 B 读
+         惯性：wg-square-1e5 上 0.19 s，总时间的 10%）。判定了的类型决定分析前的内存规划与排序代价模型
+         （§3.6-3、3b）；未定时规划按两种路径中较大者。
+     (b) **严格证明**（仍未定、且目标不是 smallest / largest——它们的谱估计本来就要分解 B——时；主分析之后，
+         factor 阶段；`prove_positive_definite`，`norms.hpp`）：D = diag(B) > 0，S = D^{-1/2} B D^{-1/2}；
+         在填充级 1（时间或内存不够时 0）上对 S − cI 做不完全 Cholesky 得 L，则 M = S − LLᴴ 的 Gershgorin 下界
+         minᵢ(m_ii − Σ_{j≠i}|m_ij|) > 0 证明 λ_min(S) > 0（Weyl；LLᴴ 半正定，L 是什么都成立）。M 的元素由存储的
+         浮点 L 与缩放后的元素算出，带严格的先验舍入界（Higham 引理 3.1，留 2 倍余量），所以正的下界是对所存
+         B 的证明，不依赖选主分解的增长因子。位移 c = 0.9θ（θ：S 上 20 步 Lanczos 的最小 Ritz 值），某主元不为
+         正（破缺）后再试 0.5θ、0.2θ；θ < 0.1 不尝试（这样的数据测例在每个填充级与位移上都失败，证明成功的
+         都有 θ ≥ 0.14）；
+         S 上 Lanczos 有 Ritz 值 < −1e-10·max|Ritz| 则证明 B 不定。**预算**：时间 `kBProofBudget` = 0.5 ×
+         主分析估计下一次 B 分解的模型时间（`factorization_s`），每次尝试与填充级 1 模式的两个构造阶段都在
+         运行前按预测时间扣除，余额不够即不做；内存 min(预算 − 当前 RSS, 分解上限)，在分配任何东西之前检查
+         （S 只在能与最小的尝试一起放下时才存；填充级 1 模式先按 O(n) 的界、再按第一遍数出的精确条目数定价）。
+         16 线程实测（`bench/anaint_bproof.cpp`）：失败的证明 0.001–0.09 s，最差比例是 ss-tem27623 的 0.054 s
+         对 B 的分解 0.058 s；成功的 0.004–0.08 s，对 0.026–0.20 s。棱元铅笔（ss-tem*）上证明失败。失败的
+         证明对 B 不作任何结论。
+     (c) 仍未定：在主分析上分解 0·A + 1·B 读惯性（主对象为双精度非 BLR；否则 `compute_inertia`），B 为 HPD
+         当且仅当没有负、零主元。
+     事件 `b_inertia` 的 `how` 记录判定方式（diagonal、dominant、diagonal_entry、lanczos、
+     incomplete_cholesky、lanczos_scaled、factorization、compute_inertia），证明的细节在事件 `b_proof`。
 2. **策略**：
    - HEP/GHEP → 位移反演 + `lanczos_krylov_schur`（B 内积，块宽见 §3.6-5）：nearest 用单位移
      （§3.6-8）；interval / smallest / largest 用窗口与谱切片（§3.6-8b）。
@@ -464,12 +555,16 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
      调用。
    - smallest / largest 的惯性搜索以谱两端的 Ritz 估计为种子：30 步 Lanczos（A；有 B 时为 B 内积下
      的 B⁻¹A，B 的分解复用主分析，对角 B 直接求逆）。
-3. **内存预算**（显式公式）：分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·(ncv_g +
-   6k_g))/1e6，k_g = k（interval：min(n, 64)），ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），
-   `lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，p_g = min(block_size > 0 ? block_size : 4, 4)——即只为
-   自动块宽预留块基，更宽的显式 block_size 不预留（分解优先，运行时再按剩余内存减半，见下）；
-   cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap 作为 ICNTL(23)
-   传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
+3. **内存预算**（显式公式）：分析前 factor_cap_MB = 0.95·(budget − current_rss − n·sizeof(T)·c_res)/1e6。
+   预留列数 c_res 按分析前已知的问题类型（§3.6-1(a)）：定性路径（HEP/GHEP）ncv_g + 6k_g，k_g = k
+   （interval：min(n, 64)），ncv_g = max(ncv（自动时 max(2(k_g + 16) + 1, k_g + 32)），
+   `lanczos_basis_columns`(n, 0, k_g, ncv, p_g))，p_g = block_size > 0 ? min(block_size, 4) : 8——自动时
+   预留块宽规则最宽的块（`eigen_detail::kRuleWidths.back()`，§3.6-5），更宽的显式 block_size 不预留（分解
+   优先，运行时再按剩余内存减半，见下）；GHIEP 为 `ghiep_reserve_columns`（P5：第一次运行的
+   `krylov_schur_general_peak_columns`，块宽取 `ghiep_block_size`，单精度/BLR 另加修正工作区 2p，再加后续
+   运行分解期间保留的普通运行 Schur 基与并集精修基各 m 列，m = min(n, nev + 1（实）/ nev（复））；类型
+   未定时取两者之大。cap ≤ 0 即抛 OutOfMemoryBudget。`analyze` 后估计 ≤ cap 才做内存内分解，并把 cap
+   作为 ICNTL(23) 传给 MUMPS（超限变成 INFO=−19 而不是被系统杀掉）；否则 `out_of_core ≠ off` 且外存估计 ≤ cap 时
    改用外存；仍超则抛 OutOfMemoryBudget 并报告估计值（绝不盲目分解）。BLR 与单精度只由配置开启
    （`blr = on`、`factor_precision = single`），driver **不**自动降级（P0 设计的「BLR → 单精度」降级链
    未实现）。
@@ -480,60 +575,120 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    `lanczos_basis_columns`（p = 1：d + ncv + 2；p > 1：d + 块布局 ncv + 2p，块布局放不下时 d + n_free + 2）
    加调用方保留的列（候选块 X、AX、BX 与返回向量：4·nev，重跑另加 3d）的字节 ≤ 0.9·(budget − 当前
    RSS)。GHIEP 同理：峰值列 `krylov_schur_general_peak_columns` 加修正工作区 2np（开修正时）
-   ≤ 0.9·(budget − 当前 RSS)（当前 RSS 含活的分解与此前运行的 Schur 基），每种减法只告警一次。GHIEP
-   的分析前预留仍按上面的 ncv_g 公式，未按 `krylov_schur_general_peak_columns` 计。
+   ≤ 0.9·(budget − 当前 RSS)（当前 RSS 含活的分解与此前运行的 Schur 基），每种减法只告警一次。更后面
+   运行（探测、单边运行、重跑）的基不预留，由这里的减半适配。
    **GHIEP 后处理**（P4 前约 88 B·n·m，wg-square-1e6 上 +1.15 GB 的尖峰决定全程峰值）现在只保留各次
    运行的 Schur 基（Ritz 向量当即丢弃），投影铅笔按 8 列一块形成（不物化 n×m 的 AW、BW），候选按
    4 个一批精修并以精修基中的系数保存，结果向量只为选中的对、在各运行的基释放之后形成；每次精修前
    释放分解（§3.6-6）。wg-square-1e6（SCOTCH 固定，2 线程）峰值 RSS 2886 → 1766 MB（报告值；guard
    1.65 GiB），后处理 3.50 s → 1.29 s 且不再增长内存（`results/p4_measurements.md` §4）。
-3b. **自适应排序**（`ordering=-1`，默认；`decide_ordering`，纯函数）：先做 AMD 分析探测（极快），按
-   代价模型预估嵌套剖分在本次运行的分解与回代上能省的时间，超过其额外分析代价才改用嵌套剖分。
-   - 嵌套剖分 = SCOTCH（ICNTL(7)=3）；`deterministic = true` 时改用 METIS（5，固定种子；`nd_ordering`），
-     因为 SCOTCH 的排序逐次分析都在变（§3.4），会让「逐位复现」落空。METIS 在 1e5 三维测例上分析更慢
-     （syn-mem27-46 0.82 → 1.06 s 等），默认因此仍是 SCOTCH（其运行与 L0-OpenMP 分解一样只在容差内
-     可复现）。自研的 `kOrderingNestedDissection` 尚未接入（§3.4）。
-   - 模型（全部确定，P4 起**不含任何实测耗时**，同一问题每次运行选择相同）：
-     t_分解 ≈ 6e-7·order + flops/(12 GF/s·线程)，t_回代 ≈ 16 B·条目/12 GB/s；AMD 分析
-     `model_analysis_s` = 3.4e-7 s·order + 2.5e-8 s·输入上三角条目 + 3.6e-10 s·AMD 因子条目（42 个数据
-     测例上的相对最小二乘拟合：n ≥ 1e4 的测例都在实测的 0.41–1.44 倍内，中位数 0.95；order 为 MUMPS
-     输入阶数，复数为 2n）；嵌套剖分分析代价 = 7 × 该值（`kNdAnalysisOverAmd`；实测 SCOTCH/AMD
-     2.2–17，中位数约 9，7 保持 P3 标定）。AMD 填充比（AMD 因子条目 / nnz(K)）> 20 视为三维型（ND 保留
-     0.35 flops、0.6 条目），否则（0.6、0.85）；预计分解次数 = 1 + 2（有证书）+ 1（有 B），回代次数
-     max(40, 3k)（interval 以 k = 32 计）。
-   - P3 比较的是**实测** AMD 分析耗时，受负载影响：两次相同的 wg-square-1e6 运行分别选了 SCOTCH 与
-     AMD（memio 实测）；同一输入的探测耗时实测相差 3 倍。改成模型后，除 wg-square-1e6（模型比值
-     节省/代价 1.02，实测 0.78，处在阈值上）外每个数据测例保持 P3 的选择（7899da8）。
-   - P3 实测（8 线程）：二维波导 1e5 1.65→1.20 s，二维腔 1.17→0.47 s；三维问题选 SCOTCH。
-   - 已知偏差：模型按单右端回代计次数，GHIEP 的块运行与 HEP/GHEP 的块 Krylov 每次回代多列、每列更便宜，
-     嵌套剖分的回代节省因此被高估；InertiaCounter 计数比完整分解便宜 10–23%，也未计入。
-4. **近奇异位移**（`factorize_near`）：`factorize` 返回 false（σ 在数值上落在特征值上）时**只扰动
-   一次**：σ ← σ + 1e-8·max(scale, |σ|)（孤立特征值此时已在检测阈值之外约 1e3 倍；
-   `max_shift_retries = 0` 时不扰动），记入报告。仍判奇异说明 σ 在比检测阈值更密的簇内，再往外移
-   会改变「最近」的集合（P2 的第二次 10× 扰动在 syn-zero-cluster-real-1e5 上落到所需半径的 5 倍处，
-   证书数出 166 个、找到 21 个）→ **在 σ 处关闭零主元检测分解**（以后在此位移的重分解照做）；再失败
-   抛 Singular。「最近 k 个」的选择始终相对原始 σ。有意放在或紧挨重特征值的位移（§3.6-8b 的部分簇
-   与重根重跑）被扰动时不告警、不计 shift_retries。
+3b. **自适应排序**（`ordering = −1`，默认；P5c，`adaptive_analysis`）：先做 AMD 分析探测（极快，其估计区分
+   二维型与三维型填充），再用代价模型把每个候选排序在本次运行**计划的工作**上定价；分析得分最好的候选、
+   以其实际估计替换预测，如此往复，直到得分最好的是已分析的候选。
+   - 候选（`candidate_orderings`，得分相近时按此顺序优先）：AMD（0）、SCOTCH（3）、自研并行嵌套剖分（10，
+     §3.4）、METIS（5）、PORD（4）。SCOTCH 排在自研嵌套剖分之前：16 线程下它在高填充三维测例上的因子只需
+     后者 0.80–0.95 倍 flops，而按填充比的形状拟合要到填充 ~150 以上才看得出；端到端把它换成自研嵌套剖分，
+     yee-pec-box-1e5 慢 13%、ss-ge87h76 慢 17%。config 也可直接给 0、2..7（MUMPS ICNTL(7)）或 10，见
+     `docs/FORMATS.md` §2。
+   - 计划的工作（`plan_work`，由配置与分析前已知的问题类型推导，不计时；按 6a3d7c1 时数据测例的端到端
+     运行标定）：HEP/GHEP nearest 分解 1 次（类型未定再加 B 的惯性 1 次）、证书计数 2 次（`inertia_check
+     = off` 时 0）、列作用 40 + 4k（p > 1）或 2k + 12（p = 1），块宽按 P4 规则估计（分析之前还没有因子
+     统计）；窗口目标（interval / smallest / largest）再加 1 次分解、计数 4 次（粗估，数据测例都是
+     nearest）；GHIEP nearest 约 3.4k 列回代、1 次分解，σ 在零带内时 5 次分解、约 20k 列。只有候选之间的
+     相对代价要紧：补救、重跑等对每个候选的价格影响相同。
+   - 代价模型（`OrderingModel`，`ordering_model()`；常数在 gpu02 测量槽 16 线程、MUMPS 阶数 ≥ 5000 的 40 个
+     数据测例上拟合，`bench/anaint_orderings.cpp`；`bench/anaint_fix_fit.cpp` 由原始输出复算每个常数并用
+     driver 自己的代码重放选择：相对最佳排序的平均超额样本内 4.3%、留一测例 5.0%）。方括号内为预测/实测
+     的范围：
+     - 给定顺序的分析（MUMPS 带 PERM_IN：自研嵌套剖分交出排列、InertiaCounter 复用主顺序），也是每种分析
+       的下限，[0.58, 1.54]；
+     - 自研嵌套剖分：单线程功 W = w_v·顶点 + w_e·边 + w_fe·因子条目 [0.47, 1.38]；p 线程 W·(s + (1 − s)/p)，
+       s = 0.383 为 16 线程实测的中位数（四分位 0.26、0.47；它不按单一串行比例的 Amdahl 定律扩展：4 线程时
+       0.19）；复数铅笔至少一半的耦合为复数时排 n 顶点图（与 `compute_ordering` 的 Embedding::Auto 一致）；
+     - MUMPS 的排序都是串行的：METIS、PORD、SCOTCH 为 ρ·W（输入图、各自的因子条目；ρ = 1.033、1.126、0.626；
+       整个分析 [0.45, 1.0]，syn-* 的低填充块图除外，它们快 3–8 倍）；AMD 的排序为 a·阶数 + b·条目
+       [0.25, 1.31]；
+     - 各排序的 flops 与因子条目相对 AMD 之比是 AMD 填充比 f = 条目(AMD)/nnz(铅笔) 的函数：ln r 在 ln f 上
+       分段线性（节点 f = 1、4、10、40、150、1000，节点外取常数；岭回归 0.05）。低填充（f < 5，块状或带状）
+       嵌套剖分要 AMD 的 2–3 倍 flops，二维（f ~ 10）0.4–0.9 倍，三维（f ≥ 40）0.1–0.35 倍；flops
+       [0.44, 1.86]、条目 [0.64, 1.36]；
+     - 16 线程的数值阶段：一次分解 t_f = f_o·阶数 + f_e·输入条目 + f_fe·因子条目 + f_fl·flops [0.23, 1.79]，
+       同一对象重分解 0.962 t_f，InertiaCounter 计数 0.886 t_f；单右端回代 t_s = s_o·阶数 + s_fe·因子条目
+       [0.30, 1.44]，一次 p 列回代 (1 + 0.062(p − 1)) t_s；其它线程数乘 (16/线程)^γ（分解 γ = 0.46、回代
+       0.22，由 16 / 4 线程的中位数比得到）；
+     - 低填充（f ≤ 4）的 AMD 因子在 16 线程下的数值阶段远慢于其规模所示（没有分隔子的深窄消去树让 L0 层的
+       线程空闲）：分解 × 1.86、回代 × 3.15，f 从 4 到 5 对数线性降到 1，按 ln(线程)/ln 16 缩放；
+     - 证书计数按 driver 的做法计价（`counter_pays` 时计数器的给定顺序分析加计数，否则主对象重分解）。
+   - 选择（`run_ordering_choice`，纯函数，可脱离 MUMPS 测试；`OrderingPricer` 定价）：已分析候选的得分是其
+     计划的数值时间；未分析的为预测分析时间 + (1 − g)·预测数值时间，g 是拿到实际估计的期望收益（以 AMD 为
+     锚时 0.05；以已分析的嵌套剖分为锚时 0.03——两种嵌套剖分之间的相对预测紧得多）；后面的候选须比前面的
+     低 `kOrderingMargin` = 5% 才胜出。循环：分析得分最好的未分析候选，与保留的现任者按同一规则对决，败者的
+     分析立即释放（同时至多两个分析常驻），再以新分析的候选为锚重新预测其余，直到得分最好的已分析。预测或
+     估计超出内存内上限（§3.6-3）的候选排在所有放得下的之后、按大小排序（全都放不下的 out-of-core 运行因此
+     不会把候选逐个分析一遍：ss-3dspectralwave2 上曾分析 4 个、50 s）。
+   - SCOTCH 的排序逐次分析都不同（§3.4），因此**按预测采纳**（`taken_on_prediction`）：一旦得分最好就分析并
+     采用（估计超出上限时除外），从不拿它的估计与别的候选比，也不作预测的锚。选择因此只是确定量（确定排序
+     的估计、模型、线程数）的函数，相同的运行选相同的排序；墙钟时间只记日志（事件 `ordering`：每个候选的
+     得分、是否分析及其分析耗时、计划的工作与选择）。
+   - `deterministic = true` 沿用下面的 P4 规则（AMD 或固定种子的 METIS），保证逐位复现。
+   - 已知偏差：ss-tem152078 上模型选了自研嵌套剖分（该例单线程排序实际是拟合 W 的 2.1 倍，syn-mem125-46
+     1.9 倍，度、填充、分隔子大小都解释不了），其分析比 SCOTCH 慢一倍，总时间为 P4 的 1.15 倍。给嵌套剖分
+     加上分析风险（未分析时加 0.5 倍预测分析时间）可修好这一例，但重放时 yee-bloch-1e4、yee-photonic-*、
+     syn-lap3d-aniso-1e5、syn-mem27-46 与 ss-qa8fk-qa8fm 也转向 SCOTCH，平均超额 4.3% → 5.3%，未采用。模型只
+     在 16 线程下标定（4 线程数据只用于线程指数与 W），低填充 AMD 的系数只来自 syn-* 测例。
+   - **P4 规则**（`decide_ordering` / `nd_ordering`，现在只服务 `deterministic = true`，也是 bench 的对照）：
+     AMD 探测后按确定的模型预估嵌套剖分在本次运行的分解与回代上能省的时间，超过其额外分析代价才改用嵌套
+     剖分——SCOTCH，`deterministic = true` 时 METIS（5，固定种子）；该路径总是 deterministic，所以实际是
+     AMD 或 METIS。模型：t_分解 ≈ 6e-7·order + flops/(12 GF/s·线程)，t_回代 ≈ 16 B·条目/12 GB/s；AMD 分析
+     `model_analysis_s` = 3.4e-7 s·order + 2.5e-8 s·输入上三角条目 + 3.6e-10 s·AMD 因子条目（42 个数据测例
+     的相对最小二乘拟合，order 为 MUMPS 输入阶数，复数为 2n）；嵌套剖分分析代价 = 7 × 该值
+     （`kNdAnalysisOverAmd`）；AMD 填充比 > 20 视为三维型（ND 保留 0.35 flops、0.6 条目），否则（0.6、
+     0.85）；预计分解次数 = 1 + 2（有证书）+ 1（有 B），回代次数 max(40, 3k)（interval 以 k = 32 计）。
+     `model_analysis_s` / `model_factor_s` / `model_solve_s` 另供证书的 `counter_pays` 与 auto 选择（缺实测值时）
+     使用。
+4. **近奇异位移**（`factorize_near`）：`factorize` 返回 false（σ₀ 在数值上落在特征值上）时，先看 σ₀ 处的
+   零主元数（事件 `singular_shift`；`near_null_eigenvalues`：实数即零主元数，复数实嵌入中每个特征值出现
+   两次，取 ⌈零主元数/2⌉）：
+   - 至多一个特征值的份：孤立特征值，**只扰动一次**：σ ← σ₀ + 1e-8·max(scale, |σ₀|)（孤立特征值此时已在
+     检测阈值之外约 1e3 倍；`max_shift_retries = 0` 时不扰动），记入报告（shift_retries = 1，告警）。
+   - 多于一个特征值的份（P5c），或扰动后的位移仍判奇异：σ₀ 在比检测阈值更密的簇内，与阈值同量级的扰动会
+     改变「最近」的集合 → **在 σ₀ 处关闭零主元检测分解**（以后在此位移的重分解照做；shift_retries 报 2，
+     `max_shift_retries = 0` 时 1）。先看零主元数，因为扰动后的位移是否被判奇异取决于主元顺序：
+     syn-zero-cluster-real-1e5（σ₀ = 0 两侧 1e4 个间距 2e-9 的特征值，取 21 个）上 AMD 的因子判了奇异，
+     METIS、SCOTCH 与自研嵌套剖分的没有；它们在 σ₀ + 1e-8 处找到的 21 对延伸到 2.85e-8，而离 0 那么近的有
+     34 个（最近 21 个到 1.86e-8）：每个种子都要证书重跑，10–11 次分解而不是 6 次。
+   - 关闭检测仍失败（精确零主元）：簇的情形最后试一次扰动位移；仍失败抛 Singular。
+   「最近 k 个」的选择始终相对原始 σ₀。P2 的第二次 10× 扰动在该例上落到所需半径的 5 倍处（证书数出 166 个、
+   找到 21 个），已废。有意放在或紧挨重特征值的位移（§3.6-8b 的部分簇与重根重跑，`on_eigenvalue`）不按簇
+   判定、照常扰动，不告警、不计 shift_retries。
 5. **迭代求解**：内层容差 = tol × inner_tol_factor；θ → λ = σ + 1/θ。nearest 恰好收敛 k 对
    （nev = k；完备性由证书负责，不靠多算余量）。主分解为单精度 / BLR 时算子带双精度迭代修正
    （≤ 10 步，rel_tol = 0.1·tol·inner_tol_factor；driver 不检查修正是否收敛，§3.4b）。
    **块 Krylov**（P4，`SolverConfig::block_size`，0 = 自动，1 = 单向量；报告 `block_size`）：
-   - HEP/GHEP（`block_size_for`）：配置 > 0 时用配置值；自动时 nev ≥ 8 的运行 p = 4，否则 1。只取决于
-     配置与 nev（不做计时探测：选择、从而特征向量都不随机器负载变化）。适用于定性路径的每次位移反演
-     Lanczos 运行：nearest、切片、单边运行与收缩重跑；报告的 `block_size` 是第一次运行的块宽（经内存
-     适配后）。证书收缩重跑缺 m 对时宽度为 `rerun_block_size` = max(p, min(4, m 上取偶))：宽度 ≥ 重数
-     时随机起始块保证一轮取全副本；上限 4（不设上限时 syn-ghep-multiplicity-real-1e4 缺 9 个、p = 10
-     的重跑用 200 次作用而单向量只用 59 次），更多副本仍靠舍入与后续重跑。依据（30 个 HEP/GHEP 数据
-     测例，4 线程，p = 1/4/8，`results/p4_measurements.md` §3）：三维 1e5 测例迭代阶段快 1.4–2.5×，
-     重特征值测例总时间快 1.4–2.2×（不再需要重跑）；k = 6、7（cav2d）块更慢（22 → 60 次作用），故
-     nev < 8 用 p = 1；p = 8 只在重特征值主导时胜过 4。小而低填充的复数 1e4 测例最多慢 0.1 s；切片
-     代价模型（§3.6-8b）仍按 p = 1 标定，窗口目标的块运行未做性能测量。
+   - HEP/GHEP（`block_size_for`）：配置 > 0 时用配置值（显式值优先）。自动时：
+     - nearest 的单位移运行（P5c）：在 σ 处的主分解（`factorize_near` 之后）上用块宽规则
+       `recommended_block_size`（§3.5），形状取 {n, nev, 该分解的 `FactorStats::factor_entries`, nnz(B)（B = I
+       时 0）, 标量类型}，p ∈ {1, 2, 4, 8}，nev ≥ 8 时至少 4。规则只读确定量（不做计时探测：选择、从而特征
+       向量都不随机器负载变化；SCOTCH 排序下因子条目的逐次波动见 §3.5）。分析前的内存预留按规则最宽的
+       p = 8（§3.6-3），放不下时运行前减半。依据（16 线程测量槽，§3.5）：端到端相对 p = 1 快 1.03–2.45×，
+       相对 P4 自动块宽 0.98–1.19×。
+     - 谱切片与单边运行（每片的 nev，含零带干扰时转交窗口的 nearest）：P4 规则，nev ≥ 8 时 p = 4，否则 1
+       ——块宽规则只在 nearest 运行上标定。
+     报告的 `block_size` 是第一次运行的块宽（经内存适配后）。证书收缩重跑缺 m 对时宽度为 `rerun_block_size`
+     = max(p, min(4, m 上取偶))：宽度 ≥ 重数时随机起始块保证一轮取全副本；上限 4（不设上限时
+     syn-ghep-multiplicity-real-1e4 缺 9 个、p = 10 的重跑用 200 次作用而单向量只用 59 次），更多副本仍靠
+     舍入与后续重跑。P4 规则的依据（30 个 HEP/GHEP 数据测例，4 线程，p = 1/4/8，`results/p4_measurements.md`
+     §3）：三维 1e5 测例迭代阶段快 1.4–2.5×，重特征值测例总时间快 1.4–2.2×（不再需要重跑）；k = 6、7
+     （cav2d）块更慢（22 → 60 次作用；P5c 的块步快路径与规则使 p = 2 在这两例上也划算，§3.5），p = 8 只在
+     重特征值主导时胜过 4。小而低填充的复数 1e4 测例最多慢 0.1 s；切片代价模型（§3.6-8b）仍按 p = 1 标定，
+     窗口目标的块运行未做性能测量。
    - GHIEP（`ghiep_block_size`，indefinite.cpp）：配置 > 0 时取 min(p, nev, 64, n/16)，探测运行
      （nev ≤ 2）恒为 1；自动时 n ≥ 2e4 且 nev ≥ 4 的运行 p = 2，否则 1。依据（2 线程，
      `results/p4_measurements.md` §4）：p = 2 在九个测例上从未慢于 p = 1（1.06–1.58×），p = 4 最多慢
      1.5×（零簇旁的单边运行每块都带回 p 个零簇方向：wg-square-1e5 σ = 0 时整次求解 284/400/620/855 次
-     作用）；n ≈ 1e4 时收益在噪声内。报告的 `block_size` 目前只由定性路径写入，GHIEP 恒报 1（实际块宽
-     见事件日志 `krylov_schur.block_size`）。
+     作用）；n ≈ 1e4 时收益在噪声内。报告的 `block_size`（P5）是第一次运行（普通运行，或 σ 在零带内时
+     的第一次单边运行；之前的探测运行按规则是单向量）经内存适配后的块宽，各次运行的块宽见事件日志
+     `krylov_schur.block_size`。
    - 两条路径都在每次运行前按 §3.6-3 的剩余内存把 p 减半（告警）。
 6. **精修**：HEP/GHEP 在原问题上做**秩揭示** Rayleigh–Ritz：B-Gram 矩阵 XᴴBX 做特征分解，丢弃小于
    最大特征值 1e-8 倍的方向（跨片去重时 1e-4），在剩余的 B-正交基上解投影铅笔。同一向量算两次、或
@@ -548,13 +703,46 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
    x ← x − K̃⁻¹(A − ρB)x（ρ 为 Rayleigh 商；对任意近似分解 K̃，其不动点都是 (A,B) 的精确特征对；
    每对至多 3 步，K(σ) 的分解按需重建），之后再做一次秩揭示 Rayleigh–Ritz；仍不达标则
    accepted=false。η > max(1e-6, tol) 的对视为幽灵，不计入找到数。
-8. **惯性证书（nearest，HEP/GHEP；复数经实嵌入同样可用）**：
-   - 窗口：r = max|λᵢ − σ|，a ≤ σ − r、b ≥ σ + r，各自推到与更外侧最近的 Ritz 提示值（ritz_all 的
-     映射值）的中点；无提示时外推 max(1e-3·|端点 − σ|, 1e-8·scale)。
-   - 通过条件 count_inertia == count_found（count_found 为窗口内不同 B-正交向量数）。少 → 以已收敛对
-     （η ≤ 10·tol）作 deflation、在 σ 处重分解后重跑（nev = 缺数 + 2，块宽 `rerun_block_size`，
-     §3.6-5），至多 2 轮；多 → 告警
-     （重复/幽灵收敛）。
+8. **完备性检验（nearest，HEP/GHEP；复数经实嵌入同样可用）**：方法由 `SolverConfig::certificate` 选（P5，
+   `src/driver/certificate.*` 的 `NearestCertifier`，每次求解一个对象、跨轮保留起始缩放、计数器与失败过的方法；
+   `inertia_check = off` 或 `certificate = off` 时不做，报告 note 为 "disabled by configuration"）。
+   - 窗口（各方法相同）：r = max|λᵢ − σ|（选中的对），a ≤ σ − r、b ≥ σ + r，各自推到与更外侧最近的 Ritz
+     提示值（ritz_all 的映射值）的中点；无提示时外推 max(1e-3·|端点 − σ|, 1e-8·scale)。
+   - **exact**（默认）：两端的双精度 Sylvester 计数，count_inertia = ν(b) − ν(a) 与 count_found（窗口内不同
+     B-正交向量数）相等即通过（计数规则与来源见下）。
+   - **exact_single**（只由 auto 选）：同样两次计数，用 InertiaCounter 的单精度 LDLᵀ，只在 §3.5b 的扰动规则
+     （B = I 或对角 B）以 10 倍余量认证该窗口时——假定的后向误差 `kAutoSingleSafety` × 1e3 = 1e4·u_s·‖K‖₁
+     （yee-pec-box-1e5 上实测误数要 ≥ 2.96e3），每个已找到的特征值与所需区域都离端点 η 以上。单精度计数多于
+     找到数、或两侧与主分解的精确计数 ν(σ)（主分解为双精度、非 BLR、带零主元检测时）矛盾（ν(σ) − ν_s(a) 个应在 [a, σ)、ν_s(b) − ν(σ) 个在 [σ, b]）时，先在
+     同一计数器上做双精度计数复核：两种精度一致的亏缺触发重跑；不一致说明单精度 LDLᵀ 的后向误差超出了
+     假设，本次求解不再用单精度计数，由双精度计数下结论。单精度计数少于找到数、或某端判奇异时交给精确
+     计数（重复 / 幽灵由它报告）。
+   - **randomized**：在 σ 处已持有的分解上做随机排除检验（§3.5b `exclusion_check`）：以窗口内已收敛的已找到
+     对（η ≤ 10·tol；选中的对取残差修正后的版本，加上其余计算出的对）作收缩，高斯起始块（每轮换种子），块宽由
+     `certificate_cost` 选、步数在运行前由失败概率上界 `certificate_delta`（默认 1e-12）定。通过半径 r' = 窗口
+     在较近一侧的半宽；声称半径 r_c 介于 r_edge = r + |σ − target.sigma|（σ 只在近奇异扰动后才不同于
+     target.sigma）与 r' 之间：1/r_c = 1/r_edge − 0.01·(1/r_edge − 1/r')（`kClaimFraction`）。检验通过且 r_c 内
+     找到的个数等于认证的个数时，以概率 ≥ 1 − δ，r_c 内恰有这么多特征值、都由已找到的对逼近，所以选中的对
+     就是最近的 k 个；检出（补空间上有新的 Ritz 值）触发重跑；不能下结论（谱隙太窄、计划超出内存预算、
+     收缩块被拒）时交给精确计数，以后各轮不再试。只在 κ(B) 有证明（B = I、对角 B、对角占优 B）时运行：一般
+     B 的 κ 只能估计，通过只是筛查结果——此时不运行，由精确计数出证书并告警，陈述写明原因；**筛查结果从不
+     作为报告的结论**。最后一轮仍检出时由精确计数下最终结论（精确计数能通过的求解不会因随机检验失败）。
+   - **auto**：每轮用 `certificate_cost`（§3.5b）以本次运行**实测**的主分解时间与 Krylov 运行一次回代调用的
+     时间（按其块宽换算到单列）预测三种方法的秒数，选最便宜且能认证者：randomized 只在 κ 有证明、且比最好的
+     精确方案快 1.2 倍（`preference`）时；exact_single 只在规则带 10 倍余量成立时；否则 exact。随机检验不能
+     下结论、而单精度计数预测比精确计数便宜时，改用单精度计数。陈述前缀给出这次预测；事件 `certificate_choice`
+     记下 `certificate_cost` 的全部输入（`bench/certint_model.cpp` 可用别的计时重算）。
+   - **轮次**：每轮先做该模式的检验；结论「缺」（exact：计数 > 找到；exact_single：两种精度确认的亏缺；
+     randomized：检出）→ 以已收敛对（η ≤ 10·tol）作 deflation、在 σ 处重分解后重跑（nev = 缺数 + 2，块宽
+     `rerun_block_size`，§3.6-5），至多 2 轮，每轮之后同法再检；精确计数少于找到数 → 告警（重复/幽灵收敛）。
+     **选中的对少于 k**（补救合并了列、对未收敛、故障注入）时，任何检验都只覆盖已找到的对的窗口，第 k 个
+     最近的特征值可能在窗口之外：即使检验通过也重跑（缺数至少为 k − 选中数），最后仍不足时陈述注明。
+   - `certificate_fault_drop`（只用于测试与测量）：第一次 Krylov 运行之后、检验之前删掉这么多已找到的对（先删
+     选中对中最大重特征值的副本、至少留一个，再删离 target.sigma 最远的选中对及其 Ritz 提示），检验必须发现
+     它们缺失、重跑把它们找回。
+   - 报告（`InertiaCertificate`，`docs/FORMATS.md` §3）：method（exact / exact_single / randomized / none）、
+     rigorous、failure_probability、solves、seconds、statement；randomized 下结论时 count_inertia = −1、
+     [lower, upper] = [σ − r_c, σ + r_c]、count_found 为 r_c 内找到的个数。
    - `count_below(s)` = ν₋(A − sB)：先带零主元检测计数；被判奇异时，s 若是谱隙点（证书端点）就在
      s 处关闭检测计数（稠密簇内任何移动都会越过特征值；向后稳定的 LDLᵀ 对离 s ≫ eps·‖K‖ 的特征值
      计数精确）；s 若是任意点（用户区间端点、插值切点、零带边界——可能恰在一个（重）特征值上）就在
@@ -567,7 +755,8 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
        model_analysis_s（计数器的分析约等于一次 AMD 分析；三维填充是，低填充的二维 / 复数嵌入否，与
        实测净节省的正负一致）；`inertia_counter = on / off` 覆盖。用计数器时**每次计数前释放主因子**
        （`MainFactors::Release`：证书之后只有重跑才要主因子，重跑在 σ 重分解一次——与主对象计数相同），
-       两者从不同时驻留。
+       两者从不同时驻留。单精度计数建立的 certifier 计数器（P5）之后也服务该求解的精确计数
+       （`exact_counts`：不建第二个计数器、不再分析；为复核单精度计数已数过的窗口不再计数）。
      - 主分解为单精度或 BLR：一律用计数器（双精度；取代 P3 的每次计数一次完整分析的
        `compute_inertia`），稠密簇内无检测计数因此也可用。
      - 窗口 / 切片：默认主对象（计数点兼作单边位移）；`inertia_counter = on` 或主因子不精确时用
@@ -575,9 +764,11 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
        切片之间要在别的位移上做 Krylov 运行）。是否释放在每次计数前重新判定。
      - 实测（4 线程，六个三维 1e5 测例，`results/p4_measurements.md` §3）：计数器比主对象计数省
        0.05–0.14 s 证书时间（5–13%，含其分析），峰值 RSS 比主因子常驻低 21–26%、比主对象计数低
-       2–7%；证书仍有两次计数分解，占这些测例总时间的 30–40%（hsolve 在真实三维 nearest 测例上慢于
-       SLEPc 的主因）。B 正定性检测仍在主对象上分解；单精度筛查计数与随机排除检验（§3.5b）尚未接入。
-   - GHIEP 无惯性证书（报告中注明）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。
+       2–7%；证书仍有两次计数分解，占这些测例总时间的 30–40%（P4 时 hsolve 在真实三维 nearest 测例上慢于
+       SLEPc 的主因；P5 的 exact_single 与 randomized 即为此而来）。
+   - 窗口目标（interval / smallest / largest）总是精确计数——它们的计数点就是切点与位移，`certificate =
+     randomized` / `off` 被忽略并告警；零带干扰时转交窗口的 nearest 同样精确计数。报告的 method 为 exact。
+   - GHIEP 无惯性证书（报告中注明，method 为 none）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。
 8b. **窗口与谱切片**（interval / smallest / largest，B 正定或 B = I；以及零带干扰的 nearest，见 9）：
    - 窗口端点与所有切点都是同一分析上的精确 Sylvester 计数，每片都知道自己含几个特征值；各片单独
      求解、单独认证，最后合并。
@@ -636,12 +827,50 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
     复对通过，才算复特征值；复特征对单独输出（`complex_eigenvalues`），实特征对不受影响。
 11. **输出**：见 `docs/FORMATS.md §3`（含 `slices`、`zero_cluster_dim`、`zero_modes_filtered`、
     五个互斥阶段计时，P4 起另有 `solver`（"hsolve"）、`version`（`hs::version()`）、`block_size`、
-    `time_certificate_s`；Python 接口的报告同源）。`factor_stats` 只统计主分解对象，InertiaCounter 的
-    分析与计数只体现在 `time_certificate_s` 与事件日志（`inertia_counter`、`main_factors_released`）。
+    `time_certificate_s`，P5 起 `certificate` 另有 `method`、`rigorous`、`failure_probability`、`solves`、
+    `seconds`、`statement`；Python 接口的报告同源）。`factor_stats` 只统计主分解对象，InertiaCounter 的
+    分析与计数只体现在 `time_certificate_s` 与事件日志（`inertia_counter`、`main_factors_released`；P5：
+    `certificate_choice`、`randomized_check`、`single_counts`、`certifier_double_counts`）。
 
 ### 3.7 util（`include/hsolve/log.hpp`、`include/hsolve/util.hpp`）
 - `Logger`：JSON lines 写文件 + 人类可读 stderr；事件名小写下划线，字段扁平。
 - `Timer`、`peak_rss_bytes()`、`current_rss_bytes()`、`max_threads()`、`build_info()`。
+
+### 3.8 blas（`src/blas/`，P5「asmkern」；不属于 libhsolve；实测与用法见 `docs/BLAS.md`）
+- 作用：替换 `dgemm_`、`dtrsm_`、`dgemv_`（另包装 MUMPS 用到的 level-1 例程——只计时、原样转发——与
+  `dmumps_c` / `smumps_c`——只为剖析器标出分析、分解、计数、回代阶段），按形状把选定的调用类改道到别的现有核；
+  其余调用（以及配置为 off 时的全部调用）原样转发给查找顺序中位于 hook 之后的真实 BLAS（`next_definition`：
+  dlsym(RTLD_NEXT)；Python 下 MUMPS 与 BLAS 由 dlopen(RTLD_LOCAL) 打开，则在已加载对象中查找）。标量集：只有
+  double——MUMPS 的实数与复数（实嵌入）分解、回代都是双精度实数运算；单精度（smumps）不改道。
+- 路由（环境变量 `HS_BLAS_ROUTE`，逗号分隔，每进程读一次；未知记号使进程带消息终止，拼错的路由不会悄悄运行）：
+  `gemv1`（N = 1 的 dgemm → 真实 dgemv）、`strsm=<m>`（小三角求解核）、`trsv=<n>` / `trsv1`（窄 dtrsm → 逐列
+  真实 dtrsv）、`narrow`（2 ≤ N ≤ maxn 的 NN / TN dgemm → 自带窄核：A 只流一遍、不打包，AVX-512F 或 AVX2 + FMA）、
+  `par`（并行区外、A 至少 2 × minkb 的调用按固定块分给至多 threads 个线程；行太少的 AᵀB 按 K 切分，部分积按
+  块序相加）、`all` = `gemv1,strsm=512,narrow,par`，另有参数 `maxn`、`rows`、`minkb`、`threads` 与指令集上限
+  `avx2`、`portable`。未设该变量时用构建默认值 `HSOLVE_BLAS_ROUTE_DEFAULT`（CMake 缓存变量，默认 "all"，""
+  = off；也作用于 `libhsolve_blashook.so`）；`HS_BLAS_ROUTE=off` 在运行时关闭全部路由（纯转发）。
+- 指令集：运行时由 CPUID 选 AVX-512F、否则 AVX2 + FMA、否则可移植循环（`hsolve_blas` 不用 `-march=native`
+  编译，SIMD 核自带 target 属性；非 x86 只编译可移植循环，`narrow` 至少要 AVX2）。`HS_BLAS_NO_AVX512`、
+  `HS_BLAS_NO_AVX2`（设为 "" 与 "0" 以外的值）强制回退，供测试与对比。`HS_BLAS_PROFILE=<文件>`（`%p` 换成
+  进程号）在任何配置下开启逐调用剖析器：按（例程、操作数标志、尺寸档、MUMPS 阶段、是否在并行区内、路由）
+  累计次数、秒数、flops 与最少搬运字节，进程退出时写成一个 JSON（`bench_asmkern_report` 排版）。
+- 构建：总是构建静态库 `hsolve_blas`（路由、核、剖析器；`-ffp-contract=off`，使 NN 的两条代码路径舍入一致）与
+  `libhsolve_blashook.so`（LD_PRELOAD 用，任何可执行文件，含 python）。CMake 选项 `HSOLVE_BLAS_HOOK`（默认 ON）
+  经函数 `hsolve_link_blas_hook` 把入口点链入 hsolve 可执行文件：`--no-as-needed` 让 MUMPS 库留在 DT_NEEDED
+  （可执行文件自己的 dmumps_c 满足了 libhsolve 的引用，conda-forge 的 `--as-needed` 会丢掉 MUMPS 库，包装便找
+  不到真实的 dmumps_c），动态列表导出入口点，使 MUMPS 的 BLAS 调用绑定到它们。链入与预加载二者择一（否则调用
+  两次经过 hook）。libhsolve、单元测试（`test_asmkern_fix_exehook` 除外，它检验这种链接）与 Python 模块都不带
+  hook；Python 下用预加载（`docs/PYTHON.md` §1）。已有构建目录保留缓存的旧值，用
+  `-UHSOLVE_BLAS_HOOK -UHSOLVE_BLAS_ROUTE_DEFAULT` 重新配置才取新默认值。
+- 结果与线程：路由只改变调用内的运算顺序（与真实例程差在舍入），不改变语义；固定线程数时每条路由都确定（每个
+  输出元素由一个线程按固定顺序计算，切分只取决于形状与线程数），不切 K 的窄核对任何线程数结果相同。OpenMP
+  并行区内（MUMPS 的 L0 子树）每条路由都在调用线程内串行，不与 MUMPS 自己的线程超订；并行路由的固定块轮转分给
+  运行时实际组成的线程组，线程组较小（OMP_THREAD_LIMIT、OMP_DYNAMIC 等）时仍算全部块。任意多线程可并发调用。
+- 默认（route all 链入 hsolve）的依据：16 线程测量槽、六个对比配置、5 次交错，每次运行都有效且精度相同，
+  端到端 1.05–1.16×；收益全在回代（MUMPS 回代时间降 18–30%，数值分解不变）。换用其它 BLAS（自编 OpenBLAS、
+  BLIS、LIBXSMM）无益（`docs/BLAS.md` §3、§5、§6）。
+- 许可：窄核改编自 OpenBLAS 0.3.34 的 SkylakeX 核（BSD-3-Clause），版权与许可声明见
+  `src/blas/simd_kernels.hpp`、`docs/BLAS.md` §7 与根目录 `THIRD_PARTY_NOTICES`。
 
 ## 4. 数值约定
 
@@ -681,16 +910,21 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 - **符号归属**：声明在 `include/hsolve/<m>.hpp` 的符号只能定义在 `src/<m>/` 下（显式实例化是弱
   符号，重复定义会被链接器静默挑一个）。临时替身只能写在测试文件的匿名命名空间里且换名。
 - 非拥有引用的构造函数删除右值重载（防悬垂）；选项结构里的指针只在调用期间有效。
-- **禁止**：稀疏矩阵稠密化（唯一例外：测试/评测代码中 n ≤ 4000 的参考解）；全局可变状态（唯一
-  例外：串行化 MUMPS 调用的进程级锁，§3.4；稀疏核分派的 CPU 检测与 `HS_KERNELS_NO_AVX512` 在首次
-  调用时读一次、之后只读，不算可变状态）；无种子随机数；库代码中 `std::cout`/`printf`。
+- **禁止**：稀疏矩阵稠密化（唯一例外：测试/评测代码中 n ≤ 4000 的参考解）；全局可变状态（例外：
+  串行化 MUMPS 调用的进程级锁，§3.4；BLAS hook（§3.8，不属于 libhsolve）的剖析器——只在 `HS_BLAS_PROFILE`
+  开启时记录——的每线程表与进程级 MUMPS 阶段标记；稀疏核分派的 CPU 检测与 `HS_KERNELS_NO_AVX512`、BLAS hook
+  解析出的真实例程与路由配置都在首次使用时写一次、之后只读，不算可变状态）；无种子随机数；库代码中
+  `std::cout`/`printf`（BLAS hook 只在无法继续时——找不到真实例程、未知路由记号——向 stderr 写一条消息并终止）。
 - 测试：`tests/cpp/test_<module>*.cpp`（GoogleTest），**套件名以模块名开头**（`Sparse*`、`Io*`、
   `Linalg*`、`Factor*`、`Ops*`、`Lanczos*`、`KrylovSchurGeneral*`、`Lobpcg*`、`JacobiDavidson*`、
   `Verify*`、`Driver*`；P3 新增如 `LinalgDenseOpsBlockCgs`、`FactorInertiaCounter`、`LanczosBlockTyped`、
   `LanczosBitwiseTyped`、`LobpcgTyped`、`JacobiDavidsonTyped`、`DriverSlicing`、`DriverZeroCluster`；P4 新增
   如 `SparseKernelPaths`、`OpsKernelPaths`、`OpsFactorSolve`、`FactorOrdering*`、`FactorBlockAnalysis`、
   `KrylovSchurGeneralBitwise`、`VerifyExclusion`、`VerifyBound`、`DriverBlocks`、`DriverCounter`、
-  `DriverGhiepBlock`）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
+  `DriverGhiepBlock`；P5 新增如 `DriverCertificate`、`DriverHpdProof`、`DriverBDefiniteness`、
+  `DriverAdaptiveOrdering`、`DriverOrderingModel`、`LanczosBlockRule`、`VerifyStartScaling`，blas 模块为
+  `BlasHook*`；P5c 修复轮的 `AnaintFix*`、`AsmkernFix*`、`CertintFix*` 以 P5 子任务代号开头，是本规则的
+  例外）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
   `<可执行文件>.<套件>.<用例>`，`tools/dev/test.sh release test_factor` 只跑该文件，匹配不到测试即
   报错。共享夹具在 `tests/cpp/support/`（`hsolve_test_support`），只追加不改签名。
   数值测试尽量用有解析解的问题。Python 工具与 Python 接口的测试在 `tests/py/`（pytest；
@@ -729,6 +963,13 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
     逻辑 CPU 数和可用内存；`--pick` 给出一个空闲节点（槽空闲、该 socket 无忙碌 CPU、可用内存 ≥ 64 GiB）。
     guard 的忙碌检查也覆盖被绑核的超线程兄弟。c001–c005 上有其他用户作业时不在该节点计时。
 - 两种 CPU 上 OpenBLAS 的乘积末位可能不同（§5 逐位测试以 CPU 型号为键）。
+- **BLAS hook 与测量**（P5，§3.8）：默认构建的 `build/<preset>/hsolve` 带 hook（`HSOLVE_BLAS_HOOK=ON`，
+  route all），计时的就是它；单元测试与 Python 模块不带。要测纯 OpenBLAS 的 hsolve，运行时设
+  `HS_BLAS_ROUTE=off`，或另建 `-DHSOLVE_BLAS_HOOK=OFF` 的构建目录；不带 hook 的可执行文件可预加载
+  `build/release/libhsolve_blashook.so` 试路由（不要与链入的 hook 同用）。`HS_BLAS_PROFILE=<文件>` 记录逐调用
+  剖析，`HS_BLAS_NO_AVX512=1` / `HS_BLAS_NO_AVX2=1` 在 AVX-512 节点上模拟只有 AVX2 / 无 SIMD 的 CPU。命令与
+  数据见 `docs/BLAS.md` §8。旧构建目录保留缓存的 `HSOLVE_BLAS_HOOK` / `HSOLVE_BLAS_ROUTE_DEFAULT`，须
+  `-U` 后重新配置。
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：
 - 默认绑定 NUMA node1 的 16 个物理核 `24-30,33-41`，进程树 RSS 上限 30 GiB；系统可用内存低于
@@ -763,4 +1004,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P2 | driver + CLI；端到端测试；测例集与首轮实验（对比 scipy 基线） |
 | P3 | **已完成**：低内存输入装配与无映射铅笔；确定性正交化（融合 CGS2、DGKS、块 CGS2）；MUMPS 约定补充与 InertiaCounter；块 Krylov-Schur（eigen 层）；LOBPCG / JD；谱切片与惯性搜索的单边目标、零带切除、GHIEP 零簇移位放置；互斥分阶段计时；Python 接口；评测工具（汇总、合并参考、scipy 基线）。**未做**：SpMV SIMD；GHIEP 重特征值的块 Krylov（一般 Krylov-Schur 仍只支持 p = 1）——二者 P4 完成 |
 | P4 | **已完成**（6a3d7c1）：稀疏核运行时分派（AVX-512）与融合修正残差、修正的舍入水平停止与活跃列回代、`FactorSolveOperator`；自研并行嵌套剖分（factor 层）与 ICNTL(15) 块分析；一般 Krylov-Schur 块模式与峰值列函数；src/verify（随机排除检验、单精度计数规则、代价模型）；driver：块 Krylov 默认（HEP/GHEP p = 4、GHIEP p = 2 的规则）、InertiaCounter 证书与 certificate 阶段、确定性排序模型（deterministic 用 METIS）、B 的 O(nnz) 筛查、GHIEP 后处理内存（wg-square-1e6 峰值 2.89 → 1.77 GB）；SLEPc 调优器与公平对比工具；集群节点部署。**未做**：JD + 单精度因子的内存受限回退；verify 接入 driver；自研嵌套剖分接入自适应排序；driver 检查单精度/BLR 修正是否收敛；16 核独占重测（SLEPc 调优与对比、排序、回代、GHIEP 块宽）；故障场景验证矩阵 |
-| P5 | verify 接入 driver（certificate = exact / randomized / auto）及 P4 未做项；进行中 |
+| P5 | **集成中**（P5c，p5c-integration）：verify 接入 driver（certificate = exact / randomized / auto / off，单精度计数的双精度复核）；输入检查与 B 正定性检验链（分析前的廉价检验、IC + Gershgorin 严格证明）；自适应排序的 16 线程代价模型，自研嵌套剖分作为候选与 `ordering = 10`；σ₀ 处的零主元簇规则；块宽规则 `recommended_block_size` 与块步快路径 `try_fast`；GHIEP 内存预留按峰值列计、报告实际块宽；BLAS hook（src/blas，默认链入、route all）；以上都在 16 核测量槽下测量。**未做**：JD + 单精度因子的内存受限回退；driver 检查单精度/BLR 修正是否收敛；InertiaCounter 双精度实例的惰性分析；SCOTCH 固定种子（之后可按其估计比较）；更好的嵌套剖分分隔子与 ND 功的预测（ss-tem152078）；一般 B 的 κ 证明（如分解 B − μ·diag(B)），使随机检验与单精度计数也适用于一般 HPD B；块宽规则用于切片；故障场景验证矩阵 |
