@@ -1040,6 +1040,9 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
   cpuset 中自己的一块），或其它在继承 cpuset 内自绑的方式。
 - 嵌套 guard（如 tune_slepc 每个试验一个 guard、外层再一个）：外层 `--exclusive` 持锁时向子进程导出
   `HS_SLOT_HELD`，内层 guard 共用这把锁（内层的 `--exclusive` 不再等锁，内存上限按单次运行上限算）。
+  `tools/bench/compare.py` 即如此运行：`guard.py --exclusive --timeout ≤2700 -- python3 tools/bench/compare.py
+  --cores 16-31 --solvers …`（compare.py 自己不加 `--exclusive`；`--solvers` 取 hsolve、hsolve-auto、
+  hsolve-nocert、slepc，未知名称在任何运行之前被拒绝）。
   guard 收到 SIGTERM/SIGHUP 时终止整个进程树（被 nohup 忽略的 SIGHUP 仍然忽略）；外层超时终止时，
   内层的 mpiexec 进程组仍由内层 guard 负责。
 
