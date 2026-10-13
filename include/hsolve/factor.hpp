@@ -176,7 +176,9 @@
 
 namespace hs {
 
-enum class FactorPrecision { Double, Single };
+/// Arithmetic of a factorization. Auto is a SolverConfig value only (the driver resolves it to
+/// Double or Single, docs/DESIGN.md §3.6-3); FactorOptions rejects it (InvalidInput).
+enum class FactorPrecision { Double, Single, Auto };
 
 /// FactorOptions::ordering value selecting hsolve's own multithreaded nested dissection
 /// (compute_ordering below), handed to MUMPS as its pivot order (PERM_IN, ICNTL(7) = 1).
@@ -204,6 +206,11 @@ struct FactorOptions {
   double blr_tol = 1e-10;     ///< CNTL(7)
   bool blr_estimates = false; ///< enable BLR at analysis only to obtain INFOG(36..39) estimates
   bool out_of_core = false;   ///< ICNTL(22); can be changed later with set_out_of_core()
+  /// An in-core factorization that fails for memory (INFO -13 allocation, -19 above the ICNTL(23)
+  /// cap - e.g. delayed pivots grew the workspace beyond the estimate the in-core decision was
+  /// made on) is retried once out of core, which then stays on (stats().ooc_switches). The
+  /// out-of-core retry can still fail (OutOfMemoryBudget). Off: such failures throw at once.
+  bool ooc_on_memory_error = false;
   std::string ooc_dir;        ///< out-of-core directory (empty: MUMPS default / TMPDIR)
   double null_pivot_tol = 1e-8;  ///< CNTL(3) in (0, 1) of Double factorizations (ICNTL(24)=1):
                                  ///< pivot rows below this, relative to the preprocessed matrix
@@ -256,6 +263,8 @@ struct FactorStats {
   index_t null_pivots = 0;          ///< INFOG(28) after the last factorization (of E for complex T)
   index_t delayed_pivots = 0;       ///< INFOG(13) after the last factorization (of E for complex T)
   index_t workspace_retries = 0;    ///< automatic ICNTL(14) increases (all calls)
+  index_t ooc_switches = 0;         ///< in-core factorizations retried out of core after a memory
+                                    ///< error (FactorOptions::ooc_on_memory_error)
   int last_info1 = 0;               ///< INFOG(1) of the last MUMPS call
   int last_info2 = 0;               ///< INFOG(2)
 };
@@ -329,6 +338,18 @@ class SparseFactorization {
   /// exactly zero pivot (INFO -10). The inertia of such a factorization is NOT certified near the
   /// shift: inertia counts for certificates must come from factorizations with detection on.
   virtual void set_null_pivot_detection(bool on) = 0;
+
+  /// Pivot order of the last successful analysis (MUMPS SYM_PERM of the matrix it factorizes:
+  /// 1-based pivot position of every variable, 2n of them for the embedding of a complex K);
+  /// empty before one (and for a backend that has none).
+  virtual const std::vector<int>& pivot_order() const;
+  /// Pivot order for the next analyze() in the convention of pivot_order() (MUMPS PERM_IN,
+  /// ICNTL(7) = 1): it replaces options().ordering, so an object of another precision (or after
+  /// a failed attempt) eliminates like an analysed one without a second fill-reducing ordering
+  /// (the given order costs a little more fill: header comment). Empty: options().ordering. Its
+  /// size is checked at analyze() (InvalidInput). A backend without pivot orders throws
+  /// Unsupported.
+  virtual void set_pivot_order(std::vector<int> order);
 
   virtual const FactorStats& stats() const = 0;
   virtual const FactorOptions& options() const = 0;

@@ -43,17 +43,14 @@ class MumpsFactorization final : public SparseFactorization<T> {
   void set_discard_factors(bool on) { discard_next_ = on; }
   bool factors_discarded() const { return discard_at_analysis_; }
 
-  /// Pivot order for the next analyze(): MUMPS PERM_IN with ICNTL(7)=1, in the SYM_PERM
-  /// convention of pivot_order() (1-based pivot position of every variable of the matrix MUMPS
-  /// factorizes, i.e. of the embedding for complex T). Empty: options().ordering. The size is
-  /// checked at analyze() (InvalidInput).
-  void set_pivot_order(std::vector<int> order) { pivot_order_in_ = std::move(order); }
+  /// Pivot order for the next analyze() (SparseFactorization::set_pivot_order).
+  void set_pivot_order(std::vector<int> order) override { pivot_order_in_ = std::move(order); }
 
   /// SYM_PERM of the last successful analysis (empty before one). Copied out of MUMPS right
   /// after JOB=1 (O(n)); reusing it skips the fill-reducing ordering (SCOTCH/METIS: 0.9-1.3 s
   /// on the 1e5 cases vs 0.03-0.05 s for an analysis given the order) at the price of a little
   /// more fill (factor.hpp: +0.4..3.4% entries on the 1e5 cases).
-  const std::vector<int>& pivot_order() const { return pivot_order_out_; }
+  const std::vector<int>& pivot_order() const override { return pivot_order_out_; }
 
   /// The analysed pencil (nullptr before a successful analyze()).
   const ShiftedPencil<T>* pencil() const { return pencil_; }

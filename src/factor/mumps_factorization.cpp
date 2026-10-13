@@ -28,6 +28,8 @@ constexpr int kMinRelaxIncrease = 10;
 
 // Returns `o` after checking every field MUMPS would otherwise misinterpret (InvalidInput).
 const FactorOptions& validated(const FactorOptions& o) {
+  if (o.precision != FactorPrecision::Double && o.precision != FactorPrecision::Single)
+    HS_THROW(InvalidInput, "FactorOptions.precision must be Double or Single (Auto is resolved by the driver)");
   if ((o.ordering < 0 || o.ordering > 7 || o.ordering == 1) && o.ordering != kOrderingNestedDissection)
     HS_THROW(InvalidInput, "FactorOptions.ordering must be an ICNTL(7) value 0,2,3,4,5,6,7 or "
                            "kOrderingNestedDissection ("
@@ -260,13 +262,24 @@ bool MumpsFactorization<T, U>::factorize(double alpha, double beta) {
   inertia_ = Inertia{};
   input_->assemble(alpha, beta);
 
-  mumps_.icntl(22) = options_.out_of_core ? 1 : 0;
   mumps_.icntl(35) = options_.blr ? 2 : 0;
   mumps_.icntl(24) = null_pivot_detection_ ? 1 : 0;
   int info1 = 0, retries = 0;
   for (;;) {
+    mumps_.icntl(22) = options_.out_of_core ? 1 : 0;
     mumps_.icntl(14) = relax_pct_;
     info1 = mumps_.run(mumps::kFactorize);
+    // Out of memory in core - MUMPS' verdict, or a workspace that the retries could not make
+    // big enough under the ICNTL(23) cap: the factors do not fit in core after all (the estimate
+    // the in-core decision was made on was too low). Out of core from now on, with fresh retries.
+    const bool no_room = mumps::is_memory_error(info1) ||
+                         (mumps::is_workspace_error(info1) && retries == kMaxWorkspaceRetries);
+    if (no_room && !options_.out_of_core && options_.ooc_on_memory_error) {
+      options_.out_of_core = true;
+      ++stats_.ooc_switches;
+      retries = 0;
+      continue;
+    }
     if (!mumps::is_workspace_error(info1) || retries == kMaxWorkspaceRetries) break;
     relax_pct_ = grown_relaxation(relax_pct_);
     ++retries;
@@ -397,6 +410,17 @@ void MumpsFactorization<T, U>::solve(T* b, index_t nrhs, index_t ldb) {
 }
 
 }  // namespace mumps
+
+template <class T>
+const std::vector<int>& SparseFactorization<T>::pivot_order() const {
+  static const std::vector<int> none;
+  return none;
+}
+
+template <class T>
+void SparseFactorization<T>::set_pivot_order(std::vector<int>) {
+  HS_THROW(Unsupported, "SparseFactorization::set_pivot_order: this backend takes no pivot order");
+}
 
 template <class T>
 std::unique_ptr<SparseFactorization<T>> make_mumps_factorization(const FactorOptions& options) {
