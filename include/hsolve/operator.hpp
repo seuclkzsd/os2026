@@ -97,6 +97,12 @@ class ShiftInvertOperator final : public LinearOperator<T> {
   /// max_j componentwise backward error of the block returned by the last apply (0 if refinement
   /// is off); a few eps means Op x is as accurate as double precision allows for this K.
   double last_backward_error() const noexcept { return last_backward_error_; }
+  /// Whether every column of the last apply ended converged: ||r_j|| <= rel_tol ||(B x)_j||, or
+  /// its residual at the rounding level of its evaluation (true if refinement is off). false:
+  /// a column stopped on a rejected correction or after max_steps - with an inexact factor the
+  /// returned block is then the operator of a perturbed matrix, not Op x (callers of Single /
+  /// BLR factors must not use it as Op x; the driver abandons such factors, DESIGN §3.4b).
+  bool last_apply_converged() const noexcept { return last_converged_; }
 
  protected:
   void do_apply(const T* x, index_t ldx, T* y, index_t ldy, index_t p) override;
@@ -115,6 +121,7 @@ class ShiftInvertOperator final : public LinearOperator<T> {
   index_t refinement_steps_ = 0;
   double last_rel_residual_ = 0.0;
   double last_backward_error_ = 0.0;
+  bool last_converged_ = true;
   std::vector<T> residual_;      ///< refinement workspace: residuals (n x p)
   std::vector<T> candidate_;     ///< refinement workspace: corrected candidate iterates (n x p)
   std::vector<double> scratch_;  ///< sparse-kernel scratch (interleaved copies)
