@@ -45,26 +45,36 @@ constexpr double kOrthoPerRow = 0.374e-9;
 constexpr double kOrthoSinglePerBasisEntry = 0.15e-9;
 constexpr double kOrthoSinglePerRow = 0.772e-9;
 //
-// Result on the calibration cases: iteration time T(p) / T(1) of the width the rule picks against
-// the best width of {1, 2, 4, 8, 16} (medians of 3 interleaved repetitions):
-//   3-D, 1e5 (ss-2cubes_sphere, ss-qa8fk-qa8fm, ss-tem152078, syn-lap3d-aniso-1e5, yee-pec-box-1e5;
-//     nev 10-12, distinct or few copies): p = 4 or 8, 0.44..0.59 (best 0.44..0.56);
-//   3-D with multiple eigenvalues (syn-mem27-46, yee-pec-cube-32) and 3-D complex yee-bloch-1e4:
-//     p = 8, 0.21 / 0.22 / 0.41 (= best);
-//   little fill (cav2d-rect-pert-1e5 nev 6, cav2d-square-1e4 nev 7, syn-*-1e5 / -1e4 random
-//     sparse incl. complex, ss-tem27623): p = 2, 0.56..0.92 (= best within 2 %);
-//   syn-multiplicity-real-1e4 (3 distinct values in 14): p = 2, 0.60 (best p = 8 0.42).
-// No pick is slower than p = 1; geometric mean over the 17 cases of T(pick) / T(best) = 1.03.
-// Without try_fast (the run() kernel throughout) p = 2 lost to p = 1 on cav2d-rect-pert-1e5 (1.20).
-// Validation on 14 further data cases (same setup, p in {1, 2, 4, 8}): no pick slower than p = 1
-// beyond noise (syn-ghep-multiplicity-real-1e4, 8 distinct values in 22: p = 2 1.02, p = 4 0.81),
-// picks within 15 % of the best width except where multiple eigenvalues favour wider blocks
-// (that case, yee-pec-cube-16, syn-lap3d-22, syn-multiplicity-complex-1e4: 1.26..1.40).
-// End to end (the CLI with --block-size forced, 16 threads in the slot, 5 interleaved runs, all
-// valid by tools/eval, certificate passed): solver time of the pick vs p = 1 on 15 cases 1.04x
-// (cav2d-rect-pert-1e5) .. 2.03x; p = 1 needed certificate reruns on the two low-fill multiplicity
-// cases, where p = 4 beats the pick p = 2 by 12..17 %, while p = 2 beats p = 4 by 3..8 % on the
-// four low-fill cases with distinct eigenvalues.
+// Floor (P5c review). Minimizing the model alone picked p = 2 on every low-fill shape with
+// nev >= 8, below the P4 auto width 4 - slower than P4 wherever multiple eigenvalues make the
+// wider block pay, which the rule cannot see before the run. bench_blocktune_e2e (hs::solve
+// in-process, 16 threads in the slot, medians of 3 interleaved runs, all certified, eta <= 2e-13):
+// syn-ghep-multiplicity-real-1e4 total 0.182 s at p = 2 vs 0.162 s at p = 4, syn-multiplicity-
+// complex-1e4 0.288 vs 0.236 s, against ss-tem27623 (distinct) 0.685 vs 0.689 s. Iteration time
+// T(p) / T(1) of the sweeps: on 7 low-fill cases with distinct eigenvalues p = 2 beats p = 4 by
+// 0.07..0.13 of T(1), on the 4 low-fill cases with multiplicities p = 4 beats p = 2 by 0.05..0.24
+// (syn-multiplicity-real-1e4 0.60 -> 0.44, syn-ghep-multiplicity-real-1e4 1.02 -> 0.81,
+// syn-multiplicity-complex-1e4 0.84 -> 0.60, syn-lap2d-100 0.55 -> 0.50). Hence nev >= 8 keeps
+// p >= 4 (kRuleFloorWidth): never below P4, at a cost of <= 8 % end to end on distinct spectra.
+//
+// Result: iteration time T(p) / T(1) of the width the rule picks against the best measured width
+// (bench_blocktune_sweep, medians of 3 interleaved repetitions, 16 threads in the slot):
+//   3-D, 1e5, nev 10-12 (ss-2cubes_sphere, ss-qa8fk-qa8fm, ss-tem152078, syn-lap3d-aniso-1e5,
+//     yee-pec-box-1e5): p = 4 or 8, 0.45..0.59 (1.00..1.06 of the best width);
+//   3-D with multiple eigenvalues (syn-mem27-46, yee-pec-cube-32, syn-mem125-46) and 3-D complex
+//     (yee-bloch-1e4, yee-photonic-*-1e4), ss-si34h36: p = 8, 0.21..0.51 (= best);
+//   little fill, nev 6 / 7 (cav2d-rect-pert-1e5, cav2d-square-1e4): p = 2, 0.92 / 0.56 (= best);
+//   little fill, nev >= 8 (ss-tem27623, syn-*-1e5 / -1e4 random sparse incl. complex): the floor
+//     p = 4, 0.44..0.97 (1.00..1.16 of the best width, p = 2 on the distinct ones);
+//   multiplicities the wider blocks exploit (syn-lap3d-22, yee-pec-cube-16; p = 4): 1.30 of p = 8;
+//   nev = 1..7 on six cases (yee-pec-box-1e5, ss-qa8fk-qa8fm, ss-tem27623, cav2d-rect-pert-1e5,
+//     yee-bloch-1e4, syn-near-singular-complex-1e4; target k replaced in a copy of config.json):
+//     3-D p = 4, 0.40..0.77 (<= 1.09 of the best width), the others p = 2, 0.57..0.99 (= best
+//     except syn-near-singular-complex-1e4 at nev = 1, 1.30 of p = 4).
+// No pick is slower than p = 1 (worst 0.99); geometric mean of T(pick) / T(best) over the 61
+// case/nev points 1.035 (the P5b rule without floor and small-nev rows: 1.11, picks up to 1.77 of
+// the best width at small nev, where it kept p = 1 or 2). Without try_fast (the run() kernel
+// throughout) p = 2 lost to p = 1 on cav2d-rect-pert-1e5 (1.20).
 
 /// Average basis size of a step of a width-p run with the automatic ncv (block_dimensions).
 double average_basis(index_t n, index_t nev, index_t p) {
@@ -111,11 +121,25 @@ WidthTable modelled_step_seconds(const ShiftInvertShape& shape) {
 }
 
 // Block steps relative to p = 1 (operator applications / p of the width-p run over those of the
-// p = 1 run, automatic ncv, tol 1e-11; thread independent), medians over the data cases whose
-// wanted eigenvalues are distinct: nev = 6 (cav2d-rect-pert-1e5), nev = 10..12 (16 cases),
-// nev = 21..26 (syn-zero-cluster-real-1e5, syn-ghep-zero-cluster-complex-1e4). Multiple eigenvalues
-// make wider blocks much better (12 cases with nev >= 8: p = 4 0.34, p = 8 0.2), which the rule
-// does not assume. Nothing was measured below nev = 6; the row at nev = 1 is "no gain".
+// p = 1 run, automatic ncv, tol 1e-11; thread independent), medians over data cases whose wanted
+// eigenvalues are distinct:
+//   nev = 1, 2, 3, 5 (pooled, 24 runs: yee-pec-box-1e5, ss-qa8fk-qa8fm, ss-tem27623,
+//     cav2d-rect-pert-1e5, yee-bloch-1e4, syn-near-singular-complex-1e4 with k replaced; per nev
+//     the medians are 0.68..0.72 / 0.55..0.61 / 0.46..0.52 for p = 2 / 4 / 8, no trend in nev:
+//     even one wanted pair converges in fewer block steps than single-vector applications, the
+//     P5b table's "no gain at nev = 1" was wrong - its p = 1 / 2 picks at small nev took up to
+//     1.77x the iteration time of the best width);
+//   nev = 7 (the same cases but cav2d-rect-pert-1e5, whose 7th pair is a near-zero mode):
+//     0.64 / 0.51 / 0.44, p = 2 rounded up to 0.65 (the nev = 11 value) to keep the table
+//     non-increasing in nev;
+//   nev = 10..12 (16 cases), nev = 21..26 (syn-zero-cluster-real-1e5,
+//     syn-ghep-zero-cluster-complex-1e4).
+// p = 16 at nev <= 7 (not measured there; only interpolates widths above 8): 0.82 of p = 8, the
+// ratio at nev = 11. The single case of the P5b row at nev = 6 (cav2d-rect-pert-1e5, k = 6:
+// 0.82 / 0.68 / 0.55, a case whose p = 1 run converges in one cycle) is replaced by the
+// interpolation between nev = 5 and 7. Multiple eigenvalues make wider blocks much better
+// (12 cases with nev >= 8: p = 4 0.34, p = 8 0.2), which the model does not assume (see the
+// floor in recommended_block_size).
 double relative_block_steps(index_t p, index_t nev) {
   if (p < 1 || nev < 1)
     HS_THROW(InvalidInput, "relative_block_steps: p = " << p << ", nev = " << nev);
@@ -124,8 +148,9 @@ double relative_block_steps(index_t p, index_t nev) {
     double nev;
     double steps[5];  // kStepWidths
   };
-  static constexpr Row kRows[] = {{1.0, {1.0, 1.0, 1.0, 1.0, 1.0}},
-                                  {6.0, {1.0, 0.82, 0.68, 0.55, 0.45}},
+  static constexpr Row kRows[] = {{1.0, {1.0, 0.69, 0.56, 0.49, 0.40}},
+                                  {5.0, {1.0, 0.69, 0.56, 0.49, 0.40}},
+                                  {7.0, {1.0, 0.65, 0.51, 0.44, 0.36}},
                                   {11.0, {1.0, 0.65, 0.50, 0.38, 0.31}},
                                   {22.0, {1.0, 0.58, 0.40, 0.29, 0.23}}};
   constexpr std::size_t kLastRow = sizeof(kRows) / sizeof(kRows[0]) - 1;
@@ -165,6 +190,10 @@ index_t recommended_block_size(index_t n, index_t nev, const WidthTable& step_co
       best_cost = cost;
     }
   }
+  // Floor (see the calibration notes): multiplicities, invisible here, favour the wider block.
+  if (nev >= kRuleFloorMinNev && best < kRuleFloorWidth &&
+      block_dimensions(s, kRuleFloorWidth, true).feasible)
+    best = kRuleFloorWidth;
   return best;
 }
 

@@ -48,9 +48,9 @@ TEST(LanczosBlockRule, RelativeStepsStartAtOneAndNeverIncreaseWithTheWidth) {
       prev = r;
     }
   }
-  // No measurement below nev = 6: a single wanted pair gains nothing from blocks.
-  for (index_t p : {2, 4, 8, 16, 100}) EXPECT_EQ(relative_block_steps(p, 1), 1.0);
-  // Fewer wanted pairs gain less from a given width (the measured rows are ordered so).
+  // Measured down to nev = 1: blocks need fewer steps even for a single wanted pair.
+  for (index_t p : {2, 4, 8, 16, 100}) EXPECT_LT(relative_block_steps(p, 1), 0.75);
+  // Fewer wanted pairs gain no more from a given width (the measured rows are ordered so).
   for (index_t p : {2, 4, 8}) {
     double prev = 1.0;
     for (index_t nev = 1; nev <= 30; ++nev) {
@@ -62,13 +62,17 @@ TEST(LanczosBlockRule, RelativeStepsStartAtOneAndNeverIncreaseWithTheWidth) {
 }
 
 TEST(LanczosBlockRule, RelativeStepsReproduceTheMeasuredRows) {
-  EXPECT_NEAR(relative_block_steps(2, 6), 0.82, 1e-12);
+  EXPECT_NEAR(relative_block_steps(2, 1), 0.69, 1e-12);  // nev = 1..5 pooled
+  EXPECT_NEAR(relative_block_steps(4, 3), 0.56, 1e-12);
+  EXPECT_NEAR(relative_block_steps(8, 5), 0.49, 1e-12);
+  EXPECT_NEAR(relative_block_steps(4, 7), 0.51, 1e-12);
   EXPECT_NEAR(relative_block_steps(4, 11), 0.50, 1e-12);
   EXPECT_NEAR(relative_block_steps(8, 11), 0.38, 1e-12);
   EXPECT_NEAR(relative_block_steps(16, 22), 0.23, 1e-12);
   EXPECT_NEAR(relative_block_steps(8, 500), 0.29, 1e-12);  // clamped to the last row
   // Between rows: linear in nev; between widths: geometric in p; beyond 16: the p = 16 value.
-  EXPECT_NEAR(relative_block_steps(4, 3), 1.0 - 0.4 * 0.32, 1e-12);
+  EXPECT_NEAR(relative_block_steps(2, 6), 0.5 * (0.69 + 0.65), 1e-12);
+  EXPECT_NEAR(relative_block_steps(8, 9), 0.5 * (0.44 + 0.38), 1e-12);
   EXPECT_NEAR(relative_block_steps(2, 16), 0.65 - (5.0 / 11.0) * 0.07, 1e-12);
   const double l3 = std::log2(3.0);
   EXPECT_NEAR(relative_block_steps(3, 11),
@@ -77,7 +81,8 @@ TEST(LanczosBlockRule, RelativeStepsReproduceTheMeasuredRows) {
 }
 
 TEST(LanczosBlockRule, ChoiceFollowsTheCostTimesSteps) {
-  const index_t n = 100000, nev = 11;
+  // nev below kRuleFloorMinNev: the plain minimization (the floor: test_blocktune_fix_rule.cpp).
+  const index_t n = 100000, nev = 7;
   // Equal step costs: the widest width (fewest steps).
   EXPECT_EQ(recommended_block_size(n, nev, WidthTable{1, 1, 1, 1}), 8);
   // Cost proportional to the width: blocks never pay.
@@ -88,7 +93,8 @@ TEST(LanczosBlockRule, ChoiceFollowsTheCostTimesSteps) {
   EXPECT_EQ(recommended_block_size(n, nev, WidthTable{1, edge * 0.999, 100, 100}), 2);
   // A wider width must beat the best narrower one (not only p = 1) by the margin.
   const double c2 = 1.0;  // relative cost 0.65
-  const double c4_tie = 0.65 / 0.50 * (1.0 - kRuleMargin);
+  const double c4_tie =
+      relative_block_steps(2, nev) / relative_block_steps(4, nev) * (1.0 - kRuleMargin);
   EXPECT_EQ(recommended_block_size(n, nev, WidthTable{2, c2, c4_tie * 1.001, 100}), 2);
   EXPECT_EQ(recommended_block_size(n, nev, WidthTable{2, c2, c4_tie * 0.999, 100}), 4);
   // Any unit: scaling all costs changes nothing.
@@ -199,20 +205,21 @@ struct Pinned {
 
 TEST(LanczosBlockRule, PicksOnTheCalibrationShapesArePinned) {
   // Iteration time of the pick vs p = 1 and vs the best width, 16 threads (block_rule.cpp):
-  // 3-D: p = 4 / 8; little fill per row (2-D meshes, random sparse patterns, complex): p = 2.
+  // 3-D: p = 4 / 8; little fill per row (2-D meshes, random sparse patterns, complex): p = 2 for
+  // nev < 8, the floor p = 4 from nev = 8 on.
   const Pinned cases[] = {
       {"cav2d-rect-pert-1e5", 99459, 6, 3.871e6, 495751, false, 2},
       {"cav2d-square-1e4", 9976, 7, 3.418e5, 34984, false, 2},
       {"ss-2cubes_sphere", 101492, 10, 4.422e7, 0, false, 8},
       {"ss-qa8fk-qa8fm", 66127, 10, 2.795e7, 1660579, false, 4},
       {"ss-tem152078", 152078, 10, 6.786e7, 6459330, false, 4},
-      {"ss-tem27623", 27623, 10, 5.751e6, 439469, false, 2},
-      {"syn-ghep-near-singular-real-1e5", 100000, 10, 2.611e6, 469406, false, 2},
+      {"ss-tem27623", 27623, 10, 5.751e6, 439469, false, 4},
+      {"syn-ghep-near-singular-real-1e5", 100000, 10, 2.611e6, 469406, false, 4},
       {"syn-lap3d-aniso-1e5", 97200, 12, 3.651e7, 0, false, 8},
       {"syn-mem27-46", 97336, 12, 5.402e7, 0, false, 8},
-      {"syn-multiplicity-real-1e4", 10000, 14, 2.399e5, 0, false, 2},
-      {"syn-near-singular-complex-1e5", 100000, 10, 6.401e6, 0, true, 2},
-      {"syn-zero-cluster-real-1e5", 100000, 21, 2.401e6, 0, false, 2},
+      {"syn-multiplicity-real-1e4", 10000, 14, 2.399e5, 0, false, 4},
+      {"syn-near-singular-complex-1e5", 100000, 10, 6.401e6, 0, true, 4},
+      {"syn-zero-cluster-real-1e5", 100000, 21, 2.401e6, 0, false, 4},
       {"yee-bloch-1e4", 10080, 10, 1.408e7, 0, true, 8},
       {"yee-pec-box-1e5", 109744, 10, 5.376e7, 109744, false, 8},
       {"yee-pec-cube-32", 92256, 12, 4.584e7, 0, false, 8},
@@ -228,18 +235,15 @@ TEST(LanczosBlockRule, PicksOnTheCalibrationShapesArePinned) {
   }
 }
 
-TEST(LanczosBlockRule, FewWantedPairsOrTinyOperatorsKeepSingleVectors) {
+TEST(LanczosBlockRule, TinyOperatorsKeepSingleVectors) {
+  // No block layout fits (few wanted pairs get blocks otherwise: test_blocktune_fix_rule.cpp).
   ShiftInvertShape s;
-  s.n = 100000;
-  s.factor_entries = 4e6;  // 2-D-like fill
-  s.nev = 1;
-  EXPECT_EQ(recommended_block_size(s), 1);
-  s.nev = 2;
-  EXPECT_EQ(recommended_block_size(s), 1);
-  s.n = 30;  // no block layout fits
+  s.n = 30;
   s.nev = 3;
   s.factor_entries = 400;
   EXPECT_EQ(recommended_block_size(s), 1);
+  s.nev = 10;
+  EXPECT_EQ(recommended_block_size(s), 1);  // the floor needs a layout that fits, too
 }
 
 }  // namespace
