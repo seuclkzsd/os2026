@@ -255,9 +255,12 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
   （主因子保持有效，证书后不必在工作位移重分解）。机制：自有的只计惯性 MUMPS 实例（ICNTL(31)=1），
   用主对象的主元顺序分析（PERM_IN，不再做一次填充排序）；`count(α, β, detection, precision)`、
   `count_pair(…)`（两次依次计数——并发不可行，见上；diag(K(b), −K(a)) 一次分解慢 1–10%、内存 1.5×）、
-  `estimate()`、`stats()`。实测（2 线程，主因子常驻，driver 路径 = 在两端点重分解主对象，5 次交错
-  中位数）：3-D SCOTCH 测例证书对 −12..−15%（syn-mem27-46 3.85 → 0.06 + 3.27 s），2-D AMD 测例 −2%，
-  低填充的复数实嵌入（syn-near-singular-complex-1e5）+42%（计数器的分析 0.48 s 与 AMD 分析相当）。
+  `estimate()`、`stats()`。双精度实例默认在构造时分析；第三个参数 `defer_double_analysis = true`（P5c 集成）
+  把它推迟到首次使用（第一次双精度计数或 `estimate()`），只做单精度计数的计数器因此只付一次分析（单精度实例
+  的，在首次单精度计数时；n ~ 1e5、16 线程约 0.06 s），推迟的分析出错时也在那次使用时抛出；
+  `double_analysed()` 告诉双精度实例是否已分析。实测（2 线程，主因子常驻，driver 路径 = 在两端点重分解
+  主对象，5 次交错中位数）：3-D SCOTCH 测例证书对 −12..−15%（syn-mem27-46 3.85 → 0.06 + 3.27 s），
+  2-D AMD 测例 −2%，低填充的复数实嵌入（syn-near-singular-complex-1e5）+42%（计数器的分析 0.48 s 与 AMD 分析相当）。
   一次计数的工作内存 INFOG(21) 为主因子的 39–59%（例 289 vs 683 MB）；主因子常驻时峰值 RSS 增加
   9–228 MB，先 `release_factors()` 则不增加。
   精度：双精度计数对距位移远于 O(eps·‖K‖·增长因子) 的特征值精确；零主元检测通常标出更近的位移，
@@ -272,9 +275,11 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
   释放。4 线程端到端实测：证书时间比主对象计数少 0.05–0.14 s（5–13%），峰值 RSS 低 2–7%
   （667d8e9）。P5 起 `certificate = auto` 在 §3.5b 的规则带 10 倍余量成立时用单精度计数（证书方法
   exact_single）：它们在 certifier 自建的 InertiaCounter 上做，可疑时在同一计数器上以双精度复核，同一
-  计数器随后也服务该轮的精确计数（不再建第二个计数器、不再分析一次；§3.6-8）。新建计数器在构造时分析
-  其双精度实例、首次单精度计数时分析单精度实例；单精度计数一次通过时双精度实例的分析没有用到
-  （yee-pec-box-1e5 约 0.075 s），推迟它的惰性构造是 factor 模块的待办。
+  计数器随后也服务该轮的精确计数（不再建第二个计数器、也不为它再分析一次；§3.6-8）。这个计数器推迟其双精度
+  实例（`defer_double_analysis`，P5c 集成）：单精度计数一次通过的证书只付单精度实例的一次分析（之前还有一次
+  用不到的双精度分析，yee-pec-box-1e5 约 0.075 s）；双精度实例在复核或精确计数第一次用到它时才分析。certifier
+  的 `inertia_counter` 事件因此不再报 incore_mb（读它会触发分析），`single_counts` 记下计数器已做的分析次数。
+  上面 P4 用法的计数器（`CountSource`）只做双精度计数，照旧在构造时分析。
 - **自研嵌套剖分**（P4，`compute_ordering`、`OrderingOptions`、`src/factor/ordering*.cpp`，无新依赖）：
   - 动机：MUMPS 内的排序是串行的（METIS/SCOTCH 占其分析的 90–97%；SCOTCH_PTHREAD_NUMBER 无效）；
     METIS/SCOTCH 不能直接链接（只是 libdmumps 的间接依赖，ld 拒绝间接 DSO，dlopen 需要 glibc 2.28
@@ -505,7 +510,9 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
 - `certificate_cost`：由已测得的分解时间、单次作用时间等预测 exact（主对象重分解对 / 计数器对）、
   single、randomized（p ∈ {1, 2, 4, 8} 中最快且计划在预算内者）的秒数并推荐；randomized 须比最好的
   精确方案快 `preference` = 1.2 倍才推荐。单精度路径的分析另计 `single_analysis_s`（< 0 时取
-  counter_analysis_s；新建计数器要分析双精度与单精度两个实例）。
+  counter_analysis_s）。driver（§3.6-8 的 auto）按计数器的状态填这两项：新建的 certifier 计数器推迟双精度实例
+  （§3.4），单精度路径只付一次分析（P5b 时为两次）；计数器已做过单精度计数时为 0；`counter_analysis_s` 在其
+  双精度实例分析过后为 0，之前仍计一次分析。
 - 实测（2 线程，`results/p4_measurements.md` §5）：完整 X 全部通过、删掉一个副本或最远特征值全部
   检出；随机检验只在分解贵（三维填充）**且**谱隙宽时占优（syn-mem27-46 比认证的单精度计数快 3.3×，
   yee-pec-cube-32 1.3×），窄谱隙（yee-pec-box-1e5，ε = 0.15）与廉价分解（1e4 测例）上更慢；代价模型
@@ -797,7 +804,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
        实测净节省的正负一致）；`inertia_counter = on / off` 覆盖。用计数器时**每次计数前释放主因子**
        （`MainFactors::Release`：证书之后只有重跑才要主因子，重跑在 σ 重分解一次——与主对象计数相同），
        两者从不同时驻留。单精度计数建立的 certifier 计数器（P5）之后也服务该求解的精确计数
-       （`exact_counts`：不建第二个计数器、不再分析；为复核单精度计数已数过的窗口不再计数）。
+       （`exact_counts`：不建第二个计数器；其双精度实例推迟到这里第一次双精度计数时才分析，§3.4；为复核单精度
+       计数已数过的窗口不再计数）。
      - 主分解为单精度或 BLR：一律用计数器（双精度；取代 P3 的每次计数一次完整分析的
        `compute_inertia`），稠密簇内无检测计数因此也可用。
      - 窗口 / 切片：默认主对象（计数点兼作单边位移）；`inertia_counter = on` 或主因子不精确时用
