@@ -108,6 +108,17 @@ TYPED_TEST(VerifySingle, RuleAppliesOnlyToIdentityOrDiagonalB) {
     const double norm_a = hs::norm_one(a);
     EXPECT_NEAR(v.eta_lower, 1e3 * kUnitSingle * emb * (norm_a + std::abs(win.w.lower)), 1e-15);
     EXPECT_NEAR(v.eta_upper, 1e3 * kUnitSingle * emb * (norm_a + std::abs(win.w.upper)), 1e-15);
+    // A caller-supplied ||A||_1 is used as given (the driver computes it once per solve).
+    hs::SingleCountRule known;
+    known.a_norm_1 = norm_a;
+    const auto vk = hs::single_count_validity(pencil, win.w, known);
+    EXPECT_EQ(vk.eta_lower, v.eta_lower);
+    EXPECT_EQ(vk.eta_upper, v.eta_upper);
+    known.a_norm_1 = 2.0 * norm_a + 1.0;
+    EXPECT_GT(hs::single_count_validity(pencil, win.w, known).eta_lower, v.eta_lower);
+    known.a_norm_1 = std::nan("");
+    EXPECT_EQ(error_code_of([&] { hs::single_count_validity(pencil, win.w, known); }),
+              hs::Error::Code::InvalidInput);
   }
   // Diagonal B: eta divided by min b_ii.
   {

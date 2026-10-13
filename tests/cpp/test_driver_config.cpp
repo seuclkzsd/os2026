@@ -1,14 +1,19 @@
 // Tests for config.json parsing/serialization and report.json serialization (src/driver).
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "hsolve/error.hpp"
+#include "hsolve/factor.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/util.hpp"
+#include "support/fixtures.hpp"
 
 namespace {
 
@@ -68,6 +73,46 @@ TEST(DriverConfig, BlockSizeAndInertiaCounterRoundTrip) {
   EXPECT_TRUE(bad(R"({"block_size": 2.5})"));
   EXPECT_TRUE(bad(R"({"block_size": "4"})"));
   EXPECT_TRUE(bad(R"({"inertia_counter": "yes"})"));
+}
+
+// ordering: -1 adaptive, MUMPS ICNTL(7) 0 / 2..7, or 10 = hsolve's nested dissection
+// (kOrderingNestedDissection); 1 (a caller-given pivot order) and anything else are rejected.
+TEST(DriverConfig, OrderingAcceptsMumpsCodesAndOwnNestedDissection) {
+  for (int o : {-1, 0, 2, 3, 4, 5, 6, 7, hs::kOrderingNestedDissection}) {
+    const auto c = hs::parse_config(R"({"ordering": )" + std::to_string(o) + "}");
+    EXPECT_EQ(c.ordering, o);
+    EXPECT_EQ(hs::parse_config(hs::config_to_json(c)).ordering, o);
+  }
+  EXPECT_EQ(hs::kOrderingNestedDissection, 10);
+  for (int o : {-2, 1, 8, 9, 11}) {
+    try {
+      (void)hs::parse_config(R"({"ordering": )" + std::to_string(o) + "}");
+      ADD_FAILURE() << "ordering " << o << " accepted";
+    } catch (const hs::Error& e) {
+      EXPECT_EQ(e.code(), hs::Error::Code::InvalidInput) << o;
+      EXPECT_NE(std::string(e.what()).find("hsolve's nested dissection"), std::string::npos) << e.what();
+    }
+  }
+}
+
+// ordering = 10 reaches the factorization: hsolve's nested dissection orders the main analysis
+// (and the certificate's counts) and the solve finds the nearest eigenvalues.
+TEST(DriverConfig, OrderingTenSolvesWithOwnNestedDissection) {
+  const auto a = hs::test::laplacian_2d<double>(30, 31);
+  auto cfg = hs::parse_config(R"({"target": {"mode": "nearest", "sigma": 0.5, "k": 5}, "ordering": 10,
+                                   "threads": 2, "tol": 1e-10})");
+  const auto sol = hs::solve(a, nullptr, cfg);
+  EXPECT_TRUE(sol.report.success);
+  EXPECT_EQ(sol.report.factor_options.ordering, hs::kOrderingNestedDissection);
+  EXPECT_TRUE(sol.report.certificate.passed);
+  std::vector<double> want = hs::test::laplacian_2d_eigenvalues(30, 31), got = sol.eigenvalues;
+  std::stable_sort(want.begin(), want.end(),
+                   [](double x, double y) { return std::abs(x - 0.5) < std::abs(y - 0.5); });
+  want.resize(5);
+  std::sort(want.begin(), want.end());
+  std::sort(got.begin(), got.end());
+  ASSERT_EQ(got.size(), want.size());
+  for (std::size_t i = 0; i < got.size(); ++i) EXPECT_NEAR(got[i], want[i], 1e-10) << i;
 }
 
 TEST(DriverConfig, MissingKeysKeepBaseAndRoundTrip) {

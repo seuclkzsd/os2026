@@ -23,9 +23,10 @@
 //                   from X, and with the found eigenvalue farthest from sigma removed, for every
 //                   delta x block size, policy window (radius r of the complete set)
 // Output: one JSON object per line; medians over the repetitions in the "summary" lines.
-// Run through tools/run/guard.py (2 threads, cores 30,33 in P4):
-//   python3 tools/run/guard.py --skip-busy-check --cores 30,33 --mem-gb 4 --timeout 1800 --
-//     build/release/bench_certfast_measure --case data/cases/<c> --solution <sol>/<c> --threads 2
+// Timed runs take a node's measurement slot (docs/DESIGN.md §6; P4 measured 2 threads on the
+// development server; the judging configuration is 16 threads):
+//   python3 tools/run/guard.py --exclusive --timeout 1800 --
+//     build/release/bench_certfast_measure --case data/cases/<c> --solution <sol>/<c> --threads 16
 //     --reps 3   (one command line)
 #include <omp.h>
 
@@ -246,8 +247,7 @@ int run(const Args& args, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b) 
     o.delta = delta;
     o.block_size = p;
     o.seed = seed;
-    if (!scaling.scaling.empty()) o.start_scaling = &scaling.scaling;
-    o.b_condition = scaling.kappa;
+    hs::set_start_scaling(o, scaling);  // S, kappa and whether kappa is proven
     hs::Timer t;
     const auto res = hs::exclusion_check<T>(*op, b_op.get(), xx, sigma, r, o);
     const double s = t.seconds();
@@ -256,6 +256,8 @@ int run(const Args& args, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b) 
            {"krylov_s", res.krylov_s},
            {"status", hs::exclusion_status_name(res.status)},
            {"eps", res.epsilon},
+           {"rigorous", res.rigorous},
+           {"kappa", res.kappa},
            {"steps", res.block_steps},
            {"op_applications", res.op_applications},
            {"failure_probability", res.failure_probability},
@@ -330,7 +332,8 @@ int run(const Args& args, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b) 
     for (const json& j : v.records) s.push_back(j.at("s").get<double>());
     json sum{{"exp", "summary"}, {"variant", v.name}, {"median_s", median(s)}, {"reps", v.records.size()}};
     const json& last = v.records.back();
-    for (const char* key : {"status", "steps", "eps", "failure_probability", "op_applications", "count", "found",
+    for (const char* key : {"status", "steps", "eps", "rigorous", "failure_probability", "op_applications", "count",
+                            "found",
                             "valid", "certified", "detected", "new_lambda_error", "exact", "max_ritz",
                             "pass_threshold", "new_count", "new_inside"})
       if (last.contains(key)) sum[key] = last[key];

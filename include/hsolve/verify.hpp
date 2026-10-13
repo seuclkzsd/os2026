@@ -273,10 +273,12 @@ void set_start_scaling(ExclusionOptions& opt, const StartScaling& sc);
 /// when that lower bound is positive (diagonally dominant: rigorous), else an ESTIMATE:
 /// safety * (Gershgorin upper bound) / (smallest Ritz value of a 40-step Lanczos run on S B S) -
 /// an assumption, not a bound (the Ritz value over-estimates lambda_min). kappa enters the step
-/// count only as log(kappa) / (2 acosh(.)), so a generous safety factor is cheap.
+/// count only as log(kappa) / (2 acosh(.)), so a generous safety factor is cheap. estimate =
+/// false skips that run: such a B then gets kappa = +inf, rigorous = false (for a caller that
+/// only wants a proven kappa, e.g. the driver's auto choice; ~0.1 s at n = 1e5).
 /// Throws InvalidInput for a non-positive diagonal. O(nnz(B)) (+ 40 B applications).
 template <class T>
-StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety = 100.0);
+StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety = 100.0, bool estimate = true);
 
 // ===================================================== (2) single-precision screening counts
 // A single-precision LDL^T count of K(s) = A - s B is the exact inertia of K(s) + E with
@@ -292,11 +294,19 @@ StartScaling start_scaling_for(const CsrMatrix<T>* b, double safety = 100.0);
 // The one non-rigorous input is c g: MUMPS' threshold pivoting has no useful a priori growth
 // bound. SingleCountRule::backward_factor = c g defaults to 1e3, i.e. eta ~ 6e-5 ||K||_1 / b_min,
 // against the largest miscount distance measured on the certpar test set, 5e-6 (scale + |s|)
-// (factor.hpp, InertiaCounter). For a general (non-diagonal) B no cheap rigorous bound on
+// (factor.hpp, InertiaCounter). A later measurement violated the default: on yee-pec-box-1e5 (16
+// threads, 1 of ~50 processes) single counts were off by 2 at ends 2.96e3 or more u_s ||K||_1 /
+// b_min away from every eigenvalue - c g is an assumption with no a priori bound, which callers
+// must guard (the driver: a 10x margin in auto, and double counts on any count above the found
+// pairs; src/driver/certificate.hpp). For a general (non-diagonal) B no cheap rigorous bound on
 // lambda_min(B) exists: the rule does not apply and no certificate is claimed.
 
 struct SingleCountRule {
   double backward_factor = 1e3;  ///< assumed c g (see above)
+  /// ||A||_1 of the pencil when the caller has it (>= 0), else computed (O(nnz(A)); a complex A's
+  /// |a_ij| are hypot calls: ~10 ms per 1e6 entries, which a caller checking several windows of
+  /// one pencil should not pay each time).
+  double a_norm_1 = -1.0;
 };
 
 /// One certificate window for single counts.
@@ -317,8 +327,9 @@ struct SingleCountValidity {
   bool valid() const { return applicable && margins_ok; }
 };
 
-/// The rule alone (no factorization): O(nnz(A) + nnz(B) + #found). Throws InvalidInput for a
-/// malformed window (a >= b, wanted region outside (a, b), found_error size mismatch).
+/// The rule alone (no factorization): O(nnz(A) + nnz(B) + #found), without nnz(A) when
+/// rule.a_norm_1 is given. Throws InvalidInput for a malformed window (a >= b, wanted region
+/// outside (a, b), found_error size mismatch) or a non-finite a_norm_1.
 template <class T>
 SingleCountValidity single_count_validity(const ShiftedPencil<T>& pencil, const SingleWindow& w,
                                           const SingleCountRule& rule = {});
@@ -402,6 +413,9 @@ struct CertificateCostInputs {
   bool complex_scalars = false;
   double factorize_s = 0.0;      ///< one double numeric factorization of K (measured)
   double counter_analysis_s = 0.0;  ///< InertiaCounter analysis (PERM_IN), ~AMD analysis time
+  /// Analyses of the single-count path; < 0: counter_analysis_s. A fresh InertiaCounter analyses
+  /// its double instance at construction and its single one at the first single count (two).
+  double single_analysis_s = -1.0;
   double count_ratio = 0.9;      ///< double count / factorize_s (InertiaCounter; measured 0.87-0.94)
   double single_ratio = 0.55;    ///< single count / double count (3-D: 0.54-0.61; low fill: ~1)
   bool single_valid = false;     ///< single_count_validity holds

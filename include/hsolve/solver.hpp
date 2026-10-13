@@ -54,6 +54,14 @@ enum class Method {
 
 enum class Toggle { Auto, On, Off };
 
+/// Completeness check of a nearest target (SolverConfig::certificate; src/driver/certificate.hpp).
+enum class CertificateMode {
+  Exact,       ///< double-precision Sylvester counts at both window ends (main object or counter)
+  Randomized,  ///< randomized exclusion check on the factorization held at sigma (verify.hpp)
+  Auto,        ///< the cheapest method that certifies, predicted from measured times
+  Off,         ///< no completeness check
+};
+
 struct SolverConfig {
   Target target;
   ProblemType problem = ProblemType::Auto;
@@ -86,7 +94,11 @@ struct SolverConfig {
   FactorPrecision factor_precision = FactorPrecision::Double;
   int ordering = -1;                ///< -1: adaptive AMD / nested dissection by cost model (DESIGN
                                     ///< §3.6-3b; nested dissection = SCOTCH, METIS if deterministic);
-                                    ///< >= 0: MUMPS ICNTL(7) (7 auto, 5 METIS, 3 SCOTCH, 0 AMD, ...)
+                                    ///< 0, 2..7: MUMPS ICNTL(7) (7 auto, 5 METIS, 3 SCOTCH, 0 AMD, ...);
+                                    ///< 10 (kOrderingNestedDissection, factor.hpp): hsolve's own
+                                    ///< multithreaded nested dissection, given to MUMPS as its pivot
+                                    ///< order (compute_ordering: the same order for every thread
+                                    ///< count and run). 1 (a caller-given order) is rejected
   bool deterministic = false;       ///< true: bitwise-reproducible factorizations/solves for a fixed
                                     ///< thread count (MUMPS ICNTL(48)=0, ~1.75x slower solves; the
                                     ///< adaptive ordering then takes METIS, not SCOTCH, whose orderings
@@ -100,6 +112,35 @@ struct SolverConfig {
                                           ///< main analysis' pivot order) instead of the main
                                           ///< object; Auto: nearest certificates when the model
                                           ///< says it pays, and always for single / BLR factors
+  /// Completeness check of NEAREST targets (HEP/GHEP; src/driver/certificate.hpp):
+  ///   exact      double Sylvester counts at both ends of the certificate window (as before);
+  ///   randomized the randomized exclusion check (verify.hpp) on the factorization held at sigma,
+  ///              p and s from certificate_cost; exact counts when it cannot make a statement
+  ///              (gap too small, plan over the memory budget). With a general (non-diagonal,
+  ///              not diagonally dominant) B its kappa is only estimated, so a pass would only be
+  ///              a SCREENING result: the check is not run there and the exact counts certify (a
+  ///              warning says so) - no screening result is ever reported as the verdict;
+  ///   auto       the method certificate_cost predicts cheapest among exact counts, single-
+  ///              precision counts (only where verify.hpp's rule certifies them with a 10x margin
+  ///              on its assumed backward error, certificate.hpp) and the randomized check (only
+  ///              with a proven kappa), from measured times of this run (main factorization, solve
+  ///              calls of the Krylov run at its block width);
+  ///   off        none (inertia_check = off also turns it off).
+  /// A check that detects a missing pair triggers the deflated rerun and checks again; single
+  /// counts that exceed the found pairs or contradict the exact count at sigma are checked by
+  /// double counts first. Fewer than k selected pairs rerun even after a passed check (it covers
+  /// the found pairs only). Window targets (interval / smallest / largest, and nearest targets
+  /// handed to the windows by the zero band) always count exactly: their count points are slice
+  /// cuts and shifts. The report states what was proven (method, rigorous, failure_probability,
+  /// statement).
+  CertificateMode certificate = CertificateMode::Exact;
+  double certificate_delta = 1e-12;  ///< randomized check: bound on the failure probability, (0, 1)
+  /// FAULT INJECTION, for tests and measurements only (0 = off): after the first Krylov run of a
+  /// nearest target, remove this many found pairs before the completeness check - copies of the
+  /// largest multiple eigenvalue among the selected pairs (one copy always stays), then the
+  /// farthest selected ones with their Ritz hints - so that the solve must find them missing (a
+  /// check detecting a copy, or fewer than k selected pairs) and the deflated rerun recover them.
+  index_t certificate_fault_drop = 0;
   double zero_filter_tol = -1.0;  ///< < 0 disables; else |lambda| <= zero_filter_tol*scale is a
                                   ///< (non-physical) zero mode, avoided by shift placement (§3.6)
   double complex_tol = 1e-8;      ///< GHIEP: a pair is complex only if |Im lambda| >
@@ -125,15 +166,35 @@ struct PairReport {
 /// eigenvalues (e.g. a null space without zero_filter_tol) require only the copies still needed
 /// from it: count_inertia then counts the eigenvalues before the cluster plus those copies (two
 /// counts prove the cluster's width; see note), and any such copies are a valid answer.
+/// Nearest targets may be checked by another method (SolverConfig::certificate): `method` says
+/// which one gave the final verdict and `statement` what it proved.
 struct InertiaCertificate {
   bool performed = false;
   double lower = 0.0;          ///< a (-inf for Smallest)
   double upper = 0.0;          ///< b (+inf for Largest)
   index_t count_inertia = -1;  ///< eigenvalues required in the window according to Sylvester inertia
+                               ///< (-1 when the final verdict did not count: randomized)
   index_t count_found = -1;    ///< distinct (B-orthogonal) computed eigenvectors in the window
   index_t endpoint_moves = 0;  ///< endpoints moved because inertia came back invalid
-  bool passed = false;         ///< count_inertia == count_found
+  bool passed = false;         ///< counts: count_inertia == count_found; randomized: the exclusion
+                               ///< check passed (no further eigenvalue within the window radius,
+                               ///< kappa of B proven). Always a proof (rigorous): screening
+                               ///< results are never reported as the verdict
   std::string note;            ///< e.g. "not available for GHIEP"
+  /// "exact" (double Sylvester counts), "exact_single" (single-precision counts under the
+  /// perturbation rule of verify.hpp), "randomized" (exclusion check), "none" (not performed).
+  std::string method = "none";
+  /// passed is a proof: true for counts (exact_single: under the rule's assumed backward error,
+  /// stated); for the randomized check when its kappa is proven (B = I, diagonal or diagonally
+  /// dominant B) or its Krylov space covered the complement. false when not passed.
+  bool rigorous = false;
+  /// Bound on P(passed although a pair within the claimed radius is missing): 0 for counts, the
+  /// achieved delta(s) of the randomized check (<= SolverConfig::certificate_delta), 1 = no statement.
+  double failure_probability = 1.0;
+  index_t solves = 0;           ///< single-vector solves (operator applications) of randomized checks
+  double seconds = 0.0;         ///< wall time of the completeness checks, all rounds (Phase
+                                ///< certificate: part of SolveReport::time_certificate_s)
+  std::string statement;        ///< what was proven, in words (auto: also the predicted costs)
 };
 
 /// One shift-invert Krylov run of a sliced or one-sided solve (DESIGN §3.6): spectrum slices of
@@ -193,7 +254,9 @@ struct SolveReport {
   double time_verify_s = 0.0;   ///< Rayleigh-Ritz refinement, residuals, rescue, selection
   double time_certificate_s = 0.0;  ///< HEP/GHEP Sylvester inertia counts: certificate endpoints,
                                     ///< window ends, slice cuts (main-object factorizations or
-                                    ///< InertiaCounter counts incl. its analysis)
+                                    ///< InertiaCounter counts incl. its analysis), and the other
+                                    ///< completeness checks of nearest targets (randomized
+                                    ///< exclusion check, single counts, the auto choice)
   std::int64_t peak_rss_bytes = 0;
   // results
   std::vector<PairReport> pairs;

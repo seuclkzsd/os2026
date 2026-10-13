@@ -54,6 +54,13 @@ struct EnumNames<Toggle> {
   static constexpr std::pair<Toggle, const char*> kList[] = {
       {Toggle::Auto, "auto"}, {Toggle::On, "on"}, {Toggle::Off, "off"}};
 };
+template <>
+struct EnumNames<CertificateMode> {
+  static constexpr std::pair<CertificateMode, const char*> kList[] = {{CertificateMode::Exact, "exact"},
+                                                                      {CertificateMode::Randomized, "randomized"},
+                                                                      {CertificateMode::Auto, "auto"},
+                                                                      {CertificateMode::Off, "off"}};
+};
 
 template <class E>
 const char* enum_name(E e) {
@@ -166,6 +173,9 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     else if (key == "out_of_core") c.out_of_core = enum_parse<Toggle>(v, k);
     else if (key == "inertia_check") c.inertia_check = enum_parse<Toggle>(v, k);
     else if (key == "inertia_counter") c.inertia_counter = enum_parse<Toggle>(v, k);
+    else if (key == "certificate") c.certificate = enum_parse<CertificateMode>(v, k);
+    else if (key == "certificate_delta") c.certificate_delta = get_number(v, k);
+    else if (key == "certificate_fault_drop") c.certificate_fault_drop = get_integer<index_t>(v, k);
     else if (key == "zero_filter_tol") c.zero_filter_tol = get_number(v, k);
     else if (key == "complex_tol") c.complex_tol = get_number(v, k);
     else if (key == "max_shift_retries") c.max_shift_retries = get_integer<index_t>(v, k);
@@ -183,7 +193,13 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     HS_THROW(InvalidInput,
              "config: ncv, block_size, slice_size, threads, max_shift_retries must be >= 0 and max_restarts >= 1");
   if (!(c.memory_budget_gb > 0.0)) HS_THROW(InvalidInput, "config: memory_budget_gb must be > 0");
-  if (c.ordering < -1 || c.ordering > 7) HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive) or a MUMPS ICNTL(7) value 0..7");
+  if (!(c.certificate_delta > 0.0) || !(c.certificate_delta < 1.0))
+    HS_THROW(InvalidInput, "config: certificate_delta must be in (0, 1)");
+  if (c.certificate_fault_drop < 0) HS_THROW(InvalidInput, "config: certificate_fault_drop must be >= 0");
+  // ICNTL(7) = 1 means "pivot order given by the caller": the config cannot give one.
+  if (c.ordering != kOrderingNestedDissection && (c.ordering < -1 || c.ordering > 7 || c.ordering == 1))
+    HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive), a MUMPS ICNTL(7) value 0 or 2..7, or "
+                               << kOrderingNestedDissection << " (hsolve's nested dissection), got " << c.ordering);
   return c;
 }
 
@@ -213,6 +229,9 @@ std::string config_to_json(const SolverConfig& c, int indent) {
             {"out_of_core", enum_name(c.out_of_core)},
             {"inertia_check", enum_name(c.inertia_check)},
             {"inertia_counter", enum_name(c.inertia_counter)},
+            {"certificate", enum_name(c.certificate)},
+            {"certificate_delta", c.certificate_delta},
+            {"certificate_fault_drop", c.certificate_fault_drop},
             {"zero_filter_tol", c.zero_filter_tol},
             {"complex_tol", c.complex_tol},
             {"max_shift_retries", c.max_shift_retries}};
@@ -281,7 +300,13 @@ std::string SolveReport::to_json(int indent) const {
               {"count_found", certificate.count_found},
               {"endpoint_moves", certificate.endpoint_moves},
               {"passed", certificate.passed},
-              {"note", certificate.note}}},
+              {"note", certificate.note},
+              {"method", certificate.method},
+              {"rigorous", certificate.rigorous},
+              {"failure_probability", certificate.failure_probability},
+              {"solves", certificate.solves},
+              {"seconds", certificate.seconds},
+              {"statement", certificate.statement}}},
             {"slices", slices_j},
             {"zero_cluster_dim", zero_cluster_dim},
             {"zero_modes_filtered", zero_modes_filtered},
