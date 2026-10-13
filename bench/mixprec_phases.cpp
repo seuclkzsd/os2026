@@ -28,7 +28,8 @@
 //           X <- X - S^{-1} R, R = A X - B X diag(lambda), S = the single factor, then
 //           Rayleigh-Ritz; davidson = Rayleigh-Ritz over [X, C], C = S^{-1} R B-orthonormalized
 //           against X, keeping per old vector the Ritz vector of largest B-overlap (diverges on
-//           the 3-D cases: the single solve's error in C mixes spurious interior Ritz pairs in).
+//           yee-pec-box-1e5 and ss-qa8fk-qa8fm, also with corrections from the double factor:
+//           standard Rayleigh-Ritz on the enlarged space lets spurious interior pairs in).
 //           --v2-refine-factor double refines with the double factor instead (diagnostic: is a
 //           slow refinement the factor's precision or the inverse-iteration rate?). Times,
 //           applications, steps, the eta history and the eigenvalue deviation from the double
@@ -97,7 +98,7 @@ struct Args {
   int inner = 3;
   index_t p = 0;  // 0: the report's block_size
   std::vector<double> v2_tols;  // empty: tol * 0.1 and 1e-8
-  std::string v2_mode = "davidson";
+  std::string v2_mode = "rii";
   bool single_only = false;
   int v2_max_restarts = 300;
   std::vector<index_t> v2_guards = {0};  // extra Ritz pairs carried through the V2 refinement
