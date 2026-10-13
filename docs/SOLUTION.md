@@ -332,10 +332,37 @@ B 正定用 Cholesky、收敛判据与 hsolve 同为后向误差）。所有时�
 `time_total_s` 对 SLEPc 的 EPSSetUp + EPSSolve + 推迟的特征向量计算（不含 Python/MPI 启动与读测例）；每次
 运行都由 `tools/eval` 独立判定，只有双方每次重复都有效时才给加速比。
 
-### 9.1 P4 现状：对调优后的 SLEPc（如实陈述）
+### 9.1 P5c 现状：16 核对调优后的 SLEPc（如实陈述）
+
+16 核独占测量槽（cores 16–31，16 线程，`guard --exclusive`），SLEPc 每个测例用 16 核调优配置
+（`results/baseline_tuning_p16.md`），5 次交错取中位数，30 次运行全部经 `tools/eval` 判定有效
+（`results/cmp-p5c-best.md`、`results/cmp-p5c-best-interval.md`，测量记录 `results/p5c_measurements.md`）。
+hsolve = 默认配置（certificate = exact），hsolve-auto = certificate = auto，关证书 = certificate = off。
+括号内为同一方法下 P4 代码的 16 核结果（`results/cmp-p16-best*.md`；SLEPc 自身时间两次相差 2% 以内）：
+
+| 测例 | hsolve（s） | SLEPc 调优（s） | hsolve 加速比 | hsolve-auto | 关证书加速比 |
+|---|---|---|---|---|---|
+| syn-mem27-46（三维 HEP） | 2.39 | 3.48 | 1.45×（P4 1.26×） | 1.96× | 2.34×（P4 1.89×） |
+| yee-pec-box-1e5（三维 GHEP） | 2.95 | 3.36 | 1.14×（P4 1.03×） | 1.14× | 1.60×（P4 1.45×） |
+| wg-square-1e5（二维 GHIEP） | 0.485 | 0.891 | 1.84×（P4 1.50×） | 1.82× | 1.83×（P4 1.51×） |
+| ss-qa8fk-qa8fm（GHEP） | 1.68 | 1.50 | 0.89×（P4 0.64×） | 0.89× | 1.18×（P4 0.81×） |
+| cav2d-rect-pert-1e5（二维 GHEP） | 0.300 | 0.215 | 0.71×（P4 0.64×） | 0.71× | 0.94×（P4 0.79×） |
+| yee-pec-box-1e5 区间 [40, 200] | 3.81 | 10.30 | 2.70×（P4 2.37×） | 2.72× | 2.71×（P4 2.41×） |
+
+- 带完备性证书的默认配置在 6 个配置中的 4 个快于调优 SLEPc；ss-qa8fk-qa8fm 与 cav2d-rect-pert-1e5 仍落后，
+  差距来自证书的两次计数分解（这两个测例 hsolve 做 3 次数值分解，关证书时 1 次，SLEPc 1 次）。
+- certificate = auto 只在 syn-mem27-46 上改变结果（选 randomized，1.96×），其余测例按实测时间仍选精确计数。
+- 对 P4（main 2938cb4）的回归测量：42 个数据测例 ABBA 交错 3 次，41 个可比测例几何平均 0.786（HEP 0.772、
+  GHEP 0.808、GHIEP 0.808），总时间 514.8 → 453.6 s；只有 ss-tem152078 慢 6.7%（排序模型选了自研 ND，
+  分析比 SCOTCH 多 0.6 s）。
+- ss-3dspectralwave2 在 CLI 默认 14 GiB 内存预算下会随机失败（out-of-core，MUMPS 内存估计逐次波动约 30%，
+  新旧二进制都会），见 `results/p5c_measurements.md` §2.2；内存预算按运行环境自动设定的工作在 P7 进行。
+- 本节未覆盖：16 以外的线程数、无 AVX-512 的 CPU。
+
+### 9.2 P4 记录：对调优后的 SLEPc（2 核与 4 核）
 
 （本节为 P4 时的数据与结论。其中的「下一步」——完备性检验的 randomized / 单精度计数接入 driver、自研并行排序
-接入自适应排序、16 核测量——已在 P5c 实现（§2.3、§4、`docs/DESIGN.md` §3.6），16 核对比数据待更新。）
+接入自适应排序、16 核测量——已在 P5c 完成，16 核结果见 §9.1。）
 
 **调优后的 SLEPc 明显更强**（`results/baseline_tuning.md`，2 核，交错中位数）：对每个测例与核数做贪心坐标
 搜索（布局、MUMPS 排序与参数、BLR、Krylov 维数、纯化等），比 SLEPc 默认配置快 1.13 倍（syn-mem27-46）、
@@ -378,7 +405,7 @@ SLEPc 在多个测例上给出错误或不完整的结果；关掉证书时 hsol
 代替分解的完备性检验（`src/verify`，§2.3）与单精度计数接入 driver、自研并行排序接入自适应排序、16 核独占重测
 （SLEPc 16 核调优与对比命令已备好，`results/baseline_tuning.md`）。
 
-### 9.2 P3 记录（未调优的 SLEPc 基线）
+### 9.3 P3 记录（未调优的 SLEPc 基线）
 
 4 核、tol = 1e-10、15 个测例（`results/cmp4b.md`；当时的基线脚本会丢掉 PETSc 选项的值，SLEPc 的求解时间也
 未含推迟的特征向量计算（对 SLEPc 略有利），见 `results/baseline_tuning.md` 的 pitfalls）：
@@ -398,7 +425,7 @@ SLEPc 在多个测例上给出错误或不完整的结果；关掉证书时 hsol
   yee-pec-box-1e4 漏掉二重特征值 107.69 的一个副本、以 118.69 顶替却自报成功（虚报）；ss-tem27623 上 SLEPc
   后向误差达标（2.2e-13）但相对残差 6.8e-5、特征值误差 4.2e-7（hsolve：4.1e-13、9.3e-16）。
 
-（16 核独占重测、补充大规模测例与故障场景验证矩阵尚待完成。）
+（补充大规模测例与故障场景验证矩阵尚待完成。）
 
 ---
 

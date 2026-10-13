@@ -12,8 +12,9 @@ LDLᵀ、惯性计数）+ 自研 Krylov-Schur（含块模式）、LOBPCG、Jacob
 - 方案说明（交付物 a）：`docs/SOLUTION.md`；文件格式：`docs/FORMATS.md`
 - Python 接口（scipy/numpy 进出）：`docs/PYTHON.md`
 - MUMPS 之下的稠密 BLAS（剖析、替换库、BLAS hook）：`docs/BLAS.md`
-- 实测汇总：`results/p3_measurements.md`、`results/p4_measurements.md`；SLEPc 调优与公平对比：
-  `results/baseline_tuning.md`；测量程序：`bench/README.md`
+- 实测汇总：`results/p5c_measurements.md`（16 核，对 P4 回归与对调优 SLEPc，摘要见 `docs/SOLUTION.md` §9.1）、
+  `results/p3_measurements.md`、`results/p4_measurements.md`；SLEPc 调优与公平对比：
+  `results/baseline_tuning.md`、`results/baseline_tuning_p16.md`；测量程序：`bench/README.md`
 
 ## 快速开始
 
