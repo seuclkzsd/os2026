@@ -17,6 +17,8 @@
 # ICNTL(29) = N; MPI layouts only). LAYOUTS: comma list, e.g. seq1x16,1x16,2x8,4x4,8x2,16x1.
 # BENCH ARGS go to every run (e.g. --modes count,full --nrhs 16 --expect-neg 20003).
 # HS_RUN_MEM_GB (default 32) is each run's RSS cap (nested guard --mem-gb; the lane allows <= 12).
+# HS_REP0 (default 0) numbers the repetitions from there, so that one campaign can be split into
+# several guard calls (each <= 45 min) and keep its rotation: REPS=1 with HS_REP0=0, 1, 2.
 # Output: OUT/TAG.jsonl, the bench's JSON lines with "layout", "rep", "order" added, and one
 # {"event":"guard",...} line per run (exit status, wall time, process-tree peak RSS).
 set -u
@@ -44,7 +46,8 @@ for line in sys.stdin:
     if line.startswith("{"):
         d = json.loads(line); d.update(layout=lay, rep=rep, order=order); print(json.dumps(d), flush=True)' "$@"
 }
-for ((r = 0; r < reps; r++)); do
+r0="${HS_REP0:-0}"
+for ((r = r0; r < r0 + reps; r++)); do
   for ((i = 0; i < nl; i++)); do
     l=${lay[$(((i + r) % nl))]}
     gsum="$out/$tag.guard.$l.r$r.json"
