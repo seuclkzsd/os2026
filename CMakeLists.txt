@@ -134,14 +134,35 @@ if(NOT HSOLVE_WITH_MPI STREQUAL "OFF" AND HSOLVE_BUILD_APPS)
 endif()
 if(MPI_C_FOUND AND NOT HSOLVE_WITH_MPI STREQUAL "OFF" AND HSOLVE_BUILD_APPS)
   message(STATUS "hsolve: hsolve-mpi with MPI ${MPI_C_VERSION} (${MPI_C_LIBRARIES}); mpiexec ${MPIEXEC_EXECUTABLE}")
+  # hsolve_mpi_c = MPI::MPI_C, except that MPI's libraries reach the linker as files (link flags) and
+  # their directories as an explicit run path after the toolchain's. Given as libraries, CMake puts
+  # their directory into the computed RPATH, and the os2026-ref environment's lib/ also holds a
+  # libgomp.so.1: CMake then warns that it may hide the toolchain's OpenMP runtime.
+  add_library(hsolve_mpi_c INTERFACE)
+  foreach(prop INTERFACE_COMPILE_OPTIONS INTERFACE_COMPILE_DEFINITIONS INTERFACE_INCLUDE_DIRECTORIES
+               INTERFACE_LINK_OPTIONS)
+    get_target_property(value MPI::MPI_C ${prop})
+    if(value)
+      set_property(TARGET hsolve_mpi_c PROPERTY ${prop} "${value}")
+    endif()
+  endforeach()
+  foreach(lib IN LISTS MPI_C_LIBRARIES)
+    if(IS_ABSOLUTE "${lib}")
+      get_filename_component(dir "${lib}" DIRECTORY)
+      target_link_libraries(hsolve_mpi_c INTERFACE "-Wl,${lib}")
+      target_link_options(hsolve_mpi_c INTERFACE "LINKER:-rpath,${dir}")
+    else()
+      target_link_libraries(hsolve_mpi_c INTERFACE "${lib}")
+    endif()
+  endforeach()
   file(GLOB HSOLVE_MPI_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/mpi/*.cpp")
   add_library(hsolve_mpi STATIC ${HSOLVE_MPI_SOURCES})
   target_include_directories(hsolve_mpi PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  target_link_libraries(hsolve_mpi PUBLIC MPI::MPI_C hsolve ${CMAKE_DL_LIBS})
+  target_link_libraries(hsolve_mpi PUBLIC hsolve_mpi_c hsolve ${CMAKE_DL_LIBS})
   add_executable(hsolve_mpi_cli apps/hsolve_mpi.cpp $<TARGET_OBJECTS:hsolve_cli_main>)
   set_target_properties(hsolve_mpi_cli PROPERTIES OUTPUT_NAME hsolve-mpi)
   target_include_directories(hsolve_mpi_cli PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  target_link_libraries(hsolve_mpi_cli PRIVATE MPI::MPI_C hsolve_mpi hsolve CLI11::CLI11 nlohmann_json::nlohmann_json)
+  target_link_libraries(hsolve_mpi_cli PRIVATE hsolve_mpi_c hsolve_mpi hsolve CLI11::CLI11 nlohmann_json::nlohmann_json)
   # The launcher: one helper rank per NUMA node of the allowed cores plus the leader (docs/PARALLEL.md).
   configure_file(apps/hsolve-mpirun "${CMAKE_CURRENT_BINARY_DIR}/hsolve-mpirun" COPYONLY)
   set(HSOLVE_MPIEXEC "${MPIEXEC_EXECUTABLE}")
@@ -207,7 +228,7 @@ if(HSOLVE_BUILD_TESTS)
       add_executable(${name} "${src}")
       target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
       target_compile_definitions(${name} PRIVATE HSOLVE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
-      target_link_libraries(${name} PRIVATE MPI::MPI_C hsolve_mpi hsolve hsolve_test_support GTest::gtest
+      target_link_libraries(${name} PRIVATE hsolve_mpi_c hsolve_mpi hsolve hsolve_test_support GTest::gtest
                                             nlohmann_json::nlohmann_json)
       foreach(ranks 1 2 3)
         add_test(NAME ${name}.ranks${ranks}
