@@ -35,6 +35,12 @@ PYTHONPATH=build/release/python python -c "import hsolve; print(hsolve.version()
   hook（转发，或像 MUMPS 的调用一样改道；路由对任何调用方都正确）。`HS_BLAS_ROUTE` 不设时取构建默认值
   （`HSOLVE_BLAS_ROUTE_DEFAULT`，默认 all），`HS_BLAS_ROUTE=off` 为纯转发。只验证了正确性，Python 下的
   加速未单独计时。
+- **MUMPS**（P9 集成，`docs/DESIGN.md` §3.4）：扩展模块与命令行链接同一个 MUMPS——默认构建（`HS_MUMPS=source`）
+  是由仓库内 `third_party/mumps/` 源码包加 L0 分块补丁编译的 MUMPS 5.8.2，其 `lib/` 排在模块 RPATH 的最前面，
+  先于环境的 conda-forge `mumps-seq`（库名与 soname 相同），默认块参数为 P9 的（运行时 `HS_MUMPS_BLOCKING=mumps`
+  恢复 MUMPS 自己的）；`HS_MUMPS=env tools/dev/build.sh release` 改用环境的 MUMPS。`hsolve.build_info()` 写出
+  所用的 MUMPS（`mumps=mumps-5.8.2-<key>` 或 `mumps=env`）与默认块参数；`tests/py/test_mumps_build.py` 在全新
+  解释器中求解后检查 `/proc/self/maps` 里映射的正是所配置的库。
 
 ## 2. 快速上手
 

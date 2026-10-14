@@ -12,6 +12,10 @@
 #   3. bare repository $HOME/git/os2026.git (git remote "cluster"), push main, clone $HOME/os2026;
 #   4. rsync data/ (not under version control) into the clone.
 # The node-side settings (conda binary, env prefixes, cores, memory) are in env/hosts/cluster-node.sh.
+# MUMPS needs no step here: the repository carries its source tarball (third_party/mumps/), and the
+# first tools/dev/build.sh on any node compiles the default patched MUMPS (~1.5 min) into the shared
+# $HOME/deps/mumps-cache (HS_MUMPS_CACHE, env/hosts/cluster-node.sh), which every later build of any
+# clone with the same build inputs reuses (tools/dev/mumps_cache.sh).
 set -euo pipefail
 HOST="${1:-gpu01}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

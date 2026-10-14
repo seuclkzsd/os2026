@@ -340,19 +340,21 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     大前沿 360–376 GFlop/s，其中完全求和部分的尾随更新是秩 KEEP(420) = 128 的 dgemm，只有 350 GFlop/s（受内存带宽
     限制；秩 ≥ 512 的贡献块更新 585–620）。整体受内存带宽限制：4 → 16 线程只快 1.84 倍。计数（ICNTL(31)=1）的代价
     是主分解的 94–95%。
-  - **块参数（可选，`HS_MUMPS_BLOCKING=p9`）**：`mumps_api.hpp` 的 `Blocking`。MumpsFactorization 在构造时（JOB=−1
+  - **块参数（P9 集成起随默认构建为 p9；环境 MUMPS 的构建仍为 mumps，`HS_MUMPS_BLOCKING` 运行时覆盖）**：
+    `mumps_api.hpp` 的 `Blocking`。MumpsFactorization 在构造时（JOB=−1
     之后、分析之前）按环境变量（未设或空时取构建的默认：CMake `HSOLVE_MUMPS_BLOCKING`，链接 `HSOLVE_MUMPS_ROOT` 的
     自建 MUMPS 时为 p9，否则 mumps）设 MUMPS 内部块参数（dmumps_c.h 暴露的 KEEP，含义由 MUMPS 源码确定，只改分块，
     同一阈值选主元的 LDLᵀ）：KEEP(420) = 256（满秩外层面板宽 `kFullRankPanelWidth`）、KEEP(58) = 2000 /
     KEEP(57) = 4000（贡献块更新的行块 `kCbUpdateBlock`），以及只有打过补丁的 MUMPS 才读的 KEEP(498) = 128 /
     KEEP(499) = 64（L0 层下的面板宽与条带块，见下）。每次分解快 1.050–1.056 倍（主分解与计数、两个 1e6 测例），
     端到端只有 1.03–1.04 倍（5 次交错、每次都有效：默认配置 syn-mem27-100 1.066、yee-pec-box-1e6 1.032，SCOTCH
-    波动大；固定 METIS 排序 1.038 / 1.027），未达默认值要求的 1.05 倍，故为可选；1e5 的 41 个数据测例上几何平均
+    波动大；固定 METIS 排序 1.038 / 1.027），单独未达默认值要求的 1.05 倍；1e5 的 41 个数据测例上几何平均
     1.003、无超出噪声的变慢。未设、空或 `mumps` 为 MUMPS 自己的块参数，其它值抛 InvalidInput。计数与 MUMPS 默认块参数下逐个相同，
     与解析值相同（`test_factor_panel`，实/复、近奇异位移；其中一个装配树已知并断言的矩阵——两个 200 列完全求和、
     贡献块 1100 行的叶前沿构成 2 线程的 L0 层，根 2100——确保 KEEP(57/58) 的行块与补丁的 L0 块确实走到不同路径）。
-  - **从源码构建 MUMPS（可选）**：`tools/dev/build_mumps.sh NAME [--isa] [--opt] [--gemmt] [--patch]` 由官方 tarball
-    （sha256 与 conda-forge 配方相同）用环境的编译器与 METIS/SCOTCH/OpenBLAS 构建，库名与 soname 同 conda-forge
+  - **从源码构建 MUMPS（P9 集成起为默认构建）**：`tools/dev/build_mumps.sh NAME [--isa] [--opt] [--gemmt] [--patch]`
+    由仓库内的官方 tarball `third_party/mumps/MUMPS_5.8.2.tar.gz`（sha256 与 conda-forge 配方相同，解包前校验；补丁
+    用 patch(1)，没有时用 `git apply`）用环境的编译器与 METIS/SCOTCH/OpenBLAS 构建，库名与 soname 同 conda-forge
     （可 LD_PRELOAD 替换），不需要 glibc > 2.17；CMake `-DHSOLVE_MUMPS_ROOT=<安装目录>` 让 hsolve 链接它（其 lib/ 在
     RPATH 最前，`test_factor_mumps_build` 检查实际映射的库）。脚本默认 nocona -O2（conda-forge 的编译选项，任何
     x86-64 CPU 可用，即门槛实测的构建）；-O3 与 x86-64-v3 / skylake-avx512 单独无收益（1.000–1.005）且不可移植
@@ -361,11 +363,25 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     端到端（默认配置，每次运行都有效）syn-mem27-100 过线（两组 5 次交错 1.125、1.089；按相同 flops 折算 1.061），
     yee-pec-box-1e6 只在线上：四组 5 次交错的中位数比 1.066、1.045、1.075、1.048（两过两不过），每个二进制合并
     20 次 1.059 [bootstrap 1.042–1.073]、按相同 flops 折算 1.055 [1.050–1.064]，固定 METIS 主元顺序（无 SCOTCH
-    波动）只有 1.040（syn-mem27-100 1.061）。评审前写的“1.125 / 1.066，门槛通过、建议作默认构建”只是一组运气好的
-    样本，已撤回：依据不足，不建议作默认构建；仍为可选（`-DHSOLVE_MUMPS_ROOT`；作默认还需部署带 tarball 并先构建
-    MUMPS：tools/dev/build.sh 与部署脚本归 lead）。
+    波动）只有 1.040（syn-mem27-100 1.061）。评审前写的“1.125 / 1.066，门槛通过”只是一组运气好的样本，factspeed
+    评审据此撤回了作默认构建的建议；用户 2026-10-14 仍决定把打补丁的自编 MUMPS 作为默认构建（P9 集成；集成构建对
+    main a831d79 的端到端实测见 `results/p9_measurements.md`）。
     以后这类门槛应消除 SCOTCH 的波动：两个二进制用同一主元顺序，或每个 20 次并按 flops 折算
     （`tools/bench/factspeed_gate_flops.py`，`results/p9_factspeed.md` §4.5）。
+  - **默认构建与回退**（P9 集成，`tools/dev/build.sh`、`tools/dev/mumps_cache.sh`）：`build.sh` 的每个预设先运行
+    `mumps_cache.sh ensure`（在 guard 下）：默认配置 = `build_mumps.sh` 的可移植默认值（nocona -O2）+ L0 分块补丁，
+    安装在 `$HS_MUMPS_CACHE/mumps-5.8.2-<key>`（默认 `build/deps/`；集群节点共用 `$HOME/deps/mumps-cache`），key 为
+    源码包与补丁的 sha256、编译选项、两个构建脚本的 sha256、C 与 Fortran 编译器的版本行、环境前缀（库按 RPATH 链接
+    其 METIS/SCOTCH/OpenBLAS）的哈希——这些都不变时直接复用（首次约 1.5 分钟，4 个作业）。并发的构建各在临时目录中
+    进行、完成后 rename 到位，先到者胜，不加锁（共享 home 上的 NFS）；安装可整体移动（库之间靠 $ORIGIN），但链接它的
+    二进制记录其路径。然后 `cmake --preset <p> -DHSOLVE_MUMPS_ROOT=<安装目录>`：命令行、Python 模块、测试与 bench
+    都链接它（RPATH 最前），默认块参数为 p9。`HS_MUMPS=env` 传空的 `HSOLVE_MUMPS_ROOT`，链接环境的 conda-forge
+    mumps-seq（P9 之前的构建，块参数 mumps）；`HS_MUMPS=/abs/prefix` 链接 `build_mumps.sh` 的其它安装（块参数 p9）。
+    每次调用都显式传 `HSOLVE_MUMPS_ROOT`，同一构建目录可来回切换：`cmake/FindMUMPS.cmake` 在它改变时清掉缓存的
+    头文件与库路径重新查找。构建信息（`hsolve --A x --version`、`hsolve.build_info()`）写出 `mumps=<安装目录名>|env`
+    与 `mumps_blocking=p9|mumps`；`tests/py/test_mumps_build.py` 检查命令行（`LD_TRACE_LOADED_OBJECTS`）与 Python
+    模块（全新解释器求解后的 `/proc/self/maps`）实际加载所配置的库、仓库内的 tarball 即固定的那个、缓存 key 随输入
+    变化。许可：`third_party/mumps/README.md`、`THIRD_PARTY_NOTICES` §3.1（默认构建的 MUMPS 是经补丁修改的版本）。
   - 实测为负、未采用：OMP_PROC_BIND / OMP_PLACES、OMP_WAIT_POLICY（passive 0.93）、关透明大页（0.96）、L0 层位置
     KEEP(408) 与关 L0（ICNTL(48)=0：0.95）、合并 KEEP(1)、更高的三角条带 KEEP(7/8)、GEMMT（OpenBLAS 的 dgemmt 是
     逐列 dgemv）。选主元阈值 CNTL(1)、PIVOT_OPTION KEEP(468) 未动（计数的惯性必须是 K 的）。
@@ -1258,7 +1274,9 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 - 节点：2×Xeon Silver 4314（2×16 核，AVX-512），251 GB，CentOS 7（glibc 2.17），无外网，home 目录
   各节点共享。`tools/dev/deploy_cluster.sh HOST` 由本机 conda 包缓存离线重建两个环境
-  （`docs/DEPENDENCIES.md`）、建裸仓库（git remote `cluster`）与克隆、拷贝测例数据。
+  （`docs/DEPENDENCIES.md`）、建裸仓库（git remote `cluster`）与克隆、拷贝测例数据。默认构建的 MUMPS（§3.4）由
+  仓库内的源码包编译，节点上缓存在共享的 `$HOME/deps/mumps-cache`（`HS_MUMPS_CACHE`，`env/hosts/cluster-node.sh`），
+  所有克隆复用；构建以路径链接它，使用中的安装不得删除。
 - `tools/dev/cluster_run.sh HOST [--wip | --allow-dirty] -- CMD`：把当前 worktree 的 HEAD 推到
   `wt/<name>`，在节点的 `$HOME/os2026-wt/<name>` 检出该提交，经 `env/run.sh` 运行 CMD；`--wip` 用
   `git stash create` 的临时提交传送未提交的已跟踪改动（不动工作区、索引与 stash 列表）；调用方的

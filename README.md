@@ -12,20 +12,33 @@ LDLᵀ、惯性计数）+ 自研 Krylov-Schur（含块模式）、LOBPCG、Jacob
 - 方案说明（交付物 a）：`docs/SOLUTION.md`；文件格式：`docs/FORMATS.md`
 - Python 接口（scipy/numpy 进出）：`docs/PYTHON.md`
 - MUMPS 之下的稠密 BLAS（剖析、替换库、BLAS hook）：`docs/BLAS.md`
-- 实测汇总：`results/p5c_measurements.md`（16 核，对 P4 回归与对调优 SLEPc，摘要见 `docs/SOLUTION.md` §9.1）、
-  `results/p3_measurements.md`、`results/p4_measurements.md`；SLEPc 调优与公平对比：
-  `results/baseline_tuning.md`、`results/baseline_tuning_p16.md`；测量程序：`bench/README.md`
+- 实测汇总：`results/p9_measurements.md`（P9 集成的最终测量：1e6 与 1e5 对 main a831d79、对调优 SLEPc、
+  1–16 线程的加速比，摘要见 `docs/SOLUTION.md` §6、§9.1）；P9 的三个实验 `results/p9_ordering.md`（自研嵌套剖分）、
+  `results/p9_factspeed.md`（1e6 的数值分解、MUMPS 块参数与自编 MUMPS）、`results/p9_mpi.md`（1e6 对 SLEPc、
+  MPI MUMPS 的上界：负结果）；更早的 `results/p8_certcost.md`、`results/p7_membudget.md`、
+  `results/p5c_measurements.md`、`results/p3_measurements.md`、`results/p4_measurements.md`；SLEPc 调优与公平对比：
+  `results/baseline_tuning.md`、`results/baseline_tuning_p16.md`、`results/cmp-p9-1e6-profiles.json`（1e6）；
+  测量程序：`bench/README.md`
 
 ## 快速开始
 
 ```bash
 conda env create -f env/environment.yml      # 一次性
 source env/activate.sh                       # 激活环境并设置资源策略默认值
-tools/dev/build.sh release                   # 构建 (build/release)
+tools/dev/build.sh release                   # 构建 (build/release)：先编译 MUMPS（首次约 1.5 分钟，之后复用），再编译 hsolve
 tools/dev/test.sh release                    # C++ 单元测试 + Python 测试（工具与接口）
 ```
 
 开发服务器自 P4 收尾起只做编辑与 git，编译、测试与实验都在集群节点上运行（见下「集群节点」）。
+
+**MUMPS 的来源**（P9 集成）：`tools/dev/build.sh` 默认（`HS_MUMPS=source`）由仓库内的官方源码包
+`third_party/mumps/MUMPS_5.8.2.tar.gz`（sha256 校验，CeCILL-C，离线可构建）加 `patches/mumps-5.8.2-l0-blocking.patch`
+编译顺序版 MUMPS 5.8.2（conda-forge 的可移植编译选项，链接环境的 METIS / SCOTCH / OpenBLAS；`tools/dev/mumps_cache.sh`
+按源码包、补丁、选项、脚本、编译器与环境的哈希缓存在 `build/deps/`，`HS_MUMPS_CACHE` 可改），所有预设、命令行与
+Python 模块都链接它（`-DHSOLVE_MUMPS_ROOT`，RPATH 在环境之前），MUMPS 的块参数默认取 P9 的（分解快 5–8%，
+`results/p9_factspeed.md`）。回退：`HS_MUMPS=env tools/dev/build.sh release` 链接环境的 conda-forge `mumps-seq`
+（P9 之前的构建）；`HS_MUMPS=/abs/prefix` 链接 `tools/dev/build_mumps.sh` 的其它安装；运行时
+`HS_MUMPS_BLOCKING=mumps` 恢复 MUMPS 自己的块参数。`hsolve --A x --version` 打印所用的 MUMPS（`mumps=…`）。
 
 构建出的 `hsolve` 默认链入 BLAS hook（`src/blas`，CMake `HSOLVE_BLAS_HOOK=ON`、route `all`）：MUMPS 回代中的窄
 BLAS 调用改用自带的 AVX-512 / AVX2 窄核、L0 层之上的大调用并行切分，其余原样交给 OpenBLAS（指令集运行时检测）。
@@ -55,7 +68,7 @@ BLAS 调用改用自带的 AVX-512 / AVX2 窄核、L0 层之上的大调用并�
 off = 不检验）、`--log FILE`。
 只在 config.json 中的键：`"inertia_counter": "auto"|"on"|"off"`（证书计数是否用只计惯性的
 InertiaCounter；auto 由代价模型决定）、`"certificate_delta"`、`"ordering"`（−1 = 自适应（默认，16 线程代价
-模型在 AMD / SCOTCH / 自研嵌套剖分 / METIS / PORD 中选）；0、2..7 = MUMPS ICNTL(7)；10 = 自研多线程嵌套剖分）。
+模型在 AMD / 自研嵌套剖分 / SCOTCH / METIS / PORD 中选，P9 起自研嵌套剖分带流精修、先于 SCOTCH）；0、2..7 = MUMPS ICNTL(7)；10 = 自研多线程嵌套剖分）。
 
 输出 `eigenvalues.npy`、`eigenvectors.npy`（n×m，Fortran 序）、`report.json`（残差、完备性证书（方法、是否
 严格、失败概率与文字陈述）、每片记录、分解统计、块宽、五个互斥阶段的计时（含证书 `time_certificate_s`）、
@@ -107,7 +120,8 @@ tools/dev/cluster_run.sh gpu02 --wip -- tools/dev/test.sh release     # 连同�
 和一条**构建/测试道**（`8-15`，`HS_JOBS=4`，单次 ≤ 12 GiB），后者用于编译、测试与冒烟运行，计时只在
 测量槽里做。规则由 guard 强制执行，详见 `docs/DESIGN.md` §6。`tools/dev/cluster_nodes.sh [--pick]` 列出各节点是否空闲
 （c001–c005 与其他用户共用，只在空闲时用）。SLEPc 环境的离线重建细节见
-`docs/DEPENDENCIES.md`。
+`docs/DEPENDENCIES.md`。节点上的默认 MUMPS 缓存在共享的 `$HOME/deps/mumps-cache`（`env/hosts/cluster-node.sh`），
+任何克隆的第一次构建编译一次，之后所有克隆复用；构建链接其路径，使用中的安装不要删除。
 
 ## 目录
 
@@ -124,7 +138,8 @@ tools/dev/cluster_run.sh gpu02 --wip -- tools/dev/test.sh release     # 连同�
 | `tools/bench` | SLEPc 基线、调优器 `tune_slepc.py`、`-log_view` 解析与对比脚本 `compare.py` |
 | `bench/` | 可复现的 C++ 性能/内存测量程序（`bench_<name>`） |
 | `tools/run/guard.py` | 资源看门狗（绑核、内存上限、互斥） |
-| `tools/dev` | 构建、测试、集群部署与集群运行脚本 |
+| `tools/dev` | 构建（含默认 MUMPS 的源码构建 `build_mumps.sh` / `mumps_cache.sh`）、测试、集群部署与集群运行脚本 |
 | `tools/deps` | 实验用 BLAS 替换库（OpenBLAS / BLIS / LIBXSMM）的源码构建脚本 |
+| `third_party/mumps`, `patches/` | MUMPS 5.8.2 官方源码包（CeCILL-C）与 hsolve 对它的补丁（默认构建使用） |
 | `env/` | conda 环境、激活脚本与按主机的设置 `env/hosts/` |
 | `results/` | 实验汇总（原始输出在 `results/raw/`，不入库） |

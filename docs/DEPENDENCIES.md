@@ -8,7 +8,7 @@
 
 | 依赖 | 版本 | 许可证 | 用途 | 调用方式 |
 |---|---|---|---|---|
-| MUMPS | 5.8.2（conda-forge mumps-seq，OpenMP） | CeCILL-C | 稀疏 LDLᵀ / LU 分解、惯性、多右端回代；单/双精度 | C 接口 `dmumps_c/zmumps_c/smumps_c/cmumps_c`，`src/factor/` |
+| MUMPS | 5.8.2（顺序版 + OpenMP。默认构建：仓库内官方源码包 `third_party/mumps/` 加 `patches/mumps-5.8.2-l0-blocking.patch`，由 `tools/dev/build_mumps.sh` 编译；回退：conda-forge mumps-seq，见下） | CeCILL-C | 稀疏 LDLᵀ / LU 分解、惯性、多右端回代；单/双精度 | C 接口 `dmumps_c/zmumps_c/smumps_c/cmumps_c`，`src/factor/` |
 | METIS | 5.1.0 | Apache-2.0 | MUMPS 的填充约简排序 | 经 MUMPS（ICNTL(7)）；不直接链接 |
 | SCOTCH | 7.0 | CeCILL-C | MUMPS 备选排序 | 经 MUMPS；不直接链接 |
 | OpenBLAS | 0.3.34（OpenMP 版） | BSD-3-Clause | BLAS / LAPACK；BLAS hook 的窄核改编自其 SkylakeX 核（见下） | Fortran 符号，`src/linalg/blas_lapack.hpp`；MUMPS 的 BLAS 调用经 `src/blas` 的 hook（默认链入 hsolve） |
@@ -41,6 +41,21 @@ P5 未增加求解器依赖：
 - 只用于实验、不随 hsolve 使用或分发：`tools/deps/build_openblas.sh`、`build_blis.sh`、`build_libxsmm.sh`
   从固定版本的源码包（sha256 校验；脚本头注明下载地址）在集群节点上编译 OpenBLAS 0.3.34、BLIS 2.1、
   LIBXSMM 1.17（均为 BSD-3-Clause），作为 LD_PRELOAD 替换件评估 BLAS（结论：都不采用，`docs/BLAS.md` §3、§6）。
+
+P9 未增加求解器依赖，改变了 MUMPS 的来源：
+- **默认构建自编 MUMPS**（P9 集成，用户 2026-10-14 决定；`docs/DESIGN.md` §3.4、`results/p9_factspeed.md`）：
+  `tools/dev/build.sh` 先由 `tools/dev/mumps_cache.sh` 构建（或复用缓存）MUMPS 5.8.2——源码为仓库内的官方
+  tarball `third_party/mumps/MUMPS_5.8.2.tar.gz`（sha256 固定、每次解包前校验，离线可构建；CeCILL-C 声明与许可
+  文本在同一目录），打上 `patches/mumps-5.8.2-l0-blocking.patch`（L0 层下的块参数 KEEP(498/499)，同为 CeCILL-C），
+  用 conda-forge 的可移植编译选项（`-O2 -march=nocona`）与环境的 gfortran、METIS、SCOTCH、OpenBLAS 编译，库名与
+  soname 同 conda-forge 的 mumps-seq；hsolve（命令行、Python 模块、测试）以 `-DHSOLVE_MUMPS_ROOT` 链接它并在
+  RPATH 中排在环境之前，默认给 MUMPS 以 P9 的块参数。缓存按源码包、补丁、编译选项、构建脚本、编译器与环境
+  前缀的哈希区分（`HS_MUMPS_CACHE`，默认 `build/deps/`，集群节点共用 `$HOME/deps/mumps-cache`）。
+- **回退**：`HS_MUMPS=env tools/dev/build.sh` 或不带 `-DHSOLVE_MUMPS_ROOT` 的 CMake 配置链接环境的 conda-forge
+  `mumps-seq`（P9 之前的构建，MUMPS 自己的块参数）；因此 `env/environment.yml` 仍含 `mumps-seq` 与
+  `mumps-include`。运行时 `HS_MUMPS_BLOCKING=mumps` 在默认构建下也恢复 MUMPS 自己的块参数。
+- 构建工具：环境内的 gfortran、make；`patch`（无则用 `git apply`）；`objdump`（`$OBJDUMP` 或系统的，检查库不需要
+  glibc > 2.17）。
 
 不使用：Intel MKL / PARDISO、HSL（MA57/MA97）、Panua-Pardiso 等非开源组件。
 CUDA（若引入）为 NVIDIA 闭源但免费，赛题明确允许；仅作可选加速，不作为核心能力。
