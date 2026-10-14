@@ -37,10 +37,10 @@
 // P10 review fixes (results/p10_gpu.md §10): OpenMP unbound / bound, 3 rounds alternating, and a
 // chunk larger than the staging ring:
 //   G="gemm --ld 15800 --reps 3 --modes cpu,gpu --shapes 1000:9000:4000,2000:8000:4000,1000:4000:2048"
-//   $S build/release/bench_gpu_dgemm $G;  $S env OMP_PROC_BIND=close OMP_PLACES=cores \
-//      build/release/bench_gpu_dgemm $G
-//   $S build/release/bench_gpu_dgemm gemm --ld 15800 --reps 3 --shapes 2000:8000:4000,1000:9000:4000 \
-//      --modes cpu,gpu,gpu-k65536
+//   $S build/release/bench_gpu_dgemm $G
+//   $S env OMP_PROC_BIND=close OMP_PLACES=cores build/release/bench_gpu_dgemm $G
+//   $S build/release/bench_gpu_dgemm gemm --ld 15800 --reps 3 --shapes 2000:8000:4000,1000:9000:4000
+//      --modes cpu,gpu,gpu-k65536                                                     (same line)
 #include <omp.h>
 #include <time.h>
 
