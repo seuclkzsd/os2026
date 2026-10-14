@@ -3,7 +3,7 @@
 // OrderingOptions::compress), weighted minimum degree on the leaves, trial separators refined down
 // to their graph (SeparatorParams::finalists) and the effort on the top separators
 // (OrderingOptions::top_*), the options' ranges, FactorOptions::nested_dissection, and the driver's
-// choice of the effort (nd_ordering_options, OrderingPricer).
+// choice of the effort and of the flow refinement (nd_ordering_options, OrderingPricer).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -365,39 +365,150 @@ TYPED_TEST(FactorOrderingOptionsPencil, FactorOptionsCarryTheDissectionOptions) 
   EXPECT_EQ(analysed_order(fo), seeded);
 }
 
+// The candidate hsolve's nested dissection of an input of `order` vertices and `entries` upper
+// entries (also its graph), priced by OrderingPricer::predict from the AMD probe's estimate
+// (amd_fe, amd_flops) on 16 threads for the nearest work of k = 10 planned for n = plan_n.
+struct PricedNd {
+  hs::SolverConfig cfg;
+  hs::driver::PlannedWork work;
+  hs::driver::OrderingInput in;
+  hs::driver::OrderingCandidate nd;
+};
+
+PricedNd price_nd(double order, double entries, double amd_fe, double amd_flops, index_t plan_n) {
+  PricedNd r;
+  r.cfg.target.k = 10;
+  r.work = hs::driver::plan_work(r.cfg, hs::ProblemType::Standard, plan_n, 1.0);
+  r.in.mumps = {order, entries};
+  r.in.nd = r.in.mumps;
+  hs::driver::OrderingPricer pricer{
+      hs::driver::ordering_model(), r.cfg, r.work, r.in, entries, 16, 0.0, {}};
+  std::vector<hs::driver::OrderingCandidate> cand(2);
+  cand[0].ordering = 0;
+  cand[1].ordering = hs::kOrderingNestedDissection;
+  hs::FactorEstimate e;
+  e.factor_entries = static_cast<std::int64_t>(amd_fe);
+  e.flops = amd_flops;
+  pricer.analysed(cand, 0, e);
+  pricer.predict(cand, 0);
+  r.nd = cand[1];
+  return r;
+}
+
 TEST(DriverOrderingEffort, OptionsAndPricing) {
-  const hs::OrderingOptions plain = hs::driver::nd_ordering_options(false);
+  const hs::OrderingOptions plain = hs::driver::nd_ordering_options(false, true);
   EXPECT_EQ(plain.top_depth, 0);
-  const hs::OrderingOptions effort = hs::driver::nd_ordering_options(true);
+  const hs::OrderingOptions effort = hs::driver::nd_ordering_options(true, true);
   EXPECT_EQ(effort.top_depth, hs::driver::kNdEffortDepth);
   EXPECT_EQ(effort.top_runs, hs::driver::kNdEffortRuns);
   EXPECT_EQ(effort.top_finalists, hs::driver::kNdEffortRuns);
   // The pricer takes the effort where the numeric work dwarfs the ordering (kNdEffortWorkRatio):
   // a huge 3-D AMD estimate (fill 200, 1e16 flops) yes, a small 2-D one (fill 10) no.
+  const auto big = price_nd(1e6, 1.4e7, 200 * 1.4e7, 1e16, 1000000);
+  EXPECT_TRUE(big.nd.nd_effort);
+  EXPECT_TRUE(big.nd.nd_flow);
+  const auto small = price_nd(1e5, 5e5, 10 * 5e5, 2e9, 1000000);
+  EXPECT_FALSE(small.nd.nd_effort);
+}
+
+// The flow refinement of the separators (OrderingOptions::flow_depth) is on by default and with
+// nd_ordering_options(_, true), off with nd_ordering_options(_, false), whatever the effort.
+TEST(DriverOrderingFlow, Options) {
+  const hs::OrderingOptions defaults;
+  EXPECT_GT(defaults.flow_depth, 0);
+  EXPECT_EQ(hs::driver::nd_ordering_options(false, true).flow_depth, defaults.flow_depth);
+  EXPECT_EQ(hs::driver::nd_ordering_options(true, true).flow_depth, defaults.flow_depth);
+  const hs::OrderingOptions off = hs::driver::nd_ordering_options(false, false);
+  EXPECT_EQ(off.flow_depth, 0);
+  EXPECT_EQ(off.top_depth, 0);
+  const hs::OrderingOptions effort_off = hs::driver::nd_ordering_options(true, false);
+  EXPECT_EQ(effort_off.flow_depth, 0);
+  EXPECT_EQ(effort_off.top_depth, hs::driver::kNdEffortDepth);
+}
+
+// The pricer runs hsolve's nested dissection without the flow refinement exactly where the planned
+// numeric time - priced as fitted, with it - is under kNdFlowWorkRatio times the predicted ordering
+// time, takes the effort from kNdEffortWorkRatio on, and prices the dissection without the flow by
+// kNdFlowFlops, kNdFlowEntries and kNdFlowTime. Swept over the AMD flops of an input with
+// yee-pec-cube-16's sizes and fill (n = 10800, 71460 upper entries, fill 46.5), so that the ratio
+// crosses both thresholds.
+TEST(DriverOrderingFlow, SkippedWhereTheNumericWorkIsSmallAgainstTheOrdering) {
+  const auto& m = hs::driver::ordering_model();
+  const double order = 10800, entries = 71460, amd_fe = 46.5 * entries;
+  auto given = [&](double fe) {
+    return m.floor_order * order + m.floor_entry * entries + m.floor_fe * fe;
+  };
+  int off = 0, on = 0, effort = 0;
+  for (double amd_flops = 1e8; amd_flops <= 1e15; amd_flops *= 3) {
+    const PricedNd p = price_nd(order, entries, amd_fe, amd_flops, 10800);
+    hs::FactorEstimate amd;
+    amd.factor_entries = static_cast<std::int64_t>(amd_fe);
+    amd.flops = amd_flops;
+    const auto [fl, en] =
+        hs::driver::predicted_shape(hs::kOrderingNestedDissection, amd, entries, 0, amd);
+    const double ordering_s =
+        hs::driver::ordering_analysis_s(hs::kOrderingNestedDissection, p.in, en, 16) - given(en);
+    const double ratio =
+        hs::driver::planned_numeric_s(p.cfg, p.work, p.in.mumps, fl, en, 16) / ordering_s;
+    SCOPED_TRACE(::testing::Message() << "AMD flops " << amd_flops << ", ratio " << ratio);
+    EXPECT_NEAR(p.nd.nd_work_ratio, ratio, 1e-9 * ratio);
+    EXPECT_EQ(p.nd.nd_flow, ratio >= hs::driver::kNdFlowWorkRatio);
+    EXPECT_EQ(p.nd.nd_effort, ratio >= hs::driver::kNdEffortWorkRatio);
+    if (p.nd.nd_flow) {
+      ++on;
+      effort += p.nd.nd_effort ? 1 : 0;
+      continue;
+    }
+    ++off;
+    const double fe = en / hs::driver::kNdFlowEntries;
+    EXPECT_NEAR(p.nd.flops, fl / hs::driver::kNdFlowFlops, 1e-12 * fl);
+    EXPECT_NEAR(p.nd.entries, fe, 1e-12 * fe);
+    EXPECT_NEAR(p.nd.analysis_s, given(fe) + ordering_s / hs::driver::kNdFlowTime, 1e-12);
+    EXPECT_NEAR(p.nd.numeric_s,
+                hs::driver::planned_numeric_s(p.cfg, p.work, p.in.mumps,
+                                              fl / hs::driver::kNdFlowFlops, fe, 16),
+                1e-12);
+  }
+  EXPECT_GT(off, 0);
+  EXPECT_GT(on, effort);
+  EXPECT_GT(effort, 0);
+}
+
+// An analysed nested dissection without the flow refinement anchors the other candidates'
+// predictions as the fitted (flow-refined) dissection would with kNdFlowFlops / kNdFlowEntries of
+// its flops / entries.
+TEST(DriverOrderingFlow, AnchorWithoutFlowPredictsLikeTheFittedDissection) {
   hs::SolverConfig cfg;
   cfg.target.k = 10;
-  const hs::driver::PlannedWork work =
-      hs::driver::plan_work(cfg, hs::ProblemType::Standard, 1000000, 1.0);
-  auto nd_candidate = [&](double order, double entries, double amd_fe, double amd_flops) {
-    hs::driver::OrderingInput in;
-    in.mumps = {order, entries};
-    in.nd = in.mumps;
+  const auto work = hs::driver::plan_work(cfg, hs::ProblemType::Standard, 100000, 1.0);
+  hs::driver::OrderingInput in;
+  in.mumps = {1e5, 1.4e6};
+  in.nd = in.mumps;
+  auto scotch = [&](bool flow, double nd_flops, double nd_entries) {
     hs::driver::OrderingPricer pricer{
-        hs::driver::ordering_model(), cfg, work, in, entries, 16, 0.0, {}};
-    std::vector<hs::driver::OrderingCandidate> cand(2);
+        hs::driver::ordering_model(), cfg, work, in, 1.4e6, 16, 0.0, {}};
+    std::vector<hs::driver::OrderingCandidate> cand(3);
     cand[0].ordering = 0;
     cand[1].ordering = hs::kOrderingNestedDissection;
-    hs::FactorEstimate e;
-    e.factor_entries = static_cast<std::int64_t>(amd_fe);
-    e.flops = amd_flops;
-    pricer.analysed(cand, 0, e);
+    cand[2].ordering = hs::driver::kOrderingScotch;
+    hs::FactorEstimate amd;
+    amd.factor_entries = static_cast<std::int64_t>(60 * 1.4e6);
+    amd.flops = 5e11;
+    pricer.analysed(cand, 0, amd);
     pricer.predict(cand, 0);
-    return cand[1];
+    cand[1].nd_flow = flow;
+    hs::FactorEstimate nd;
+    nd.factor_entries = static_cast<std::int64_t>(nd_entries);
+    nd.flops = nd_flops;
+    pricer.analysed(cand, 1, nd);
+    pricer.predict(cand, 1);
+    return cand[2];
   };
-  const auto big = nd_candidate(1e6, 1.4e7, 200 * 1.4e7, 1e16);
-  EXPECT_TRUE(big.nd_effort);
-  const auto small = nd_candidate(1e5, 5e5, 10 * 5e5, 2e9);
-  EXPECT_FALSE(small.nd_effort);
+  const auto without = scotch(false, 1e11, 3e7);
+  const auto with = scotch(true, 1e11 * hs::driver::kNdFlowFlops, 3e7 * hs::driver::kNdFlowEntries);
+  EXPECT_NEAR(without.flops, with.flops, 1e-9 * with.flops);
+  EXPECT_NEAR(without.entries, with.entries, 1e-6 * with.entries);
+  EXPECT_NEAR(without.score_s, with.score_s, 1e-6 * with.score_s);
 }
 
 }  // namespace

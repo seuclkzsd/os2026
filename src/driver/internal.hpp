@@ -484,15 +484,23 @@ struct OrderingCandidate {
   /// Factors beyond the in-core cap score kOverCapScore-scaled by their size (steps.cpp).
   double score_s = 0.0;
   /// hsolve's nested dissection only: priced (and to be run) with the extra effort on its top
-  /// separators, nd_ordering_options(true) - chosen where the planned numeric work dwarfs the
-  /// ordering (kNdEffortWorkRatio).
+  /// separators, nd_ordering_options(true, true) - chosen where the planned numeric work dwarfs
+  /// the ordering (kNdEffortWorkRatio).
   bool nd_effort = false;
+  /// hsolve's nested dissection only: with the flow refinement of its separators (the default,
+  /// OrderingOptions::flow_depth); false - priced and run without it, nd_ordering_options(false,
+  /// false) - where the planned numeric work is under kNdFlowWorkRatio times the ordering.
+  bool nd_flow = true;
+  /// hsolve's nested dissection only: the predicted planned numeric time over its predicted
+  /// ordering time as fitted (default options), the input of both rules; 0 before a prediction.
+  double nd_work_ratio = 0.0;
 };
 
-/// compute_ordering's options for hsolve's nested dissection in the driver: the defaults, or with
+/// compute_ordering's options for hsolve's nested dissection in the driver: the defaults; with
 /// `effort` the top kNdEffortDepth levels' separators from kNdEffortRuns trial bisections, each
-/// refined down to its graph (OrderingOptions::top_*; steps.cpp: measurements).
-OrderingOptions nd_ordering_options(bool effort);
+/// refined down to its graph (OrderingOptions::top_*); without `flow` no flow refinement of the
+/// separators (OrderingOptions::flow_depth = 0). steps.cpp: the measurements behind both rules.
+OrderingOptions nd_ordering_options(bool effort, bool flow);
 /// The effort is taken when the predicted planned numeric time is at least this multiple of the
 /// predicted ordering time; it then costs kNdEffortTime times the ordering time and saves the
 /// factors kNdEffortFlops of their flops and kNdEffortEntries of their entries (steps.cpp).
@@ -502,9 +510,17 @@ constexpr int kNdEffortRuns = 16;
 constexpr double kNdEffortTime = 1.2;
 constexpr double kNdEffortFlops = 0.97;
 constexpr double kNdEffortEntries = 0.99;
+/// The flow refinement is skipped when the predicted planned numeric time is under this multiple
+/// of the predicted ordering time (with it: the cost model's fit). With it the ordering takes
+/// kNdFlowTime times as long and the factors have kNdFlowFlops of the flops and kNdFlowEntries of
+/// the entries they have without it (medians of the P9 measurements, steps.cpp).
+constexpr double kNdFlowWorkRatio = 4.5;
+constexpr double kNdFlowTime = 1.15;
+constexpr double kNdFlowFlops = 0.90;
+constexpr double kNdFlowEntries = 0.95;
 
 /// Orderings the adaptive analysis chooses from, in order of preference on near-equal scores: AMD,
-/// SCOTCH, hsolve's nested dissection (multithreaded), METIS, PORD (steps.cpp: why this order).
+/// hsolve's nested dissection (multithreaded), SCOTCH, METIS, PORD (steps.cpp: why this order).
 std::vector<int> candidate_orderings(const SolverConfig& cfg);
 /// FactorOptions::ordering of MUMPS' SCOTCH (ICNTL(7) = 3).
 constexpr int kOrderingScotch = 3;

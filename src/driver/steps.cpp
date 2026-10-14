@@ -972,20 +972,42 @@ void OrderingPricer::analysed(std::vector<OrderingCandidate>& cand, std::size_t 
   if (cap_mb > 0 && e.incore_mb > cap_mb) c.score_s = kOverCapScore * (e.incore_mb / cap_mb);
 }
 
-OrderingOptions nd_ordering_options(bool effort) {
+OrderingOptions nd_ordering_options(bool effort, bool flow) {
   OrderingOptions o;
   if (effort) {
     o.top_depth = kNdEffortDepth;
     o.top_runs = kNdEffortRuns;
     o.top_finalists = kNdEffortRuns;
   }
+  if (!flow) o.flow_depth = 0;
   return o;
 }
 
+// hsolve's nested dissection is fitted (shapes, W) as run by default, with the flow refinement of
+// its separators. Two rules adapt it to the planned work, both on nd_work_ratio, the predicted
+// planned numeric time over the predicted ordering time (results/p9_ordering.md sections 5.4, 8.2):
+//   * from kNdEffortWorkRatio (30) on: the effort on the top separators (ordering x1.05-1.2 on the
+//     large cases, ss-ge87h76 -12% flops, nothing elsewhere: priced x1.2 / x0.97 / x0.99);
+//   * under kNdFlowWorkRatio (4.5): no flow refinement. Measured with / without it (16 threads,
+//     slot): ordering x0.98-1.39 on the 1e4-3e4 3-D cases, analysis x0.90-1.83 (median 1.05) on the
+//     1e5 ones; flops x0.74-1.0, entries x0.86-1.0 - priced x1.15 / x0.90 / x0.95 (flops geomean
+//     over 19 cases 0.90). At the small end the time does not follow the flops: at ratios 3.3-3.6
+//     the analysis, three factorizations and 22 four-column solves changed by +19 ms
+//     (yee-pec-cube-16: flops -17%, yet its factorization +10% and four-column solves +17% on the
+//     new tree), -7 ms (yee-pec-box-1e4), -24 ms (ss-tem27623) and +18 ms (ss-helm3d01: ordering
+//     +34 ms) - about even, a regression risk; from 5.6 on (the Yee 1e4 cells, the 1e5 3-D cases)
+//     the run model changed by -14% to +3% (median -7%), at 1e6 (ratios ~20) flops -1% / -27%. The
+//     threshold lies in the gap between them (3.6 to 5.6, geometric mean 4.5). Without the flow the
+//     dissection orders those graphs as P5c's did (the same flops): they run as on main a831d79.
 void OrderingPricer::predict(std::vector<OrderingCandidate>& cand, std::size_t anchor) const {
   FactorEstimate a;
   a.flops = cand[anchor].flops;
   a.factor_entries = static_cast<std::int64_t>(cand[anchor].entries);
+  if (cand[anchor].ordering == kOrderingNestedDissection && !cand[anchor].nd_flow) {
+    // The anchor ran without the flow refinement; the shapes relate the others to the fitted one.
+    a.flops *= kNdFlowFlops;
+    a.factor_entries = static_cast<std::int64_t>(cand[anchor].entries * kNdFlowEntries);
+  }
   for (auto& c : cand) {
     if (c.analysed) continue;
     auto [flops, entries] = predicted_shape(model, c.ordering, amd, pencil_nnz, cand[anchor].ordering, a);
@@ -993,14 +1015,23 @@ void OrderingPricer::predict(std::vector<OrderingCandidate>& cand, std::size_t a
     c.numeric_s = planned_numeric_s(model, cfg, work, in.mumps, flops, entries, threads,
                                     c.ordering == 0 ? entries / std::max(1.0, pencil_nnz) : 0.0);
     c.nd_effort = false;
+    c.nd_flow = true;
     if (c.ordering == kOrderingNestedDissection) {
-      // The effort on the top separators where the numeric work dwarfs the ordering (nd_ordering_options).
+      // The effort on the top separators where the numeric work dwarfs the ordering, no flow
+      // refinement where it is small against it (nd_ordering_options; the rules above).
       const double ordering_s = c.analysis_s - given_order_analysis_s(model, in.mumps, entries);
+      c.nd_work_ratio = c.numeric_s / std::max(ordering_s, 1e-300);
       if (c.numeric_s >= kNdEffortWorkRatio * ordering_s) {
         c.nd_effort = true;
         flops *= kNdEffortFlops;
         entries *= kNdEffortEntries;
         c.analysis_s = given_order_analysis_s(model, in.mumps, entries) + kNdEffortTime * ordering_s;
+        c.numeric_s = planned_numeric_s(model, cfg, work, in.mumps, flops, entries, threads, 0.0);
+      } else if (c.numeric_s < kNdFlowWorkRatio * ordering_s) {
+        c.nd_flow = false;
+        flops /= kNdFlowFlops;
+        entries /= kNdFlowEntries;
+        c.analysis_s = given_order_analysis_s(model, in.mumps, entries) + ordering_s / kNdFlowTime;
         c.numeric_s = planned_numeric_s(model, cfg, work, in.mumps, flops, entries, threads, 0.0);
       }
     }
@@ -1118,7 +1149,8 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   auto analyse = [&](std::size_t i) {
     FactorOptions o = fopts;
     o.ordering = orderings[i];
-    if (o.ordering == kOrderingNestedDissection) o.nested_dissection = nd_ordering_options(cand[i].nd_effort);
+    if (o.ordering == kOrderingNestedDissection)
+      o.nested_dissection = nd_ordering_options(cand[i].nd_effort, cand[i].nd_flow);
     obj[i] = make_mumps_factorization<T>(o);
     Timer t;
     obj[i]->analyze(pencil, 1.0, -sigma0);
@@ -1131,12 +1163,15 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
     if (i != pick) obj[i].reset();
   const FactorEstimate& amd_estimate = pricer.amd;
   const double fill = cand[0].entries / std::max(1.0, nnz);
-  // The log: every candidate's price, which were analysed (with their wall time), the choice.
+  // The log: every candidate's price, which were analysed (with their wall time), the choice; for
+  // hsolve's nested dissection its rules' flags (e effort, n no flow refinement) and ratio (r).
   std::string summary;
   for (std::size_t i = 0; i < cand.size(); ++i) {
     summary += (i ? " " : "") + std::to_string(orderings[i]) + (cand[i].nd_effort ? "e" : "") +
-               (cand[i].analysed ? ":a" : ":p") + "/" + fmt(cand[i].score_s) + "s";
+               (cand[i].nd_flow ? "" : "n") + (cand[i].analysed ? ":a" : ":p") + "/" +
+               fmt(cand[i].score_s) + "s";
     if (cand[i].analysed) summary += "/" + fmt(seconds[i]) + "s";
+    if (orderings[i] == kOrderingNestedDissection) summary += "/r" + fmt(cand[i].nd_work_ratio);
   }
   event(c, "ordering", {{"choice", static_cast<std::int64_t>(orderings[pick])},
                         {"amd_flops", amd_estimate.flops},
