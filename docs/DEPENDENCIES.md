@@ -57,18 +57,31 @@ P9 未增加求解器依赖，改变了 MUMPS 的来源：
 - 构建工具：环境内的 gfortran、make；`patch`（无则用 `git apply`）；`objdump`（`$OBJDUMP` 或系统的，检查库不需要
   glibc > 2.17）。
 
+P10 多进程模式（可选，`docs/PARALLEL.md`、`docs/DESIGN.md` §3.9）：
+- **`hsolve-mpi`**（CMake `HSOLVE_WITH_MPI=AUTO`：找到 MPI 就构建）动态链接 MPI：集群节点上为 os2026-ref 环境的
+  **Open MPI 5.0.11**（BSD-3-Clause），经它链接 PMIx 5.0.8（BSD-3-Clause）、hwloc 2.13（BSD-3-Clause；经它
+  libxml2 2.15，MIT，与 GNU libiconv 1.18，LGPL-2.1，动态链接）、libevent 2.1.12（BSD-3-Clause）、UCX 1.22 与
+  UCC 1.8（BSD-3-Clause）、libfabric 1.22（BSD-2-Clause / GPL-2.0 双许可，按 BSD-2-Clause 使用）、rdma-core 65
+  （同为 BSD-2 / GPL-2 双许可）、libnl 3.11（LGPL-2.1+，动态链接）；启动脚本 `hsolve-mpirun` 调用该 MPI 的 `mpiexec`
+  （Open MPI 自带的 PRRTE `prterun`）。每个进程仍链接顺序版 MUMPS（其 libmpiseq 的 MPI 桩函数由排在前面的真
+  MPI 覆盖，DESIGN §3.9）。版权声明与许可证：`THIRD_PARTY_NOTICES` 3.7。`hsolve` 可执行文件、libhsolve 与 Python
+  模块不链接 MPI；评测机没有 MPI 时不构建 `hsolve-mpi`，普通 `hsolve` 即默认路径。
+- 只测过 Open MPI 5.0.11；启动脚本经环境变量把布局传给各 rank，Open MPI 专有的选项（`-x`、`--bind-to none`、测试的
+  `--oversubscribe`）只在 `mpiexec --version` 表明是 Open MPI 时才加（MPICH / Intel MPI 的 Hydra 默认转发环境、
+  不绑核、不限 rank 数；其它启动器的选项可经 CMake 的 `MPIEXEC_PREFLAGS` 加给测试）。
+
 不使用：Intel MKL / PARDISO、HSL（MA57/MA97）、Panua-Pardiso 等非开源组件。
 CUDA（若引入）为 NVIDIA 闭源但免费，赛题明确允许；仅作可选加速，不作为核心能力。
 
 公开测试矩阵（SuiteSparse Matrix Collection）按 CC-BY 4.0 使用，引用见 `tools/gen/` 生成的元数据。
 
-## 对照基线（环境 `os2026-ref`，只用于 `tools/bench/`，不随 hsolve 分发）
+## 对照基线（环境 `os2026-ref`，用于 `tools/bench/`；其 Open MPI 也是集群节点上 `hsolve-mpi` 链接的 MPI，见上）
 
 | 依赖 | 版本 | 许可证 | 用途 |
 |---|---|---|---|
 | PETSc / SLEPc（petsc4py / slepc4py） | 3.26 | BSD-2-Clause | SLEPc Krylov-Schur + 位移反演基线（`tools/bench/baseline_slepc.py`） |
 | MUMPS（MPI 版） | 5.8.2 | CeCILL-C | 基线的分解（与 hsolve 同版本，使对比只差特征值层） |
-| OpenMPI | 5 | BSD-3-Clause | 基线的多 rank 布局 |
+| OpenMPI | 5.0.11 | BSD-3-Clause | 基线的多 rank 布局；`hsolve-mpi` 的 MPI（P10） |
 | libfabric | 1.22（集群节点，见下） | BSD-2-Clause / GPL-2.0 双许可 | OpenMPI 的传输层 |
 | PT-SCOTCH / ParMETIS | — | CeCILL-C / 明尼苏达大学许可（限非营利研究） | 基线调优中试过的并行分析（ICNTL(28)=2） |
 

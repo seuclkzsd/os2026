@@ -1,5 +1,5 @@
 // GPU module: dgemm offload for the large dense updates of MUMPS' factorizations (P10 "gpu";
-// docs/DESIGN.md §3.9, docs/BLAS.md §10, results/p10_gpu.md). Scalar set: double (FP64 on both
+// docs/DESIGN.md §3.10, docs/BLAS.md §10, results/p10_gpu.md). Scalar set: double (FP64 on both
 // the CPU and the GPU: cublasDgemm is IEEE double arithmetic like any BLAS).
 //
 // One call C = alpha op(A) op(B) + beta C is split along one dimension of C - its columns when

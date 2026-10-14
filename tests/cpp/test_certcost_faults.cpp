@@ -172,13 +172,15 @@ TEST(DriverCountFailureConfig, ParseValidateRoundTrip) {
   EXPECT_EQ(hs::parse_config(R"({"certificate_fault_count": 95})").certificate_fault_count, 95);  // 64+16+15
   const auto j = nlohmann::json::parse(hs::config_to_json(hs::parse_config(R"({"certificate_fault_count": 37})")));
   EXPECT_EQ(j["certificate_fault_count"], 37);
-  for (const char* bad : {R"({"certificate_fault_count": -1})", R"({"certificate_fault_count": 128})",
+  // P10: 128 = every task of a helper process fails (multi-process solves, DESIGN §3.9).
+  EXPECT_EQ(hs::parse_config(R"({"certificate_fault_count": 144})").certificate_fault_count, 144);  // 128+16
+  for (const char* bad : {R"({"certificate_fault_count": -1})", R"({"certificate_fault_count": 256})",
                           R"({"certificate_fault_count": 48})", R"({"certificate_fault_count": 1.5})"})
     EXPECT_THROW(hs::parse_config(bad), hs::Error) << bad;  // 48: two kinds at once
   EXPECT_EQ(hs::driver::kFaultCountMask,
             hs::driver::kFaultCounterCounts | hs::driver::kFaultMainCounts | hs::driver::kFaultCountAllowance |
                 hs::driver::kFaultRefactorization | hs::driver::kFaultOtherError | hs::driver::kFaultBadAlloc |
-                hs::driver::kFaultLate);
+                hs::driver::kFaultLate | hs::driver::kFaultHelperTasks);
 }
 
 // ---------------------------------------------------------------------- end to end, typed
@@ -607,7 +609,7 @@ TYPED_TEST(DriverCountFailureTyped, CertifierCounterFailureLeavesTheVerdictToThe
   rep.certificate.count_inertia = nu_b - nu_a;
   rep.certificate.count_found = kK;
   rep.certificate.passed = nu_b - nu_a == kK;
-  certifier.record_exact(false);
+  certifier.record_exact("main factorization");
   EXPECT_TRUE(rep.certificate.passed);
   EXPECT_NE(rep.certificate.statement.find("single counts failed"), std::string::npos) << rep.certificate.statement;
   // With no count possible the report says the certificate was not completed.

@@ -24,6 +24,8 @@ Contents
           3.4  SCOTCH 7.0 (through MUMPS)                         CeCILL-C
           3.5  zlib 1.3                                           zlib
           3.6  GCC runtime libraries                              GPL-3.0 with the GCC Runtime Library Exception
+          3.7  Open MPI 5.0.11 and its run-time libraries         BSD-3-Clause (some LGPL-2.1 / dual,
+               (hsolve-mpi and the hsolve-mpirun launcher only)    see 3.7)
   Part 4  Used only for tests, tools or experiments (not part of the hsolve binaries)
 
 
@@ -255,6 +257,37 @@ require.
   (https://www.gnu.org/licenses/gcc-exception-3.1.html): code compiled by GCC and linked with
   these libraries may be distributed under terms of the distributor's choice.
 
+3.7 Open MPI 5.0.11 and its run-time libraries - hsolve-mpi only (P10, DESIGN §3.9)
+---------------------------------------------------------------------------------------------------
+The optional multi-process executable hsolve-mpi (built when CMake finds an MPI,
+HSOLVE_WITH_MPI=AUTO; on the cluster nodes the Open MPI of the os2026-ref environment) links
+libmpi and through it the libraries below; hsolve-mpirun starts it with that MPI's mpiexec
+(PRRTE's prterun). The hsolve executable, libhsolve and the Python module do not link any of them.
+Texts: info/licenses/ of each conda package (conda-forge), and the URLs given.
+  * Open MPI 5.0.11 (libmpi, libopen-pal; mpiexec / prterun, PRRTE included): BSD-3-Clause.
+      Copyright (c) 2004-2012 The Trustees of Indiana University and Indiana University Research
+      and Technology Corporation; Copyright (c) 2004-2024 The University of Tennessee and The
+      University of Tennessee Research Foundation; Copyright (c) 2004-2018 High Performance
+      Computing Center Stuttgart, University of Stuttgart; Copyright (c) 2004-2008 The Regents of
+      the University of California; and the further copyright holders listed in its LICENSE file
+      (https://github.com/open-mpi/ompi/blob/v5.0.x/LICENSE). All rights reserved.
+      License: BSD-3-Clause, the conditions and disclaimer of section 1.1 with these copyright
+      lines and "the copyright holders" for "the OpenBLAS project".
+  * PMIx 5.0.8 (libpmix): BSD-3-Clause (https://github.com/openpmix/openpmix/blob/master/LICENSE).
+  * hwloc 2.13 (libhwloc): BSD-3-Clause (https://github.com/open-mpi/hwloc/blob/master/COPYING);
+    through it libxml2 2.15 (MIT) and GNU libiconv 1.18 (LGPL-2.1, dynamically linked).
+  * libevent 2.1.12 (libevent_core, libevent_pthreads): BSD-3-Clause
+    (https://github.com/libevent/libevent/blob/master/LICENSE).
+  * UCX 1.22 (libucp, libucs, libucm, libuct) and UCC 1.8 (libucc): BSD-3-Clause
+    (https://github.com/openucx/ucx/blob/master/LICENSE, https://github.com/openucx/ucc/blob/master/LICENSE).
+  * libfabric 1.22 (libfabric): BSD-2-Clause or GPL-2.0, at the user's choice - used under
+    BSD-2-Clause (https://github.com/ofiwg/libfabric/blob/main/COPYING).
+  * rdma-core 65 (libibverbs, librdmacm, libefa; through UCX and libfabric): BSD-2-Clause or
+    GPL-2.0 ("Linux-OpenIB"), used under BSD-2-Clause (https://github.com/linux-rdma/rdma-core).
+  * libnl 3.11 (libnl-3, libnl-route-3; through rdma-core): LGPL-2.1-or-later, dynamically
+    linked (https://github.com/thom311/libnl/blob/main/COPYING).
+  * libatomic (GCC runtime, section 3.6).
+
 
 ===================================================================================================
 Part 4. Used only for tests, tools or experiments
@@ -264,10 +297,10 @@ Not part of the hsolve library, executable or Python module; listed for complete
   * GoogleTest 1.18 (C++ unit tests): BSD-3-Clause, Copyright 2008, Google Inc.
   * NumPy 2.4 / SciPy 1.17 (case generators, evaluation, baselines; runtime dependencies of the
     Python front end, not linked into it): BSD-3-Clause.
-  * Comparison baseline environment os2026-ref (tools/bench only): PETSc / SLEPc 3.26
-    (BSD-2-Clause), MUMPS 5.8.2 MPI (CeCILL-C), OpenMPI 5 (BSD-3-Clause), libfabric 1.22
-    (BSD-2-Clause / GPL-2.0 dual), PT-SCOTCH (CeCILL-C), ParMETIS (University of Minnesota license,
-    non-profit research only).
+  * Comparison baseline environment os2026-ref (tools/bench): PETSc / SLEPc 3.26
+    (BSD-2-Clause), MUMPS 5.8.2 MPI (CeCILL-C), PT-SCOTCH (CeCILL-C), ParMETIS (University of
+    Minnesota license, non-profit research only). Its Open MPI 5 and libfabric 1.22 are also what
+    hsolve-mpi links on the cluster nodes: section 3.7.
   * BLAS experiments (tools/deps, built from pinned source tarballs, never distributed with
     hsolve): OpenBLAS 0.3.34, BLIS 2.1, LIBXSMM 1.17, all BSD-3-Clause.
   * Public test matrices from the SuiteSparse Matrix Collection: CC-BY 4.0 (citations in the case

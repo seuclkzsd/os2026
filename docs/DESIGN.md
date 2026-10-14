@@ -63,7 +63,13 @@ CPU（§6）。MPI MUMPS 在一个 16 核 socket 上慢于顺序版 + OpenMP（0
 v9（P10「gpu」，分支 p10gpu）——新模块 src/gpu（不属于 libhsolve，由 BLAS hook 使用）：运行时 dlopen 的 CUDA runtime 与
 cuBLAS，把 MUMPS 分解（含证书计数）中被主机流量模型判为划算的大 dgemm 以 FP64 卸载到一张 GPU（暂存打包、cuBLAS、主机
 加回；默认只用 GPU，混合模式为测量选项）；模式 `HS_GPU` / `hsolve --gpu off|auto|on`，默认 off（与今天的 CPU 路径完全
-相同），无 GPU 或无 CUDA 库时自动回到 CPU（降级模式）；报告的 `gpu` 对象（§3.8、§3.9）。实测见 `results/p10_gpu.md`。
+相同），无 GPU 或无 CUDA 库时自动回到 CPU（降级模式）；报告的 `gpu` 对象（§3.8、§3.10）。实测见 `results/p10_gpu.md`。
+
+v10（P10「mpi」，分支 p10mpi）——可选的多进程模式 `hsolve-mpi`（CMake `HSOLVE_WITH_MPI=AUTO`，启动脚本
+`hsolve-mpirun`）：leader 占全部核运行 hs::solve，每个 NUMA 节点一个 helper 进程；nearest 证书的两次精确计数由两个
+helper 同时做，窗口目标的切片交给 helper，是否交出由代价规则与覆盖整棵进程树的内存预算决定，helper 失败由 leader
+接手（故障位 128）；只有一个 NUMA 节点时启动脚本直接运行单进程 hsolve。`src/parallel`（libhsolve 内，无 MPI）与
+`src/mpi`（MPI 传输）；报告新增 `parallel` 对象（§3.9）。实测见 `results/p10_mpi.md`、`docs/PARALLEL.md`。
 
 ---
 
@@ -109,7 +115,10 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
              并行切分，其余原样转发真实 BLAS；默认链入 hsolve 可执行文件，或以 libhsolve_blashook.so
              预加载（§3.8，docs/BLAS.md）
 src/gpu      （P10，不属于 libhsolve，由 hook 使用）运行时加载的 CUDA runtime / cuBLAS，把 MUMPS 分解中的大 dgemm
-             卸载到 GPU（FP64），模式 off | auto | on，默认 off；无 GPU 时为 CPU 路径（§3.9）
+             卸载到 GPU（FP64），模式 off | auto | on，默认 off；无 GPU 时为 CPU 路径（§3.10）
+src/parallel （P10，属于 libhsolve，无 MPI）多进程会话：hs::solve_parallel / serve、消息协议、driver::Helpers 的
+             实现（RemoteHelpers）、线程传输（测试用）；位于 driver 之上，driver 只见接口（§3.9）
+src/mpi      （P10，不属于 libhsolve，HSOLVE_WITH_MPI）hs::Transport 的 MPI 实现；hsolve-mpi 可执行文件
 ```
 
 - 下层模块（io / sparse / linalg / factor / ops / eigen / verify）**不打印、不依赖日志**；统计信息
@@ -1110,6 +1119,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    - 窗口目标（interval / smallest / largest）总是精确计数——它们的计数点就是切点与位移，`certificate =
      randomized` / `off` 被忽略并告警；零带干扰时转交窗口的 nearest 同样精确计数。报告的 method 为 exact。
    - GHIEP 无惯性证书（报告中注明，method 为 none）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。
+   - 多进程求解（P10，§3.9）：exact 的两次计数在代价与内存允许时由两个 helper 进程同时各做一次（`concurrent_counts`，
+     同 `count_below` 的规则，计数相同）；否则如上在 leader 上依次计数。
 8b. **窗口与谱切片**（interval / smallest / largest，B 正定或 B = I；以及零带干扰的 nearest，见 9）：
    - 窗口端点与所有切点都是同一分析上的精确 Sylvester 计数，每片都知道自己含几个特征值；各片单独
      求解、单独认证，最后合并。
@@ -1136,6 +1147,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      片大小的代价模型未按块运行重新标定，窗口目标的性能未重测。
    - 合并：来自不同片、特征值相差 ≤ 2e-9 相对的对成组，以 B-Gram 秩（1e-4）+ Rayleigh–Ritz 去重；
      全局证书逐窗口要求「不同对数 == 计数」。
+   - 多进程求解（P10，§3.9）：切点照旧由 leader 计数，各片交给 helper 进程（同一 `run_slice`），leader 合并；有 ≥ 2 个
+     helper 时含 ≥ 32 个特征值的窗口至少切成 helper 数那么多片。
    - smallest / largest：窗口 (−∞, U] 与 [L, +∞)，U（L）由上述惯性搜索确定：要求 ν(U) ∈ [k, k + slack]，
      slack = t_分解 / 边际每对代价（钳到 [1, max(16, k)]：多算几对比再做一次计数便宜时停止细化），
      再在 U（L）处单边运行。第 k 个特征值落在数值相等的大簇（超出 k 的副本多于 max(16, k)，如零空间）
@@ -1219,14 +1232,108 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   更高的三角条带（更少更大的调用）0.99 倍；GEMMT 未走（OpenBLAS 0.3.34 的 dgemmt 是逐列 dgemv）。
 - 许可：窄核改编自 OpenBLAS 0.3.34 的 SkylakeX 核（BSD-3-Clause），版权与许可声明见
   `src/blas/simd_kernels.hpp`、`docs/BLAS.md` §7 与根目录 `THIRD_PARTY_NOTICES`。
-- GPU 路由（P10，§3.9）：构建带 GPU 模块时（CMake `HSOLVE_GPU`，默认 ON），dmumps_c 的包装在分解（JOB 2，及含分解的
+- GPU 路由（P10，§3.10）：构建带 GPU 模块时（CMake `HSOLVE_GPU`，默认 ON），dmumps_c 的包装在分解（JOB 2，及含分解的
   4/5/6）前后开关 GPU 卸载窗口；窗口内、并行区外、被 GPU 模块模型接受的 dgemm 走 GPU（路由 `Gpu`，剖析器标签 `gpu`）。
   与 `HS_BLAS_ROUTE` 无关，由 GPU 模式决定（默认 off：路由与今天完全相同）。
 
-### 3.9 gpu（`src/gpu/`，P10「gpu」；不属于 libhsolve；实测见 `results/p10_gpu.md`、`docs/BLAS.md` §10）
+### 3.9 多进程（MPI，P10「mpi」；`src/parallel`、`src/mpi`、`apps/hsolve_mpi.cpp`；实测 `results/p10_mpi.md`，用法 `docs/PARALLEL.md`）
+- **动机（实测，测量节点 2 socket × 16 核，每次运行 16 核）**：数值分解与计数受内存带宽限制。一个 socket 上 MPI 无益
+  （P9，`results/p9_mpi.md`）；两个 socket 时：
+  - 一个进程 16 线程分在两个 socket（各 8 核）：1e6 的分解 / 计数比单 socket 16 线程快 1.19–1.27 倍（多了一个 socket
+    的带宽），1e5 反而慢（分解 0.63–0.92 倍、计数 0.36–0.76 倍：新实例的首次触摸把内存放在一个 socket 上）；
+  - **每 socket 一个进程、同时各做一个独立分解，互不干扰**：两个并发的 8 线程计数各自只用一个 8 线程计数单独时的时间
+    （1e6：27.07 对 26.95 s，22.45 对 22.37 s；1e5：0.520 对 0.507 s），证书的两次计数因此比单 socket 上 hsolve
+    的顺序两次快 1.59 倍（1e6）/ 1.58–1.74 倍（1e5 三维），比两 socket 上 16 线程的顺序两次快 1.30 / 1.32 倍（1e6）、
+    2.3–4.7 倍（1e5）。同一 socket 上的两个并发进程则互相拖慢（各 1.4–1.8 倍）。
+  - MPI MUMPS 2×8 跨 socket 做一次分解：1e5 比 16 线程跨 socket 快 1.16–1.39 倍，1e6 只有 0.95 / 1.09 倍；要用它，
+    主对象须换成分布式 MUMPS（与 hsolve 链接的顺序 MUMPS 及其 libmpiseq 冲突，回代、修正与 Krylov 基也须随之分布），
+    收益不稳——未采用。实测的收益来自彼此独立的分解按 socket 并发，不需要分布式分解。
+- **布局（leader + 每 socket 一个 helper）**：rank 0（leader）占全部核（OMP 线程 = 核数），做 hs::solve 的全部顺序
+  工作（分析、主分解、Krylov、验证、切点计数）；rank 1..S（helper）各绑定一个 NUMA 节点（socket）的核，线程数 = 该
+  节点的核数。**leader 计算时 helper 只等消息，helper 计算时 leader 只等结果**——任何时刻都不超订核；helper 的数据
+  （矩阵副本、分析、因子）在它自己 socket 的内存上。等待不占核：`MpiTransport::receive` 以 MPI_Iprobe 加 50 µs–2 ms
+  递增的睡眠轮询（Open MPI 的阻塞 MPI_Recv 会空转一个核）。`hsolve-mpirun` 按进程的 cpuset 与 NUMA 拓扑给出
+  R = 1 + S；允许的核只在一个 NUMA 节点上且未给 `--ranks` 时，它以同样的参数直接 exec 同目录的普通 `hsolve`（不起 MPI
+  作业、不需要 mpiexec、没有约 1.7–1.9 s 的 MPI 启动）；`--ranks R` 强制一个 R 个 rank 的 MPI 作业（R − 1 个
+  helper：有那么多 NUMA 节点就按节点，否则把核等分）。布局经环境变量（`HSOLVE_MPIRUN_PLAN`、`HSOLVE_MPIRUN_EXE`，
+  导出——各启动器都把环境传给本机的 rank）交给各 rank，rank 号取 `OMPI_COMM_WORLD_RANK`、`PMIX_RANK`、`PMI_RANK`
+  （Hydra：MPICH、Intel MPI）或 `MV2_COMM_WORLD_RANK`；Open MPI 专有的 `-x` 与 `--bind-to none` 只在 `mpiexec
+  --version` 表明是 Open MPI 时才加（审查 p10mpi 第 3、4 条）。
+- **交给 helper 的工作**（driver 只见接口 `driver::Helpers` / `HelpersOf<T>`，`src/driver/helpers.hpp`；会话协议与
+  消息编码在 `src/parallel`，MPI 传输在 `src/mpi`）：
+  1. **nearest 证书（exact）的两次计数** ν(a)、ν(b)：两个 helper 同时各做一次（`concurrent_counts`，helpers.cpp），
+     规则同 `count_below`（谱隙点、奇异时外移，`count_below` 的函数重载），在各自的 InertiaCounter 上（从 helper 的
+     主对象构造；主对象以 leader 主分析的主元顺序 PERM_IN 分析，之后丢弃，只留计数器的分析）——计数是精确整数，与
+     单进程逐个相同。前提：至少两个可用 helper；问题已共享；**代价规则**（`ParallelOptions::helper_counts = auto`）：
+     本次实测的主分解时间 t_f 下，一次计数（0.9 t_f）须多于 helper 的准备（`helper_preparation_s`：两次给定顺序的
+     分析，按 `model_analysis_s` 上界，加 0.05 s 消息）——helper 的计数在 1e5 比 leader 的快（0.85 倍时间）、在 1e6
+     慢（1.53 倍），规则取二者相等；内存：leader 先释放主因子（同 `MainFactors::Release`，重跑时在 σ 重分解），
+     **发送问题之前**按预测检查——两次计数（各按主分析内存内估计的 `kHelperCountShare` = 0.45 倍，实测 0.38–0.50）
+     加两个 helper 拿到问题后持有的内存（矩阵字节的 `kHelperProblemCopies` = 2.5 倍，实测 1.8–2.7）须放得下计数余量
+     （`count_allowance_mb`）；helper 拿到问题后再以它们报告的计数估计与占用检查一次。不满足时 leader 照旧自己数
+     （report.parallel.notes 说明原因）；问题已发出时 helper 先放下它（`Helpers::drop`），helper 的两次计数之后也
+     放下——leader 自己的计数（全部，或某个 helper 失败的那一次）与随后的重跑看到的预算与 hs::solve 相同（审查 p10mpi
+     第 1 条：helper 留着问题时 syn-mem27-46 在 1.0 GiB 下证书未完成，hs::solve 则通过）。certificate 的陈述注明各次
+     计数在哪里做："2 of the 2 counts made by helper processes"；一次由 helper、一次由 leader 时写明 leader 那次是在
+     InertiaCounter 还是主分解上（`count_sources`，certificate.hpp）。
+  2. **窗口目标的切片**（interval / smallest / largest，及零带转交的 nearest）：窗口端点与切点照旧由 leader 计数
+     确定；各片依次交给空闲的 helper（`WindowSolver::solve_slices`，同一 `run_slice`：位移、分解、Krylov、验证、片内
+     重跑；helper 的主对象同样以 leader 的主元顺序分析），leader 等待并合并（池中每对带片号，`deduplicate()` 与全局
+     证书看到的同单进程）。前提：至少两个可用 helper；代价规则（`helper_slices = auto`）：一片的预测工作（切片代价
+     模型：分解 + c 对）多于 helper 的准备（一次分析 + 消息）；内存：一个 helper 的片（主分析的内存内估计 ×1.15 +
+     c_max 对的 Krylov 工作集 7 c n 个标量）能放下几个就用几个 helper，少于两个则 leader 全做——先按预测（预算余量
+     加 leader 的主因子、减去 helper 的问题副本）决定是否发送问题，helper 拿到后以实际占用再定；只在交出时 leader
+     才释放主因子。有 ≥ 2 个 helper 时，含 ≥ 32 个特征值的窗口至少切成 helper 数那么多片（每片 ≥ 16；顺序的代价模型
+     会把 yee-pec-box-1e5 [40, 400] 的 108 个特征值留成一片，helper 空闲）——**只在 helper 会接下这些片时**：代价规则
+     通过、且预测两个 helper 的片同时放得下（预算余量减去输出池与 helper 的问题副本，加上 leader 的主因子）；否则保持
+     顺序模型的切片，leader 像 hs::solve 一样解（审查 p10mpi 第 2 条：先切再被内存规则拒绝时 yee-pec-box-1e5 [40, 400]
+     在 2.5 GiB 下多一次切点计数与一片，5 次分解对 3 次，0.78 倍）。helper 的片做完（或被拒）后放下问题，leader
+     再解交回的片。helper 的部分簇判定为非数值相等时由 leader 整簇求解（同单进程）。
+  3. 其余——分析、主分解、Krylov、randomized / 单精度证书、GHIEP 全部——仍在 leader 上：没有能并发的独立分解。
+- **共享时机**：问题（leader 输入检查后的 A、B 的 CSR、工作配置、范数、主元顺序与因子选项，`share()` 只登记）在 helper
+  第一次有任务前才发送（`Helpers::prepare`），helper 随即构造 pencil 并（nearest）分析计数器，leader 等它们就绪。
+  早发送让 helper 的分析与 leader 的主分解重叠：1e5 上主分解慢 0.2–0.35 s（筛查），故改在 leader 本就要等待时。
+- **结果与容错**：结果与单进程相同（计数是整数；切片同一代码、同一主元顺序，只差分解线程数造成的舍入）。helper 的任务
+  失败（MUMPS / 内存错误、`std::bad_alloc`、任何异常；故障注入 `certificate_fault_count` 位 128）以错误回复，leader
+  自己做该工作，该 helper 本次求解不再使用（`report.parallel.fallbacks`、notes、告警）。helper **进程**死亡则 MPI 作业
+  终止（MPI 默认错误处理），hsolve 无法接住。
+- **内存**：预算覆盖进程树为本次求解持有的内存——`memory_in_use` 加上每个 helper 报告的 RSS 中高于其空闲水平
+  （没有问题时的 RSS，随 Ready / Dropped 报告）的部分，任务进行中按授予的额度计；helper 进程本身（MPI、库，每个约
+  50 MB）不计入，与它第一次拿到问题之前一样。helper 只在一批工作即将进行或进行中持有问题：被拒、做完或交回时
+  leader 发 Drop，helper 释放问题及其上的一切（副本、分析、因子）并 `malloc_trim`，回复剩余的 RSS（Dropped），leader
+  等到回复才继续（1e5 上约 0.01 s）。分析前的规划仍只看 leader（helper 那时还没有数据）。
+- **报告**：`report.parallel`（processes、threads、helper_counts、helper_slices、fallbacks、share_s、wait_s、
+  helper_busy_s、notes）；阶段计时仍互斥：发送问题与等待 helper（就绪、结果、放下问题）计入当时的阶段——计数为
+  certificate，切片为 iterate。helper 的事件写到 `<log>.rank<r>`。
+- **构建与运行**：CMake `HSOLVE_WITH_MPI`（AUTO：找到 MPI 即构建；集群节点上为 `$HS_REF_ENV` 即 os2026-ref 环境的
+  Open MPI 5.0.11）构建 `hsolve-mpi`（与 `hsolve` 同一份命令行，`apps/cli.cpp`）、`hsolve-mpirun` 与
+  `test_mpi_session`（1、2、3 个 rank）。hsolve 链接顺序 MUMPS，其 libmpiseq 以桩函数定义 MPI_Init、MPI_Comm_rank、
+  MPI_Finalize、MPI_Wtime：MPI 库在链接行上排在 MUMPS 之前，全局符号查找取真正的 MPI；`hsolve-mpi` 启动时检查
+  （`hs::mpi::mpi_library`），`test_mpi_session` 亦检查；可执行文件不包含 `<mpi.h>`（MUMPS 的 include 目录里有
+  libseq 的 mpi.h 桩）。`--helper-counts` / `--helper-slices`（auto | on | off）= `hs::ParallelOptions`。只测过
+  Open MPI 5.0.11：`test_mpi_session` 的 `--oversubscribe --bind-to none` 只在 configure 时 `mpiexec --version` 表明是
+  Open MPI 才加（Hydra 默认不绑核、不限 rank 数；其它启动器的选项经 `MPIEXEC_PREFLAGS`），启动脚本见上。
+- **实测**（两 socket 各 8 核对一个进程 16 线程跨两 socket，5 次交错、每次有效，`results/p10_mpi.md` §4，审查修复后的
+  二进制 54e5219）：两 socket 上 hsolve-mpi 对 hsolve（16 线程跨两个 socket）：1e6 nearest 1.11 / 1.09 倍
+  （syn-mem27-100 75.8 → 68.5 s，yee-pec-box-1e6 64.1 → 59.0 s；证书 36.0 → 29.2 s、29.9 → 24.2 s；对单 socket 的
+  hsolve 1.26 / 1.23 倍），1e5 三维 nearest 1.10–1.20 倍（证书 0.97–1.01 → 0.73–0.77 s），多片窗口 1.15–1.74 倍
+  （syn-mem27-46 [0.1, 0.3] 655 个特征值 4 片：33.0 → 19.0 s；yee-pec-cube-32 [40, 400] 2 片 1.50 倍）；主分解与 Krylov
+  不变（仍是 leader 的顺序计算）。内存紧时（`results/p10_mpi.md` §7）：同一显式预算下 hsolve-mpi 与 hsolve 同样认证、
+  同样切片（syn-mem27-46 1.0 GiB：5/5 认证，修复前 0/5；yee-pec-box-1e5 [40, 400] 2.5 GiB：1 片 3 次分解、6.27 对
+  6.27 s，修复前 2 片 5 次、0.78 倍）；1e6 在 16 GiB 下不再向 helper 发送放不下的问题（进程树峰值 7.1 对修复前 10.1 GiB）。
+  对照（`results/p10_mpi.md` §4.1）：以 hsolve-mpi 单 rank 启动（同样的启动路径与 Open MPI）或改 glibc 的 malloc 都
+  不带来这一收益，收益来自 helper 的计数与切片。
+- **限制**：单 socket 上 helper 共用一个 socket 的带宽，实测更慢（0.86–0.93 倍；多片窗口仍 1.11–1.16 倍），
+  `hsolve-mpirun` 因此在单 NUMA 节点上直接运行普通 hsolve（墙钟与直接运行相同，`results/p10_mpi.md` §7.3）；
+  MPI 启动（mpiexec + MPI_Init）约 1.7–2 s，计入墙钟、不计入 `time_total_s`，1e5 的 nearest 收益（0.17–0.40 s）抵不上
+  它；GHIEP、randomized 证书与单片窗口没有可并发的工作；每个 helper 工作时另持一份矩阵与分析（1e6：进程树采样峰值
+  18.3 / 14.6 GiB 对单进程 13.2 / 11.3 GiB；预算按 helper 为求解持有的内存计，紧时计数与切片在发送前就留在 leader）；
+  预测偏低时 helper 拿到问题后才被拒，只浪费其准备（`results/p10_mpi.md` §3.1）；只测过 Open MPI。
+
+### 3.10 gpu（`src/gpu/`，P10「gpu」；不属于 libhsolve；实测见 `results/p10_gpu.md`、`docs/BLAS.md` §10）
 - 目的：赛题要求的 GPU 加速与无 GPU 的降级模式。可卸载的只有分解中的稠密更新：1e6 三维测例上分解占整次运行
   约 75%（主分解 + 证书的两次精确计数），其中 L0 层之上逐个调用、按调用多线程的 dgemm 是大头；回代受内存带宽限制、
-  因子在主机内存（PCIe 3 只有 ~12.8 GB/s，低于主机的 ~36 GB/s），不卸载（§3.9 末）。
+  因子在主机内存（PCIe 3 只有 ~12.8 GB/s，低于主机的 ~36 GB/s），不卸载（§3.10 末）。
 - **运行时加载**（`cuda_lib`）：dlopen CUDA runtime 与 cuBLAS（`libcudart.so.12` + `libcublas.so.12`，否则 CUDA 11
   的一对；依次查 `HS_CUDA_LIBDIR`、动态加载器的路径、`/usr/local/cuda*/lib64`，两者取自同一目录）。只声明用到的几个
   入口点与枚举值（CUDA 11/12 的 ABI），构建不需要 CUDA、不含 NVIDIA 的头文件或代码；评测机（无 GPU）上二进制照常运行。
@@ -1335,7 +1442,7 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 - **禁止**：稀疏矩阵稠密化（唯一例外：测试/评测代码中 n ≤ 4000 的参考解）；全局可变状态（例外：
   串行化 MUMPS 调用的进程级锁，§3.4；BLAS hook（§3.8，不属于 libhsolve）的剖析器——只在 `HS_BLAS_PROFILE`
   开启时记录——的每线程表与进程级 MUMPS 阶段标记；稀疏核分派的 CPU 检测与 `HS_KERNELS_NO_AVX512`、BLAS hook
-  解析出的真实例程与路由配置都在首次使用时写一次、之后只读，不算可变状态；GPU 卸载（§3.9，hook 的一部分）的进程级
+  解析出的真实例程与路由配置都在首次使用时写一次、之后只读，不算可变状态；GPU 卸载（§3.10，hook 的一部分）的进程级
   模式、分解窗口、只创建一次的引擎与其统计）；无种子随机数；库代码中
   `std::cout`/`printf`（BLAS hook 只在无法继续时——找不到真实例程、未知路由记号——向 stderr 写一条消息并终止）。
 - 测试：`tests/cpp/test_<module>*.cpp`（GoogleTest），**套件名以模块名开头**（`Sparse*`、`Io*`、
@@ -1348,7 +1455,9 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
   `DriverAdaptiveOrdering`、`DriverOrderingModel`、`LanczosBlockRule`、`VerifyStartScaling`，blas 模块为
   `BlasHook*`；P5c 修复轮的 `AnaintFix*`、`AsmkernFix*`、`CertintFix*` 与 P5c 集成的 `BlocktuneDriver`
   （driver）、`CounterDeferred`（factor）、`P5cIntFix*`（eigen 与 driver）以子任务代号开头，是本规则的
-  例外）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
+  例外；P10 的多进程模块为 `Parallel*`（`test_parallel_session`，线程传输）与 `Mpi*`（`tests/cpp/mpi/`，不在
+  通配之内，ctest 以 1、2、3 个 rank 的 MPI 作业运行：`test_mpi_session.ranks<R>`））。逐位哈希测试的参考表以
+  平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
   `<可执行文件>.<套件>.<用例>`，`tools/dev/test.sh release test_factor` 只跑该文件，匹配不到测试即
   报错。共享夹具在 `tests/cpp/support/`（`hsolve_test_support`），只追加不改签名。
   数值测试尽量用有解析解的问题。Python 工具与 Python 接口的测试在 `tests/py/`（pytest；
@@ -1396,10 +1505,10 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
   剖析，`HS_BLAS_NO_AVX512=1` / `HS_BLAS_NO_AVX2=1` 在 AVX-512 节点上模拟只有 AVX2 / 无 SIMD 的 CPU。命令与
   数据见 `docs/BLAS.md` §8。旧构建目录保留缓存的 `HSOLVE_BLAS_HOOK` / `HSOLVE_BLAS_ROUTE_DEFAULT`，须
   `-U` 后重新配置。
-- **GPU 实验**（P10，§3.9）：只用 gpu02 的 GPU 7（与测量槽同在 NUMA node 1；其余卡属于其他作业，不得触碰）。带 GPU 的
+- **GPU 实验**（P10，§3.10）：只用 gpu02 的 GPU 7（与测量槽同在 NUMA node 1；其余卡属于其他作业，不得触碰）。带 GPU 的
   计时运行经 `tools/bench/gpu_slot.sh 7 TIMEOUT -- CMD`：先用 nvidia-smi 确认该卡空闲（无计算进程、显存占用 ≤ 64 MiB），
   再以 `CUDA_VISIBLE_DEVICES=7` 和 `guard.py --exclusive` 占用测量槽。默认构建的 GPU 模式为 off，单元测试默认看不到任何
-  GPU（§3.9 测试），所以其它 agent 的测量与测试不受影响；GPU 测试用 `HSOLVE_TEST_GPU_DEVICE=7` 显式打开。
+  GPU（§3.10 测试），所以其它 agent 的测量与测试不受影响；GPU 测试用 `HSOLVE_TEST_GPU_DEVICE=7` 显式打开。
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的，`env/hosts/CISL-NF5468M6.sh`；
 集群节点见上；没有主机文件的机器——用户或评测机——`HS_CORES` 默认取该 shell 可用的全部 CPU，`env/activate.sh`，
@@ -1445,4 +1554,5 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |
 | P8 | **已完成**（p8-certcost-fix）：证书的计数失败不再结束求解——计数源（InertiaCounter / 主对象）失败时换另一个，计数前按计数余量检查估计（主对象代替计数器时按其上次分解的 INFOG(21)），SCOTCH 分析超上限时至多再分析两次；都不行时 nearest 交回已收敛的对、证书标为未完成（success = false），窗口目标只丢失败的切片；一般 HPD B 的 κ 与 λ_min 严格界（只用于 auto / randomized）；更便宜的精确计数全部实测为负（两进程并行、单次合并分解、省缩放/检测、换计数源），默认证书仍为 exact（`results/p8_certcost.md`）。 |
 | P9 | **已完成**（p9-merge 90e7483 = ordering + factspeed + mpi 的评审修正分支，集成分支 p9int）。**ordering**：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割；driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时采用）、顶层投入（代价模型决定）；代价模型按新剖分重拟合（重放超额 1.1%），候选顺序中它先于 SCOTCH（门槛：1e6 1.25× / 1.22×，26 个 1e5 测例几何平均 0.919，`results/p9_ordering.md`）。**factspeed**：1e6 分解的剖析（DGEMM 峰值的 40–43%，受内存带宽限制）、MUMPS 块参数 `Blocking`（KEEP(420) = 256、KEEP(57/58)）与补丁 `patches/mumps-5.8.2-l0-blocking.patch`（L0 层下的 KEEP(498/499)）、可复现的 MUMPS 源码构建 `tools/dev/build_mumps.sh`；运行设置、重编（-O3 / AVX2 / AVX-512）、GEMMT 等为负结果（`results/p9_factspeed.md`）。**mpi**：1e6 对调优 SLEPc（`eps_ncv = 3k` 更正后 main 1.04× / 0.67×）与 MPI MUMPS 的上界——一个 16 核 socket 上 2 × 8 … 16 × 1 为顺序版 1 × 16 的 0.85–0.59 倍，负结果、不改设计（`results/p9_mpi.md`）。**集成**：打补丁的自编 MUMPS 成为默认构建（用户决定；官方 tarball 入库 `third_party/mumps/`，`tools/dev/mumps_cache.sh` 按构建输入缓存，`HS_MUMPS=env` 回退到 conda 的 MUMPS，`HS_MUMPS_BLOCKING=mumps` 运行时恢复 MUMPS 的块参数，构建信息写出所用 MUMPS，`tests/py/test_mumps_build.py`），无主机文件的机器上 guard 绑本机的 CPU；`tools/bench/thread_scaling.py`。最终测量（gpu01 测量槽，849 次计时运行全部有效、证书 exact，`results/p9_measurements.md`）：对 main a831d79 1e6（8 次）syn-mem27-100 1.34×、yee-pec-box-1e6 1.28×（同一主元顺序上块参数与补丁 1.056× / 1.053×），41 个数据测例几何平均 0.910、无回归；对调优 SLEPc 8 个配置中 5 个更快（syn-mem27-46 1.77×、yee-pec-box-1e5 1.37×、wg-square-1e5 1.89×、区间 3.14×、syn-mem27-100 1.41×；ss-qa8fk-qa8fm 0.96×、cav2d-rect-pert-1e5 0.74×、yee-pec-box-1e6 0.86×）；16 线程对最快的 1 线程配置（默认及固定的五种排序）三维 1e5 测例 3.57–4.51×、同一主元顺序 4.26–5.09×（评审更正：初稿以默认配置自己的 1 线程运行为基线，其排序在 1 线程时与 16 线程不同，报 4.2–5.4×；`tools/bench/thread_scaling.py` 的 `--variant`）。**未做**：排序代价模型在低线程数的定价（只在 16 线程标定；1 线程时 syn-mem27-46、ss-qa8fk-qa8fm 选 SCOTCH，METIS / PORD 快 1.21 / 1.27 倍，`results/p9_measurements.md` §5）、三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分；L0 层面板的秩 1 更新（PIVOT_OPTION）；证书的两次计数在 1e6 时仍占运行的一半 |
-| P10 | **gpu 已完成**（分支 p10gpu；本行为 GPU 部分的文本建议，MPI 部分见 p10mpi）：src/gpu——运行时 dlopen 的 CUDA runtime / cuBLAS（构建不需要 CUDA），BLAS hook 在 MUMPS 分解（含证书计数）中把主机流量模型判为划算的大 dgemm 以 FP64 卸载到一张 GPU（暂存打包、cuBLAS、主机加回，默认只用 GPU）；`HS_GPU` / `hsolve --gpu off\|auto\|on`，默认 off（CPU 路径不变），auto 只在分解估计 ≥ 3e12 flops 时用 GPU，无 GPU / 无库时为 CPU 路径并在报告中说明（降级模式）；报告的 `gpu` 对象。实测（gpu02 槽 + GPU 7，16 线程，5 次交错，`results/p10_gpu.md`）：单次调用 1.7–5.0×（受主机内存带宽限制）；1e6 三维测例同一主元顺序下每次分解 1.06–1.10×（三次合计 syn-mem27-100 1.092×、yee-pec-box-1e6 1.068×），配 P9 块参数 1.07–1.12×（合计 1.110× / 1.082×），8 线程 1.15×；GPU 承担分解 43–47% 的 flops；整次运行（证书 exact，`--gpu auto`，每次有效）syn-mem27-100 88.9 → 83.1 s（1.069×）、yee-pec-box-1e6 73.8 → 69.7 s（1.058×），峰值内存 +0.47 GiB；1e5–2.6e5 上 `on` 为负（0.72–0.97×）故 auto 只在估计 ≥ 3e12 flops 时用 GPU；每次计数仍是双精度 LDLᵀ 的精确 Sylvester 惯性，证书的条件与保证同 CPU 路径（实测计数与 CPU 路径相同，但不保证逐一相等）；评审修正（p10gpu-fix）：OpenMP 绑定下引擎线程可用全部位置、`chunk_kb` 以槽大小封顶、无 GPU 模块的构建也写出降级报告。**未做**：混合 CPU + GPU、L0 层内调用、回代上 GPU（受主机内存带宽 / 因子在主机内存所限，见 §3.9） |
+| P10 | **gpu 已完成**（分支 p10gpu；本行为 GPU 部分的文本建议，MPI 部分见 p10mpi）：src/gpu——运行时 dlopen 的 CUDA runtime / cuBLAS（构建不需要 CUDA），BLAS hook 在 MUMPS 分解（含证书计数）中把主机流量模型判为划算的大 dgemm 以 FP64 卸载到一张 GPU（暂存打包、cuBLAS、主机加回，默认只用 GPU）；`HS_GPU` / `hsolve --gpu off\|auto\|on`，默认 off（CPU 路径不变），auto 只在分解估计 ≥ 3e12 flops 时用 GPU，无 GPU / 无库时为 CPU 路径并在报告中说明（降级模式）；报告的 `gpu` 对象。实测（gpu02 槽 + GPU 7，16 线程，5 次交错，`results/p10_gpu.md`）：单次调用 1.7–5.0×（受主机内存带宽限制）；1e6 三维测例同一主元顺序下每次分解 1.06–1.10×（三次合计 syn-mem27-100 1.092×、yee-pec-box-1e6 1.068×），配 P9 块参数 1.07–1.12×（合计 1.110× / 1.082×），8 线程 1.15×；GPU 承担分解 43–47% 的 flops；整次运行（证书 exact，`--gpu auto`，每次有效）syn-mem27-100 88.9 → 83.1 s（1.069×）、yee-pec-box-1e6 73.8 → 69.7 s（1.058×），峰值内存 +0.47 GiB；1e5–2.6e5 上 `on` 为负（0.72–0.97×）故 auto 只在估计 ≥ 3e12 flops 时用 GPU；每次计数仍是双精度 LDLᵀ 的精确 Sylvester 惯性，证书的条件与保证同 CPU 路径（实测计数与 CPU 路径相同，但不保证逐一相等）；评审修正（p10gpu-fix）：OpenMP 绑定下引擎线程可用全部位置、`chunk_kb` 以槽大小封顶、无 GPU 模块的构建也写出降级报告。**未做**：混合 CPU + GPU、L0 层内调用、回代上 GPU（受主机内存带宽 / 因子在主机内存所限，见 §3.10） |
+|  | **mpi 已完成**（分支 p10mpi）：多进程模式 hsolve-mpi（leader 占全部核 + 每 socket 一个 helper；`src/parallel` 会话与协议、`src/mpi` 传输，`HSOLVE_WITH_MPI=AUTO`，启动脚本 `hsolve-mpirun`）：nearest 证书的两次计数由两个 helper 同时做、窗口目标的切片交给 helper，代价规则与内存（预算覆盖整棵进程树）决定是否交出；结果与单进程相同，helper 的失败由 leader 接手（§3.9）。实测（5 次交错、全部有效，`results/p10_mpi.md`，审查修复后重测）：两 socket（各 8 核）上对单进程 hsolve，1e6 nearest 1.09–1.11 倍、1e5 三维 nearest 1.10–1.20 倍、多片窗口 1.15–1.74 倍；单 socket 上无益（0.86–0.93 倍，启动脚本因此直接运行普通 hsolve，不起 MPI 作业）；审查修复（`results/p10_mpi.md` §7）：helper 的内存规则在发送问题前按预测判断、被拒或做完即放下问题（紧预算下与 hsolve 同样认证、同样切片），单 NUMA 节点上不起 MPI 作业，Open MPI 专有选项只给 Open MPI，许可证声明覆盖 hsolve-mpi 的 MPI 库；MPI 版 MUMPS 跨 socket 一次分解 0.95–1.09 倍（1e6），未采用。**未做**：主分解与 Krylov 的进程级并行（顺序计算，实测无可分的独立分解）；单 socket 机器上的进程级收益 |

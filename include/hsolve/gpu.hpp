@@ -1,4 +1,4 @@
-// GPU offload control for applications (P10 "gpu"; docs/DESIGN.md §3.9, docs/BLAS.md §10).
+// GPU offload control for applications (P10 "gpu"; docs/DESIGN.md §3.10, docs/BLAS.md §10).
 // Scalar set: none.
 //
 // The GPU offload lives in the BLAS hook (src/blas + src/gpu), which is linked into the hsolve

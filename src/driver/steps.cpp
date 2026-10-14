@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "driver/helpers.hpp"
 #include "driver/internal.hpp"
 #include "driver/projection.hpp"
 #include "eigen/block_lanczos.hpp"
@@ -60,7 +61,8 @@ std::string fmt(double x) {
 }
 
 double memory_in_use(const Ctx& c) {
-  return static_cast<double>(std::max<std::int64_t>(memory_in_use_bytes(c.rep.memory.measure), 0));
+  const double own = static_cast<double>(std::max<std::int64_t>(memory_in_use_bytes(c.rep.memory.measure), 0));
+  return own + (c.helpers ? c.helpers->memory_bytes() : 0.0);
 }
 
 double budget_left(const Ctx& c) { return c.cfg.memory_budget_gb * 1073741824.0 - memory_in_use(c); }
@@ -521,11 +523,18 @@ bool counter_pays(const SolverConfig& cfg, const FactorEstimate& e, const MumpsI
 template <class T>
 index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, double step, bool* detection_off,
                     bool s_is_gap, bool* near_eigenvalue) {
+  return count_below(
+      c, [&](double x, bool detection) { return src.count(c, x, detection); }, s, outward, step, detection_off,
+      s_is_gap, near_eigenvalue);
+}
+
+index_t count_below(Ctx& c, const std::function<Inertia(double, bool)>& count, double& s, double outward,
+                    double step, bool* detection_off, bool s_is_gap, bool* near_eigenvalue) {
   if (near_eigenvalue) *near_eigenvalue = false;
   for (int tries = 0; tries < 8; ++tries) {
     for (const bool detection : {true, false}) {
       if (!detection && tries == 0 && !s_is_gap) s += outward * 0.1 * step;
-      const Inertia in = src.count(c, s, detection);
+      const Inertia in = count(s, detection);
       if (in.valid) {
         if (!detection && c.rep.certificate.note.empty())
           c.rep.certificate.note = "endpoint inertia counted without null-pivot detection (dense cluster)";

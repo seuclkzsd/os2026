@@ -645,7 +645,7 @@ machine has no GPU). The only work worth moving is the dense part of the numeric
 (section 9: at n = 1e6 the three factorizations of a nearest run - main and the certificate's two
 exact counts - are ~75% of it, BLAS is 65-69% of a factorization); the solves stream the factors
 from host memory, which PCIe 3 (12.8 GB/s) cannot do faster than the socket (36 GB/s). Measurements,
-tables and commands: `results/p10_gpu.md`; design and modes: docs/DESIGN.md §3.9.
+tables and commands: `results/p10_gpu.md`; design and modes: docs/DESIGN.md §3.10.
 
 **What it does.** With the GPU module built in (CMake `HSOLVE_GPU`, default ON; nothing CUDA is
 needed to build: `libcudart.so.12` / `libcublas.so.12` are opened with dlopen at the first
@@ -710,7 +710,7 @@ every factorization run (both 1e6 cases, 5 + 5 runs of each factorization), the 
 counts and eigenvalues within 3e-15 relative in whole runs. GPU-only calls are bitwise reproducible
 (tile sizes depend on the shape only); the threaded CPU path itself is not.
 
-**Tests.** `test_gpu`, `test_gpu_hook` (docs/DESIGN.md §3.9): without `HSOLVE_TEST_GPU_DEVICE`
+**Tests.** `test_gpu`, `test_gpu_hook` (docs/DESIGN.md §3.10): without `HSOLVE_TEST_GPU_DEVICE`
 the processes see no GPU and check the fallback; with it (gpu02: 7, through
 `tools/bench/gpu_slot.sh`) the engine against the CPU BLAS and the hooked factorization / CLI
 against the CPU path. `test_gpu.AffinityUnderOmpProcBind` runs the affinity test under

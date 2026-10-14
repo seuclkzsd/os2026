@@ -1,4 +1,4 @@
-// GPU module: CPU affinity of the threads the engine starts (P10 "gpu"; docs/DESIGN.md §3.9,
+// GPU module: CPU affinity of the threads the engine starts (P10 "gpu"; docs/DESIGN.md §3.10,
 // docs/BLAS.md §10). Scalar set: none.
 //
 // A thread starts with the CPU affinity of the thread that creates it. With OMP_PROC_BIND (or

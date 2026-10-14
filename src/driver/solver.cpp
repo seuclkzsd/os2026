@@ -18,6 +18,7 @@
 #include <omp.h>
 #endif
 
+#include "driver/helpers.hpp"
 #include "driver/internal.hpp"
 #include "driver/norms.hpp"
 #include "hsolve/error.hpp"
@@ -418,6 +419,32 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
     event(c, "spectrum_estimate", {{"lo1", spectrum.lo1}, {"lo2", spectrum.lo2}, {"hi1", spectrum.hi1}, {"hi2", spectrum.hi2}});
   }
 
+  // Multi-process solve (DESIGN §3.9): the problem the helpers will need, sent to them only before
+  // their first task (Helpers::prepare: they never compute while the leader does). Only the
+  // definite path hands out work (the nearest certificate's two counts, the slices of window
+  // targets); a nearest target without counts has none.
+  if (c.helpers && method == Method::ShiftInvertLanczos) {
+    const bool nearest = cfg.target.mode == TargetMode::Nearest;
+    const bool counts = cfg.inertia_check != Toggle::Off && cfg.certificate != CertificateMode::Off;
+    if (!nearest || counts) {
+      driver::ProblemInfo info;
+      info.n2a = rep.norm2_a;
+      info.n2b = rep.norm2_b;
+      info.scale = d.scale;
+      info.sigma0 = sigma0;
+      info.prepare_count = nearest;
+      info.spectrum_valid = spectrum.valid;
+      info.lo1 = spectrum.lo1;
+      info.lo2 = spectrum.lo2;
+      info.hi1 = spectrum.hi1;
+      info.hi2 = spectrum.hi2;
+      auto* hp = dynamic_cast<driver::HelpersOf<T>*>(c.helpers);
+      HS_ASSERT(hp != nullptr, "helpers of another scalar type");
+      hp->share(c, pencil, *fac, info);
+    }
+  }
+  rep.parallel.threads = c.helpers ? fac->options().threads : 0;
+
   // 6-11. Solve along the chosen path.
   Solution<T> sol = (method == Method::ShiftInvertKrylovSchur)
                         ? driver::solve_indefinite(c, pencil, *fac, rep.norm2_a, rep.norm2_b, d.scale)
@@ -434,12 +461,20 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
 template <class T>
 Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b_in, const SolverConfig& cfg_in,
                   Logger* log) {
+  return driver::solve_with_helpers<T>(a_in, b_in, cfg_in, log, nullptr);
+}
+
+template <class T>
+Solution<T> driver::solve_with_helpers(const CsrMatrix<T>& a_in, const CsrMatrix<T>* b_in, const SolverConfig& cfg_in,
+                                       Logger* log, HelpersOf<T>* helpers) {
   const OmpThreadsScope omp_threads(cfg_in.threads);
   driver::PhaseClock clock;  // starts in Phase::Setup
   SolveReport rep;
   SolverConfig cfg = cfg_in;  // memory_budget_gb: resolved after the diagnosis
   rep.precision.requested = cfg_in.factor_precision;
   Ctx c{cfg, log, rep, clock};
+  c.helpers = helpers;
+  rep.parallel.processes = helpers ? helpers->size() + 1 : 1;
 
   // 1. Diagnosis: exact Hermitian inputs, norms, scale.
   CsrMatrix<T> a_store, b_store;
@@ -580,6 +615,8 @@ Solution<T> solve(const CsrMatrix<T>& a_in, const non_deduced_t<CsrMatrix<T>>* b
 #define HS_INSTANTIATE_SOLVE(T)                                                                     \
   template Solution<T> solve<T>(const CsrMatrix<T>&, const non_deduced_t<CsrMatrix<T>>*, const SolverConfig&, \
                                 Logger*);                                                               \
+  template Solution<T> driver::solve_with_helpers<T>(const CsrMatrix<T>&, const CsrMatrix<T>*,          \
+                                                     const SolverConfig&, Logger*, driver::HelpersOf<T>*); \
   template driver::BDefiniteness driver::test_b_definiteness<T>(const CsrMatrix<T>&, const driver::NormEstimate&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_SOLVE)
 #undef HS_INSTANTIATE_SOLVE

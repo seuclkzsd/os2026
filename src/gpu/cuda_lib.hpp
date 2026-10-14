@@ -1,4 +1,4 @@
-// GPU module (P10 "gpu"; docs/DESIGN.md §3.9, docs/BLAS.md §10): the CUDA runtime and cuBLAS,
+// GPU module (P10 "gpu"; docs/DESIGN.md §3.10, docs/BLAS.md §10): the CUDA runtime and cuBLAS,
 // loaded at run time with dlopen. hsolve needs no CUDA at build time and runs unchanged where no
 // NVIDIA driver, CUDA library or GPU exists: load() then reports why and every caller stays on the
 // CPU. Scalar set: none (function table); the GPU work itself is FP64 (cublasDgemm).

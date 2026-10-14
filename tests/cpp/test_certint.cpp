@@ -549,7 +549,7 @@ TYPED_TEST(DriverCertificateTyped, SingleCountsCertifyTheWindowOrDeferToExactCou
   const auto out = rig.certifier.run(hs::CertificateMethod::ExactSingle, s->window, {doubled}, 0);
   EXPECT_EQ(out.verdict, hs::driver::CheckOutcome::Verdict::Undecided);
   rig.rep.certificate.passed = false;
-  rig.certifier.record_exact(true);
+  rig.certifier.record_exact("InertiaCounter");
   EXPECT_NE(rig.rep.certificate.statement.find("single counts did not certify (valid 1, count 8 vs found 9)"),
             std::string::npos)
       << rig.rep.certificate.statement;

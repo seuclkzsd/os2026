@@ -10,7 +10,7 @@ part: what can go to one V100, how it is done, what it gains, what it costs, and
 * **What can go to the GPU, and how.** Only the dense part of MUMPS' numeric factorizations is worth
   moving: at n = 1e6 a nearest run is ~75% factorizations (the main one and the exact certificate's
   two inertia counts), the solves are bound by host memory bandwidth and the factors live in host
-  memory. hsolve's BLAS hook now has a GPU route (`src/gpu`, docs/DESIGN.md §3.9, docs/BLAS.md §10):
+  memory. hsolve's BLAS hook now has a GPU route (`src/gpu`, docs/DESIGN.md §3.10, docs/BLAS.md §10):
   inside a factorization, dgemm calls made outside MUMPS' OpenMP-parallel L0 subtrees go to one GPU
   through FP64 cuBLAS when a host-traffic model predicts >= 1.25x - in practice MUMPS' contribution-
   block updates (k = the front's pivots >= ~1000), **43-47% of a 1e6 factorization's flops but only
@@ -44,7 +44,7 @@ part: what can go to one V100, how it is done, what it gains, what it costs, and
   path's. Each count is still the exact Sylvester inertia of an IEEE-double LDL^T, equal to the
   inertia of K - s B when the factorization's backward error is below the distance from the
   endpoint s to the nearest eigenvalue - the same condition and guarantee as on the CPU path
-  (docs/DESIGN.md §3.9). Measured: the inertia of every factorization equals the GPU-off run's and
+  (docs/DESIGN.md §3.10). Measured: the inertia of every factorization equals the GPU-off run's and
   the complete references' counts, every whole run's certificate count equals the CPU run's, and the
   eigenvalues agree to 3e-15 relative. GPU-only calls are bitwise reproducible (the threaded CPU
   path is not).
@@ -580,7 +580,7 @@ and, on the GPU, `GpuEngine.ChunksLargerThanTheStagingRingAreCapped` (64 MiB chu
 **10.3 The degrade-mode report in a build without the GPU module.** With `-DHSOLVE_GPU=OFF`, the
 hook reported mode "off" whatever was asked, and hsolve dropped a report whose mode is off before
 looking at `--gpu`. As a result, `hsolve --gpu on` wrote no `gpu` object, contrary to the CLI's
-header, DESIGN §3.9 and BLAS.md §10.
+header, DESIGN §3.10 and BLAS.md §10.
 
 *Fix:* without the GPU module, the hook keeps the mode set by `hsolve_gpu_set_mode`, which still
 returns NotBuilt, or else a valid `HS_GPU`, and reports it with `"available": false` and the reason.
@@ -592,14 +592,14 @@ false, "reason": "built without the GPU module (HSOLVE_GPU=OFF)"}`. Test
 `GpuHook.WithoutTheGpuModuleTheReportSaysWhy` runs in that build: the hook's report after
 `set_mode`, and report.json of `--gpu on` and of `HS_GPU=auto`. It passes.
 
-**10.4 Exactness wording.** This report, DESIGN §3.9 and the P10 roadmap row said that the counts are
+**10.4 Exactness wording.** This report, DESIGN §3.10 and the P10 roadmap row said that the counts are
 the CPU path's, and that rounding-level differences do not change pivot signs. That claim is
 stronger than what holds. GPU rounding changes the values MUMPS' threshold pivoting reads, so
 delayed and 2x2 pivot choices and individual pivot signs may differ from the CPU path. What carries
 over is the certificate's argument: each count is the exact Sylvester inertia of an IEEE-double
 LDL^T, and it equals the inertia of K - s B when the backward error is below the endpoint's
 distance to the spectrum. The statements now say this. Equal counts are reported as measured, not
-guaranteed (the answers above, section 6's SOLUTION text, DESIGN §3.9, BLAS.md §10 and the
+guaranteed (the answers above, section 6's SOLUTION text, DESIGN §3.10, BLAS.md §10 and the
 roadmap row).
 
 **10.5 Build and tests.** A fresh build of all 294 targets with `-DHSOLVE_WERROR=ON` (GPU module on,

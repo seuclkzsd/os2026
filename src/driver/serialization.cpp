@@ -211,9 +211,9 @@ SolverConfig parse_config(const std::string& json_text, const SolverConfig& base
     HS_THROW(InvalidInput, "config: certificate_delta must be in (0, 1)");
   if (c.certificate_fault_drop < 0) HS_THROW(InvalidInput, "config: certificate_fault_drop must be >= 0");
   // The bits of src/driver/internal.hpp kFault*; the two kinds 16 and 32 exclude each other.
-  if (c.certificate_fault_count < 0 || c.certificate_fault_count > 127 || (c.certificate_fault_count & 48) == 48)
+  if (c.certificate_fault_count < 0 || c.certificate_fault_count > 255 || (c.certificate_fault_count & 48) == 48)
     HS_THROW(InvalidInput, "config: certificate_fault_count must be a sum of the bits 1, 2, 4, 8, 16 or 32 (not "
-                           "both), 64 (0..127)");
+                           "both), 64, 128 (0..255)");
   // ICNTL(7) = 1 means "pivot order given by the caller": the config cannot give one.
   if (c.ordering != kOrderingNestedDissection && (c.ordering < -1 || c.ordering > 7 || c.ordering == 1))
     HS_THROW(InvalidInput, "config: ordering must be -1 (adaptive), a MUMPS ICNTL(7) value 0 or 2..7, or "
@@ -330,6 +330,17 @@ std::string SolveReport::to_json(int indent) const {
               {"fallback", precision.fallback},
               {"fallback_reason", precision.fallback_reason},
               {"attempt_s", precision.attempt_s}}},
+            {"parallel",
+             {{"processes", parallel.processes},
+              {"threads", parallel.threads},
+              {"helper_threads", parallel.helper_threads},
+              {"helper_counts", parallel.helper_counts},
+              {"helper_slices", parallel.helper_slices},
+              {"fallbacks", parallel.fallbacks},
+              {"share_s", parallel.share_s},
+              {"wait_s", parallel.wait_s},
+              {"helper_busy_s", parallel.helper_busy_s},
+              {"notes", parallel.notes}}},
             {"pairs", pairs_j},
             {"certificate",
              {{"performed", certificate.performed},

@@ -90,6 +90,9 @@ file(GLOB_RECURSE HSOLVE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/
 # src/blas is the optional BLAS hook and src/gpu its GPU offload (blocks at the end of this file),
 # not part of libhsolve.
 list(FILTER HSOLVE_SOURCES EXCLUDE REGEX "/src/(blas|gpu)/")
+# src/mpi is the optional MPI transport of hsolve-mpi (block "MPI" below), not part of libhsolve:
+# libhsolve's multi-process sessions (src/parallel) are MPI-free.
+list(FILTER HSOLVE_SOURCES EXCLUDE REGEX "/src/mpi/")
 add_library(hsolve ${HSOLVE_SOURCES})
 target_include_directories(hsolve
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -109,10 +112,81 @@ endif()
 # ---- applications ----
 if(HSOLVE_BUILD_APPS)
   find_package(CLI11 2.0 REQUIRED)
-  add_executable(hsolve_cli apps/hsolve_cli.cpp)
+  # The command line itself (apps/cli.cpp), shared by hsolve and hsolve-mpi.
+  add_library(hsolve_cli_main OBJECT apps/cli.cpp)
+  target_link_libraries(hsolve_cli_main PRIVATE hsolve CLI11::CLI11 nlohmann_json::nlohmann_json)
+  add_executable(hsolve_cli apps/hsolve_cli.cpp $<TARGET_OBJECTS:hsolve_cli_main>)
   set_target_properties(hsolve_cli PROPERTIES OUTPUT_NAME hsolve)
   # ${CMAKE_DL_LIBS}: --gpu finds the BLAS hook's GPU control with dlsym (include/hsolve/gpu.hpp).
   target_link_libraries(hsolve_cli PRIVATE hsolve CLI11::CLI11 nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
+endif()
+
+# ---- MPI (P10, DESIGN §3.9, docs/PARALLEL.md): hsolve-mpi, one solve as an MPI job ----
+# HSOLVE_WITH_MPI: ON, OFF or AUTO (default: ON when an MPI is found - MPI_HOME, else the Open MPI
+# of the os2026-ref environment named by $HS_REF_ENV, as on the cluster nodes, else the PATH).
+# MPI only carries the session's messages between hsolve processes (src/parallel over src/mpi);
+# every process keeps the SEQUENTIAL MUMPS. That MUMPS brings libmpiseq, which defines MPI_Init,
+# MPI_Comm_rank, MPI_Finalize and MPI_Wtime as stubs: MPI is linked FIRST, so that the dynamic
+# linker's global lookup takes the real library's (hsolve-mpi checks it at start, test_mpi_session
+# too). The single-process hsolve does not change.
+set(HSOLVE_WITH_MPI "AUTO" CACHE STRING "Build hsolve-mpi and its tests: ON | OFF | AUTO (ON if an MPI is found)")
+set_property(CACHE HSOLVE_WITH_MPI PROPERTY STRINGS AUTO ON OFF)
+if(NOT HSOLVE_WITH_MPI STREQUAL "OFF" AND HSOLVE_BUILD_APPS)
+  if(NOT MPI_HOME AND NOT DEFINED ENV{MPI_HOME} AND DEFINED ENV{HS_REF_ENV} AND EXISTS "$ENV{HS_REF_ENV}/bin/mpicc")
+    set(MPI_HOME "$ENV{HS_REF_ENV}")
+  endif()
+  if(HSOLVE_WITH_MPI STREQUAL "ON")
+    find_package(MPI REQUIRED COMPONENTS C)
+  else()
+    find_package(MPI QUIET COMPONENTS C)
+  endif()
+endif()
+if(MPI_C_FOUND AND NOT HSOLVE_WITH_MPI STREQUAL "OFF" AND HSOLVE_BUILD_APPS)
+  message(STATUS "hsolve: hsolve-mpi with MPI ${MPI_C_VERSION} (${MPI_C_LIBRARIES}); mpiexec ${MPIEXEC_EXECUTABLE}")
+  # hsolve_mpi_c = MPI::MPI_C, except that MPI's libraries reach the linker as files (link flags) and
+  # their directories as an explicit run path after the toolchain's. Given as libraries, CMake puts
+  # their directory into the computed RPATH, and the os2026-ref environment's lib/ also holds a
+  # libgomp.so.1: CMake then warns that it may hide the toolchain's OpenMP runtime.
+  add_library(hsolve_mpi_c INTERFACE)
+  foreach(prop INTERFACE_COMPILE_OPTIONS INTERFACE_COMPILE_DEFINITIONS INTERFACE_INCLUDE_DIRECTORIES
+               INTERFACE_LINK_OPTIONS)
+    get_target_property(value MPI::MPI_C ${prop})
+    if(value)
+      set_property(TARGET hsolve_mpi_c PROPERTY ${prop} "${value}")
+    endif()
+  endforeach()
+  foreach(lib IN LISTS MPI_C_LIBRARIES)
+    if(IS_ABSOLUTE "${lib}")
+      get_filename_component(dir "${lib}" DIRECTORY)
+      target_link_libraries(hsolve_mpi_c INTERFACE "-Wl,${lib}")
+      target_link_options(hsolve_mpi_c INTERFACE "LINKER:-rpath,${dir}")
+    else()
+      target_link_libraries(hsolve_mpi_c INTERFACE "${lib}")
+    endif()
+  endforeach()
+  file(GLOB HSOLVE_MPI_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/mpi/*.cpp")
+  add_library(hsolve_mpi STATIC ${HSOLVE_MPI_SOURCES})
+  target_include_directories(hsolve_mpi PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(hsolve_mpi PUBLIC hsolve_mpi_c hsolve ${CMAKE_DL_LIBS})
+  add_executable(hsolve_mpi_cli apps/hsolve_mpi.cpp $<TARGET_OBJECTS:hsolve_cli_main>)
+  set_target_properties(hsolve_mpi_cli PROPERTIES OUTPUT_NAME hsolve-mpi)
+  target_include_directories(hsolve_mpi_cli PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(hsolve_mpi_cli PRIVATE hsolve_mpi_c hsolve_mpi hsolve CLI11::CLI11 nlohmann_json::nlohmann_json)
+  # The launcher: one helper rank per NUMA node of the allowed cores plus the leader (docs/PARALLEL.md).
+  configure_file(apps/hsolve-mpirun "${CMAKE_CURRENT_BINARY_DIR}/hsolve-mpirun" COPYONLY)
+  set(HSOLVE_MPIEXEC "${MPIEXEC_EXECUTABLE}")
+  # mpiexec options of the MPI tests: Open MPI binds ranks by default and refuses more ranks than
+  # cores (3 ranks in a 2-core test slot), hence --oversubscribe --bind-to none; Hydra (MPICH, Intel
+  # MPI) neither binds by default nor limits the ranks. MPIEXEC_PREFLAGS (FindMPI's cache variable)
+  # adds options for other launchers.
+  execute_process(COMMAND "${MPIEXEC_EXECUTABLE}" --version OUTPUT_VARIABLE _hs_mpiexec_version
+                  ERROR_VARIABLE _hs_mpiexec_version RESULT_VARIABLE _hs_mpiexec_rc TIMEOUT 30)
+  separate_arguments(HSOLVE_MPIEXEC_TEST_FLAGS UNIX_COMMAND "${MPIEXEC_PREFLAGS}")
+  if(_hs_mpiexec_version MATCHES "Open MPI|OpenRTE|open-mpi|PRRTE")
+    list(APPEND HSOLVE_MPIEXEC_TEST_FLAGS --oversubscribe --bind-to none)
+  endif()
+elseif(HSOLVE_WITH_MPI STREQUAL "AUTO")
+  message(STATUS "hsolve: no MPI found - hsolve-mpi not built (HSOLVE_WITH_MPI=AUTO)")
 endif()
 
 # ---- benchmarks: one executable per bench/*.cpp (reproducible measurements, run via guard.py) ----
@@ -164,9 +238,29 @@ if(HSOLVE_BUILD_TESTS)
     gtest_discover_tests(${name} TEST_PREFIX "${name}." DISCOVERY_MODE PRE_TEST
       PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1")
   endforeach()
+  # Multi-process sessions over MPI (tests/cpp/mpi/): every test program runs as an MPI job of 1, 2
+  # and 3 ranks (rank 0 runs the tests, the others serve). Not in the glob above: they need MPI.
+  if(TARGET hsolve_mpi)
+    file(GLOB HSOLVE_MPI_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/mpi/test_*.cpp")
+    foreach(src IN LISTS HSOLVE_MPI_TEST_SOURCES)
+      get_filename_component(name "${src}" NAME_WE)
+      add_executable(${name} "${src}")
+      target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+      target_compile_definitions(${name} PRIVATE HSOLVE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+      target_link_libraries(${name} PRIVATE hsolve_mpi_c hsolve_mpi hsolve hsolve_test_support GTest::gtest
+                                            nlohmann_json::nlohmann_json)
+      foreach(ranks 1 2 3)
+        add_test(NAME ${name}.ranks${ranks}
+                 COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks} ${HSOLVE_MPIEXEC_TEST_FLAGS}
+                         $<TARGET_FILE:${name}>)
+        set_tests_properties(${name}.ranks${ranks} PROPERTIES
+          ENVIRONMENT "OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1" TIMEOUT 600 PROCESSORS ${ranks})
+      endforeach()
+    endforeach()
+  endif()
 endif()
 
-# ---- GPU offload (src/gpu, docs/BLAS.md section 10, docs/DESIGN.md 3.9) ----
+# ---- GPU offload (src/gpu, docs/BLAS.md section 10, docs/DESIGN.md 3.10) ----
 # The CUDA runtime and cuBLAS are loaded at run time (dlopen): nothing CUDA is needed to build, and a
 # binary runs unchanged where no GPU, driver or CUDA library exists (the CPU path). hsolve_gpu holds
 # the loader, the dgemm offload engine and the offload controller; the BLAS hook uses it in MUMPS' factorizations
@@ -237,6 +331,9 @@ function(hsolve_link_blas_hook target)
 endfunction()
 if(HSOLVE_BLAS_HOOK AND HSOLVE_BUILD_APPS)
   hsolve_link_blas_hook(hsolve_cli)
+  if(TARGET hsolve_mpi_cli)
+    hsolve_link_blas_hook(hsolve_mpi_cli)  # after MPI on its link line (see the MPI block)
+  endif()
 endif()
 foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
   get_filename_component(name "${src}" NAME_WE)

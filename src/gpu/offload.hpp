@@ -1,4 +1,4 @@
-// GPU module: the process-level GPU offload of the BLAS hook (P10 "gpu"; docs/DESIGN.md §3.9,
+// GPU module: the process-level GPU offload of the BLAS hook (P10 "gpu"; docs/DESIGN.md §3.10,
 // docs/BLAS.md §10). Scalar set: double.
 //
 // Mode (process-wide; read from the environment variable HS_GPU at the first factorization unless

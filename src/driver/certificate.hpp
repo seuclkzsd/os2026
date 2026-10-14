@@ -175,6 +175,11 @@ struct CertificateChoice {
   double epsilon = 0.0;           ///< eps of the randomized estimate (coupling taken as 0)
 };
 
+/// Where a nearest certificate's two exact counts were made, for its statement: by_helpers of them
+/// by helper processes of a multi-process solve (on their InertiaCounters, DESIGN §3.9), the rest by
+/// the leader on its InertiaCounter (leader_counter) or on its main factorization.
+std::string count_sources(index_t by_helpers, bool leader_counter);
+
 /// The nearest target's fast completeness checks, one object per solve (kept across the
 /// certificate rounds: start scaling, counter, failed methods). Fills SolveReport::certificate on
 /// a verdict; all of its work is charged to Phase::Certificate (except a refactorization at sigma
@@ -202,8 +207,9 @@ class NearestCertifier {
   CheckOutcome run(CertificateMethod method, const NearestWindow& w, const RoundPairs<T>& pairs, int round);
 
   /// Report fields after the exact counts of this round (cert.passed etc. already set by the
-  /// caller); on_counter: the counts came from an InertiaCounter.
-  void record_exact(bool on_counter);
+  /// caller); source: where the counts were made, for the statement ("InertiaCounter", "main
+  /// factorization", or one per count in a multi-process solve: count_sources, driver/helpers.hpp).
+  void record_exact(const std::string& source);
 
   /// Report fields when no count could be made at this round's window [a, b] (CountFailure: every
   /// count source failed, `why`): the certificate was performed but not completed - passed =

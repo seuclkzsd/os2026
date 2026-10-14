@@ -192,7 +192,9 @@ struct SolverConfig {
   /// allowance 0); 8 the refactorization at the working shift before a deflated rerun or a
   /// randomized check fails. Kind of the failures of 1, 2, 8 (at most one): 16 another MUMPS error
   /// (FactorizationFailed; bit 1 then throws at each count instead of the cap), 32 std::bad_alloc.
-  /// 64: bits 1 and 2 only from a window target's first slice on. A count that fails moves to the
+  /// 64: bits 1 and 2 only from a window target's first slice on. 128 (P10, multi-process solves:
+  /// include/hsolve/parallel.hpp): every task a helper process gets fails there (of the kind of 16 /
+  /// 32, default OutOfMemoryBudget), so that the leader does the work itself. A count that fails moves to the
   /// other count source; with none left the nearest target returns its pairs with the certificate
   /// performed but not completed, a window target the pairs of its completed slices
   /// (docs/FORMATS.md §3).
@@ -352,6 +354,24 @@ struct SliceReport {
   bool passed = false;         ///< count_found == count_inertia (GHIEP: run converged)
 };
 
+/// A multi-process solve (hs::solve_parallel, include/hsolve/parallel.hpp; DESIGN §3.9): what the
+/// helper processes did. processes == 1 for hs::solve (all other fields 0 / empty). The leader's
+/// own phases stay exclusive: sending the problem and waiting for the helpers (ready, results,
+/// dropping the problem) are charged to the phase of their work - certificate for counts, iterate for
+/// slices.
+struct ParallelReport {
+  int processes = 1;             ///< leader + helpers of the session
+  int threads = 0;               ///< OpenMP threads of the leader's factorizations (0: single process)
+  int helper_threads = 0;        ///< OpenMP threads of each helper (as they reported; 0: none got work)
+  index_t helper_counts = 0;     ///< certificate counts a helper made (concurrently with the leader's)
+  index_t helper_slices = 0;     ///< spectrum slices a helper solved
+  index_t fallbacks = 0;         ///< helper tasks that failed and that the leader did itself
+  double share_s = 0.0;          ///< leader: handing the helpers the problem (matrices, pivot order)
+  double wait_s = 0.0;           ///< leader: waiting for helper results after its own work was done
+  double helper_busy_s = 0.0;    ///< helpers: summed seconds of their tasks
+  std::vector<std::string> notes;  ///< what was (not) handed out and why, failures
+};
+
 struct SolveReport {
   // problem
   index_t n = 0;
@@ -393,6 +413,7 @@ struct SolveReport {
   std::int64_t peak_rss_bytes = 0;
   MemoryReport memory;        ///< the memory budget and where it came from
   PrecisionReport precision;  ///< factor arithmetic, its checks and fallback
+  ParallelReport parallel;    ///< helper processes of a multi-process solve
   // results
   std::vector<PairReport> pairs;
   InertiaCertificate certificate;
