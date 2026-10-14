@@ -50,7 +50,7 @@ if str(REPO) not in sys.path:
 
 GUARD = REPO / "tools/run/guard.py"
 RUN = REPO / "tools/bench/mpi_socket_run.sh"
-SPLITS = ("1x16", "1x16i", "1x8", "2x8", "2x8m", "1+2x8")
+SPLITS = ("1x16", "1x16i", "1x16g", "1x8", "2x8", "2x8m", "1+2x8", "1x16r")
 DEFAULT_OUT = Path(os.environ.get("HOME", "/tmp")) / "p10mpi" / "runs"
 
 

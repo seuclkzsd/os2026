@@ -15,6 +15,8 @@
 #           tools/bench/mpi_bind.sh (KIND bench: MPI MUMPS; KIND hsolve: build/release/hsolve-mpi)
 #   1+2x8   KIND hsolve: hsolve's multi-process mode through its launcher
 #           (build/release/hsolve-mpirun --ranks 3): the leader on all cores, a helper on each half
+#   1x16r   KIND hsolve: the launcher with one rank (hsolve-mpi alone: start-up, Open MPI loaded)
+#   1x16g   1x16 with glibc malloc keeping freed memory (MALLOC_MMAP_MAX_=0, no trimming)
 # KIND:
 #   bench   build/mpi/seq_factor_bench (2x8m: build/mpi/mpi_factor_bench) with hsolve's BLAS hook
 #           preloaded (build/release/libhsolve_blashook.so, route all: as the hsolve executable links
@@ -107,11 +109,21 @@ case "$layout" in
     # shellcheck disable=SC2046
     "${cmd[@]}" "$root/tools/bench/mpi_bind.sh" "${mpi[@]}" "$@" $(targs "$half") | tag 0 "$all"
     ;;
-  1+2x8)
+  1+2x8|1x16r)
     # hsolve's multi-process mode as its launcher lays it out: the leader on all inherited cores, two
-    # helpers on the halves (one per NUMA node when the cores span two).
-    [ "$kind" = hsolve ] || { echo "mpi_socket_run.sh: 1+2x8 is for KIND hsolve" >&2; exit 2; }
-    "$root/build/release/hsolve-mpirun" --ranks 3 -- "$@" | tag 0 "$all"
+    # helpers on the halves (one per NUMA node when the cores span two); 1x16r: the launcher with one
+    # rank - hsolve-mpi alone, i.e. hsolve started the multi-process way (start-up, Open MPI loaded).
+    [ "$kind" = hsolve ] || { echo "mpi_socket_run.sh: $layout is for KIND hsolve" >&2; exit 2; }
+    ranks=3
+    [ "$layout" = 1x16r ] && ranks=1
+    "$root/build/release/hsolve-mpirun" --ranks "$ranks" -- "$@" | tag 0 "$all"
     ;;
-  *) echo "mpi_socket_run.sh: unknown LAYOUT $layout (1x16, 1x16i, 1x8, 2x8, 2x8m, 1+2x8)" >&2; exit 2 ;;
+  1x16g)
+    # one process as 1x16 with glibc's malloc keeping freed memory (no mmap'd blocks, no trimming):
+    # isolates the allocator from the multi-process mode (results/p10_mpi.md section 4).
+    # shellcheck disable=SC2046
+    env ${preload[@]+"${preload[@]}"} $(threads_env "$n") MALLOC_MMAP_MAX_=0 MALLOC_TRIM_THRESHOLD_=18446744073709551615 \
+      taskset -c "$all" "${seq[@]}" "$@" $(targs "$n") | tag 0 "$all"
+    ;;
+  *) echo "mpi_socket_run.sh: unknown LAYOUT $layout (1x16, 1x16i, 1x16g, 1x8, 2x8, 2x8m, 1+2x8, 1x16r)" >&2; exit 2 ;;
 esac
