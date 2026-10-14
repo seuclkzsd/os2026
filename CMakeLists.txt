@@ -166,6 +166,16 @@ if(MPI_C_FOUND AND NOT HSOLVE_WITH_MPI STREQUAL "OFF" AND HSOLVE_BUILD_APPS)
   # The launcher: one helper rank per NUMA node of the allowed cores plus the leader (docs/PARALLEL.md).
   configure_file(apps/hsolve-mpirun "${CMAKE_CURRENT_BINARY_DIR}/hsolve-mpirun" COPYONLY)
   set(HSOLVE_MPIEXEC "${MPIEXEC_EXECUTABLE}")
+  # mpiexec options of the MPI tests: Open MPI binds ranks by default and refuses more ranks than
+  # cores (3 ranks in a 2-core test slot), hence --oversubscribe --bind-to none; Hydra (MPICH, Intel
+  # MPI) neither binds by default nor limits the ranks. MPIEXEC_PREFLAGS (FindMPI's cache variable)
+  # adds options for other launchers.
+  execute_process(COMMAND "${MPIEXEC_EXECUTABLE}" --version OUTPUT_VARIABLE _hs_mpiexec_version
+                  ERROR_VARIABLE _hs_mpiexec_version RESULT_VARIABLE _hs_mpiexec_rc TIMEOUT 30)
+  separate_arguments(HSOLVE_MPIEXEC_TEST_FLAGS UNIX_COMMAND "${MPIEXEC_PREFLAGS}")
+  if(_hs_mpiexec_version MATCHES "Open MPI|OpenRTE|open-mpi|PRRTE")
+    list(APPEND HSOLVE_MPIEXEC_TEST_FLAGS --oversubscribe --bind-to none)
+  endif()
 elseif(HSOLVE_WITH_MPI STREQUAL "AUTO")
   message(STATUS "hsolve: no MPI found - hsolve-mpi not built (HSOLVE_WITH_MPI=AUTO)")
 endif()
@@ -232,7 +242,7 @@ if(HSOLVE_BUILD_TESTS)
                                             nlohmann_json::nlohmann_json)
       foreach(ranks 1 2 3)
         add_test(NAME ${name}.ranks${ranks}
-                 COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks} --oversubscribe --bind-to none
+                 COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks} ${HSOLVE_MPIEXEC_TEST_FLAGS}
                          $<TARGET_FILE:${name}>)
         set_tests_properties(${name}.ranks${ranks} PROPERTIES
           ENVIRONMENT "OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1" TIMEOUT 600 PROCESSORS ${ranks})
