@@ -183,7 +183,6 @@ def cmd_eval(a: argparse.Namespace) -> int:
     verdicts_path = a.out / f"{a.tag}.eval.json"
     verdicts = json.loads(verdicts_path.read_text()) if verdicts_path.exists() else {}
     judges: dict[str, Any] = {}
-    target = None
     for r in rows:
         out = Path(r["out"])
         if str(out) in verdicts:
@@ -193,7 +192,6 @@ def cmd_eval(a: argparse.Namespace) -> int:
             c = case.load_case(name, root=a.root)
             cfg_override = out.parent / f"config-{out.name}.json"
             tgt = json.loads(cfg_override.read_text())["target"] if cfg_override.exists() else dict(c.config["target"])
-            target = tgt
             judges[name] = make_judge(c, tgt, evaluate.estimate_norms(c.A, c.B))
         g = {"returncode": r.get("returncode"), "killed": r.get("killed"), "wall_s": r.get("wall_s"),
              "peak_rss_gib": r.get("peak_rss_gib")}
@@ -215,7 +213,6 @@ def cmd_eval(a: argparse.Namespace) -> int:
         print(f"{name} {r['layout']} rep {r['rep']}: valid={verdicts[str(out)]['valid']} "
               f"{'; '.join(verdicts[str(out)].get('why') or [])[:200]}", flush=True)
         verdicts_path.write_text(json.dumps(verdicts, indent=1) + "\n")
-    del target
     return 0
 
 
