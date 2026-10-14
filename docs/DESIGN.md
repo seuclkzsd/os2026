@@ -323,7 +323,35 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
   2 个及以上线程时即使 `SCOTCH_randomSeed` + `SCOTCH_randomReset` 也逐次不同（syn-lap3d-aniso-1e5，8 线程：因子
   条目 33.1e6–35.2e6，外存估计 208–272 MB），单线程时跨进程复现（同一进程内每次分析前 reset 也复现），但分析慢
   2.6–3.7 倍（四个 1e5 测例 1.4–2.6 s 对 0.45–0.8 s）。不能廉价地复现；driver 改为不依赖估计的精确值（§3.6-8 的
-  计数余量与失败回退）。
+  计数余量与失败回退）。P9 在 1e6 上看到的波动更大：syn-mem27-100 各次运行的 SCOTCH 排序 flops 为 7.6e12–1.34e13
+  （整次求解 102–141 s），yee-pec-box-1e6 为 6.7e12–7.3e12（`results/p9_factspeed.md` §4）。
+- **P9：1e6 上数值 LDLᵀ 的吞吐**（factspeed，`results/p9_factspeed.md`，16 线程测量槽，内存内）：
+  - 剖析（`bench/factspeed_factor.cpp`：按 driver 的方式做主分解与两次计数，固定主元顺序，MUMPS 统计与计时、
+    BLAS 剖析、SIGPROF 采样）：一次分解 22–26 s、292–316 GFlop/s，为槽内 DGEMM 峰值（744）的 40–43%。L0 子树层
+    占 27–29% 时间、13–14% flops（131–152 GFlop/s：小前沿，组装、清零、面板的秩 1 更新各占一成到四分之一）；其上的
+    大前沿 360–376 GFlop/s，其中完全求和部分的尾随更新是秩 KEEP(420) = 128 的 dgemm，只有 350 GFlop/s（受内存带宽
+    限制；秩 ≥ 512 的贡献块更新 585–620）。整体受内存带宽限制：4 → 16 线程只快 1.84 倍。计数（ICNTL(31)=1）的代价
+    是主分解的 94–95%。
+  - **块参数（可选，`HS_MUMPS_BLOCKING=p9`）**：`mumps_api.hpp` 的 `Blocking`。MumpsFactorization 在构造时（JOB=−1
+    之后、分析之前）按环境变量设 MUMPS 内部块参数（dmumps_c.h 暴露的 KEEP，含义由 MUMPS 源码确定，只改分块，
+    同一阈值选主元的 LDLᵀ）：KEEP(420) = 256（满秩外层面板宽 `kFullRankPanelWidth`）、KEEP(58) = 2000 /
+    KEEP(57) = 4000（贡献块更新的行块 `kCbUpdateBlock`），以及只有打过补丁的 MUMPS 才读的 KEEP(498) = 128 /
+    KEEP(499) = 64（L0 层下的面板宽与条带块，见下）。每次分解快 1.050–1.056 倍（主分解与计数、两个 1e6 测例），
+    端到端只有 1.03–1.04 倍（默认配置 5 次交错：syn-mem27-100 1.066、yee-pec-box-1e6 1.032，SCOTCH 波动大；固定
+    METIS 排序见结果文档 §4），未达默认值要求的 1.05 倍，故为可选；1e5 的 41 个数据测例上几何平均 1.003、无超出噪声
+    的变慢。未设、空或 `mumps` 为 MUMPS 自己的块参数，其它值抛 InvalidInput。计数与 MUMPS 默认块参数下逐个相同，
+    与解析值相同（`test_factor_panel`，实/复、近奇异位移）。
+  - **从源码构建 MUMPS（可选）**：`tools/dev/build_mumps.sh NAME [--isa] [--opt] [--gemmt] [--patch]` 由官方 tarball
+    （sha256 与 conda-forge 配方相同）用环境的编译器与 METIS/SCOTCH/OpenBLAS 构建，库名与 soname 同 conda-forge
+    （可 LD_PRELOAD 替换），不需要 glibc > 2.17；CMake `-DHSOLVE_MUMPS_ROOT=<安装目录>` 让 hsolve 链接它（其 lib/ 在
+    RPATH 最前，`test_factor_mumps_build` 检查实际映射的库）。-O3 与 x86-64-v3 / skylake-avx512 单独无收益
+    （1.000–1.005），故不作默认。`patches/mumps-5.8.2-l0-blocking.patch`：L0 层下（KEEP(405)=1）用 KEEP(498/499)
+    代替 KEEP(420) 与 KEEP(7/8/218)（清零带随之变窄）；与 p9 块参数一起再快 1.8–2.1%（计数共 1.073–1.079 倍）。
+  - 实测为负、未采用：OMP_PROC_BIND / OMP_PLACES、OMP_WAIT_POLICY（passive 0.93）、关透明大页（0.96）、L0 层位置
+    KEEP(408) 与关 L0（ICNTL(48)=0：0.95）、合并 KEEP(1)、更高的三角条带 KEEP(7/8)、GEMMT（OpenBLAS 的 dgemmt 是
+    逐列 dgemv）。选主元阈值 CNTL(1)、PIVOT_OPTION KEEP(468) 未动（计数的惯性必须是 K 的）。
+  - 测量钩子（只给 bench 与测试）：`MumpsControlOverrides`（分析与分解前写入的额外 ICNTL/KEEP/CNTL）、`instance()`
+    （读 INFOG/RINFOG/KEEP）。
 - **自研嵌套剖分**（P4，`compute_ordering`、`OrderingOptions`、`src/factor/ordering*.cpp`，无新依赖）：
   - 动机：MUMPS 内的排序是串行的（METIS/SCOTCH 占其分析的 90–97%；SCOTCH_PTHREAD_NUMBER 无效）；
     METIS/SCOTCH 不能直接链接（只是 libdmumps 的间接依赖，ld 拒绝间接 DSO，dlopen 需要 glibc 2.28
@@ -1090,6 +1118,10 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
 - 默认（route all 链入 hsolve）的依据：16 线程测量槽、六个对比配置、5 次交错，每次运行都有效且精度相同，
   端到端 1.05–1.16×；收益全在回代（MUMPS 回代时间降 18–30%，数值分解不变）。换用其它 BLAS（自编 OpenBLAS、
   BLIS、LIBXSMM）无益（`docs/BLAS.md` §3、§5、§6）。
+- 数值分解（P9，`docs/BLAS.md` §9）：1e6 三维测例的分解中 BLAS 占墙钟时间的 65–69%，几乎全是 dgemm；L0 层之上
+  按调用多线程的 dgemm 484–492 GFlop/s，其中秩 128 的尾随更新只有 350（内存带宽），由 MUMPS 的块参数而非 BLAS 解决
+  （§3.4 P9）；L0 子树内单线程 dgemm 每线程 22–23 GFlop/s。没有改道能帮分解：MUMPS 的 dgemm 形状已是 BLAS-3，
+  更高的三角条带（更少更大的调用）0.99 倍；GEMMT 未走（OpenBLAS 0.3.34 的 dgemmt 是逐列 dgemv）。
 - 许可：窄核改编自 OpenBLAS 0.3.34 的 SkylakeX 核（BSD-3-Clause），版权与许可声明见
   `src/blas/simd_kernels.hpp`、`docs/BLAS.md` §7 与根目录 `THIRD_PARTY_NOTICES`。
 
