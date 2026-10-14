@@ -609,7 +609,7 @@ TYPED_TEST(DriverCountFailureTyped, CertifierCounterFailureLeavesTheVerdictToThe
   rep.certificate.count_inertia = nu_b - nu_a;
   rep.certificate.count_found = kK;
   rep.certificate.passed = nu_b - nu_a == kK;
-  certifier.record_exact(false);
+  certifier.record_exact("main factorization");
   EXPECT_TRUE(rep.certificate.passed);
   EXPECT_NE(rep.certificate.statement.find("single counts failed"), std::string::npos) << rep.certificate.statement;
   // With no count possible the report says the certificate was not completed.

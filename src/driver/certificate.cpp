@@ -45,6 +45,13 @@ std::string predicted(double s) { return std::isfinite(s) ? sec(s) : std::string
 
 }  // namespace
 
+std::string count_sources(index_t by_helpers, bool leader_counter) {
+  const std::string own = leader_counter ? "InertiaCounter" : "main factorization";
+  if (by_helpers <= 0) return own;
+  if (by_helpers >= 2) return "InertiaCounter";  // the helpers'
+  return "one count on a helper process' InertiaCounter, one on the leader's " + own;
+}
+
 template <class T>
 NearestCertifier<T>::NearestCertifier(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac,
                                       double sigma, bool detection_off, double scale, double n2a, double n2b,
@@ -755,7 +762,7 @@ bool NearestCertifier<T>::exact_counts(double a, double b, index_t& nu_a, index_
 }
 
 template <class T>
-void NearestCertifier<T>::record_exact(bool on_counter) {
+void NearestCertifier<T>::record_exact(const std::string& source) {
   InertiaCertificate& cert = c_.rep.certificate;
   cert.method = certificate_method_name(CertificateMethod::Exact);
   cert.rigorous = cert.passed;
@@ -764,9 +771,9 @@ void NearestCertifier<T>::record_exact(bool on_counter) {
   os.precision(6);
   os << prefix();
   if (!fallback_note_.empty()) os << fallback_note_ << "; therefore ";
-  os << "double-precision Sylvester counts (" << (on_counter ? "InertiaCounter" : "main factorization")
-     << "): nu(b) - nu(a) = " << cert.count_inertia << " eigenvalue(s) in [" << cert.lower << ", " << cert.upper
-     << "], " << cert.count_found << " distinct found pair(s) there";
+  os << "double-precision Sylvester counts (" << source << "): nu(b) - nu(a) = " << cert.count_inertia
+     << " eigenvalue(s) in [" << cert.lower << ", " << cert.upper << "], " << cert.count_found
+     << " distinct found pair(s) there";
   if (cert.passed) os << ": every eigenvalue in the window is found";
   cert.statement = os.str();
   fallback_note_.clear();

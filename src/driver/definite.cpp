@@ -546,7 +546,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       cert.count_found = found;
       cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
       const index_t by_helpers = c.rep.parallel.helper_counts - helper_counts;
-      fast.record_exact(on_certifier || counts.uses_counter() || by_helpers > 0);
+      fast.record_exact(count_sources(by_helpers, on_certifier || counts.uses_counter()));
       if (by_helpers > 0)
         cert.statement += "; " + std::to_string(by_helpers) + " of the 2 counts made by helper processes (their "
                           "InertiaCounters on the leader's pivot order)";

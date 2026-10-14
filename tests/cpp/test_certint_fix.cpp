@@ -361,7 +361,7 @@ struct Rig {
     c.count_inertia = nu_b - nu_a;
     c.count_found = found;
     c.passed = c.count_inertia == c.count_found;
-    certifier.record_exact(true);
+    certifier.record_exact("InertiaCounter");
     return true;
   }
 };

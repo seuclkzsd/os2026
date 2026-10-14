@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "driver/certificate.hpp"
 #include "driver/helpers.hpp"
 #include "driver/internal.hpp"
 #include "hsolve/error.hpp"
@@ -481,6 +482,45 @@ TEST(ParallelDriverHooks, DeclinedCountsReleaseTheHelpers) {
   EXPECT_EQ(hs::driver::count_below(f.c, counts, a, -1.0, 1e-9, nullptr, true), 41);
   EXPECT_EQ(hs::driver::count_below(f.c, counts, b, +1.0, 1e-9, nullptr, true), 61);
   EXPECT_TRUE(counts.uses_counter());
+}
+
+// The certificate statement names where each count was made: a failed helper count that the
+// leader made on its main factorization (no InertiaCounter: inertia_counter = off) is not reported
+// as an InertiaCounter count (review p10mpi, finding 6).
+TEST(ParallelDriverHooks, StatementNamesEachCountsSource) {
+  EXPECT_EQ(hs::driver::count_sources(0, true), "InertiaCounter");
+  EXPECT_EQ(hs::driver::count_sources(0, false), "main factorization");
+  EXPECT_EQ(hs::driver::count_sources(2, false), "InertiaCounter");
+  EXPECT_EQ(hs::driver::count_sources(1, false),
+            "one count on a helper process' InertiaCounter, one on the leader's main factorization");
+  constexpr index_t kN = 300;
+  const auto a = hs::test::laplacian_1d<double>(kN);
+  hs::SolverConfig cfg;
+  cfg.target.mode = hs::TargetMode::Nearest;
+  cfg.target.sigma = 1.0;
+  cfg.target.k = 6;
+  cfg.threads = 1;
+  cfg.memory_budget_gb = 4.0;
+  cfg.certificate = hs::CertificateMode::Exact;
+  cfg.inertia_counter = hs::Toggle::Off;
+  for (int failing : {0, 2}) {
+    FakeHelpers h(2, hs::test::laplacian_1d_eigenvalues(kN));
+    h.opts.helper_counts = hs::Toggle::On;
+    h.failing = failing;
+    const auto sol = hs::driver::solve_with_helpers<double>(a, nullptr, cfg, nullptr, &h);
+    const auto& cert = sol.report.certificate;
+    EXPECT_TRUE(sol.report.success) << warnings(sol.report);
+    EXPECT_TRUE(cert.passed) << cert.statement;
+    if (failing == 0) {
+      EXPECT_NE(cert.statement.find("Sylvester counts (InertiaCounter)"), std::string::npos) << cert.statement;
+      EXPECT_NE(cert.statement.find("2 of the 2 counts made by helper processes"), std::string::npos);
+    } else {
+      EXPECT_EQ(sol.report.parallel.fallbacks, 1);
+      EXPECT_NE(cert.statement.find("one on the leader's main factorization"), std::string::npos) << cert.statement;
+      EXPECT_NE(cert.statement.find("1 of the 2 counts made by helper processes"), std::string::npos);
+    }
+    EXPECT_EQ(h.drops, 1);
+  }
 }
 
 // Regression (review p10mpi, finding 2): a window is cut into one slice per helper only when the
