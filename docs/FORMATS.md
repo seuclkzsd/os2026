@@ -257,7 +257,8 @@ slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
   fallbacks, share_s, wait_s, helper_busy_s, notes[]}`——多进程模式（`hsolve-mpi`、`hs::solve_parallel`）的进程数
   （leader + helper；`hsolve` 恒为 1，其余为 0 / 空）、leader 与每个 helper 的分解线程数（helper 报告的；没有 helper
   拿到问题时 0）、helper 做的证书计数与切片数、helper 任务失败而由 leader 重做的次数、leader 发送问题的时间、leader
-  等待 helper 结果的时间（发送计入 setup，等计数计入 certificate，等切片与 helper 放下问题计入 iterate：阶段仍互斥）、
+  等待 helper 的时间（等它们就绪、等结果、等它们放下问题；计入当时的阶段——计数为 certificate，切片为 iterate：阶段
+  仍互斥）、
   helper 任务时间之和，以及 `notes`（为何没交给 helper——代价规则、内存规则（发送前预测或 helper 报告后）、可用 helper
   不足——与失败、回退）。多进程模式的证书 `statement` 注明各次计数在哪里做（例如 "2 of the 2 counts made by helper
   processes"；一次由 helper、一次由 leader 时分别写明 InertiaCounter 或 main factorization）。

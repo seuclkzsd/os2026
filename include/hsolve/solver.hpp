@@ -356,8 +356,9 @@ struct SliceReport {
 
 /// A multi-process solve (hs::solve_parallel, include/hsolve/parallel.hpp; DESIGN §3.9): what the
 /// helper processes did. processes == 1 for hs::solve (all other fields 0 / empty). The leader's
-/// own phases stay exclusive: sending the problem is charged to setup, waiting for a helper's count
-/// to certificate and waiting for its slices to iterate (their work overlaps the leader's).
+/// own phases stay exclusive: sending the problem and waiting for the helpers (ready, results,
+/// dropping the problem) are charged to the phase of their work - certificate for counts, iterate for
+/// slices.
 struct ParallelReport {
   int processes = 1;             ///< leader + helpers of the session
   int threads = 0;               ///< OpenMP threads of the leader's factorizations (0: single process)

@@ -1213,8 +1213,12 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   节点的核数。**leader 计算时 helper 只等消息，helper 计算时 leader 只等结果**——任何时刻都不超订核；helper 的数据
   （矩阵副本、分析、因子）在它自己 socket 的内存上。等待不占核：`MpiTransport::receive` 以 MPI_Iprobe 加 50 µs–2 ms
   递增的睡眠轮询（Open MPI 的阻塞 MPI_Recv 会空转一个核）。`hsolve-mpirun` 按进程的 cpuset 与 NUMA 拓扑给出
-  R = 1 + S（一个 socket 时 R = 1，即普通 hsolve）；`--ranks R` 可强制（R − 1 个 helper：有那么多 NUMA 节点就按节点，
-  否则把核等分）。
+  R = 1 + S；允许的核只在一个 NUMA 节点上且未给 `--ranks` 时，它以同样的参数直接 exec 同目录的普通 `hsolve`（不起 MPI
+  作业、不需要 mpiexec、没有约 1.7–1.9 s 的 MPI 启动）；`--ranks R` 强制一个 R 个 rank 的 MPI 作业（R − 1 个
+  helper：有那么多 NUMA 节点就按节点，否则把核等分）。布局经环境变量（`HSOLVE_MPIRUN_PLAN`、`HSOLVE_MPIRUN_EXE`，
+  导出——各启动器都把环境传给本机的 rank）交给各 rank，rank 号取 `OMPI_COMM_WORLD_RANK`、`PMIX_RANK`、`PMI_RANK`
+  （Hydra：MPICH、Intel MPI）或 `MV2_COMM_WORLD_RANK`；Open MPI 专有的 `-x` 与 `--bind-to none` 只在 `mpiexec
+  --version` 表明是 Open MPI 时才加（审查 p10mpi 第 3、4 条）。
 - **交给 helper 的工作**（driver 只见接口 `driver::Helpers` / `HelpersOf<T>`，`src/driver/helpers.hpp`；会话协议与
   消息编码在 `src/parallel`，MPI 传输在 `src/mpi`）：
   1. **nearest 证书（exact）的两次计数** ν(a)、ν(b)：两个 helper 同时各做一次（`concurrent_counts`，helpers.cpp），
@@ -1223,18 +1227,28 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      单进程逐个相同。前提：至少两个可用 helper；问题已共享；**代价规则**（`ParallelOptions::helper_counts = auto`）：
      本次实测的主分解时间 t_f 下，一次计数（0.9 t_f）须多于 helper 的准备（`helper_preparation_s`：两次给定顺序的
      分析，按 `model_analysis_s` 上界，加 0.05 s 消息）——helper 的计数在 1e5 比 leader 的快（0.85 倍时间）、在 1e6
-     慢（1.53 倍），规则取二者相等；内存：leader 先释放主因子（同 `MainFactors::Release`，重跑时在 σ 重分解），两次
-     计数同时须放得下计数余量（`count_allowance_mb`，预算按 leader 加 helper 的内存计）。不满足时 leader 照旧自己数
-     （report.parallel.notes 说明原因）。certificate 的陈述注明 "2 of the 2 counts made by helper processes"。
+     慢（1.53 倍），规则取二者相等；内存：leader 先释放主因子（同 `MainFactors::Release`，重跑时在 σ 重分解），
+     **发送问题之前**按预测检查——两次计数（各按主分析内存内估计的 `kHelperCountShare` = 0.45 倍，实测 0.38–0.50）
+     加两个 helper 拿到问题后持有的内存（矩阵字节的 `kHelperProblemCopies` = 2.5 倍，实测 1.8–2.7）须放得下计数余量
+     （`count_allowance_mb`）；helper 拿到问题后再以它们报告的计数估计与占用检查一次。不满足时 leader 照旧自己数
+     （report.parallel.notes 说明原因）；问题已发出时 helper 先放下它（`Helpers::drop`），helper 的两次计数之后也
+     放下——leader 自己的计数（全部，或某个 helper 失败的那一次）与随后的重跑看到的预算与 hs::solve 相同（审查 p10mpi
+     第 1 条：helper 留着问题时 syn-mem27-46 在 1.0 GiB 下证书未完成，hs::solve 则通过）。certificate 的陈述注明各次
+     计数在哪里做："2 of the 2 counts made by helper processes"；一次由 helper、一次由 leader 时写明 leader 那次是在
+     InertiaCounter 还是主分解上（`count_sources`，certificate.hpp）。
   2. **窗口目标的切片**（interval / smallest / largest，及零带转交的 nearest）：窗口端点与切点照旧由 leader 计数
      确定；各片依次交给空闲的 helper（`WindowSolver::solve_slices`，同一 `run_slice`：位移、分解、Krylov、验证、片内
      重跑；helper 的主对象同样以 leader 的主元顺序分析），leader 等待并合并（池中每对带片号，`deduplicate()` 与全局
      证书看到的同单进程）。前提：至少两个可用 helper；代价规则（`helper_slices = auto`）：一片的预测工作（切片代价
      模型：分解 + c 对）多于 helper 的准备（一次分析 + 消息）；内存：一个 helper 的片（主分析的内存内估计 ×1.15 +
-     c_max 对的 Krylov 工作集 7 c n 个标量）能放下几个就用几个 helper（leader 先释放主因子），少于两个则 leader
-     全做。有 ≥ 2 个 helper 时，含 ≥ 32 个特征值的窗口至少切成 helper 数那么多片（每片 ≥ 16；顺序的代价模型会把
-     yee-pec-box-1e5 [40, 400] 的 108 个特征值留成一片，helper 空闲）。helper 的部分簇判定为非数值相等时由 leader
-     整簇求解（同单进程）。
+     c_max 对的 Krylov 工作集 7 c n 个标量）能放下几个就用几个 helper，少于两个则 leader 全做——先按预测（预算余量
+     加 leader 的主因子、减去 helper 的问题副本）决定是否发送问题，helper 拿到后以实际占用再定；只在交出时 leader
+     才释放主因子。有 ≥ 2 个 helper 时，含 ≥ 32 个特征值的窗口至少切成 helper 数那么多片（每片 ≥ 16；顺序的代价模型
+     会把 yee-pec-box-1e5 [40, 400] 的 108 个特征值留成一片，helper 空闲）——**只在 helper 会接下这些片时**：代价规则
+     通过、且预测两个 helper 的片同时放得下（预算余量减去输出池与 helper 的问题副本，加上 leader 的主因子）；否则保持
+     顺序模型的切片，leader 像 hs::solve 一样解（审查 p10mpi 第 2 条：先切再被内存规则拒绝时 yee-pec-box-1e5 [40, 400]
+     在 2.5 GiB 下多一次切点计数与一片，5 次分解对 3 次，0.78 倍）。helper 的片做完（或被拒）后放下问题，leader
+     再解交回的片。helper 的部分簇判定为非数值相等时由 leader 整簇求解（同单进程）。
   3. 其余——分析、主分解、Krylov、randomized / 单精度证书、GHIEP 全部——仍在 leader 上：没有能并发的独立分解。
 - **共享时机**：问题（leader 输入检查后的 A、B 的 CSR、工作配置、范数、主元顺序与因子选项，`share()` 只登记）在 helper
   第一次有任务前才发送（`Helpers::prepare`），helper 随即构造 pencil 并（nearest）分析计数器，leader 等它们就绪。
@@ -1243,28 +1257,38 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   失败（MUMPS / 内存错误、`std::bad_alloc`、任何异常；故障注入 `certificate_fault_count` 位 128）以错误回复，leader
   自己做该工作，该 helper 本次求解不再使用（`report.parallel.fallbacks`、notes、告警）。helper **进程**死亡则 MPI 作业
   终止（MPI 默认错误处理），hsolve 无法接住。
-- **内存**：预算覆盖整个进程树——`memory_in_use` 加上 helper 最近报告的 RSS，任务进行中按授予的额度计；分析前的规划
-  仍只看 leader（helper 那时还没有数据）。
+- **内存**：预算覆盖进程树为本次求解持有的内存——`memory_in_use` 加上每个 helper 报告的 RSS 中高于其空闲水平
+  （没有问题时的 RSS，随 Ready / Dropped 报告）的部分，任务进行中按授予的额度计；helper 进程本身（MPI、库，每个约
+  50 MB）不计入，与它第一次拿到问题之前一样。helper 只在一批工作即将进行或进行中持有问题：被拒、做完或交回时
+  leader 发 Drop，helper 释放问题及其上的一切（副本、分析、因子）并 `malloc_trim`，回复剩余的 RSS（Dropped），leader
+  等到回复才继续（1e5 上约 0.01 s）。分析前的规划仍只看 leader（helper 那时还没有数据）。
 - **报告**：`report.parallel`（processes、threads、helper_counts、helper_slices、fallbacks、share_s、wait_s、
-  helper_busy_s、notes）；阶段计时仍互斥：发送问题计入 setup，等待 helper 的计数计入 certificate，等待切片计入
-  iterate。helper 的事件写到 `<log>.rank<r>`。
+  helper_busy_s、notes）；阶段计时仍互斥：发送问题与等待 helper（就绪、结果、放下问题）计入当时的阶段——计数为
+  certificate，切片为 iterate。helper 的事件写到 `<log>.rank<r>`。
 - **构建与运行**：CMake `HSOLVE_WITH_MPI`（AUTO：找到 MPI 即构建；集群节点上为 `$HS_REF_ENV` 即 os2026-ref 环境的
   Open MPI 5.0.11）构建 `hsolve-mpi`（与 `hsolve` 同一份命令行，`apps/cli.cpp`）、`hsolve-mpirun` 与
   `test_mpi_session`（1、2、3 个 rank）。hsolve 链接顺序 MUMPS，其 libmpiseq 以桩函数定义 MPI_Init、MPI_Comm_rank、
   MPI_Finalize、MPI_Wtime：MPI 库在链接行上排在 MUMPS 之前，全局符号查找取真正的 MPI；`hsolve-mpi` 启动时检查
   （`hs::mpi::mpi_library`），`test_mpi_session` 亦检查；可执行文件不包含 `<mpi.h>`（MUMPS 的 include 目录里有
-  libseq 的 mpi.h 桩）。`--helper-counts` / `--helper-slices`（auto | on | off）= `hs::ParallelOptions`。
-- **实测**（两 socket 各 8 核对一个进程 16 线程跨两 socket，5 次交错、每次有效，`results/p10_mpi.md` §4）：
-  两 socket 上 hsolve-mpi 对 hsolve（16 线程跨两个 socket）：1e6 nearest 1.10 倍（syn-mem27-100 75.4 → 68.3 s，
-  yee-pec-box-1e6 64.1 → 58.5 s；证书 35.9 → 29.2 s、29.7 → 24.2 s；对单 socket 的 hsolve 1.28 / 1.23 倍），1e5
-  三维 nearest 1.06–1.14 倍（证书 0.97–1.01 → 0.72–0.76 s），多片窗口 1.16–1.75 倍（syn-mem27-46 [0.1, 0.3] 655 个
-  特征值 4 片：32.9 → 18.8 s；yee-pec-cube-32 [40, 400] 2 片 1.51 倍）；主分解与 Krylov 不变（仍是 leader 的顺序计算）。
+  libseq 的 mpi.h 桩）。`--helper-counts` / `--helper-slices`（auto | on | off）= `hs::ParallelOptions`。只测过
+  Open MPI 5.0.11：`test_mpi_session` 的 `--oversubscribe --bind-to none` 只在 configure 时 `mpiexec --version` 表明是
+  Open MPI 才加（Hydra 默认不绑核、不限 rank 数；其它启动器的选项经 `MPIEXEC_PREFLAGS`），启动脚本见上。
+- **实测**（两 socket 各 8 核对一个进程 16 线程跨两 socket，5 次交错、每次有效，`results/p10_mpi.md` §4，审查修复后的
+  二进制 54e5219）：两 socket 上 hsolve-mpi 对 hsolve（16 线程跨两个 socket）：1e6 nearest 1.11 / 1.09 倍
+  （syn-mem27-100 75.8 → 68.5 s，yee-pec-box-1e6 64.1 → 59.0 s；证书 36.0 → 29.2 s、29.9 → 24.2 s；对单 socket 的
+  hsolve 1.26 / 1.23 倍），1e5 三维 nearest 1.10–1.20 倍（证书 0.97–1.01 → 0.73–0.77 s），多片窗口 1.15–1.74 倍
+  （syn-mem27-46 [0.1, 0.3] 655 个特征值 4 片：33.0 → 19.0 s；yee-pec-cube-32 [40, 400] 2 片 1.50 倍）；主分解与 Krylov
+  不变（仍是 leader 的顺序计算）。内存紧时（`results/p10_mpi.md` §7）：同一显式预算下 hsolve-mpi 与 hsolve 同样认证、
+  同样切片（syn-mem27-46 1.0 GiB：5/5 认证，修复前 0/5；yee-pec-box-1e5 [40, 400] 2.5 GiB：1 片 3 次分解、6.27 对
+  6.27 s，修复前 2 片 5 次、0.78 倍）；1e6 在 16 GiB 下不再向 helper 发送放不下的问题（进程树峰值 7.1 对修复前 10.1 GiB）。
   对照（`results/p10_mpi.md` §4.1）：以 hsolve-mpi 单 rank 启动（同样的启动路径与 Open MPI）或改 glibc 的 malloc 都
   不带来这一收益，收益来自 helper 的计数与切片。
-- **限制**：单 socket 上 helper 共用一个 socket 的带宽，实测更慢（0.86–0.95 倍；多片窗口仍 1.11–1.17 倍），`hsolve-mpirun` 因此默认 R = 1；
-  MPI 启动（mpiexec + MPI_Init）约 1.8–2 s，计入墙钟、不计入 `time_total_s`，1e5 的 nearest 收益（0.36–0.47 s）抵不上
-  它；GHIEP、randomized 证书与单片窗口没有可并发的工作；每个 helper 另持一份矩阵与分析（1e6：进程树采样峰值
-  18.0 / 14.9 GiB 对单进程 13.1 / 11.3 GiB；预算覆盖整棵进程树，紧时计数留在 leader）。
+- **限制**：单 socket 上 helper 共用一个 socket 的带宽，实测更慢（0.86–0.93 倍；多片窗口仍 1.11–1.16 倍），
+  `hsolve-mpirun` 因此在单 NUMA 节点上直接运行普通 hsolve（墙钟与直接运行相同，`results/p10_mpi.md` §7.3）；
+  MPI 启动（mpiexec + MPI_Init）约 1.7–2 s，计入墙钟、不计入 `time_total_s`，1e5 的 nearest 收益（0.17–0.40 s）抵不上
+  它；GHIEP、randomized 证书与单片窗口没有可并发的工作；每个 helper 工作时另持一份矩阵与分析（1e6：进程树采样峰值
+  18.3 / 14.6 GiB 对单进程 13.2 / 11.3 GiB；预算按 helper 为求解持有的内存计，紧时计数与切片在发送前就留在 leader）；
+  预测偏低时 helper 拿到问题后才被拒，只浪费其准备（`results/p10_mpi.md` §3.1）；只测过 Open MPI。
 
 ## 4. 数值约定
 
@@ -1410,4 +1434,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |
 | P8 | **已完成**（p8-certcost-fix）：证书的计数失败不再结束求解——计数源（InertiaCounter / 主对象）失败时换另一个，计数前按计数余量检查估计（主对象代替计数器时按其上次分解的 INFOG(21)），SCOTCH 分析超上限时至多再分析两次；都不行时 nearest 交回已收敛的对、证书标为未完成（success = false），窗口目标只丢失败的切片；一般 HPD B 的 κ 与 λ_min 严格界（只用于 auto / randomized）；更便宜的精确计数全部实测为负（两进程并行、单次合并分解、省缩放/检测、换计数源），默认证书仍为 exact（`results/p8_certcost.md`）。 |
 | P9 | **ordering 已完成**（分支 p9-ordering，评审修正 p9-ordering-fix）：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割；driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时采用）、顶层投入（代价模型决定）；代价模型按新剖分重拟合，候选顺序中它先于 SCOTCH，图规模按压缩后计。最终代码的门槛（测量槽，ABBA，全部有效、证书 exact）：1e6 内存内（5 次）syn-mem27-100 111.0 → 89.0 s（1.25×）、yee-pec-box-1e6 89.7 → 73.7 s（1.22×）；26 个 n ≤ 1e5 数据测例（3 次）几何平均 0.919，18 例快 3% 以上；初稿的 yee-pec-cube-16 系统性变慢（+9%：流精修后的排列在 16 线程下分析、分解、回代都更慢）已消除（20 次 1.015），剩 wg-square-n289（n = 289）以与 main 相同的排列慢 1.6 ms（`results/p9_ordering.md` §8）。**未做**：三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分 |
-| P10 | **mpi 已完成**（分支 p10mpi）：多进程模式 hsolve-mpi（leader 占全部核 + 每 socket 一个 helper；`src/parallel` 会话与协议、`src/mpi` 传输，`HSOLVE_WITH_MPI=AUTO`，启动脚本 `hsolve-mpirun`）：nearest 证书的两次计数由两个 helper 同时做、窗口目标的切片交给 helper，代价规则与内存（预算覆盖整棵进程树）决定是否交出；结果与单进程相同，helper 的失败由 leader 接手（§3.9）。实测（5 次交错、全部有效，`results/p10_mpi.md`）：两 socket（各 8 核）上对单进程 hsolve，1e6 nearest 1.10 倍、1e5 三维 nearest 1.06–1.14 倍、多片窗口 1.16–1.75 倍；单 socket 上无益（0.86–0.95 倍，启动脚本因此只起一个进程）；MPI 版 MUMPS 跨 socket 一次分解 0.95–1.09 倍（1e6），未采用。**未做**：主分解与 Krylov 的进程级并行（顺序计算，实测无可分的独立分解）；单 socket 机器上的进程级收益 |
+| P10 | **mpi 已完成**（分支 p10mpi）：多进程模式 hsolve-mpi（leader 占全部核 + 每 socket 一个 helper；`src/parallel` 会话与协议、`src/mpi` 传输，`HSOLVE_WITH_MPI=AUTO`，启动脚本 `hsolve-mpirun`）：nearest 证书的两次计数由两个 helper 同时做、窗口目标的切片交给 helper，代价规则与内存（预算覆盖整棵进程树）决定是否交出；结果与单进程相同，helper 的失败由 leader 接手（§3.9）。实测（5 次交错、全部有效，`results/p10_mpi.md`，审查修复后重测）：两 socket（各 8 核）上对单进程 hsolve，1e6 nearest 1.09–1.11 倍、1e5 三维 nearest 1.10–1.20 倍、多片窗口 1.15–1.74 倍；单 socket 上无益（0.86–0.93 倍，启动脚本因此直接运行普通 hsolve，不起 MPI 作业）；审查修复（`results/p10_mpi.md` §7）：helper 的内存规则在发送问题前按预测判断、被拒或做完即放下问题（紧预算下与 hsolve 同样认证、同样切片），单 NUMA 节点上不起 MPI 作业，Open MPI 专有选项只给 Open MPI，许可证声明覆盖 hsolve-mpi 的 MPI 库；MPI 版 MUMPS 跨 socket 一次分解 0.95–1.09 倍（1e6），未采用。**未做**：主分解与 Krylov 的进程级并行（顺序计算，实测无可分的独立分解）；单 socket 机器上的进程级收益 |

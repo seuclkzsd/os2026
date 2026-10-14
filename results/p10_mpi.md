@@ -29,16 +29,32 @@ that pay as an optional multi-process mode of hsolve (section 3; `docs/DESIGN.md
   of one window, which tools/eval caught, section 4); a failing helper task is redone by the leader;
   the single-process hsolve and its default are unchanged. Tests run the protocol over threads and
   over MPI with 1, 2 and 3 ranks.
-* **Measured end to end (5 interleaved repetitions, every run valid; section 4).** On two sockets (8 +
-  8 cores) against hsolve spread over the same cores: **1e6 nearest 1.10x** (syn-mem27-100 75.4 -> 68.3
-  s, yee-pec-box-1e6 64.1 -> 58.5 s; against hsolve on one socket 1.28x / 1.23x), 1e5 3-D nearest
-  1.06-1.14x, **windows with several slices 1.16-1.75x** (syn-mem27-46 [0.1, 0.3], 655 eigenvalues:
-  32.9 -> 18.8 s). On one socket the mode loses (0.86-0.95x; 1.11-1.17x on the windows with many
-  slices), so the launcher runs plain hsolve there.
+* **Measured end to end (5 interleaved repetitions, every run valid; section 4, with the binary of
+  the review fix).** On two sockets (8 + 8 cores), against hsolve spread over the same cores:
+  - **1e6 nearest: 1.09-1.11x** (syn-mem27-100 75.8 -> 68.5 s, yee-pec-box-1e6 64.1 -> 59.0 s);
+    against hsolve on one socket 1.26x / 1.23x;
+  - 1e5 3-D nearest: 1.10-1.20x;
+  - **windows with several slices: 1.15-1.74x** (syn-mem27-46 [0.1, 0.3], 655 eigenvalues:
+    33.0 -> 19.0 s).
+
+  On one socket the mode loses (0.86-0.93x; 1.11-1.16x on the windows with many slices), so the
+  launcher runs the plain hsolve there, without an MPI job.
+* **Review fixes (section 7).**
+  - The helpers' memory rules are now decided before the problem is sent, and the helpers drop the
+    problem whenever the leader keeps the work or their batch is done. Under a tight budget the
+    multi-process mode then certifies wherever hsolve does: syn-mem27-46 at 1.0 GiB went from 0/5
+    to 5/5. It also keeps hsolve's slices: yee-pec-box-1e5 [40, 400] at 2.5 GiB went from 0.78x to
+    1.00x.
+  - On one NUMA node the launcher execs the plain hsolve, without the +1.7-1.9 s of a one-rank
+    MPI job.
+  - The launcher and the tests pass Open MPI's options only to Open MPI.
+  - The notices cover hsolve-mpi's MPI libraries.
+  - The certificate statement names each count's source.
 * **Honest limits (section 5):** the gain needs two sockets (a 16-core judging machine may be one);
   only the certificate's counts and the slices run in parallel - main factorization and Krylov stay
-  one sequential computation; MPI start-up costs ~1.8-2.0 s of wall time, more than the gain on 1e5
-  nearest targets; the process tree's peak grows 1.3-1.4x at 1e6; GHIEP gets nothing.
+  one sequential computation; MPI start-up costs ~1.7-2.0 s of wall time, more than the gain on 1e5
+  nearest targets; the process tree's peak grows 1.3-1.4x at 1e6; GHIEP gets nothing; only Open MPI
+  was tested.
 
 ## 1. Setup
 
@@ -185,8 +201,9 @@ section 2 decided every point:
   analysis, main factorization, Krylov, verification, slice cuts; ranks 1..S, the **helpers**, one per
   NUMA node (socket) with that node's cores. The leader never computes while helpers do and vice
   versa (each waits in a sleeping poll, `MpiTransport::receive`), so no core is ever oversubscribed
-  and the run never uses more than its 16 cores. On one NUMA node `hsolve-mpirun` starts plain hsolve
-  (R = 1).
+  and the run never uses more than its 16 cores. On one NUMA node `hsolve-mpirun` execs the plain
+  hsolve with the same arguments - no MPI job (since the review fix, section 7.3; before, it started a
+  one-rank MPI job).
 * **What helpers do.** (1) The nearest certificate's two exact counts nu(a), nu(b), one per helper,
   at the same time (each on its own InertiaCounter on the leader's pivot order; `count_below`'s rules,
   so the integer counts are those of the single process). (2) The slices of window targets
@@ -194,16 +211,29 @@ section 2 decided every point:
   leader counts the cuts as before and hands the slices to idle helpers, which run the same
   `run_slice`; the leader merges. Everything else stays on the leader: section 2 found no other
   independent factorizations (MPI MUMPS for the main factorization: section 2.2).
-* **When.** At least two usable helpers (one alone would compete with the leader for cores or run on
-  half of them); the memory budget - charged with the helpers' memory, so it covers the process
-  tree - must hold the work at once (two counts after the leader released its main factors; a
-  slice per helper, each getting an equal share of what is left); and cost rules (`--helper-counts`,
-  `--helper-slices` auto, the default): a count (0.9 x the measured main factorization) must outweigh
-  the helpers' preparation (two analyses on the given order + 0.05 s), a slice's predicted work its
-  helper's preparation. With two or more helpers a window of at least 32 eigenvalues is cut into at
-  least as many slices as there are helpers. The problem (the factorized matrices, configuration,
-  pivot order) is sent only before the helpers' first task: sent right after the analysis, the
-  helpers' preparation slowed the leader's main factorization by 0.2-0.35 s at 1e5 (screening).
+* **When.** These conditions decide:
+  - at least two usable helpers (one alone would compete with the leader for cores or run on half
+    of them);
+  - cost rules (`--helper-counts`, `--helper-slices` auto, the default): a count (0.9 x the measured
+    main factorization) must outweigh the helpers' preparation (two analyses on the given order +
+    0.05 s), and a slice's predicted work must outweigh its helper's preparation;
+  - the memory budget must hold the work at once: two counts after the leader released its main
+    factors, or a slice per helper, each getting an equal share of what is left. The budget is
+    charged with what the helpers hold for the solve, i.e. their resident memory above their idle
+    level, so it covers the process tree. Since the review fix (section 7) this rule is checked
+    from predictions BEFORE the problem is sent (section 3.1), and again with what the helpers
+    report once they have it. The helpers drop the problem (Drop / Dropped) whenever the leader
+    keeps the work, and after each batch of their work. The leader's own counts and slices then
+    run under the budget hs::solve would have.
+
+  With two or more helpers, a window of at least 32 eigenvalues is cut into at least as many
+  slices as there are helpers. Since the fix this happens only when the helpers will take those
+  slices: the cost rule must pass and the memory must be predicted to fit; otherwise the
+  sequential plan stays.
+
+  The problem (the factorized matrices, configuration, pivot order) is sent only before the
+  helpers' first task. Sent right after the analysis, the helpers' preparation slowed the leader's
+  main factorization by 0.2-0.35 s at 1e5 (screening).
 * **Failures.** A helper task that fails (MUMPS or memory error, an exception; fault bit 128 injects
   it) is answered with the error; the leader does the work itself and stops using that helper in
   this solve (`report.parallel.fallbacks`). A helper process that dies ends the MPI job (MPI's default
@@ -216,7 +246,41 @@ section 2 decided every point:
   failure kind, the cost rules and Off, the driver hooks against scripted helpers: the memory rule,
   a failed count, real and complex) and over MPI with 1, 2 and 3 ranks (`test_mpi_session.ranks{1,2,3}`:
   the real MPI library is linked, nearest certificate, interval slices, failing helpers - results
-  equal to `hs::solve`'s); pytest for the campaign tool.
+  equal to `hs::solve`'s); pytest for the campaign tool. Review fix (section 7): the memory
+  rules before and after the problem is sent and the drops (FakeHelpers with a memory model; Drop
+  over threads and over 3 MPI ranks), the window cut only for helpers that take the slices, the
+  certificate's count sources, and the launcher (`tests/py/test_hsolve_mpirun.py`: one NUMA node =
+  plain hsolve, the plan through the environment for an Open MPI- and a Hydra-style mpiexec).
+
+### 3.1 Memory predictions of the helpers' work (review fix)
+
+The memory rules are decided before the helpers get the problem, from what the leader knows:
+- a count on a helper is predicted at `kHelperCountShare` = 0.45 of the main analysis' in-core
+  estimate (MUMPS INFOG(16)), since a helper's inertia-only instance keeps no factors;
+- what a helper holds once it has the problem is predicted at `kHelperProblemCopies` = 2.5 x the
+  bytes of the matrices it gets: its copies, its pencil and, for counts, its counter's analysis.
+
+Both are measured on c005 (`tools/bench/mpi_review_runs.sh calib`: hsolve-mpirun --ranks 3 in the lane, helper work forced on,
+10 GiB budget; the leader's main analysis with 8 threads, the helpers' with 4). helpers_ready gives
+their count estimate and what they hold above their idle level:
+
+| case | main in-core estimate MB | a helper's count estimate MB (x main) | matrices sent MB | held per helper MB (x matrices) | drop s |
+|---|---|---|---|---|---|
+| syn-mem27-46 (nearest) | 718 | 320 (0.45) | 31.4 | 80.2 (2.56) | 0.010 |
+| yee-pec-box-1e5 (nearest) | 659 | 264 (0.40) | 20.1 | 54.4 (2.70) | 0.009 |
+| ss-qa8fk-qa8fm (nearest) | 324 | 122 (0.38) | 41.2 | 74.4 (1.81) | 0.008 |
+| cav2d-rect-pert-1e5 (nearest) | 52 | 20 (0.38) | 13.9 | 30.9 (2.23) | 0.008 |
+| yee-pec-box-1e5 [40, 400] (slices) | 659 | - | 20.1 | 24.8 (1.23) | 0.014 |
+| syn-mem27-46 [0.1, 0.3] (slices) | 718 | - | 31.4 | 38.2 (1.22) | 0.016 |
+| yee-pec-cube-32 [40, 400] (slices) | 588 | - | 15.1 | 19.2 (1.27) | 0.018 |
+
+The count share at 1e6 was 0.495 (syn-mem27-100, 8-thread helpers: 7965 MB against 16101 MB, from
+the review's 16 GiB run). A slice helper holds only its copies before its first slice: it analyses
+when that slice runs, inside its granted share, so 2.5 is high for slices. The error is
+one-sided. A prediction that is too high keeps work on the leader. One that is too low is caught
+by the check after the problem was sent, and then only the preparation is wasted (section 7.1:
+syn-mem27-46 at 1.1 GiB in the lane). Dropping the problem after a batch, which frees the helpers'
+factors or count workspace, took 0.008-0.018 s at 1e5.
 
 ## 4. End to end (claims: 5 interleaved repetitions, every run valid)
 
@@ -226,98 +290,111 @@ loading and, for the multi-process mode, the MPI start-up - both shown). Phases 
 exclusive phases of the leader (DESIGN §3.6-0; waiting for helpers is charged to certificate /
 iterate). Peak: the guard's sampled process tree (all ranks) / the sum of the processes' own peaks.
 Layouts: `one:` = 16 cores of one socket, `two:` = 8 cores of each socket; `1x16` = hsolve,
-`1+2x8` = hsolve's multi-process mode (leader 16 threads, two helpers x 8 threads). Binaries: 1e5 and
-intervals from the final code (tags d1e5, div1-3, 142/142 runs valid); 1e6 from campaign C (c1e6,
-40/40 valid) at 1c39bf6 - the later commits change only the cost rules (which hand these counts to
-the helpers as before), the slice helpers' memory share and the report; a run of each 1e6 case with
-the final binary (d1e6s) gives the same: 67.2 s / 57.9 s, 2 helper counts each.
+`1+2x8` = hsolve's multi-process mode (leader 16 threads, two helpers x 8 threads).
+
+Binaries are those of the review fix (section 7), at 54e5219: hsolve-mpi with the memory rules
+predicted before the problem is sent, and Drop. Tags g1e5, giv1-3 and g1e6, 192/192 runs valid. At
+32 GiB the helpers get the same work as before the fix: 2 counts each nearest target, the same slices.
+The drops of the problem after each batch take 0.012-0.016 s at 1e6. Before the fix (tags d1e5,
+div1-3, c1e6) the multi-process medians were within 2% of these: section 7.4.
 
 **Nearest targets (the certificate's two counts on the helpers):**
 
 | case | layout | solver s, median [min-max] | x vs one:1x16 | x vs two:1x16 | wall s | factor | iterate | certificate | peak GiB |
 |---|---|---|---|---|---|---|---|---|---|
-| syn-mem27-100 | one:1x16 | 87.41 [87.26-87.63] | 1.00 | - | 88.4 | 26.76 | 16.11 | 43.78 | 13.1 |
-| syn-mem27-100 | one:1+2x8 | 93.87 [92.85-94.14] | 0.93 | - | 96.5 | 26.84 | 16.11 | 50.14 | 18.2 / 30.0 |
-| syn-mem27-100 | two:1x16 | 75.38 [72.60-76.65] | 1.16 | 1.00 | 76.3 | 22.06 | 16.40 | 35.91 | 13.1 |
-| syn-mem27-100 | **two:1+2x8** | **68.28** [67.40-70.04] | **1.28** | **1.10** | 70.9 | 22.35 | 15.92 | **29.19** | 18.0 / 30.1 |
-| yee-pec-box-1e6 | one:1x16 | 72.21 [72.12-72.58] | 1.00 | - | 73.0 | 22.52 | 13.14 | 36.05 | 11.3 |
-| yee-pec-box-1e6 | one:1+2x8 | 77.67 [77.44-77.81] | 0.93 | - | 80.2 | 22.62 | 13.12 | 41.40 | 14.9 / 24.7 |
-| yee-pec-box-1e6 | two:1x16 | 64.09 [62.85-64.24] | 1.13 | 1.00 | 64.9 | 19.44 | 14.28 | 29.68 | 11.3 |
-| yee-pec-box-1e6 | **two:1+2x8** | **58.49** [58.21-58.72] | **1.23** | **1.10** | 60.9 | 19.23 | 14.31 | **24.17** | 14.9 / 24.6 |
-| syn-mem27-46 | one:1x16 | 2.016 [1.996-2.192] | 1.00 | - | 2.18 | 0.82 | 0.26 | 0.86 | 0.9 |
-| syn-mem27-46 | one:1+2x8 | 2.273 [2.232-2.281] | 0.89 | - | 4.24 | 0.85 | 0.26 | 1.09 | 1.4 / 1.9 |
-| syn-mem27-46 | two:1x16 | 2.260 [2.107-2.441] | 0.89 | 1.00 | 2.42 | 0.91 | 0.29 | 1.01 | 0.9 |
-| syn-mem27-46 | **two:1+2x8** | **1.988** [1.978-2.077] | 1.01 | **1.14** | 3.90 | 0.88 | 0.28 | **0.76** | 1.3 / 1.9 |
-| yee-pec-box-1e5 | one:1x16 | 2.453 [2.431-2.488] | 1.00 | - | 2.62 | 0.82 | 0.75 | 0.84 | 0.8 |
-| yee-pec-box-1e5 | one:1+2x8 | 2.637 [2.623-2.661] | 0.93 | - | 4.59 | 0.82 | 0.75 | 1.01 | 1.2 / 1.6 |
-| yee-pec-box-1e5 | two:1x16 | 2.784 [2.655-2.853] | 0.88 | 1.00 | 2.99 | 0.91 | 0.83 | 0.97 | 0.8 |
-| yee-pec-box-1e5 | **two:1+2x8** | **2.540** [2.477-2.560] | 0.97 | **1.10** | 4.39 | 0.88 | 0.83 | **0.72** | 1.2 / 1.7 |
-| ss-qa8fk-qa8fm | one:1x16 | 1.502 [1.493-1.512] | 1.00 | - | 1.73 | 0.56 | 0.51 | 0.38 | 0.7 |
-| ss-qa8fk-qa8fm | one:1+2x8 | 1.678 [1.670-1.693] | 0.90 | - | 3.63 | 0.56 | 0.52 | 0.53 | 0.9 / 1.1 |
-| ss-qa8fk-qa8fm | two:1x16 | 1.740 [1.661-1.844] | 0.86 | 1.00 | 1.98 | 0.61 | 0.55 | 0.48 | 0.7 |
-| ss-qa8fk-qa8fm | **two:1+2x8** | **1.637** [1.616-1.662] | 0.92 | **1.06** | 3.54 | 0.61 | 0.53 | **0.43** | 0.9 / 1.1 |
-| cav2d-rect-pert-1e5 (2-D) | one:1x16 | 0.308 [0.294-0.334] | 1.00 | - | 0.44 | 0.10 | 0.11 | 0.06 | 0.2 |
-| cav2d-rect-pert-1e5 | one:1+2x8 | 0.323 [0.306-0.347] | 0.95 | - | 2.25 | 0.10 | 0.12 | 0.06 | 0.3 |
-| cav2d-rect-pert-1e5 | two:1x16 | 0.535 [0.410-0.591] | 0.57 | 1.00 | 0.72 | 0.18 | 0.16 | 0.09 | 0.2 |
-| cav2d-rect-pert-1e5 | two:1+2x8 (no helper work: cost rule) | 0.400 [0.362-0.471] | 0.77 | 1.34 | 2.28 | 0.12 | 0.14 | 0.09 | 0.3 |
+| syn-mem27-100 | one:1x16 | 86.66 [86.44-87.38] | 1.00 | - | 87.5 | 26.75 | 15.37 | 43.77 | 13.2 |
+| syn-mem27-100 | one:1+2x8 | 94.00 [93.74-94.22] | 0.92 | - | 96.7 | 26.91 | 16.11 | 50.26 | 18.3 / 29.5 |
+| syn-mem27-100 | two:1x16 | 75.83 [74.07-77.88] | 1.14 | 1.00 | 76.7 | 22.38 | 16.83 | 36.04 | 13.2 |
+| syn-mem27-100 | **two:1+2x8** | **68.53** [67.63-69.70] | **1.26** | **1.11** | 71.1 | 22.14 | 16.34 | **29.21** | 18.3 / 29.5 |
+| yee-pec-box-1e6 | one:1x16 | 72.33 [72.18-72.54] | 1.00 | - | 73.0 | 22.55 | 13.14 | 36.12 | 11.3 |
+| yee-pec-box-1e6 | one:1+2x8 | 77.73 [77.58-77.81] | 0.93 | - | 80.3 | 22.66 | 13.12 | 41.39 | 14.9 / 24.5 |
+| yee-pec-box-1e6 | two:1x16 | 64.12 [62.81-65.24] | 1.13 | 1.00 | 64.9 | 19.48 | 14.14 | 29.85 | 11.3 |
+| yee-pec-box-1e6 | **two:1+2x8** | **58.97** [58.77-59.44] | **1.23** | **1.09** | 61.5 | 19.88 | 14.65 | **24.21** | 14.6 / 24.5 |
+| syn-mem27-46 | one:1x16 | 2.009 [1.998-2.030] | 1.00 | - | 2.18 | 0.83 | 0.26 | 0.87 | 0.9 |
+| syn-mem27-46 | one:1+2x8 | 2.258 [2.219-2.283] | 0.89 | - | 4.19 | 0.84 | 0.25 | 1.09 | 1.4 / 1.8 |
+| syn-mem27-46 | two:1x16 | 2.402 [2.279-2.475] | 0.84 | 1.00 | 2.58 | 1.01 | 0.29 | 1.01 | 0.9 |
+| syn-mem27-46 | **two:1+2x8** | **2.008** [1.987-2.031] | 1.00 | **1.20** | 3.94 | 0.88 | 0.29 | **0.77** | 1.3 / 1.8 |
+| yee-pec-box-1e5 | one:1x16 | 2.444 [2.425-2.481] | 1.00 | - | 2.62 | 0.81 | 0.75 | 0.83 | 0.8 |
+| yee-pec-box-1e5 | one:1+2x8 | 2.650 [2.635-2.679] | 0.92 | - | 4.61 | 0.83 | 0.75 | 1.01 | 1.1 / 1.6 |
+| yee-pec-box-1e5 | two:1x16 | 2.882 [2.794-3.097] | 0.85 | 1.00 | 3.08 | 1.02 | 0.83 | 0.97 | 0.8 |
+| yee-pec-box-1e5 | **two:1+2x8** | **2.483** [2.470-2.591] | 0.98 | **1.16** | 4.41 | 0.88 | 0.82 | **0.73** | 1.1 / 1.6 |
+| ss-qa8fk-qa8fm | one:1x16 | 1.514 [1.505-1.528] | 1.00 | - | 1.72 | 0.56 | 0.51 | 0.38 | 0.7 |
+| ss-qa8fk-qa8fm | one:1+2x8 | 1.685 [1.679-1.707] | 0.90 | - | 3.75 | 0.56 | 0.51 | 0.53 | 0.9 / 1.0 |
+| ss-qa8fk-qa8fm | two:1x16 | 1.825 [1.796-2.158] | 0.83 | 1.00 | 2.08 | 0.70 | 0.56 | 0.47 | 0.8 |
+| ss-qa8fk-qa8fm | **two:1+2x8** | **1.654** [1.608-1.741] | 0.92 | **1.10** | 3.68 | 0.61 | 0.53 | **0.44** | 0.9 / 1.0 |
+| cav2d-rect-pert-1e5 (2-D) | one:1x16 | 0.300 [0.297-0.342] | 1.00 | - | 0.44 | 0.10 | 0.11 | 0.06 | 0.2 |
+| cav2d-rect-pert-1e5 | one:1+2x8 | 0.332 [0.314-0.349] | 0.90 | - | 2.33 | 0.12 | 0.12 | 0.06 | 0.2 / 0.3 |
+| cav2d-rect-pert-1e5 | two:1x16 | 0.473 [0.414-0.594] | 0.63 | 1.00 | 0.72 | 0.18 | 0.16 | 0.08 | 0.2 |
+| cav2d-rect-pert-1e5 | two:1+2x8 (no helper work: cost rule) | 0.401 [0.386-0.432] | 0.75 | 1.18 | 2.33 | 0.13 | 0.14 | 0.07 | 0.3 / 0.3 |
 
 **Window targets (spectrum slicing; the slices on the helpers):**
 
 | case, interval (eigenvalues, slices) | layout | solver s | x vs one:1x16 | x vs two:1x16 | wall s | factor | iterate | certificate | peak GiB |
 |---|---|---|---|---|---|---|---|---|---|
-| syn-mem27-46 [0.1, 0.3] (655, 4) | one:1x16 | 31.17 [31.03-31.51] | 1.00 | - | 32.2 | 2.16 | 24.70 | 2.29 | 2.5 |
-| | one:1+2x8 | 26.68 [26.64-26.83] | 1.17 | - | 29.4 | 0.37 | 23.75 | 2.31 | 4.2 / 5.5 |
-| | two:1x16 | 32.89 [32.35-33.26] | 0.95 | 1.00 | 33.9 | 2.35 | 25.75 | 2.49 | 2.4 |
-| | **two:1+2x8** | **18.78** [18.70-18.94] | **1.66** | **1.75** | 21.5 | 0.39 | 15.74 | 2.41 | 4.2 / 5.5 |
-| yee-pec-cube-32 [40, 400] (271, 2) | one:1x16 | 13.89 [13.71-13.92] | 1.00 | - | 14.4 | 1.07 | 10.91 | 1.11 | 1.7 |
-| | one:1+2x8 | 12.46 [12.32-12.55] | 1.11 | - | 14.6 | 0.33 | 10.92 | 1.12 | 3.2 / 4.2 |
-| | two:1x16 | 15.31 [15.21-15.78] | 0.91 | 1.00 | 15.8 | 1.31 | 11.79 | 1.35 | 2.1 |
-| | **two:1+2x8** | **10.15** [9.97-10.19] | **1.37** | **1.51** | 12.3 | 0.39 | 8.29 | 1.35 | 3.1 / 4.2 |
-| yee-pec-box-1e5 [40, 400] (108; 1 slice, 2 with helpers) | one:1x16 | 5.849 [5.836-5.852] | 1.00 | - | 6.21 | 0.80 | 3.75 | 0.90 | 1.4 |
-| | one:1+2x8 | 6.801 [6.791-6.842] | 0.86 | - | 8.89 | 0.37 | 5.02 | 1.33 | 2.6 / 3.4 |
-| | two:1x16 | 6.442 [6.229-6.500] | 0.91 | 1.00 | 6.74 | 1.06 | 3.93 | 1.01 | 1.7 |
-| | **two:1+2x8** | **5.548** [5.520-5.574] | 1.05 | **1.16** | 7.61 | 0.38 | 3.62 | 1.48 | 2.7 / 3.4 |
+| syn-mem27-46 [0.1, 0.3] (655, 4) | one:1x16 | 31.16 [31.04-31.37] | 1.00 | - | 32.1 | 2.20 | 24.67 | 2.29 | 2.2 |
+| | one:1+2x8 | 26.79 [26.57-26.85] | 1.16 | - | 29.6 | 0.37 | 23.88 | 2.30 | 4.2 / 5.5 |
+| | two:1x16 | 33.04 [32.27-33.21] | 0.94 | 1.00 | 34.0 | 2.48 | 25.49 | 2.49 | 2.5 |
+| | **two:1+2x8** | **18.95** [18.86-18.99] | **1.64** | **1.74** | 21.8 | 0.38 | 15.90 | 2.47 | 4.2 / 5.5 |
+| yee-pec-cube-32 [40, 400] (271, 2) | one:1x16 | 13.83 [13.77-13.99] | 1.00 | - | 14.3 | 1.05 | 10.87 | 1.11 | 2.1 |
+| | one:1+2x8 | 12.47 [12.33-12.58] | 1.11 | - | 14.7 | 0.34 | 10.90 | 1.11 | 3.1 / 4.2 |
+| | two:1x16 | 15.24 [15.13-15.62] | 0.91 | 1.00 | 15.7 | 1.27 | 11.65 | 1.36 | 2.1 |
+| | **two:1+2x8** | **10.15** [10.12-10.37] | **1.36** | **1.50** | 12.4 | 0.34 | 8.36 | 1.35 | 3.1 / 4.1 |
+| yee-pec-box-1e5 [40, 400] (108; 1 slice, 2 with helpers) | one:1x16 | 5.839 [5.828-5.873] | 1.00 | - | 6.21 | 0.81 | 3.75 | 0.90 | 1.6 |
+| | one:1+2x8 | 6.807 [6.785-6.875] | 0.86 | - | 8.91 | 0.36 | 5.03 | 1.32 | 2.5 / 3.4 |
+| | two:1x16 | 6.367 [6.291-6.477] | 0.92 | 1.00 | 6.65 | 0.93 | 3.95 | 1.01 | 1.8 |
+| | **two:1+2x8** | **5.553** [5.513-5.598] | 1.05 | **1.15** | 7.64 | 0.37 | 3.66 | 1.45 | 2.7 / 3.4 |
 
 What the claims say:
 
-* **Two sockets: the multi-process mode is faster than one process spread over both** - 1e6 nearest
-  1.10x (68.3 vs 75.4 s, 58.5 vs 64.1 s; certificate 35.9 -> 29.2 s, 29.7 -> 24.2 s), 1e5 3-D nearest
-  1.06-1.14x (certificate 0.97-1.01 -> 0.72-0.76 s), windows with several slices 1.16x, 1.51x, 1.75x.
-  The main factorization and the Krylov phase are the leader's as before (equal within noise).
-* **Against hsolve on one socket** (the 16-core layout on these nodes): 1e6 1.23-1.28x (half of it the
-  second socket's bandwidth for the leader: `two:1x16` alone is 1.13-1.16x),
-  windows 1.05-1.66x (1.05x: the window whose second slice exists only for the helpers); 1e5
-  nearest 0.92-1.01x (3-D), 0.77x (cav2d).
-* **On one socket the mode loses** (0.89-0.95x nearest, 0.86x on yee-pec-box-1e5's window): the
-  helpers share the socket's memory bandwidth and pay their preparation; it still gains on the windows
-  with many slices (1.11x, 1.17x), where the leader alone would factorize one slice after the other.
-  `hsolve-mpirun` therefore starts one process on a single NUMA node.
-* **Wall time.** Starting the MPI job (prterun, MPI_Init of three processes) adds ~1.8-2.0 s at 1e5
-  (wall 3.5-4.4 s against 2.0-3.0 s); at 1e6 the helpers' gain outweighs it (70.9 vs 76.3 s, 60.9 vs
-  64.9 s), on the windows with several slices too (21.5 vs 33.9 s, 12.3 vs 15.8 s), not on the 1e5
-  nearest cases and the 108-eigenvalue window.
-* **Memory.** The helpers hold their own copies of the problem and their counters: the process tree
-  peaks at 18.0 / 14.9 GiB (sampled; sum of the processes' own peaks 30.1 / 24.6 GiB) against 13.1 /
-  11.3 GiB at 1e6 - within the 32 GiB of a run, but on a 16 GiB machine the 1e6 cases run out of core
-  anyway (P7) and the two counts at once would not fit: the memory rule then keeps them on the leader.
+* **Two sockets: the multi-process mode is faster than one process spread over both.**
+  - 1e6 nearest: 1.11x / 1.09x (68.5 vs 75.8 s, 59.0 vs 64.1 s). The certificate drops from 36.0 to
+    29.2 s and from 29.9 to 24.2 s.
+  - 1e5 3-D nearest: 1.10-1.20x. The certificate drops from 0.97-1.01 s to 0.73-0.77 s.
+  - Windows with several slices: 1.15x, 1.50x, 1.74x.
+  - The main factorization and the Krylov phase are the leader's as before (equal within noise).
+* **Against hsolve on one socket** (the 16-core layout on these nodes):
+  - 1e6: 1.23-1.26x. About half of it is the second socket's bandwidth for the leader: `two:1x16`
+    alone is 1.13-1.14x.
+  - Windows: 1.05-1.64x. The 1.05x is the window whose second slice exists only for the helpers.
+  - 1e5 nearest: 0.92-1.00x (3-D) and 0.75x (cav2d).
+* **On one socket the mode loses:** 0.89-0.93x on nearest targets and 0.86x on yee-pec-box-1e5's
+  window. The helpers share the socket's memory bandwidth and pay their preparation. The mode still
+  gains on the windows with many slices (1.11x, 1.16x), where the leader alone would factorize one
+  slice after the other. `hsolve-mpirun` therefore runs the plain hsolve on a single NUMA node: no
+  MPI job since the review fix (section 7.3).
+* **Wall time.** Starting the MPI job (prterun, MPI_Init of three processes) adds ~1.7-2.0 s at 1e5:
+  wall 3.7-4.6 s against 2.1-3.1 s.
+  - The helpers' gain outweighs it at 1e6 (71.1 vs 76.7 s, 61.5 vs 64.9 s) and on the windows with
+    several slices (21.8 vs 34.0 s, 12.4 vs 15.7 s).
+  - It does not on the 1e5 nearest cases and the 108-eigenvalue window.
+* **Memory.** The helpers hold their own copies of the problem and their counters while they count.
+  - At 1e6 the process tree peaks at 18.3 / 14.6 GiB (sampled; the sum of the processes' own peaks
+    is 29.5 / 24.5 GiB), against 13.2 / 11.3 GiB for hsolve. That is within the 32 GiB of a run.
+  - With a 16 GiB limit the 1e6 cases run out of core anyway (P7), and two counts at once do not
+    fit. Since the fix the leader decides that before it sends anything: section 7.2 shows the
+    tree at the single process's peak.
 * **Results are the single-process ones**: the same eigenvalues (every run valid against the complete
   references), the same certificate counts (`2 of the 2 counts made by helper processes`), the same
   slices.
-* **The 2-D case and the GHIEP case get no helper work** (cav2d-rect-pert-1e5: a 0.035 s main
-  factorization against ~0.18 s of helper preparation, the cost rule keeps the counts on the leader;
-  wg-square-1e5: GHIEP has no inertia counts). Yet the multi-process leader's run is shorter than the
-  plain process's on two sockets (cav2d 0.400 vs 0.535 s): section 4.1 separates that from the
-  helpers.
+* **The 2-D case and the GHIEP case get no helper work.**
+  - cav2d-rect-pert-1e5: a 0.035 s main factorization against ~0.18 s of helper preparation, so the
+    cost rule keeps the counts on the leader.
+  - wg-square-1e5: GHIEP has no inertia counts.
+  - Yet the multi-process leader's run is shorter than the plain process's on two sockets (cav2d
+    0.401 vs 0.473 s). Section 4.1 separates that from the helpers.
 * **A bug the campaign caught.** The first version gave each slice helper only the memory one slice
-  needs; on yee-pec-cube-32's 167-pair slice its Krylov basis did not fit, the helper halved its block
-  width to 1 and missed 4 pairs (tools/eval: invalid, campaign C tag civ3); helpers now get an equal
-  share of what the budget leaves (e2c443d), measured above (div3).
+  needs. On yee-pec-cube-32's 167-pair slice its Krylov basis did not fit, so the helper halved its
+  block width to 1 and missed 4 pairs (tools/eval: invalid, campaign C tag civ3). Helpers now get an
+  equal share of what the budget leaves (e2c443d), measured above (giv3).
 
-### 4.1 What the helpers do (tag f1e5, final binary, 5 repetitions, all valid)
+### 4.1 What the helpers do (tag f1e5, binary f265491 before the review fix, 5 repetitions, all valid)
 
-Two controls on two sockets: `two:1x16r` - hsolve-mpi with ONE rank through the launcher (the same
-start-up, Open MPI loaded, no helpers) - and `two:1x16g` - plain hsolve with glibc's malloc keeping
-freed memory (`MALLOC_MMAP_MAX_=0`, no trimming; Open MPI may change the allocator's behaviour):
+Two controls on two sockets:
+- `two:1x16r` is hsolve-mpi with ONE rank through the launcher (`--ranks 1`): the same start-up,
+  Open MPI loaded, no helpers. Before the review fix this was also what the launcher did by itself
+  on one NUMA node; section 7.3 has the fix.
+- `two:1x16g` is plain hsolve with glibc's malloc keeping freed memory (`MALLOC_MMAP_MAX_=0`, no
+  trimming), since Open MPI may change the allocator's behaviour.
 
 | case | two:1x16 | two:1x16r | two:1x16g | two:1+2x8 | certificate: two:1x16 / 1+2x8 |
 |---|---|---|---|---|---|
@@ -331,7 +408,7 @@ freed memory (`MALLOC_MMAP_MAX_=0`, no trimming; Open MPI may change the allocat
   (0.95-1.02 s -> 0.72-0.77 s), 1.12x / 1.17x end to end here.
 * The cases without helper work show only the run-to-run spread of one process spread over two
   sockets at 1e5 (ranges overlap; plain hsolve's 0.333-0.457 s on cav2d, 0.543-0.944 s on
-  wg-square-1e5); the 1.34x of cav2d in the table above is that spread, not a gain.
+  wg-square-1e5); the 1.18x of cav2d in the table above is that spread, not a gain.
 
 ## 5. The "并行方案" table and the limits
 
@@ -357,31 +434,42 @@ on the same two sockets):
 | layout (16 cores) | placement | handed to helpers | 1e6 nearest: syn-mem27-100 / yee-pec-box-1e6 | 1e5 3-D nearest: syn-mem27-46 / yee-pec-box-1e5 / ss-qa8fk-qa8fm | windows: syn-mem27-46 (4 slices) / yee-pec-cube-32 (2) / yee-pec-box-1e5 (2) |
 |---|---|---|---|---|---|
 | 1 x 16 (hsolve) | one socket | - | 1.00 / 1.00 | 1.00 / 1.00 / 1.00 | 1.00 / 1.00 / 1.00 |
-| 1 + 2 x 8 (hsolve-mpi) | one socket | counts, slices | 0.93 / 0.93 | 0.89 / 0.93 / 0.90 | 1.17 / 1.11 / 0.86 |
-| 1 x 16 (hsolve) | two sockets | - | 1.16 / 1.13 | 0.89 / 0.88 / 0.86 | 0.95 / 0.91 / 0.91 |
-| **1 + 2 x 8 (hsolve-mpi)** | **two sockets** | counts, slices | **1.28 / 1.23** (1.10 / 1.10) | **1.01 / 0.97 / 0.92** (1.14 / 1.10 / 1.06) | **1.66 / 1.37 / 1.05** (1.75 / 1.51 / 1.16) |
+| 1 + 2 x 8 (hsolve-mpi) | one socket | counts, slices | 0.92 / 0.93 | 0.89 / 0.92 / 0.90 | 1.16 / 1.11 / 0.86 |
+| 1 x 16 (hsolve) | two sockets | - | 1.14 / 1.13 | 0.84 / 0.85 / 0.83 | 0.94 / 0.91 / 0.92 |
+| **1 + 2 x 8 (hsolve-mpi)** | **two sockets** | counts, slices | **1.26 / 1.23** (1.11 / 1.09) | **1.00 / 0.98 / 0.92** (1.20 / 1.16 / 1.10) | **1.64 / 1.36 / 1.05** (1.74 / 1.50 / 1.15) |
 
-Per phase in those runs (two sockets, hsolve -> hsolve-mpi): the certificate 35.9 -> 29.2 s and 29.7 ->
-24.2 s at 1e6, 0.97-1.01 -> 0.72-0.76 s at 1e5; the windows' slices (iterate) 25.8 -> 15.7 s
-(syn-mem27-46) and 11.8 -> 8.3 s (yee-pec-cube-32); analysis, main factorization and Krylov run on the
-leader as in hsolve and take the same time.
+(Binary of the review fix, 54e5219; tags g1e6, g1e5, giv1-3.)
+
+Per phase in those runs (two sockets, hsolve -> hsolve-mpi):
+- the certificate: 36.0 -> 29.2 s and 29.9 -> 24.2 s at 1e6, 0.97-1.01 -> 0.73-0.77 s at 1e5;
+- the windows' slices (iterate): 25.5 -> 15.9 s (syn-mem27-46) and 11.7 -> 8.4 s (yee-pec-cube-32);
+- analysis, main factorization and Krylov run on the leader as in hsolve and take the same time.
 
 **Limits** (honest ones):
 
-* **One socket: no gain.** Helpers on one socket share its memory bandwidth: 0.86-0.95x, except
-  windows with many slices (1.11-1.17x). `hsolve-mpirun` starts plain hsolve on one NUMA node - the
-  judging machine (16 cores) may well be one socket, and then the multi-process mode changes nothing.
+* **One socket: no gain.** Helpers on one socket share its memory bandwidth: 0.86-0.93x, except on
+  windows with many slices (1.11-1.16x). `hsolve-mpirun` therefore runs the plain hsolve on one NUMA
+  node, without an MPI job or its start-up (section 7.3). The judging machine (16 cores) may well be
+  one socket, and then the multi-process mode changes nothing.
 * **Two sockets: modest for nearest targets.** Only the certificate's two counts run concurrently -
   the main factorization and the Krylov run are one sequential computation, which the leader runs on
-  all cores as hsolve does; at 1e6 the certificate is ~40-45% of the run, so 1.10x. Windows with
-  several slices gain most (1.5-1.75x). GHIEP (no counts), the randomized certificate (no counts when
+  all cores as hsolve does; at 1e6 the certificate is ~40-45% of the run, so 1.09-1.11x. Windows with
+  several slices gain most (1.5-1.74x). GHIEP (no counts), the randomized certificate (no counts when
   it certifies), single-slice windows and problems too small for the helpers' preparation (cost
   rules) get nothing.
-* **MPI start-up.** ~1.8-2.0 s of wall time (prterun, three MPI_Inits) before the solve; it outweighs
-  the gain on the 1e5 nearest cases and the 108-eigenvalue window, not at 1e6 or on the larger windows.
-* **Memory.** Each helper holds a copy of the problem and its own counter or factors: the process tree
-  peaks 1.3-1.4x higher at 1e6 (18.0 vs 13.1 GiB, 14.9 vs 11.3 GiB). The budget covers the tree, so
-  under a tight limit the counts stay on the leader rather than overrun it.
+* **MPI start-up.** ~1.7-2.0 s of wall time (prterun, three MPI_Inits) before the solve. It outweighs
+  the gain on the 1e5 nearest cases and the 108-eigenvalue window, but not at 1e6 or on the larger
+  windows.
+* **Memory.** While it works, each helper holds a copy of the problem and its own counter or factors.
+  The process tree peaks 1.3-1.4x higher at 1e6 (18.3 vs 13.2 GiB, 14.6 vs 11.3 GiB).
+  - The budget is charged with what the helpers hold for the solve. Their own idle processes (MPI,
+    libraries, ~50 MB each) are not charged.
+  - Under a tight limit the counts and slices stay on the leader. Since the review fix this is
+    decided before the problem is sent, and the helpers drop it whenever the leader keeps the work.
+    The leader then certifies wherever hsolve does (section 7.1), and at 1e6 under 16 GiB the tree
+    stays at the single process's peak (section 7.2).
+  - The prediction can still be too low near the edge. The helpers then drop the problem once
+    they report their actual needs, and only their preparation is lost (section 3.1).
 * **Emulated topology.** The two-socket layouts use 8 of each socket's 16 cores (the run's 16 cores);
   each socket then serves 8 cores with its whole memory bandwidth and L3, as a 2 x 8-core machine
   would, but a machine with smaller sockets may have less bandwidth per socket.
@@ -390,6 +478,10 @@ leader as in hsolve and take the same time.
   object in place of hsolve's, and loses to the per-socket counts for the certificate.
 * **Failures.** A helper task that fails is redone by the leader (tests: fault bit 128, every kind);
   a helper process that dies ends the MPI job.
+* **Other MPIs untested.** Only Open MPI 5.0.11 is installed on the nodes and in the offline package
+  cache. The launcher and the tests pass Open MPI's options only to Open MPI and give the plan through
+  the environment, so Hydra-based MPIs (MPICH, Intel MPI) should work. That is shown only with
+  stand-in launchers (`tests/py/test_hsolve_mpirun.py`).
 
 ## 6. Commands
 
@@ -432,7 +524,119 @@ python3 tools/bench/mpi_layouts.py run --tag f1e5 --kind hsolve --reps 5 --layou
 python3 tools/run/guard.py --skip-busy-check --mem-gb 12 --timeout 2700 -- \
   python3 tools/bench/mpi_layouts.py eval --tag d1e5                                       # (--root $D for 1e6)
 python3 tools/bench/mpi_layouts.py table --tag d1e5                                        # (f1e5: --base two:1x16)
+# 7 (review fix, at 54e5219; raw output in $HOME/p10mpi/fix/): memory-tight budgets and the launcher on
+# one NUMA node (interleaved, each run its own guard --exclusive), then the end-to-end tags with event logs
+bash tools/bench/mpi_review_runs.sh tight $HOME/p10mpi/fix/tight
+bash tools/bench/mpi_review_runs.sh launch $HOME/p10mpi/fix/launch
+O=$HOME/p10mpi/fix/runs
+python3 tools/bench/mpi_layouts.py run --out $O --kind hsolve --events --tag g16 --reps 1 \
+  --layouts two:1x16,two:1+2x8 --case syn-mem27-100 --root $D --mem-gb 16 --timeout 1500
+python3 tools/bench/mpi_layouts.py run --out $O --kind hsolve --events --tag g1e5 --reps 5 --layouts $L \
+  --case syn-mem27-46 --case yee-pec-box-1e5 --case ss-qa8fk-qa8fm --case cav2d-rect-pert-1e5 --timeout 600
+#   giv1-3: as div1-3 with --out $O --events; g1e6: as c1e6 with --out $O --events; then eval / table --out $O
 # one multi-process solve by hand (two sockets' worth of cores):
 python3 tools/run/guard.py --exclusive --cores 8-15,16-23 --mem-gb 32 --timeout 900 -- \
   build/release/hsolve-mpirun -- --A data/cases/syn-mem27-46/A.npz --config data/cases/syn-mem27-46/config.json --out OUT
 ```
+
+## 7. Review fixes (review p10mpi; branch p10mpi-fix)
+
+The review of P10 found six problems. All six are fixed. Each fix comes with a regression test
+(section 3, Tests) and the measurements below. The disposition and the commit of each:
+
+| # | finding | disposition | commit |
+|---|---|---|---|
+| 1 | major: hsolve-mpi did not certify where hsolve certifies under the same budget. The helpers were prepared before the memory rule ran; their copies and analyses stayed until the end of the solve and were charged to the leader's count allowance. | fixed: memory rule predicted before sending, Drop / Dropped, budget charged above the helpers' idle level (sections 3, 3.1, 7.1, 7.2) | 1279778 |
+| 2 | major: the window was cut into one slice per helper before it was known that a helper would take a slice | fixed: cut only when the cost rule passes and two helpers' slices are predicted to fit; the leader releases its main factors only when the helpers take the slices (section 7.1) | 1279778 |
+| 3 | major: on one NUMA node the launcher started a one-rank MPI job (+1.7-1.9 s) instead of plain hsolve | fixed: the launcher execs the plain hsolve (section 7.3) | 8b1db53 |
+| 4 | minor: the launcher and the ctest registration used Open MPI-only options | fixed: the plan reaches the ranks through the environment, with the rank read from OMPI_COMM_WORLD_RANK / PMIX_RANK / PMI_RANK / MV2_COMM_WORLD_RANK; Open MPI options are passed only to Open MPI (launcher and tests). The docs say only Open MPI was tested: no other MPI is installed or in the offline package cache, so MPICH / Intel MPI are covered by stand-in tests only | 8b1db53, a7c5583 |
+| 5 | minor: THIRD_PARTY_NOTICES, DEPENDENCIES and FORMATS were not updated for hsolve-mpi | fixed: notices 3.7 (Open MPI and its run-time libraries, from hsolve-mpi's ldd and the conda packages' licenses), DEPENDENCIES P10 entry, FORMATS (fault bit 128, 0..255; report.parallel; --helper-counts / --helper-slices) | 2258ffd |
+| 6 | minor: the certificate statement named the InertiaCounter even when the leader's fallback count used the main factorization | fixed: the statement names each count's source (count_sources) | cca48b1 |
+
+### 7.1 Memory-tight budgets (findings 1 and 2; two sockets, 5 interleaved repetitions)
+
+The review's experiment ran again on the fixed binary. Each run had its own guard: `--exclusive
+--cores 8-15,16-23 --mem-gb 32` and the same explicit `--memory-budget-gb` for both modes. Plain
+hsolve used 16 threads; the other mode was `hsolve-mpirun --ranks 3` (`tools/bench/mpi_review_runs.sh
+tight`). "Before" is the review's result at f265491.
+
+| case, budget | mode | runs ok / certified | solver s | wall s | certificate s | leader factorizations, slices | helper work | before the fix |
+|---|---|---|---|---|---|---|---|---|
+| syn-mem27-46 nearest, 1.0 GiB | hsolve | 5/5, 5/5 | 2.286 [2.151-2.476] | 2.44 | 1.033 | 1, - | - | 5/5 certified |
+| | hsolve-mpi | 5/5, **5/5** | 2.228 [2.153-2.263] | 4.08 | 0.964 | 1, - | none: predicted 809 MB > 578 MB allowance, nothing sent | **0/5 certified** (rc 1: certificate NOT COMPLETED) |
+| syn-mem27-46 nearest, 1.1 GiB | hsolve | 5/5, 5/5 | 2.280 [2.157-2.434] | 2.44 | 1.015 | 1, - | - | |
+| | hsolve-mpi | 5/5, 5/5 | 2.273 [2.167-2.299] | 4.14 | 1.008 | 1, - | none (predicted) | |
+| yee-pec-box-1e5 [40, 400], 2.5 GiB | hsolve | 5/5, 5/5 | 6.267 [5.966-6.418] | 6.55 | 0.983 | 3, 1 | - | 6.263 s |
+| | hsolve-mpi | 5/5, 5/5 | **6.265** [6.127-6.298] | 8.24 | 0.987 | **3, 1** | none: the cut for the helpers skipped (2 x 1185 MB > 1840 MB predicted) | **8.006 s, 5 factorizations, 2 slices (0.78x)** |
+
+* The multi-process mode now computes exactly what hsolve computes when the budget leaves no room
+  for the helpers. The leader counts on its InertiaCounter and certifies; the window keeps
+  hsolve's single slice and its 3 factorizations. Solver times are equal. The wall time adds the
+  MPI start-up of the three-rank job (~1.7-1.9 s).
+* A lane sweep (8 cores: the leader on 8 threads, two helpers on 4) covered the edge cases:
+  - syn-mem27-46 nearest, 0.8-1.5 GiB: both modes certify at every budget. The counts are declined
+    from the prediction at 0.8-1.0 GiB. At 1.1 GiB the prediction passed but the helpers' own
+    estimate did not fit (2 x 320 MB > 607 MB): the helpers dropped the problem, and the leader
+    certified on its counter. That run wasted the preparation (certificate 1.32 vs 1.03 s), the
+    one-sided error of section 3.1. From 1.2 GiB the helpers count.
+  - yee-pec-box-1e5 [40, 400], 1.5-2.5 GiB: the plan equals hsolve's (1 slice, 3 factorizations,
+    6.1 s each). From 3.0 GiB the helpers take two slices. The review saw them used only from
+    3.5 GiB, with a wasted cut below that.
+
+### 7.2 The judging scale under 16 GiB (finding 1; g16: syn-mem27-100, two sockets, guard --mem-gb 16, 1 run each)
+
+With a 16 GiB limit the budget is 13.6 GiB, and the 1e6 case runs out of core in both modes (P7).
+
+| layout | solver s | certificate s | wall s | tree peak GiB (sampled) | helper work | before the fix (review, rB16) |
+|---|---|---|---|---|---|---|
+| two:1x16 (hsolve) | 170.9 | 36.3 | 171.8 | 7.26 | - | 180.7 s, 7.1 GiB |
+| two:1+2x8 (hsolve-mpi) | 171.7 | 34.9 | 174.5 | **7.11** | none: predicted 16119 MB > 11942 MB, nothing sent (share 0, wait 0) | 175.6 s; helpers prepared (share 0.52 s + wait 1.48 s) then declined; **peak 10.1 GiB** |
+
+The helpers no longer receive a 1e6 problem whose counts cannot fit. The process tree stays at
+the single process's peak.
+
+### 7.3 The launcher on one NUMA node (finding 3; one socket, cores 16-31, 5 interleaved repetitions)
+
+The launcher without `--ranks` (`tools/bench/mpi_review_runs.sh launch`) was run against plain
+`hsolve` with the same arguments. Wall time is the guard's.
+
+| case | mode | solver s | wall s | report.parallel.processes |
+|---|---|---|---|---|
+| syn-mem27-46 | hsolve | 2.012 [1.981-2.063] | 2.175 [2.124-2.245] | 1 |
+| | hsolve-mpirun | 2.003 [1.985-2.030] | 2.177 [2.126-2.275] | 1 |
+| cav2d-rect-pert-1e5 | hsolve | 0.292 [0.289-0.306] | 0.408 [0.404-0.436] | 1 |
+| | hsolve-mpirun | 0.295 [0.289-0.299] | 0.420 [0.403-0.468] | 1 |
+
+Before the fix this started a one-rank MPI job. In section 4.1 that job (two:1x16r) cost +1.7-1.9 s
+of wall time per run and 0.95-0.99x of solver time. On a single-socket judging machine,
+`hsolve-mpirun` is now the plain hsolve.
+
+### 7.4 End to end after the fix (32 GiB; section 4)
+
+The claims of section 4 were measured again on the fixed binary (54e5219). The later commit 4a7029c
+changes only an error path that these runs never take: a helper that fails to prepare is dropped
+as well. Tags:
+- g1e5: 1e5 nearest;
+- giv1-3: the windows;
+- g1e6: 1e6 nearest.
+
+Each tag ran 5 interleaved repetitions of the four layouts, and every run was judged by tools/eval.
+At 32 GiB the helpers get the same work as before the fix. The drops add 0.008-0.018 s at 1e5 and
+0.012-0.016 s at 1e6 (they free 1.2-1.4 GB of the helpers' copies and analyses). The predictions
+pass with room:
+- syn-mem27-100: 2 x (0.45 x 16101 + 2.5 x 330) = 16.1 GB predicted, and the helpers then report
+  2 x 7965 MB of counts;
+- yee-pec-box-1e6: the helpers report 2 x 6426 MB.
+
+The two-socket speedup over hsolve on the same cores, before and after the fix:
+
+| target | before (f265491 / 1c39bf6; d1e5, div1-3, c1e6) | after (54e5219; g1e5, giv1-3, g1e6) |
+|---|---|---|
+| syn-mem27-100 / yee-pec-box-1e6 nearest | 1.10 / 1.10 (68.28 / 58.49 s) | 1.11 / 1.09 (68.53 / 58.97 s) |
+| syn-mem27-46 / yee-pec-box-1e5 / ss-qa8fk-qa8fm nearest | 1.14 / 1.10 / 1.06 (1.988 / 2.540 / 1.637 s) | 1.20 / 1.16 / 1.10 (2.008 / 2.483 / 1.654 s) |
+| windows syn-mem27-46 / yee-pec-cube-32 / yee-pec-box-1e5 | 1.75 / 1.51 / 1.16 (18.78 / 10.15 / 5.548 s) | 1.74 / 1.50 / 1.15 (18.95 / 10.15 / 5.553 s) |
+
+The multi-process times are unchanged within 2%. The larger 1e5 ratios come from the plain process
+spread over two sockets, which was slower in this campaign (2.402 vs 2.260 s on syn-mem27-46; its
+two-socket spread at 1e5, section 4.1). Every run of g1e5, giv1-3, g1e6 and g16 was valid
+(tools/eval: 194/194).
