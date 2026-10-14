@@ -240,6 +240,23 @@ TYPED_TEST(ParallelSessionTyped, HelpersSolveTheSlices) {
   }
 }
 
+// The automatic slice size: with two helpers a window of at least two minimum slices (16) gets at
+// least two slices, all solved by the helpers, whatever the sequential cost model would choose.
+TEST(ParallelSessionSlices, AutoSliceSizeKeepsEveryHelperBusy) {
+  const auto a = laplacian3d<double>();
+  hs::SolverConfig cfg = interval_cfg();
+  cfg.slice_size = 0;
+  const auto want = inside(spectrum(), kLower, kUpper);
+  ASSERT_GE(want.size(), 32u);
+  with_session(3, [&](hs::Transport& peers) {
+    const auto sol = hs::solve_parallel(a, nullptr, cfg, nullptr, peers);
+    EXPECT_TRUE(sol.report.success) << warnings(sol.report);
+    expect_same_set(sol.eigenvalues, want, 1e-9);
+    EXPECT_GE(sol.report.slices.size(), 2u);
+    EXPECT_EQ(sol.report.parallel.helper_slices, static_cast<index_t>(sol.report.slices.size())) << warnings(sol.report);
+  });
+}
+
 // Every helper task fails (fault bit 128, each kind): the leader does the work itself, the result
 // is certified, the report counts the fallbacks and the helpers are not used again.
 TYPED_TEST(ParallelSessionTyped, FailingHelpersAreReplacedByTheLeader) {

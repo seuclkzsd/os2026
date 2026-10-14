@@ -692,6 +692,9 @@ constexpr int kMaxRerunRounds = 32;
 constexpr int kStallRounds = 2;
 /// Rerun shift of a multiple eigenvalue: this fraction of the gap to its nearest neighbour away.
 constexpr double kMultipletOffset = 0.01;
+/// Multi-process solves: the smallest slice a window is cut into so that every helper gets one
+/// (the cost model's own minimum, steps.cpp kMinSlice).
+constexpr index_t kHelperMinSlice = 16;
 
 /// Pairs accepted from all slices, eigenvalue order maintained per slice.
 template <class T>
@@ -1758,6 +1761,25 @@ Solution<T> WindowSolver<T>::solve() {
       c_max_ = std::max<index_t>(1, fit);
       c_target_ = std::max<index_t>(1, std::min(c_target_, c_max_));
       warn(c_, "slice size capped at " + std::to_string(c_max_) + " pairs by the memory budget");
+    }
+  }
+
+  // Multi-process solves (DESIGN §3.9): with two or more helpers to solve slices at once, a window
+  // of at least two minimum slices is cut into at least as many slices as there are helpers - the
+  // sequential cost model's optimum would leave helpers idle (yee-pec-box-1e5 [40, 400], 108
+  // eigenvalues: one slice).
+  if (cfg.slice_size == 0 && c_.helpers && c_.helpers->shared()) {
+    int usable = 0;
+    for (int h = 1; h <= c_.helpers->size(); ++h) usable += c_.helpers->usable(h) ? 1 : 0;
+    if (usable >= 2 && total >= 2 * kHelperMinSlice) {
+      const index_t per = std::max<index_t>(kHelperMinSlice, (total + usable - 1) / usable);
+      if (per < c_target_) {
+        event(c_, "slice_size_helpers", {{"helpers", static_cast<std::int64_t>(usable)},
+                                         {"model_target", static_cast<std::int64_t>(c_target_)},
+                                         {"target", static_cast<std::int64_t>(per)}});
+        c_target_ = per;
+        c_max_ = std::min(c_max_, c_target_ + c_target_ / 4);
+      }
     }
   }
 
