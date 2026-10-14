@@ -214,6 +214,14 @@ TEST(GpuHook, HsolveWithGpuOnFindsTheSameEigenpairsAndCount) {
   } else {
     EXPECT_EQ(g.value("available", true), false) << g.dump();
   }
+  // auto: far below the threshold (3e12 estimated flops) - no CUDA library is even looked for.
+  const json automode = run_cli(dir, "auto", "--gpu auto");
+  ASSERT_FALSE(automode.is_null());
+  ASSERT_TRUE(automode.contains("gpu")) << automode.dump();
+  EXPECT_EQ(automode["gpu"].value("mode", ""), "auto");
+  EXPECT_TRUE(automode["gpu"]["available"].is_null()) << automode["gpu"].dump();
+  EXPECT_EQ(automode["gpu"].value("factorizations_offloaded", -1), 0);
+  EXPECT_EQ(cpu["certificate"]["count_inertia"], automode["certificate"]["count_inertia"]);
   fs::remove_all(dir);
 #endif
 }
