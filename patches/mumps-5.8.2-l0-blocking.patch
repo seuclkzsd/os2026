@@ -1,0 +1,274 @@
+MUMPS 5.8.2: separate block sizes for the fronts under the L0-OpenMP layer (P9 "factspeed").
+
+Under MUMPS' L0 layer (KEEP(405) = 1: subtrees factorized by one thread each) the fronts are small
+and the factorization is memory-bandwidth bound; above it the fronts are large. One set of block
+sizes cannot suit both: hsolve sets the full-rank panel width KEEP(420) = 256 for the large fronts
+(results/p9_factspeed.md), which slows the L0 phase, and the band above the diagonal that MUMPS
+zeroes when it assembles a front (max(KEEP(7), KEEP(8), KEEP(218)) - 1 = 249) is most of a small
+front. This patch reads two KEEP entries that MUMPS 5.8.2 does not use, both ignored when 0 (their
+value after JOB = -1, so a caller that does not set them gets MUMPS' behaviour):
+  KEEP(498) > 0: full-rank panel width under the L0 layer (instead of KEEP(420));
+  KEEP(499) > 0: under the L0 layer, the triangle stripes of the fully summed update (KEEP(7/8)),
+                 the diagonal sub-blocks of the contribution-block update (KEEP(218)) and hence
+                 the zeroed band (KEEP(499) - 1).
+Only the blocking changes - every update is the same arithmetic on the same entries, and the zeroed
+band still covers every block that reads it. All four arithmetics. Apply with
+  tools/dev/build_mumps.sh NAME --patch patches/mumps-5.8.2-l0-blocking.patch
+(patch -p1 in the tarball's top directory). Same license as MUMPS (CeCILL-C).
+
+diff -ruN a/src/cfac_asm_master_m.F b/src/cfac_asm_master_m.F
+--- a/src/cfac_asm_master_m.F
++++ b/src/cfac_asm_master_m.F
+@@ -467,6 +467,9 @@
+ !$OMP   END PARALLEL DO
+       ELSE
+         TOPDIAG = max(KEEP(7), KEEP(8), KEEP(218))-1
++C       P9 hsolve patch: the L0 blocks of KEEP(499)
++        IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0)
++     &    TOPDIAG = KEEP(499)-1
+         IF  (LR_ACTIVATED) THEN
+          NULLIFY(BEGS_BLR)
+          CALL GET_CUT(IW(IOLDPS+HF:IOLDPS+HF+NFRONT-1), NASS1,
+diff -ruN a/src/cfac_front_aux.F b/src/cfac_front_aux.F
+--- a/src/cfac_front_aux.F
++++ b/src/cfac_front_aux.F
+@@ -2009,6 +2009,7 @@
+       INTEGER IROW
+       INTEGER Block
+       INTEGER BLSIZE
++      INTEGER K7LOC, K8LOC
+       COMPLEX ONE, ALPHA
+       INCLUDE 'mumps_headers.h'
+       PARAMETER (ONE=(1.0E0,0.0E0), ALPHA=(-1.0E0,0.0E0))
+@@ -2041,8 +2042,15 @@
+      &                A( LPOS ), LDA, ONE, A( APOS ), LDA )
+          ELSE
+ #endif
+-          IF ( LAST_COL_GEMM - IEND_BLOCK > KEEP(7) ) THEN
+-           BLSIZE = KEEP(8)
++C         P9 hsolve patch: KEEP(499) > 0 replaces KEEP(7/8) under L0
++          K7LOC = KEEP(7)
++          K8LOC = KEEP(8)
++          IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) THEN
++            K7LOC = KEEP(499)
++            K8LOC = KEEP(499)
++          ENDIF
++          IF ( LAST_COL_GEMM - IEND_BLOCK > K7LOC ) THEN
++           BLSIZE = K8LOC
+           ELSE
+            BLSIZE = LAST_COL_GEMM - IEND_BLOCK
+           END IF
+@@ -2398,6 +2406,8 @@
+         BLSIZE = NFRONT - NASS
+       END IF
+       BLSIZE2 = KEEP(218)
++C     P9 hsolve patch: KEEP(499) > 0 replaces KEEP(218) under L0
++      IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) BLSIZE2 = KEEP(499)
+       NPIV = IW( IOLDPS + 1 + KEEP(IXSZ))
+       IF ( NFRONT - NASS .GT. 0 ) THEN
+        IF ( POSTPONE_COL_UPDATE ) THEN
+diff -ruN a/src/cfac_front_LDLT_type1.F b/src/cfac_front_LDLT_type1.F
+--- a/src/cfac_front_LDLT_type1.F
++++ b/src/cfac_front_LDLT_type1.F
+@@ -187,6 +187,9 @@
+       CALL CMUMPS_SET_INNERBLOCKSIZE( NBKJIB_ORIG, NASS, KEEP)
+       IF (.not.LR_ACTIVATED) THEN
+           NBLR_ORIG     = KEEP(420)
++C         P9 hsolve patch: KEEP(498) > 0 is the width under L0
++          IF (KEEP(405).EQ.1 .AND. KEEP(498).GT.0)
++     &      NBLR_ORIG = KEEP(498)
+       ELSE
+           NBLR_ORIG  = -9999 
+       ENDIF
+diff -ruN a/src/dfac_asm_master_m.F b/src/dfac_asm_master_m.F
+--- a/src/dfac_asm_master_m.F
++++ b/src/dfac_asm_master_m.F
+@@ -467,6 +467,9 @@
+ !$OMP   END PARALLEL DO
+       ELSE
+         TOPDIAG = max(KEEP(7), KEEP(8), KEEP(218))-1
++C       P9 hsolve patch: the L0 blocks of KEEP(499)
++        IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0)
++     &    TOPDIAG = KEEP(499)-1
+         IF  (LR_ACTIVATED) THEN
+          NULLIFY(BEGS_BLR)
+          CALL GET_CUT(IW(IOLDPS+HF:IOLDPS+HF+NFRONT-1), NASS1,
+diff -ruN a/src/dfac_front_aux.F b/src/dfac_front_aux.F
+--- a/src/dfac_front_aux.F
++++ b/src/dfac_front_aux.F
+@@ -2020,6 +2020,7 @@
+       INTEGER IROW
+       INTEGER Block
+       INTEGER BLSIZE
++      INTEGER K7LOC, K8LOC
+       DOUBLE PRECISION ONE, ALPHA
+       INCLUDE 'mumps_headers.h'
+       PARAMETER (ONE=1.0D0, ALPHA=-1.0D0)
+@@ -2052,8 +2053,15 @@
+      &                A( LPOS ), LDA, ONE, A( APOS ), LDA )
+          ELSE
+ #endif
+-          IF ( LAST_COL_GEMM - IEND_BLOCK > KEEP(7) ) THEN
+-           BLSIZE = KEEP(8)
++C         P9 hsolve patch: KEEP(499) > 0 replaces KEEP(7/8) under L0
++          K7LOC = KEEP(7)
++          K8LOC = KEEP(8)
++          IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) THEN
++            K7LOC = KEEP(499)
++            K8LOC = KEEP(499)
++          ENDIF
++          IF ( LAST_COL_GEMM - IEND_BLOCK > K7LOC ) THEN
++           BLSIZE = K8LOC
+           ELSE
+            BLSIZE = LAST_COL_GEMM - IEND_BLOCK
+           END IF
+@@ -2409,6 +2417,8 @@
+         BLSIZE = NFRONT - NASS
+       END IF
+       BLSIZE2 = KEEP(218)
++C     P9 hsolve patch: KEEP(499) > 0 replaces KEEP(218) under L0
++      IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) BLSIZE2 = KEEP(499)
+       NPIV = IW( IOLDPS + 1 + KEEP(IXSZ))
+       IF ( NFRONT - NASS .GT. 0 ) THEN
+        IF ( POSTPONE_COL_UPDATE ) THEN
+diff -ruN a/src/dfac_front_LDLT_type1.F b/src/dfac_front_LDLT_type1.F
+--- a/src/dfac_front_LDLT_type1.F
++++ b/src/dfac_front_LDLT_type1.F
+@@ -187,6 +187,9 @@
+       CALL DMUMPS_SET_INNERBLOCKSIZE( NBKJIB_ORIG, NASS, KEEP)
+       IF (.not.LR_ACTIVATED) THEN
+           NBLR_ORIG     = KEEP(420)
++C         P9 hsolve patch: KEEP(498) > 0 is the width under L0
++          IF (KEEP(405).EQ.1 .AND. KEEP(498).GT.0)
++     &      NBLR_ORIG = KEEP(498)
+       ELSE
+           NBLR_ORIG  = -9999 
+       ENDIF
+diff -ruN a/src/sfac_asm_master_m.F b/src/sfac_asm_master_m.F
+--- a/src/sfac_asm_master_m.F
++++ b/src/sfac_asm_master_m.F
+@@ -467,6 +467,9 @@
+ !$OMP   END PARALLEL DO
+       ELSE
+         TOPDIAG = max(KEEP(7), KEEP(8), KEEP(218))-1
++C       P9 hsolve patch: the L0 blocks of KEEP(499)
++        IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0)
++     &    TOPDIAG = KEEP(499)-1
+         IF  (LR_ACTIVATED) THEN
+          NULLIFY(BEGS_BLR)
+          CALL GET_CUT(IW(IOLDPS+HF:IOLDPS+HF+NFRONT-1), NASS1,
+diff -ruN a/src/sfac_front_aux.F b/src/sfac_front_aux.F
+--- a/src/sfac_front_aux.F
++++ b/src/sfac_front_aux.F
+@@ -2020,6 +2020,7 @@
+       INTEGER IROW
+       INTEGER Block
+       INTEGER BLSIZE
++      INTEGER K7LOC, K8LOC
+       REAL ONE, ALPHA
+       INCLUDE 'mumps_headers.h'
+       PARAMETER (ONE=1.0E0, ALPHA=-1.0E0)
+@@ -2052,8 +2053,15 @@
+      &                A( LPOS ), LDA, ONE, A( APOS ), LDA )
+          ELSE
+ #endif
+-          IF ( LAST_COL_GEMM - IEND_BLOCK > KEEP(7) ) THEN
+-           BLSIZE = KEEP(8)
++C         P9 hsolve patch: KEEP(499) > 0 replaces KEEP(7/8) under L0
++          K7LOC = KEEP(7)
++          K8LOC = KEEP(8)
++          IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) THEN
++            K7LOC = KEEP(499)
++            K8LOC = KEEP(499)
++          ENDIF
++          IF ( LAST_COL_GEMM - IEND_BLOCK > K7LOC ) THEN
++           BLSIZE = K8LOC
+           ELSE
+            BLSIZE = LAST_COL_GEMM - IEND_BLOCK
+           END IF
+@@ -2409,6 +2417,8 @@
+         BLSIZE = NFRONT - NASS
+       END IF
+       BLSIZE2 = KEEP(218)
++C     P9 hsolve patch: KEEP(499) > 0 replaces KEEP(218) under L0
++      IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) BLSIZE2 = KEEP(499)
+       NPIV = IW( IOLDPS + 1 + KEEP(IXSZ))
+       IF ( NFRONT - NASS .GT. 0 ) THEN
+        IF ( POSTPONE_COL_UPDATE ) THEN
+diff -ruN a/src/sfac_front_LDLT_type1.F b/src/sfac_front_LDLT_type1.F
+--- a/src/sfac_front_LDLT_type1.F
++++ b/src/sfac_front_LDLT_type1.F
+@@ -187,6 +187,9 @@
+       CALL SMUMPS_SET_INNERBLOCKSIZE( NBKJIB_ORIG, NASS, KEEP)
+       IF (.not.LR_ACTIVATED) THEN
+           NBLR_ORIG     = KEEP(420)
++C         P9 hsolve patch: KEEP(498) > 0 is the width under L0
++          IF (KEEP(405).EQ.1 .AND. KEEP(498).GT.0)
++     &      NBLR_ORIG = KEEP(498)
+       ELSE
+           NBLR_ORIG  = -9999 
+       ENDIF
+diff -ruN a/src/zfac_asm_master_m.F b/src/zfac_asm_master_m.F
+--- a/src/zfac_asm_master_m.F
++++ b/src/zfac_asm_master_m.F
+@@ -467,6 +467,9 @@
+ !$OMP   END PARALLEL DO
+       ELSE
+         TOPDIAG = max(KEEP(7), KEEP(8), KEEP(218))-1
++C       P9 hsolve patch: the L0 blocks of KEEP(499)
++        IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0)
++     &    TOPDIAG = KEEP(499)-1
+         IF  (LR_ACTIVATED) THEN
+          NULLIFY(BEGS_BLR)
+          CALL GET_CUT(IW(IOLDPS+HF:IOLDPS+HF+NFRONT-1), NASS1,
+diff -ruN a/src/zfac_front_aux.F b/src/zfac_front_aux.F
+--- a/src/zfac_front_aux.F
++++ b/src/zfac_front_aux.F
+@@ -2009,6 +2009,7 @@
+       INTEGER IROW
+       INTEGER Block
+       INTEGER BLSIZE
++      INTEGER K7LOC, K8LOC
+       COMPLEX(kind=8) ONE, ALPHA
+       INCLUDE 'mumps_headers.h'
+       PARAMETER (ONE=(1.0D0,0.0D0), ALPHA=(-1.0D0,0.0D0))
+@@ -2041,8 +2042,15 @@
+      &                A( LPOS ), LDA, ONE, A( APOS ), LDA )
+          ELSE
+ #endif
+-          IF ( LAST_COL_GEMM - IEND_BLOCK > KEEP(7) ) THEN
+-           BLSIZE = KEEP(8)
++C         P9 hsolve patch: KEEP(499) > 0 replaces KEEP(7/8) under L0
++          K7LOC = KEEP(7)
++          K8LOC = KEEP(8)
++          IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) THEN
++            K7LOC = KEEP(499)
++            K8LOC = KEEP(499)
++          ENDIF
++          IF ( LAST_COL_GEMM - IEND_BLOCK > K7LOC ) THEN
++           BLSIZE = K8LOC
+           ELSE
+            BLSIZE = LAST_COL_GEMM - IEND_BLOCK
+           END IF
+@@ -2398,6 +2406,8 @@
+         BLSIZE = NFRONT - NASS
+       END IF
+       BLSIZE2 = KEEP(218)
++C     P9 hsolve patch: KEEP(499) > 0 replaces KEEP(218) under L0
++      IF (KEEP(405).EQ.1 .AND. KEEP(499).GT.0) BLSIZE2 = KEEP(499)
+       NPIV = IW( IOLDPS + 1 + KEEP(IXSZ))
+       IF ( NFRONT - NASS .GT. 0 ) THEN
+        IF ( POSTPONE_COL_UPDATE ) THEN
+diff -ruN a/src/zfac_front_LDLT_type1.F b/src/zfac_front_LDLT_type1.F
+--- a/src/zfac_front_LDLT_type1.F
++++ b/src/zfac_front_LDLT_type1.F
+@@ -187,6 +187,9 @@
+       CALL ZMUMPS_SET_INNERBLOCKSIZE( NBKJIB_ORIG, NASS, KEEP)
+       IF (.not.LR_ACTIVATED) THEN
+           NBLR_ORIG     = KEEP(420)
++C         P9 hsolve patch: KEEP(498) > 0 is the width under L0
++          IF (KEEP(405).EQ.1 .AND. KEEP(498).GT.0)
++     &      NBLR_ORIG = KEEP(498)
+       ELSE
+           NBLR_ORIG  = -9999 
+       ENDIF
