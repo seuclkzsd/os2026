@@ -1,7 +1,7 @@
 /* bench/mpi_factor_bench.c - P9 "mpi": upper bound of hybrid MPI + OpenMP MUMPS for hsolve's
  * factorizations (the certificate's inertia-only counts and the main LDL^T with its block solves).
  *
- * A standalone C program (not part of the hsolve build: CMake globs bench/*.cpp only), built twice
+ * A standalone C program (not part of the hsolve build: CMake globs only the .cpp files of bench/), built twice
  * by tools/bench/mpi_build.sh from this one source:
  *   build/mpi/mpi_factor_bench      against the MPI MUMPS 5.8.2 of the os2026-ref env (Open MPI 5,
  *                                   ScaLAPACK, PT-SCOTCH, ParMETIS, OpenMP), run under mpiexec;
@@ -341,7 +341,9 @@ static double norm2(const double* v, int64_t n) {
   return sqrt(s);
 }
 
-static int run_mode(const Options* o, const Matrix* m, int* perm, const char* mode, double* t_total) {
+/* Runs one mode; returns INFOG(12) of its first factorization, *ok = the inertia was the same in
+ * every repetition and equals --expect-neg (when given). */
+static int run_mode(const Options* o, const Matrix* m, int* perm, const char* mode, double* t_total, int* ok) {
   const int count = strcmp(mode, "count") == 0;
   if (!count && strcmp(mode, "full") != 0) die("--modes takes count and/or full");
   DMUMPS_STRUC_C id;
@@ -464,9 +466,9 @@ static int run_mode(const Options* o, const Matrix* m, int* perm, const char* mo
     free(rhs);
     free(b0);
   }
-  const int ok = inertia_stable && (o->expect_neg < 0 || (long long)neg_first == o->expect_neg);
+  *ok = inertia_stable && (o->expect_neg < 0 || (long long)neg_first == o->expect_neg);
   run_job(&id, JOB_END, "termination");
-  return ok ? neg_first : -2;
+  return neg_first;
 }
 
 int main(int argc, char** argv) {
@@ -487,10 +489,10 @@ int main(int argc, char** argv) {
   int all_ok = 1;
   int neg_seen = -1;
   for (char* tok = strtok(modes, ","); tok; tok = strtok(NULL, ",")) {
-    const int neg = run_mode(&o, &m, perm, tok, &t_total);
-    if (neg == -2) all_ok = 0;
-    else if (neg_seen >= 0 && neg != neg_seen) all_ok = 0;
-    else neg_seen = neg;
+    int ok = 0;
+    const int neg = run_mode(&o, &m, perm, tok, &t_total, &ok);
+    if (!ok || (neg_seen >= 0 && neg != neg_seen)) all_ok = 0;
+    if (neg_seen < 0) neg_seen = neg;
   }
 
   struct rusage ru;
