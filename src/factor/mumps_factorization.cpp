@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <type_traits>
@@ -111,6 +112,13 @@ int grown_relaxation(int pct) {
 
 namespace mumps {
 
+Blocking blocking_from_environment() {
+  const char* v = std::getenv("HS_MUMPS_BLOCKING");
+  if (v == nullptr || *v == '\0' || std::strcmp(v, "mumps") == 0) return Blocking::Mumps;
+  if (std::strcmp(v, "p9") == 0) return Blocking::P9;
+  HS_THROW(InvalidInput, "HS_MUMPS_BLOCKING must be unset, \"mumps\" or \"p9\", got \"" << v << "\"");
+}
+
 template <class T, class U>
 MumpsFactorization<T, U>::MumpsFactorization(const FactorOptions& options)
     // options_ is declared (and validated) before the MUMPS instance is created.
@@ -134,6 +142,15 @@ void MumpsFactorization<T, U>::configure_static_controls() {
   // INFOG(12) counts the negative pivots of fronts MUMPS factorizes itself; keep the root front
   // out of ScaLAPACK (a no-op for the sequential library, but it keeps the inertia exact).
   mumps_.icntl(13) = 1;
+  // Opt-in block sizes (mumps_api.hpp, Blocking): wider full-rank panels make the trailing updates
+  // of large fronts compute- instead of memory-bound.
+  if (blocking_from_environment() == Blocking::P9) {
+    mumps_.keep(420) = kFullRankPanelWidth;
+    mumps_.keep(58) = kCbUpdateBlock;
+    mumps_.keep(57) = 2 * kCbUpdateBlock;
+    mumps_.keep(498) = kL0PanelWidth;  // read only by the patched MUMPS (mumps_api.hpp)
+    mumps_.keep(499) = kL0Block;
+  }
   mumps_.icntl(16) = options_.threads;  // 0 is resolved at analyze()
   mumps_.icntl(18) = 0;                 // centralized matrix on the host
   mumps_.icntl(20) = 0;                 // dense right-hand sides

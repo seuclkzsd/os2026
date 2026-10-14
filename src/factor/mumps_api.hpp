@@ -60,6 +60,41 @@ inline CallMutex& call_mutex() {
   return m;
 }
 
+/// Block sizes a MumpsFactorization gives MUMPS (P9 "factspeed", results/p9_factspeed.md):
+///   Mumps - MUMPS' own (the default);
+///   P9    - kFullRankPanelWidth, kCbUpdateBlock and, for a patched MUMPS, kL0PanelWidth /
+///           kL0Block below: every factorization of the 1e6 3-D cases 1.05-1.06x faster (1.07-1.08x
+///           with the patch), end to end 1.03-1.04x - below the 1.05x a default needs, so opt-in.
+/// Chosen per object at construction from the environment variable HS_MUMPS_BLOCKING: unset, ""
+/// or "mumps" -> Mumps, "p9" -> P9, anything else -> InvalidInput. Only the blocking changes: the
+/// same threshold-pivoted LDL^T, the same counts (test_factor_panel).
+enum class Blocking { Mumps, P9 };
+Blocking blocking_from_environment();
+
+/// MUMPS' full-rank outer panel width of LDL^T / LU fronts: KEEP(420), the block NBLR_ORIG of
+/// [sd]fac_front_LDLT_type1.F (MUMPS sets 4 * KEEP(6) = 128 at JOB=-1; the analysis sizes its
+/// buffers with it, so it is set before the analysis). A front's fully summed columns are
+/// factorized in panels of this width, each followed by a rank-KEEP(420) dgemm update of the rest
+/// of the front; at 128 that update is memory-bound on 16 cores (~350 GFlop/s against 585-620 at
+/// larger ranks, ~500 at 256, gpu01 slot).
+inline constexpr int kFullRankPanelWidth = 256;
+
+/// Row block of the contribution-block update at the end of a front's LDL^T (KEEP(58), used only
+/// by [sd]fac_front_aux.F DMUMPS_FAC_T_LDLT: blocks of KEEP(58) rows once the contribution block
+/// has more than KEEP(57) = 2 * KEEP(58) rows, else two halves; MUMPS: 1000 / 2000). Fewer, larger
+/// dgemm calls on the big fronts; the same arithmetic (P9 "factspeed").
+inline constexpr int kCbUpdateBlock = 2000;
+
+/// Block sizes under MUMPS' L0-OpenMP layer, read only by a MUMPS built with
+/// patches/mumps-5.8.2-l0-blocking.patch (tools/dev/build_mumps.sh --patch; CMake
+/// HSOLVE_MUMPS_ROOT): KEEP(498) the full-rank panel width there (its small fronts prefer MUMPS'
+/// 128 to kFullRankPanelWidth), KEEP(499) the triangle stripes / contribution-block diagonal blocks
+/// there and hence the band above the diagonal zeroed at assembly (64 instead of 150 / 120 / 250:
+/// less memset on small fronts). MUMPS 5.8.2 itself does not use these two entries (0 after JOB=-1),
+/// so with the environment's library they change nothing.
+inline constexpr int kL0PanelWidth = 128;
+inline constexpr int kL0Block = 64;
+
 /// Fortran communicator understood by the sequential (libmpiseq) MUMPS build.
 inline constexpr int kUseCommWorld = -987654;
 
