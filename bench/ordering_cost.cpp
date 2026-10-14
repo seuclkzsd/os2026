@@ -9,14 +9,17 @@
 //       [--solves 5] [--block-solves 3] [--blocks 4,8] [--max-mb 27000] [--perm-in FILE]
 //       [--perm-out FILE] [--nd-leaf L] [--nd-imbalance F] [--nd-coarsen C] [--nd-tries T]
 //       [--nd-passes P] [--nd-runs R] [--nd-finalists F] [--nd-compress 0|1]
-//       [--nd-top-depth D] [--nd-top-size S] [--nd-top-runs R] [--nd-top-finalists F] [--nd-flow L] [--nd-seed S] [--nd-embedding auto|compressed|full] [--nd-profile 0|1]
+//       [--nd-top-depth D] [--nd-top-size S] [--nd-top-runs R] [--nd-top-finalists F]
+//       [--nd-flow L] [--nd-flow-trials 0|1] [--nd-flow-finest 0|1] [--nd-flow-min N]
+//       [--nd-mode M] [--nd-seed S] [--nd-embedding auto|compressed|full] [--nd-profile 0|1]
 //
 // O: FactorOptions::ordering - 0 AMD, 2 AMF, 3 SCOTCH, 4 PORD, 5 METIS, 6 QAMD (MUMPS, serial,
 // inside the analysis), 10 hsolve's nested dissection (hs::compute_ordering with --threads
 // threads and the --nd-* OrderingOptions, timed apart, then handed to MUMPS as PERM_IN), or
 // 11 (real T) the same nested dissection through its internal interface
 // (hs::ordering::nested_dissection; --nd-mode M sets the FM variant, 0 two-sided, 1 one-sided, 2
-// both; profile as with --nd-profile 1), or -1 with --perm-in FILE: a pivot order from a .npy file (int32, 1-based pivot positions, as
+// both; --nd-flow-* the flow refinement's internal switches; profile as with --nd-profile 1), or
+// -1 with --perm-in FILE: a pivot order from a .npy file (int32, 1-based pivot positions, as
 // --perm-out writes them: the analysed object's SYM_PERM). DIR holds A.npz (and B.npz) and
 // config.json (sigma = target.sigma). The numeric steps are skipped when --numeric 0 or the
 // in-core estimate exceeds --max-mb MB. --nd-profile 1 (real T) first runs the nested dissection
@@ -29,7 +32,18 @@
 // solve_p_s {p: s} (medians per call), neg / valid of the factorizations (must agree between
 // orderings). One process per measurement, orderings interleaved, through tools/run/guard.py in
 // the measurement slot; for solve times matching the CLI (which links the BLAS hook) preload
-// build/release/libhsolve_blashook.so. Commands behind results/p9_ordering.md: see there.
+// build/release/libhsolve_blashook.so. The P9 tables (results/p9_ordering.md sections 2, 3, 5) come
+// from, per measurement (one nested guard inside one outer slot guard per campaign part;
+// orderings / variants rotated per repetition):
+//   python3 tools/run/guard.py --exclusive --timeout 900 --mem-gb 32 -- \
+//     env LD_PRELOAD=build/release/libhsolve_blashook.so build/release/bench_ordering_cost \
+//     --case $CASE --threads 16 --ordering $O --counts 1 [--max-mb 20000] \
+//     [--nd-top-depth 2 --nd-top-runs 16 --nd-top-finalists 16]
+// and, analysis only (no timing: build lane, 8 threads), the ND variants of section 5:
+//   python3 tools/run/guard.py --skip-busy-check --mem-gb 11 --timeout 600 -- \
+//     build/release/bench_ordering_cost --case $CASE --threads 8 --numeric 0 --ordering 11 \
+//     [--nd-flow D --nd-flow-trials 0|1 --nd-flow-finest 0|1 --nd-flow-min N] [--nd-runs R ...]
+// External orders (geometric references): --ordering -1 --perm-in geo.npy.
 #include <omp.h>
 
 #include <algorithm>
@@ -42,14 +56,13 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <random>
 #include <sstream>
 #include <string>
 #include <variant>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "driver/internal.hpp"
 #include "factor/ordering_detail.hpp"
@@ -79,7 +92,7 @@ struct Args {
   fs::path perm_in, perm_out;
   hs::OrderingOptions nd;
   bool nd_profile = false;
-  int nd_mode = -1;  // SeparatorParams::refine_mode for --ordering 11 (-1: default)
+  int nd_mode = -1;     // SeparatorParams::refine_mode for --ordering 11 (-1: default)
   int flow_trials = 0;  // SeparatorParams::flow_in_trials for --ordering 11
   int flow_min = 0;     // SeparatorParams::flow_min_vertices for --ordering 11
   int flow_finest = 1;  // SeparatorParams::flow_finest_only for --ordering 11
@@ -106,19 +119,21 @@ void fill(std::vector<T>& x, std::mt19937_64& rng) {
 // --nd-profile 1 (real T): hs::ordering::nested_dissection on the pencil's graph with the --nd-*
 // options, timed apart, with its DissectionStats (work, critical path, where the work went).
 template <class T>
-json nd_profile(const hs::ShiftedPencil<T>& pencil, const hs::OrderingOptions& o, int threads, int mode = -1,
-                std::vector<int>* perm = nullptr, int flow_trials = 0, int flow_min = 0, int flow_finest = 1) {
+json nd_profile(const hs::ShiftedPencil<T>& pencil, const hs::OrderingOptions& o, int threads,
+                int mode = -1, std::vector<int>* perm = nullptr, int flow_trials = 0,
+                int flow_min = 0, int flow_finest = 1) {
   if constexpr (hs::is_complex_v<T>) {
     if (perm) HS_THROW(Unsupported, "--ordering 11 needs a real pencil");
     return json{{"skipped", "complex"}};
   } else {
     hs::Timer t;
-    hs::ordering::Graph g = hs::ordering::graph_from_upper(static_cast<std::int32_t>(pencil.order()),
-                                                           pencil.rowptr().data(), pencil.colind().data());
+    hs::ordering::Graph g = hs::ordering::graph_from_upper(
+        static_cast<std::int32_t>(pencil.order()), pencil.rowptr().data(), pencil.colind().data());
     hs::ordering::Graph cg;
     std::vector<std::int32_t> first, members;
     const bool compressed =
-        o.compress && hs::ordering::compress_graph(g, hs::ordering::kCompressionRatio, threads, cg, first, members);
+        o.compress && hs::ordering::compress_graph(g, hs::ordering::kCompressionRatio, threads, cg,
+                                                   first, members);
     if (compressed) g = std::move(cg);
     const double graph_s = t.seconds();
     hs::ordering::DissectionParams p;
@@ -173,7 +188,8 @@ json nd_profile(const hs::ShiftedPencil<T>& pencil, const hs::OrderingOptions& o
 }
 
 template <class T>
-int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b) {
+int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>& a,
+        const hs::CsrMatrix<T>* b) {
   const hs::ShiftedPencil<T> pencil(a, b);
   hs::SolverConfig cfg = cfg_in;
   cfg.threads = args.threads;
@@ -194,7 +210,8 @@ int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>
               {"threads", args.threads},
               {"sigma", sigma}};
 
-  if (args.nd_profile && args.ordering != 11) out["nd_profile"] = nd_profile(pencil, args.nd, args.threads);
+  if (args.nd_profile && args.ordering != 11)
+    out["nd_profile"] = nd_profile(pencil, args.nd, args.threads);
   auto f = hs::make_mumps_factorization<T>(fo);
   double ordering_s = 0.0;
   hs::Timer t;
@@ -214,7 +231,8 @@ int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>
     f->set_pivot_order(std::move(perm));
   } else if (args.ordering == 11) {
     std::vector<int> perm;
-    out["nd_profile"] = nd_profile(pencil, args.nd, args.threads, args.nd_mode, &perm, args.flow_trials, args.flow_min, args.flow_finest);
+    out["nd_profile"] = nd_profile(pencil, args.nd, args.threads, args.nd_mode, &perm,
+                                   args.flow_trials, args.flow_min, args.flow_finest);
     ordering_s = t.seconds();
     f->set_pivot_order(std::move(perm));
   } else if (args.ordering < 0) {
@@ -228,7 +246,9 @@ int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>
   out["analyze_s"] = analyze_s;
   out["ordering_s"] = ordering_s;
   out["given_s"] = analyze_s - ordering_s;
-  if (!args.perm_out.empty()) hs::write_npy_vector(args.perm_out, std::vector<std::int32_t>(f->pivot_order().begin(), f->pivot_order().end()));
+  if (!args.perm_out.empty())
+    hs::write_npy_vector(
+        args.perm_out, std::vector<std::int32_t>(f->pivot_order().begin(), f->pivot_order().end()));
   const hs::FactorEstimate est = f->estimate();
   out["est_flops"] = est.flops;
   out["est_entries"] = est.factor_entries;

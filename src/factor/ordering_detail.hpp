@@ -76,8 +76,8 @@ Graph graph_from_upper(std::int32_t n, const std::int64_t* rowptr, const std::in
 /// max_ratio of the vertices (the outputs are then cleared); else `c` is the compressed graph
 /// and members[first[k] .. first[k + 1]) the vertices of class k, increasing; classes are
 /// numbered in the order of their smallest member.
-bool compress_graph(const Graph& g, double max_ratio, int threads, Graph& c, std::vector<std::int32_t>& first,
-                    std::vector<std::int32_t>& members);
+bool compress_graph(const Graph& g, double max_ratio, int threads, Graph& c,
+                    std::vector<std::int32_t>& first, std::vector<std::int32_t>& members);
 /// METIS' threshold (COMPRESSION_FRACTION): compress when at most 85% of the vertices remain.
 inline constexpr double kCompressionRatio = 0.85;
 

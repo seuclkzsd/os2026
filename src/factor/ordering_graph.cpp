@@ -89,8 +89,8 @@ bool same_closed(const Graph& g, std::int32_t u, std::int32_t v) {
 
 }  // namespace
 
-bool compress_graph(const Graph& g, double max_ratio, int threads, Graph& c, std::vector<std::int32_t>& first,
-                    std::vector<std::int32_t>& members) {
+bool compress_graph(const Graph& g, double max_ratio, int threads, Graph& c,
+                    std::vector<std::int32_t>& first, std::vector<std::int32_t>& members) {
   const std::int32_t n = g.n;
   c = Graph{};
   first.clear();
@@ -106,7 +106,8 @@ bool compress_graph(const Graph& g, double max_ratio, int threads, Graph& c, std
   // rep[v]: the smallest vertex of v's class - a neighbour of v (or v itself).
   std::vector<std::int32_t> rep(static_cast<std::size_t>(n));
   std::int64_t classes = 0;
-#pragma omp parallel for schedule(dynamic, 4096) reduction(+ : classes) num_threads(std::max(1, threads))
+#pragma omp parallel for schedule(dynamic, 4096) reduction(+ : classes) \
+    num_threads(std::max(1, threads))
   for (std::int32_t v = 0; v < n; ++v) {
     std::int32_t r = v;
     for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e) {

@@ -40,7 +40,8 @@ std::vector<std::int32_t> minimum_degree(const Graph& g) {
         for (std::uint64_t bits = r[w]; bits; bits &= bits - 1)
           d += g.vwgt[static_cast<std::size_t>(w * 64 + __builtin_ctzll(bits))];
     }
-    return static_cast<std::int32_t>(std::min<std::int64_t>(d, std::numeric_limits<std::int32_t>::max() - 1));
+    return static_cast<std::int32_t>(
+        std::min<std::int64_t>(d, std::numeric_limits<std::int32_t>::max() - 1));
   };
   for (std::int32_t v = 0; v < n; ++v) {
     std::uint64_t* r = row(v);

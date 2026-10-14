@@ -1028,7 +1028,8 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
 #pragma omp task if (parallel) default(shared) firstprivate(r)
         {
           Random run_rng(run_seed[r]);
-          runs[r] = bisect_once(mid, run_rng, trial_p, max_part, tries, tr ? &run_traces[r] : nullptr);
+          runs[r] =
+              bisect_once(mid, run_rng, trial_p, max_part, tries, tr ? &run_traces[r] : nullptr);
         }
       }
     }
@@ -1052,7 +1053,8 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
       std::vector<std::uint64_t> fin_seed(static_cast<std::size_t>(finalists));
       for (int f = 0; f < finalists; ++f) fin_seed[f] = rng.next();
       std::vector<std::vector<std::uint8_t>> fin(static_cast<std::size_t>(finalists));
-      std::vector<std::pair<std::int64_t, std::int64_t>> fscore(static_cast<std::size_t>(finalists));
+      std::vector<std::pair<std::int64_t, std::int64_t>> fscore(
+          static_cast<std::size_t>(finalists));
       if (timing) timing->runs_s += stage.lap();
 #pragma omp taskgroup
       {

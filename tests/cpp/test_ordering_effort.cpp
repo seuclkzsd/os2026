@@ -1,9 +1,9 @@
 // Unit tests of the P9 additions to hsolve's nested dissection (src/factor/ordering*.cpp,
-// compute_ordering): merging indistinguishable vertices (compress_graph, OrderingOptions::compress),
-// weighted minimum degree on the leaves, trial separators refined down to their graph
-// (SeparatorParams::finalists) and the effort on the top separators (OrderingOptions::top_*),
-// the options' ranges, FactorOptions::nested_dissection, and the driver's choice of the effort
-// (nd_ordering_options, OrderingPricer).
+// compute_ordering): merging indistinguishable vertices (compress_graph,
+// OrderingOptions::compress), weighted minimum degree on the leaves, trial separators refined down
+// to their graph (SeparatorParams::finalists) and the effort on the top separators
+// (OrderingOptions::top_*), the options' ranges, FactorOptions::nested_dissection, and the driver's
+// choice of the effort (nd_ordering_options, OrderingPricer).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -30,7 +30,8 @@ using hs::ShiftedPencil;
 namespace ord = hs::ordering;
 using Edges = std::vector<std::pair<std::int32_t, std::int32_t>>;
 
-ord::Graph graph_from_edges(std::int32_t n, const Edges& edges, std::vector<std::int32_t> vwgt = {}) {
+ord::Graph graph_from_edges(std::int32_t n, const Edges& edges,
+                            std::vector<std::int32_t> vwgt = {}) {
   std::vector<std::vector<std::int32_t>> up(static_cast<std::size_t>(n));
   for (auto [a, b] : edges) {
     if (a == b) continue;
@@ -195,8 +196,10 @@ TEST(FactorOrderingCompression, ComputeOrderingEliminatesEachClassAsABlock) {
 TEST(FactorOrderingCompression, IndistinguishableRatioForTheCostModel) {
   const int nx = 12, ny = 9, comps = 3;
   const std::int32_t nodes = nx * ny;
-  const auto field = matrix_from_edges<double>(comps * nodes, vector_field_edges(nodes, grid_edges(nx, ny), comps));
-  EXPECT_DOUBLE_EQ(ord::indistinguishable_ratio(ShiftedPencil<double>(field, nullptr)), 1.0 / comps);
+  const auto field = matrix_from_edges<double>(
+      comps * nodes, vector_field_edges(nodes, grid_edges(nx, ny), comps));
+  EXPECT_DOUBLE_EQ(ord::indistinguishable_ratio(ShiftedPencil<double>(field, nullptr)),
+                   1.0 / comps);
   const auto grid = matrix_from_edges<cplx>(nodes, grid_edges(nx, ny));
   EXPECT_DOUBLE_EQ(ord::indistinguishable_ratio(ShiftedPencil<cplx>(grid, nullptr)), 1.0);
   // The driver's graph sizes of hsolve's nested dissection follow it (OrderingInput::nd).
@@ -330,7 +333,8 @@ TEST(FactorOrderingOptions, EffortRangesAreEnforced) {
   EXPECT_TRUE(bad([](O& o) { o.top_runs = 0; }));
   EXPECT_TRUE(bad([](O& o) { o.top_finalists = 6; }));
   EXPECT_FALSE(bad([](O& o) { o.separator_runs = 64, o.separator_finalists = 64; }));
-  EXPECT_FALSE(bad([](O& o) { o.top_depth = 3, o.top_size = 50, o.top_runs = 16, o.top_finalists = 16; }));
+  EXPECT_FALSE(
+      bad([](O& o) { o.top_depth = 3, o.top_size = 50, o.top_runs = 16, o.top_finalists = 16; }));
 }
 
 // ------------------------------------------------------------- FactorOptions and the driver
@@ -372,12 +376,14 @@ TEST(DriverOrderingEffort, OptionsAndPricing) {
   // a huge 3-D AMD estimate (fill 200, 1e16 flops) yes, a small 2-D one (fill 10) no.
   hs::SolverConfig cfg;
   cfg.target.k = 10;
-  const hs::driver::PlannedWork work = hs::driver::plan_work(cfg, hs::ProblemType::Standard, 1000000, 1.0);
+  const hs::driver::PlannedWork work =
+      hs::driver::plan_work(cfg, hs::ProblemType::Standard, 1000000, 1.0);
   auto nd_candidate = [&](double order, double entries, double amd_fe, double amd_flops) {
     hs::driver::OrderingInput in;
     in.mumps = {order, entries};
     in.nd = in.mumps;
-    hs::driver::OrderingPricer pricer{hs::driver::ordering_model(), cfg, work, in, entries, 16, 0.0, {}};
+    hs::driver::OrderingPricer pricer{
+        hs::driver::ordering_model(), cfg, work, in, entries, 16, 0.0, {}};
     std::vector<hs::driver::OrderingCandidate> cand(2);
     cand[0].ordering = 0;
     cand[1].ordering = hs::kOrderingNestedDissection;

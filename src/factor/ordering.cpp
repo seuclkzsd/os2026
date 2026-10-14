@@ -324,12 +324,15 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
     HS_THROW(InvalidInput, "OrderingOptions.coarsen_to must be >= 2, got " << o.coarsen_to);
   if (o.separator_runs < 1 || o.separator_runs > 64 || o.separator_finalists < 1 ||
       o.separator_finalists > o.separator_runs)
-    HS_THROW(InvalidInput, "OrderingOptions: need 1 <= separator_finalists <= separator_runs <= 64, got "
-                               << o.separator_finalists << ", " << o.separator_runs);
-  if (o.top_depth < 0 || o.top_size < 0 || o.top_runs < 1 || o.top_runs > 64 || o.top_finalists < 1 ||
-      o.top_finalists > o.top_runs)
-    HS_THROW(InvalidInput, "OrderingOptions: need top_depth, top_size >= 0 and 1 <= top_finalists <= top_runs <= 64, got "
-                               << o.top_depth << ", " << o.top_finalists << ", " << o.top_runs);
+    HS_THROW(InvalidInput,
+             "OrderingOptions: need 1 <= separator_finalists <= separator_runs <= 64, got "
+                 << o.separator_finalists << ", " << o.separator_runs);
+  if (o.top_depth < 0 || o.top_size < 0 || o.top_runs < 1 || o.top_runs > 64 ||
+      o.top_finalists < 1 || o.top_finalists > o.top_runs)
+    HS_THROW(InvalidInput,
+             "OrderingOptions: need top_depth, top_size >= 0 and 1 <= top_finalists <= top_runs <= "
+             "64, got "
+                 << o.top_depth << ", " << o.top_finalists << ", " << o.top_runs);
   if (o.flow_depth < 0 || o.flow_depth > 16)
     HS_THROW(InvalidInput, "OrderingOptions.flow_depth must lie in [0, 16], got " << o.flow_depth);
   if (o.init_tries < 1 || o.refine_passes < 0)
@@ -362,8 +365,8 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
   ordering::Graph cg;
   std::vector<std::int32_t> class_first, class_members;
   const bool graph_compressed =
-      o.compress &&
-      ordering::compress_graph(g, ordering::kCompressionRatio, threads, cg, class_first, class_members);
+      o.compress && ordering::compress_graph(g, ordering::kCompressionRatio, threads, cg,
+                                             class_first, class_members);
   if (graph_compressed) g = std::move(cg);
   const index_t ordered_vertices = g.n;
   ordering::DissectionParams p;
@@ -387,7 +390,8 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
     std::vector<std::int32_t> expanded;
     expanded.reserve(static_cast<std::size_t>(vertices));
     for (const std::int32_t q : order)
-      for (std::int32_t m = class_first[q]; m < class_first[q + 1]; ++m) expanded.push_back(class_members[m]);
+      for (std::int32_t m = class_first[q]; m < class_first[q + 1]; ++m)
+        expanded.push_back(class_members[m]);
     order = std::move(expanded);
   }
 
@@ -454,7 +458,7 @@ double ordering::indistinguishable_ratio(const ShiftedPencil<T>& pencil) {
 #define HS_INSTANTIATE_ORDERING(T)                                                               \
   template std::vector<int> compute_ordering<T>(const ShiftedPencil<T>&, const OrderingOptions&, \
                                                 OrderingStats*);                                 \
-  template double ordering::complex_coupling_fraction<T>(const ShiftedPencil<T>&);           \
+  template double ordering::complex_coupling_fraction<T>(const ShiftedPencil<T>&);               \
   template double ordering::indistinguishable_ratio<T>(const ShiftedPencil<T>&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_ORDERING)
 #undef HS_INSTANTIATE_ORDERING
