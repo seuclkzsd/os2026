@@ -13,6 +13,8 @@
 #   2x8     two processes at once, one on each half (T = half each), independent of each other
 #   2x8m    ONE MPI job of two ranks (Open MPI of the os2026-ref env), rank r pinned to half r by
 #           tools/bench/mpi_bind.sh (KIND bench: MPI MUMPS; KIND hsolve: build/release/hsolve-mpi)
+#   1+2x8   KIND hsolve: hsolve's multi-process mode through its launcher
+#           (build/release/hsolve-mpirun --ranks 3): the leader on all cores, a helper on each half
 # KIND:
 #   bench   build/mpi/seq_factor_bench (2x8m: build/mpi/mpi_factor_bench) with hsolve's BLAS hook
 #           preloaded (build/release/libhsolve_blashook.so, route all: as the hsolve executable links
@@ -105,5 +107,11 @@ case "$layout" in
     # shellcheck disable=SC2046
     "${cmd[@]}" "$root/tools/bench/mpi_bind.sh" "${mpi[@]}" "$@" $(targs "$half") | tag 0 "$all"
     ;;
-  *) echo "mpi_socket_run.sh: unknown LAYOUT $layout (1x16, 1x16i, 1x8, 2x8, 2x8m)" >&2; exit 2 ;;
+  1+2x8)
+    # hsolve's multi-process mode as its launcher lays it out: the leader on all inherited cores, two
+    # helpers on the halves (one per NUMA node when the cores span two).
+    [ "$kind" = hsolve ] || { echo "mpi_socket_run.sh: 1+2x8 is for KIND hsolve" >&2; exit 2; }
+    "$root/build/release/hsolve-mpirun" --ranks 3 -- "$@" | tag 0 "$all"
+    ;;
+  *) echo "mpi_socket_run.sh: unknown LAYOUT $layout (1x16, 1x16i, 1x8, 2x8, 2x8m, 1+2x8)" >&2; exit 2 ;;
 esac
