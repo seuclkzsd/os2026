@@ -1,35 +1,38 @@
-// GPU offload of dense dgemm (P10 "gpu", src/gpu, docs/BLAS.md §10): the machine's transfer and
-// FP64 rates, and the hybrid CPU + GPU engine (gemm_engine.hpp) against the CPU BLAS on the shapes
-// of MUMPS' factorization updates.
+// GPU offload of dense dgemm (P10 "gpu", src/gpu, docs/BLAS.md §10, results/p10_gpu.md §2): the
+// machine's transfer and FP64 rates, and the offload engine (gemm_engine.hpp) against the CPU BLAS on
+// the shapes of MUMPS' factorization updates.
 //
 //   bench_gpu_dgemm info
 //   bench_gpu_dgemm copy [--mb 16,64,256] [--reps 5]
 //   bench_gpu_dgemm devgemm [--shapes m:n:k,...] [--reps 5]
 //   bench_gpu_dgemm gemm [--shapes m:n:k[:ta:tb],...] [--ld L] [--reps 5]
-//                        [--modes cpu,gpu,hyb,hyb-p3-c12,...] [--slot-mb 32] [--mem-mb 1024]
+//                        [--modes cpu,gpu,hyb,gpu-p3-s6,hyb-c8,...] [--slot-mb 16] [--mem-mb 1024]
 //
 // info: loads the CUDA libraries, initializes the engine (device 0 of CUDA_VISIBLE_DEVICES) and
 // prints its description and set-up time. copy: host memcpy from pageable into pinned memory (one
-// thread), pinned / pageable host-to-device and device-to-host copies, both directions at once,
-// and cudaHostRegister + cudaHostUnregister of touched pageable memory (MB/s, best of reps).
-// devgemm: cublasDgemm on device-resident operands (GFlop/s, median). gemm: per shape, the modes
-// interleaved per repetition on the same operands (C restored before every run): cpu = the BLAS
-// dgemm (all OpenMP threads), gpu = the engine with the GPU computing every column (CPU idle),
-// hyb = the hybrid engine; options appended with '-': -p<N> N issuing (packing) threads (default
-// 2), -s<N> N pipeline slots, -m<MB> slot size, -k<KB> pack/upload chunk, -c<N> N BLAS threads
-// for the CPU share (default max - N - 1), -nt0 regular stores when packing;
-// wall time median [min-max] of reps, GFlop/s, the GPU's share of the flops, and the largest
-// difference to the cpu result relative to max |C|. --ld L stores all three operands with leading
-// dimension L (MUMPS' fronts: lda = ldb = ldc = NFRONT); default the tight one.
-// Output: one JSON object per line on stdout. Run through tools/run/guard.py in the measurement
-// slot with CUDA_VISIBLE_DEVICES set to the one GPU allowed (gpu02: 7).
+// thread), pinned / pageable / strided-pageable host-to-device and device-to-host copies, both
+// directions at once, and cudaHostRegister + cudaHostUnregister of touched pageable memory (MB/s,
+// best of reps). devgemm: cublasDgemm on device-resident operands (GFlop/s, median). gemm: per
+// shape, the modes interleaved per repetition on the same operands (C restored before every run):
+// cpu = the BLAS dgemm (all OpenMP threads), gpu = the engine as the hook uses it (GPU only: 2
+// packing threads, 6 slots of --slot-mb, non-temporal stores, guided tiles), hyb = the hybrid
+// engine; options appended with '-': -p<N> N issuing (packing) threads, -s<N> N pipeline slots,
+// -m<MB> slot size, -k<KB> pack/upload chunk, -c<N> N BLAS threads for the CPU share (default
+// max - N - 1), -nt0 regular stores when packing. Every mode offloads every shape here (the offload
+// model is printed as model_speedup, not applied). Output per shape and mode: wall time median
+// [min-max], GFlop/s, the GPU's share of the flops, the speedup over cpu and the largest difference
+// to the cpu result relative to max |C|. --ld L stores all three operands with leading dimension L
+// (MUMPS' fronts: lda = ldb = ldc = NFRONT); default the tight one.
+// Output: one JSON object per line on stdout (tools/bench/gpu_dgemm_table.py makes the tables).
+// Run in the measurement slot with exactly one idle GPU visible (tools/bench/gpu_slot.sh).
 //
-// P10 commands (gpu02, slot 16-31, GPU 7; results/p10_gpu.md has the tables):
-//   G="python3 tools/run/guard.py --exclusive --timeout 900 --"
-//   CUDA_VISIBLE_DEVICES=7 $G build/release/bench_gpu_dgemm info
-//   CUDA_VISIBLE_DEVICES=7 $G build/release/bench_gpu_dgemm copy --mb 16,64,256
-//   CUDA_VISIBLE_DEVICES=7 $G build/release/bench_gpu_dgemm devgemm --shapes 1000:8000:4000,...
-//   CUDA_VISIBLE_DEVICES=7 $G build/release/bench_gpu_dgemm gemm --ld 15800 --shapes ... --reps 5
+// P10 commands (gpu02, slot 16-31, GPU 7; one slot call; results/p10_gpu.md §2 and §9):
+//   S="tools/bench/gpu_slot.sh 7 900 --"; M=results/raw/p10gpu/micro.jsonl
+//   $S build/release/bench_gpu_dgemm info > $M
+//   $S build/release/bench_gpu_dgemm copy --mb 16,64,256 --reps 5 >> $M
+//   $S build/release/bench_gpu_dgemm devgemm --reps 5 --shapes 1000:9000:4000,1000:4000:2048,...
+//   $S build/release/bench_gpu_dgemm gemm --ld 15800 --slot-mb 16 --reps 3 --shapes ... >> $M
+//      --modes cpu,gpu,gpu-p1,gpu-p3,gpu-s3,gpu-m32,gpu-nt0,gpu-k1024-nt0,hyb,hyb-c8   (same line)
 #include <omp.h>
 #include <time.h>
 
@@ -311,7 +314,7 @@ int cmd_gemm(const Args& args) {
   const long ldarg = std::stol(args.get("ld", "0"));
   const auto modes = split(args.get("modes", "cpu,gpu,hyb"), ',');
   hs::gpu::EngineOptions base;
-  base.slot_bytes = std::stoull(args.get("slot-mb", "32")) << 20;
+  base.slot_bytes = std::stoull(args.get("slot-mb", "16")) << 20;
   base.mem_bytes = std::stoull(args.get("mem-mb", "1024")) << 20;
   base.min_flops = 0.0;  // every shape is offloaded here (the model is printed, not applied)
   base.min_speedup = 0.0;
