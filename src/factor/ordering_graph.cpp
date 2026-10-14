@@ -167,6 +167,41 @@ Graph induced_subgraph(const Graph& g, const std::vector<std::uint8_t>& where, s
   }
   Graph s;
   s.n = static_cast<std::int32_t>(to_parent.size());
+  if (g.n >= kParallelGraphSize) {
+    // The same rows, counted and copied by concurrent tasks (taskloop: the caller's team).
+    s.xadj.assign(static_cast<std::size_t>(s.n) + 1, 0);
+    s.vwgt.resize(static_cast<std::size_t>(s.n));
+    constexpr std::int32_t kChunk = 4096;
+#pragma omp taskloop grainsize(1) default(shared)
+    for (std::int32_t b = 0; b < s.n; b += kChunk)
+      for (std::int32_t k = b; k < std::min(s.n, b + kChunk); ++k) {
+        const std::int32_t v = to_parent[k];
+        std::int64_t d = 0;
+        for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e) d += (where[g.adj[e]] == part);
+        s.xadj[k + 1] = d;
+        s.vwgt[k] = g.vwgt[v];
+      }
+    for (std::int32_t k = 0; k < s.n; ++k) {
+      s.xadj[k + 1] += s.xadj[k];
+      s.total_vwgt += s.vwgt[k];
+    }
+    s.adj.resize(static_cast<std::size_t>(s.xadj[s.n]));
+    s.ewgt.resize(static_cast<std::size_t>(s.xadj[s.n]));
+#pragma omp taskloop grainsize(1) default(shared)
+    for (std::int32_t b = 0; b < s.n; b += kChunk)
+      for (std::int32_t k = b; k < std::min(s.n, b + kChunk); ++k) {
+        const std::int32_t v = to_parent[k];
+        std::int64_t q = s.xadj[k];
+        for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e) {
+          const std::int32_t u = g.adj[e];
+          if (where[u] != part) continue;
+          s.adj[q] = local[u];
+          s.ewgt[q] = g.ewgt[e];
+          ++q;
+        }
+      }
+    return s;
+  }
   s.xadj.assign(static_cast<std::size_t>(s.n) + 1, 0);
   s.vwgt.resize(static_cast<std::size_t>(s.n));
   std::int64_t edges = 0;

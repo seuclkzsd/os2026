@@ -115,6 +115,76 @@ class GainHeap {
 
 // ------------------------------------------------------------------------------- coarsening
 
+// The coarse rows of the pairs (v, partner) in `rep` order (rep[cv] = lower vertex of coarse
+// vertex cv, partner = match[v]) computed concurrently by OpenMP tasks (taskloop: the calling
+// task's team; one thread outside a parallel region): two passes - row lengths, then the rows at
+// their offsets. Each row is the coarse neighbours in order of first appearance in v's row, then
+// the partner's, with summed edge weights - exactly what the serial loop in coarsen_once writes, so
+// the coarse graph is the same. Duplicates are found with a small open-addressing table per row.
+void contract_parallel(const Graph& g, const std::vector<std::int32_t>& match,
+                       const std::vector<std::int32_t>& cmap, const std::vector<std::int32_t>& rep,
+                       Graph& c) {
+  const std::int32_t nc = c.n;
+  // row(cv, emit): calls emit(cu, w, first) for every coarse neighbour occurrence; first tells a
+  // new neighbour (index k in the row) from a repeated one (index of its first occurrence).
+  auto row = [&](std::int32_t cv, std::vector<std::int32_t>& table, auto&& emit) {
+    const std::int32_t v = rep[cv], partner = match[v];
+    const std::int64_t len = g.degree(v) + (partner != v ? g.degree(partner) : 0);
+    std::size_t cap = 16;
+    while (cap < 2 * static_cast<std::size_t>(len)) cap *= 2;
+    if (table.size() < 2 * cap) table.resize(2 * cap);
+    std::fill(table.begin(), table.begin() + static_cast<std::ptrdiff_t>(2 * cap), -1);
+    std::int32_t k = 0;
+    auto scan = [&](std::int32_t x) {
+      for (std::int64_t e = g.xadj[x]; e < g.xadj[x + 1]; ++e) {
+        const std::int32_t cu = cmap[g.adj[e]];
+        if (cu == cv) continue;
+        std::size_t h = (static_cast<std::uint32_t>(cu) * 0x9E3779B1u) & (cap - 1);
+        while (table[2 * h] != -1 && table[2 * h] != cu) h = (h + 1) & (cap - 1);
+        if (table[2 * h] == -1) {
+          table[2 * h] = cu;
+          table[2 * h + 1] = k;
+          emit(cu, g.ewgt[e], k++, true);
+        } else {
+          emit(cu, g.ewgt[e], table[2 * h + 1], false);
+        }
+      }
+    };
+    scan(v);
+    if (partner != v) scan(partner);
+    return k;
+  };
+  std::vector<std::int64_t>& start = c.xadj;
+  start.assign(static_cast<std::size_t>(nc) + 1, 0);
+  constexpr std::int32_t kChunk = 2048;
+#pragma omp taskloop grainsize(1) default(shared)
+  for (std::int32_t b = 0; b < nc; b += kChunk) {
+    std::vector<std::int32_t> table;
+    for (std::int32_t cv = b; cv < std::min(nc, b + kChunk); ++cv)
+      start[cv + 1] = row(cv, table, [](std::int32_t, std::int32_t, std::int32_t, bool) {});
+  }
+  for (std::int32_t cv = 0; cv < nc; ++cv) start[cv + 1] += start[cv];
+  c.adj.resize(static_cast<std::size_t>(start[nc]));
+  c.ewgt.resize(static_cast<std::size_t>(start[nc]));
+#pragma omp taskloop grainsize(1) default(shared)
+  for (std::int32_t b = 0; b < nc; b += kChunk) {
+    std::vector<std::int32_t> table;
+    for (std::int32_t cv = b; cv < std::min(nc, b + kChunk); ++cv) {
+      const std::int64_t o = start[cv];
+      row(cv, table, [&](std::int32_t cu, std::int32_t w, std::int32_t k, bool first) {
+        if (first) {
+          c.adj[static_cast<std::size_t>(o + k)] = cu;
+          c.ewgt[static_cast<std::size_t>(o + k)] = w;
+        } else {
+          c.ewgt[static_cast<std::size_t>(o + k)] += w;
+        }
+      });
+      const std::int32_t v = rep[cv], partner = match[v];
+      c.vwgt[cv] = g.vwgt[v] + (partner != v ? g.vwgt[partner] : 0);
+    }
+  }
+}
+
 // Sorted heavy-edge matching (vertices visited by increasing degree, random among equal
 // degrees; each unmatched vertex takes its heaviest unmatched neighbour, scanning its row from a
 // random rotation so that unit weights do not favour low numbers) and contraction. Returns the
@@ -190,9 +260,16 @@ Graph coarsen_once(const Graph& g, Random& rng, std::int64_t max_vwgt,
 
   Graph c;
   c.n = nc;
-  c.xadj.assign(static_cast<std::size_t>(nc) + 1, 0);
   c.vwgt.resize(static_cast<std::size_t>(nc));
   c.total_vwgt = g.total_vwgt;
+  if (n >= kParallelGraphSize) {
+    std::vector<std::int32_t> rep(static_cast<std::size_t>(nc));
+    for (std::int32_t v = 0; v < n; ++v)
+      if (match[v] >= v) rep[cmap[v]] = v;
+    contract_parallel(g, match, cmap, rep, c);
+    return c;
+  }
+  c.xadj.assign(static_cast<std::size_t>(nc) + 1, 0);
   // Coarse rows are appended one after the other (capacity reserved for the fine graph, an upper
   // bound that is never touched beyond what is written); slot[cu] is the position of coarse
   // neighbour cu if it lies in the current row.

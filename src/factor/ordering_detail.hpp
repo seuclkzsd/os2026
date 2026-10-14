@@ -103,6 +103,12 @@ inline constexpr int kTwoStageLevels = 4;
 inline constexpr int kTwoStageRuns = 5;
 inline constexpr std::int32_t kParallelRunSize = 1000;
 
+/// Graphs of at least this many vertices are contracted (coarsening) and split into the halves of
+/// a separator (induced_subgraph) by concurrent OpenMP tasks (taskloop in the caller's team: the
+/// top of the dissection, where few pieces keep the threads busy, is its critical path). The
+/// results are the same as the serial loops' (P9: syn-mem27-100 ... ).
+inline constexpr std::int32_t kParallelGraphSize = 20000;
+
 /// Largest subgraph the dissection orders by minimum degree (bitset elimination graph: O(n^2/64)
 /// memory, up to O(n^3/64) time), hence the largest DissectionParams::leaf_size (and
 /// OrderingOptions::leaf_size). A larger subgraph that cannot be split (no separator leaves both
