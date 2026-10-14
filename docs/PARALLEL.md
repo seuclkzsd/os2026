@@ -69,8 +69,33 @@ build/release/hsolve-mpirun [--ranks R] [--dry-run] -- --A A.npz [--B B.npz] --c
 
 ## 5. 实测加速
 
-__TABLE__
+测量节点 c005（2×Xeon Silver 4314，每 socket 16 核，无 GPU），每次运行 16 核、32 GiB，5 次交错、每次结果经
+tools/eval 判定有效；时间为报告的 `time_total_s`（求解本身，不含读矩阵与 MPI 启动），括号内为对同一两 socket 核上
+单进程 hsolve 的加速比。「单 socket」= 一个 socket 的 16 核；「两 socket」= 每个 socket 8 核（共 16 核）。
+
+| 布局（16 核） | 位置 | 1e6 nearest：syn-mem27-100 / yee-pec-box-1e6 | 1e5 三维 nearest：syn-mem27-46 / yee-pec-box-1e5 / ss-qa8fk-qa8fm | 多片窗口：syn-mem27-46 [0.1, 0.3] / yee-pec-cube-32 [40, 400] |
+|---|---|---|---|---|
+| hsolve 1×16 | 单 socket | 87.4 / 72.2 s | 2.02 / 2.45 / 1.50 s | 31.2 / 13.9 s |
+| hsolve-mpi 1 + 2×8 | 单 socket | 93.9 / 77.7 s（0.93×） | 2.27 / 2.64 / 1.68 s（0.89–0.93×） | 26.7 / 12.5 s（1.17 / 1.11×） |
+| hsolve 1×16 | 两 socket | 75.4 / 64.1 s | 2.26 / 2.78 / 1.74 s | 32.9 / 15.3 s |
+| **hsolve-mpi 1 + 2×8** | **两 socket** | **68.3 / 58.5 s（1.10 / 1.10×）** | **1.99 / 2.54 / 1.64 s（1.14 / 1.10 / 1.06×）** | **18.8 / 10.2 s（1.75 / 1.51×）** |
+
+各阶段（两 socket，hsolve → hsolve-mpi）：证书 35.9 → 29.2 s、29.7 → 24.2 s（1e6），0.97–1.01 → 0.72–0.76 s（1e5）；
+窗口的切片 25.8 → 15.7 s、11.8 → 8.3 s；分析、主分解、Krylov 不变。单独的分解阶段（`results/p10_mpi.md` §2、§5）：
+证书的两次计数每 socket 一个同时做 27.1 / 22.5 s，对一个进程跨两个 socket 依次做 35.3 / 30.4 s、单 socket 43.3 /
+35.5 s；MPI 版 MUMPS 2×8 跨 socket 做一次分解 19.1 / 14.6 s，对顺序 MUMPS 跨 socket 18.1 / 16.0 s（未采用）。
 
 ## 6. 限制
 
-__LIMITS__
+- **要两个 socket。** 单 socket 上 helper 与 leader 共用一份内存带宽，多进程模式更慢（0.86–0.95 倍，多片窗口除外），
+  `hsolve-mpirun` 在单 NUMA 节点上因此直接运行普通 hsolve。评测机的 16 核若是一个 socket，多进程模式不改变结果
+  也不加速。
+- **nearest 只并行证书的两次计数。** 主分解与 Krylov 是一条顺序计算，仍由占全部核的 leader 做；1e6 上证书约占运行的
+  40–45%，端到端 1.10 倍。GHIEP（没有惯性计数）、randomized 证书、只有一片的窗口与太小的问题（代价规则）没有可分的工作。
+- **MPI 启动约 1.8–2.0 s 墙钟**（prterun 与三个进程的 MPI_Init），不计入 `time_total_s`；它超过 1e5 nearest 与
+  108 个特征值窗口的收益，1e6 与多片窗口仍净赚。
+- **内存。** 每个 helper 持有问题的副本与自己的计数器或因子：1e6 上进程树峰值 18.0 / 14.9 GiB，对单进程 13.1 /
+  11.3 GiB。预算覆盖整棵进程树，内存紧时计数留在 leader。
+- **拓扑是模拟的。** 两 socket 的布局用每个 socket 16 核中的 8 核：每个 socket 以整份带宽与 L3 服务 8 核，与
+  2×8 核的机器相当，但更小的 socket 每 socket 的带宽可能更低。
+- helper 进程崩溃会结束整个 MPI 作业（MPI 默认的错误处理）；helper 任务内的失败由 leader 接手。
