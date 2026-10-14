@@ -43,7 +43,11 @@ bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, dou
     return false;
   }
   SparseFactorization<T>& fac = counts.fac();
-  const double est = hp.count_estimate_mb();  // waits for the helpers' preparation if needed
+  {
+    PhaseScope phase(c.clock, Phase::Certificate);
+    hp.prepare(c);  // the helpers get the problem now and analyse their counters (the leader waits)
+  }
+  const double est = hp.count_estimate_mb();
   if (!(est > 0) || !hp.usable(h[0]) || !hp.usable(h[1])) {
     note(c, "certificate counts on the leader: the helpers could not prepare their counters");
     return false;

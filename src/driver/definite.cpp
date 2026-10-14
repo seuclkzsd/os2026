@@ -1372,6 +1372,13 @@ int WindowSolver<T>::slice_helpers(double& need_bytes) {
   int usable = 0;
   for (int h = 1; h <= hp.size(); ++h) usable += hp.usable(h) ? 1 : 0;
   if (usable < 2) return 0;
+  {
+    PhaseScope phase(c_.clock, Phase::Iterate);
+    hp.prepare(c_);  // the helpers get the problem now (the leader waits)
+  }
+  usable = 0;
+  for (int h = 1; h <= hp.size(); ++h) usable += hp.usable(h) ? 1 : 0;
+  if (usable < 2) return 0;
   if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
   const double vec = static_cast<double>(n_) * sizeof(T);
   need_bytes = 1.15 * fac_.estimate().incore_mb * 1e6 + 7.0 * vec * static_cast<double>(c_max_);

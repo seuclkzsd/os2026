@@ -115,6 +115,12 @@ class Helpers {
   virtual void abandon(int h, const std::string& why) = 0;
   /// Whether the problem was shared with the helpers (share()); before it no task can be posted.
   virtual bool shared() const = 0;
+  /// Before the first task: sends the shared problem to the helpers if not done yet and waits
+  /// until they are ready (copied it, built the pencil, analysed their count instance when the
+  /// problem asked for one). Done here, when the leader is about to wait anyway, so that helpers
+  /// never compute while the leader does (results/p10_mpi.md: preparing during the leader's main
+  /// factorization slowed it more than it saved). A helper that fails to prepare is not usable.
+  virtual void prepare(Ctx& c) = 0;
   /// Memory the helpers hold or may hold now, bytes: per helper its last reported resident
   /// memory, or the budget handed out with a task still running if that is larger. The driver
   /// adds it to the leader's own (memory_in_use), so the solve's budget covers the process tree.
@@ -133,10 +139,10 @@ class Helpers {
 template <class T>
 class HelpersOf : public Helpers {
  public:
-  /// Hands every helper the matrices the solve factorizes (the pencil's A and B), the working
-  /// configuration, `info` and the main analysis' pivot order and options. Helpers then analyse
-  /// (prepare_count: their count instance at once, while the leader goes on). Charged to the
-  /// leader's Setup phase (ParallelReport::share_s). Once per solve.
+  /// Makes the problem available to the helpers: the matrices the solve factorizes (the pencil's A
+  /// and B), the working configuration, `info` and the main analysis' pivot order and options. The
+  /// objects must outlive the solve's helper work; they are sent at prepare() (the first task).
+  /// Called again (a fallback from inexact factors: another main object) it replaces them.
   virtual void share(Ctx& c, const ShiftedPencil<T>& pencil, const SparseFactorization<T>& main,
                      const ProblemInfo& info) = 0;
   /// Posts slice t to idle helper h; collect with wait_slice().

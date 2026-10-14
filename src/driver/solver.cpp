@@ -419,10 +419,10 @@ Solution<T> solve_with_factors(Ctx& c, const ShiftedPencil<T>& pencil, const Dia
     event(c, "spectrum_estimate", {{"lo1", spectrum.lo1}, {"lo2", spectrum.lo2}, {"hi1", spectrum.hi1}, {"hi2", spectrum.hi2}});
   }
 
-  // Multi-process solve (DESIGN §3.9): the helpers get the problem now - they analyse while the
-  // leader factorizes and iterates. Only the definite path hands out work (the nearest
-  // certificate's second count, the slices of window targets); a nearest target without counts
-  // has none.
+  // Multi-process solve (DESIGN §3.9): the problem the helpers will need, sent to them only before
+  // their first task (Helpers::prepare: they never compute while the leader does). Only the
+  // definite path hands out work (the nearest certificate's two counts, the slices of window
+  // targets); a nearest target without counts has none.
   if (c.helpers && method == Method::ShiftInvertLanczos) {
     const bool nearest = cfg.target.mode == TargetMode::Nearest;
     const bool counts = cfg.inertia_check != Toggle::Off && cfg.certificate != CertificateMode::Off;

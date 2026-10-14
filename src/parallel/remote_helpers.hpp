@@ -25,6 +25,7 @@ class RemoteHelpers final : public driver::HelpersOf<T> {
   bool usable(int h) const override { return helpers_.at(static_cast<std::size_t>(h)).usable; }
   void abandon(int h, const std::string& why) override;
   bool shared() const override { return shared_; }
+  void prepare(driver::Ctx& c) override;
   double memory_bytes() const override;
   double count_estimate_mb() const override;
   int helper_threads() const override;
@@ -59,7 +60,11 @@ class RemoteHelpers final : public driver::HelpersOf<T> {
   Transport& peers_;
   std::uint32_t generation_;
   mutable std::vector<Helper> helpers_;  ///< index 0 unused (the leader)
-  bool shared_ = false;
+  bool shared_ = false;  ///< share() was called: the problem below is available
+  bool sent_ = false;    ///< ... and was sent to the helpers (prepare())
+  const ShiftedPencil<T>* pencil_ = nullptr;
+  const SparseFactorization<T>* main_ = nullptr;
+  driver::ProblemInfo info_;
   driver::Ctx* ctx_ = nullptr;  ///< the solve's context, for the report (set at share/post)
 };
 

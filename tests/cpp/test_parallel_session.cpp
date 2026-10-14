@@ -276,6 +276,7 @@ class FakeHelpers final : public hs::driver::HelpersOf<double> {
   bool usable(int h) const override { return usable_.at(static_cast<std::size_t>(h)); }
   void abandon(int h, const std::string&) override { usable_.at(static_cast<std::size_t>(h)) = false; }
   bool shared() const override { return true; }
+  void prepare(hs::driver::Ctx&) override { ++prepared; }
   double memory_bytes() const override { return memory; }
   double count_estimate_mb() const override { return estimate_mb; }
   int helper_threads() const override { return 1; }
@@ -301,7 +302,7 @@ class FakeHelpers final : public hs::driver::HelpersOf<double> {
   int busy() const override { return 0; }
 
   double memory = 0.0, estimate_mb = 1.0;
-  int failing = 0;
+  int failing = 0, prepared = 0;
   std::vector<std::pair<int, hs::driver::CountTask>> posted;
 
  private:
@@ -352,6 +353,7 @@ TEST(ParallelDriverHooks, TwoHelpersCountBothEnds) {
   EXPECT_TRUE(h.posted[0].second.s_is_gap);
   EXPECT_EQ(f.rep.parallel.helper_counts, 2);
   EXPECT_EQ(f.rep.parallel.fallbacks, 0);
+  EXPECT_EQ(h.prepared, 1);              // the problem goes to the helpers at their first task
   EXPECT_FALSE(f.fac->inertia().valid);  // the main factors were released before the counts
 }
 

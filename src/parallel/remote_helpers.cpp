@@ -30,7 +30,7 @@ RemoteHelpers<T>::~RemoteHelpers() {
       while (x.owes_ready || (x.task != 0 && x.reply.empty())) receive_one(h);
       x.task = 0;
       x.reply.clear();
-      if (shared_) {
+      if (sent_) {
         Writer w(Msg::End);
         w.pod(generation_);
         peers_.send(h, w.bytes());
@@ -117,45 +117,68 @@ int RemoteHelpers<T>::receive_one(int h) const {
 template <class T>
 void RemoteHelpers<T>::ensure_idle(int h) const {
   const Helper& x = helpers_.at(static_cast<std::size_t>(h));
-  HS_ASSERT(h >= 1 && h <= size() && x.task == 0 && x.usable && shared_, "helper " << h << " cannot take a task");
+  HS_ASSERT(h >= 1 && h <= size() && x.task == 0 && x.usable && sent_, "helper " << h << " cannot take a task");
+}
+
+template <class T>
+void RemoteHelpers<T>::share(driver::Ctx& c, const ShiftedPencil<T>& pencil, const SparseFactorization<T>& main,
+                             const driver::ProblemInfo& info) {
+  ctx_ = &c;
+  pencil_ = &pencil;
+  main_ = &main;
+  info_ = info;
+  shared_ = true;
+  sent_ = false;  // (again, after a fallback to double factors: the helpers set up anew)
 }
 
 // The problem in one message: the pencil's matrices as the solve factorizes them (after its
 // Hermitian check), the working configuration, the norms and shift, the factor options and the
 // main analysis' pivot order. Sending blocks until each helper has the data (shared memory between
-// ranks on one node: ~0.1 s for the 1e6 cases, results/p10_mpi.md).
+// ranks on one node); the helpers then build their pencil and, for a certificate, analyse their
+// count instance, and answer Ready - all while the leader waits here.
 template <class T>
-void RemoteHelpers<T>::share(driver::Ctx& c, const ShiftedPencil<T>& pencil, const SparseFactorization<T>& main,
-                             const driver::ProblemInfo& info) {
+void RemoteHelpers<T>::prepare(driver::Ctx& c) {
   ctx_ = &c;
-  driver::PhaseScope phase(c.clock, driver::Phase::Setup);
-  Timer timer;
-  for (int h = 1; h <= size(); ++h) {
-    while (helpers_[static_cast<std::size_t>(h)].owes_ready) receive_one(h);  // an earlier attempt's
-    HS_ASSERT(helpers_[static_cast<std::size_t>(h)].task == 0, "share() while helper " << h << " works");
+  HS_ASSERT(shared_, "prepare() before share()");
+  if (!sent_) {
+    Timer timer;
+    for (int h = 1; h <= size(); ++h) {
+      while (helpers_[static_cast<std::size_t>(h)].owes_ready) receive_one(h);  // an earlier attempt's
+      HS_ASSERT(helpers_[static_cast<std::size_t>(h)].task == 0, "prepare() while helper " << h << " works");
+    }
+    Writer w(Msg::Setup);
+    w.pod(generation_);
+    w.pod(static_cast<std::uint8_t>(is_complex_v<T> ? 1 : 0));
+    w.str(config_to_json(c.cfg, -1));
+    w.pod(info_);
+    put(w, main_->options());
+    w.vec(main_->pivot_order());
+    w.csr(pencil_->a());
+    w.pod(static_cast<std::uint8_t>(pencil_->b() ? 1 : 0));
+    if (pencil_->b()) w.csr(*pencil_->b());
+    for (int h = 1; h <= size(); ++h) {
+      Helper& x = helpers_[static_cast<std::size_t>(h)];
+      if (!x.usable) continue;
+      peers_.send(h, w.bytes());
+      x.owes_ready = true;
+      x.ready = false;
+    }
+    sent_ = true;
+    c.rep.parallel.share_s += timer.seconds();
+    driver::event(c, "helpers_share", {{"helpers", static_cast<std::int64_t>(size())},
+                                       {"bytes", static_cast<std::int64_t>(w.bytes().size())},
+                                       {"seconds", timer.seconds()}});
   }
-  Writer w(Msg::Setup);
-  w.pod(generation_);
-  w.pod(static_cast<std::uint8_t>(is_complex_v<T> ? 1 : 0));
-  w.str(config_to_json(c.cfg, -1));
-  w.pod(info);
-  put(w, main.options());
-  w.vec(main.pivot_order());
-  w.csr(pencil.a());
-  w.pod(static_cast<std::uint8_t>(pencil.b() ? 1 : 0));
-  if (pencil.b()) w.csr(*pencil.b());
+  Timer wait;
+  bool waited = false;
   for (int h = 1; h <= size(); ++h) {
-    Helper& x = helpers_[static_cast<std::size_t>(h)];
-    if (!x.usable) continue;
-    peers_.send(h, w.bytes());
-    x.owes_ready = true;
-    x.ready = false;
+    waited = waited || helpers_[static_cast<std::size_t>(h)].owes_ready;
+    await_ready(h);
   }
-  shared_ = true;
-  c.rep.parallel.share_s += timer.seconds();
-  driver::event(c, "helpers_share", {{"helpers", static_cast<std::int64_t>(size())},
-                                     {"bytes", static_cast<std::int64_t>(w.bytes().size())},
-                                     {"seconds", timer.seconds()}});
+  if (waited) {
+    c.rep.parallel.wait_s += wait.seconds();
+    driver::event(c, "helpers_ready", {{"seconds", wait.seconds()}, {"count_mb", count_estimate_mb()}});
+  }
 }
 
 template <class T>
