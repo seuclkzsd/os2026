@@ -39,7 +39,7 @@ TYPED_TEST(MpiSessionTyped, NearestCertificate) {
   using T = TypeParam;
   const auto a = laplacian3d<T>();
   const auto ref = hs::solve(a, nullptr, nearest_cfg());
-  const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, *g_peers);
+  const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, *g_peers, kForce);
   expect_nearest_certified(sol);
   expect_same_set(sol.eigenvalues, ref.eigenvalues, 1e-12);
   const auto& p = sol.report.parallel;
@@ -52,7 +52,7 @@ TYPED_TEST(MpiSessionTyped, IntervalSlices) {
   using T = TypeParam;
   const auto a = laplacian3d<T>();
   const auto ref = hs::solve(a, nullptr, interval_cfg());
-  const auto sol = hs::solve_parallel(a, nullptr, interval_cfg(), nullptr, *g_peers);
+  const auto sol = hs::solve_parallel(a, nullptr, interval_cfg(), nullptr, *g_peers, kForce);
   expect_interval_certified(sol);
   expect_same_set(sol.eigenvalues, ref.eigenvalues, 1e-12);
   const auto& p = sol.report.parallel;
@@ -64,12 +64,12 @@ TYPED_TEST(MpiSessionTyped, IntervalSlices) {
 TYPED_TEST(MpiSessionTyped, FailingHelpersAreReplacedByTheLeader) {
   using T = TypeParam;
   const auto a = laplacian3d<T>();
-  const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(hs::driver::kFaultHelperTasks), nullptr, *g_peers);
+  const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(hs::driver::kFaultHelperTasks), nullptr, *g_peers, kForce);
   expect_nearest_certified(sol);
   EXPECT_EQ(sol.report.parallel.helper_counts, 0);
   EXPECT_EQ(sol.report.parallel.fallbacks, g_peers->size() >= 3 ? 2 : 0) << warnings(sol.report);
   const auto iv = hs::solve_parallel(a, nullptr, interval_cfg(hs::driver::kFaultHelperTasks | hs::driver::kFaultOtherError),
-                                     nullptr, *g_peers);
+                                     nullptr, *g_peers, kForce);
   expect_interval_certified(iv);
   EXPECT_EQ(iv.report.parallel.helper_slices, 0);
   EXPECT_EQ(iv.report.parallel.fallbacks, g_peers->size() >= 3 ? 2 : 0) << warnings(iv.report);

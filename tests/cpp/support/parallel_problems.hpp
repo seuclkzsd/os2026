@@ -11,11 +11,15 @@
 #include <string>
 #include <vector>
 
+#include "hsolve/parallel.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
 #include "support/fixtures.hpp"
 
 namespace hs::partest {
+
+/// The test problems are far too small for the cost rules (Auto): force the helpers' work.
+inline const ParallelOptions kForce{Toggle::On, Toggle::On};
 
 constexpr index_t kNx = 13, kNy = 15, kNz = 17;  // n = 3315, simple wanted eigenvalues
 constexpr double kSigma = 0.9;

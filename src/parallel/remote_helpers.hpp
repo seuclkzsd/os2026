@@ -14,7 +14,7 @@ template <class T>
 class RemoteHelpers final : public driver::HelpersOf<T> {
  public:
   /// peers.rank() must be 0. generation: this solve's number in the session (fresh per solve).
-  RemoteHelpers(Transport& peers, std::uint32_t generation);
+  RemoteHelpers(Transport& peers, std::uint32_t generation, const ParallelOptions& options = {});
   /// Ends the solve on the helpers (End: they drop the problem). Replies still owed are collected
   /// first, so that the next solve starts in step.
   ~RemoteHelpers() override;
@@ -22,6 +22,7 @@ class RemoteHelpers final : public driver::HelpersOf<T> {
   RemoteHelpers& operator=(const RemoteHelpers&) = delete;
 
   int size() const override { return static_cast<int>(helpers_.size()) - 1; }
+  const ParallelOptions& options() const override { return options_; }
   bool usable(int h) const override { return helpers_.at(static_cast<std::size_t>(h)).usable; }
   void abandon(int h, const std::string& why) override;
   bool shared() const override { return shared_; }
@@ -59,6 +60,7 @@ class RemoteHelpers final : public driver::HelpersOf<T> {
 
   Transport& peers_;
   std::uint32_t generation_;
+  ParallelOptions options_;
   mutable std::vector<Helper> helpers_;  ///< index 0 unused (the leader)
   bool shared_ = false;  ///< share() was called: the problem below is available
   bool sent_ = false;    ///< ... and was sent to the helpers (prepare())

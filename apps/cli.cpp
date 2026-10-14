@@ -92,8 +92,9 @@ void print_summary(const hs::Solution<T>& sol) {
 
 template <class T>
 int run_solve(const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b, const hs::SolverConfig& cfg, hs::Logger& log,
-              const fs::path& out, const std::vector<std::string>& load_notes, bool quiet, hs::Transport* peers) {
-  hs::Solution<T> sol = peers ? hs::solve_parallel(a, b, cfg, &log, *peers) : hs::solve(a, b, cfg, &log);
+              const fs::path& out, const std::vector<std::string>& load_notes, bool quiet, hs::Transport* peers,
+              const hs::ParallelOptions& popts) {
+  hs::Solution<T> sol = peers ? hs::solve_parallel(a, b, cfg, &log, *peers, popts) : hs::solve(a, b, cfg, &log);
   for (const auto& note : load_notes) sol.report.warnings.push_back("input: " + note);
   write_outputs(out, sol);
   if (!quiet) print_summary(sol);
@@ -126,7 +127,7 @@ int hs::cli::run(int argc, char** argv, hs::Transport* peers) {
   long long k = 0, smallest = 0, largest = 0, slice_size = 0, block_size = 0;
   std::vector<double> interval;
   int threads = -1;
-  std::string precision, certificate, budget;
+  std::string precision, certificate, budget, helper_counts = "auto", helper_slices = "auto";
   bool verbose = false, quiet = false, version = false;
 
   app.add_option("--A", a_path, "matrix A (.npz scipy sparse, .npy dense, .mtx)")->required();
@@ -158,6 +159,14 @@ int hs::cli::run(int argc, char** argv, hs::Transport* peers) {
                                 "B is not proven) | auto (the cheapest that certifies, predicted from measured "
                                 "times) | off")
                      ->check(CLI::IsMember({"exact", "randomized", "auto", "off"}));
+  app.add_option("--helper-counts", helper_counts,
+                 "hsolve-mpi: the nearest certificate's two counts on two helper processes at once - auto (when "
+                 "they pay against the helpers' preparation), on, off (docs/PARALLEL.md)")
+      ->check(CLI::IsMember({"auto", "on", "off"}));
+  app.add_option("--helper-slices", helper_slices,
+                 "hsolve-mpi: spectrum slices on the helper processes - auto (when a slice outweighs the helpers' "
+                 "preparation), on, off")
+      ->check(CLI::IsMember({"auto", "on", "off"}));
   app.add_option("--log", log_path, "JSON-lines event log file");
   app.add_flag("-v,--verbose", verbose, "debug output");
   app.add_flag("-q,--quiet", quiet, "no summary on stdout");
@@ -189,6 +198,10 @@ int hs::cli::run(int argc, char** argv, hs::Transport* peers) {
     }
   }
   const ReleaseHelpers release(peers);
+  const auto toggle = [](const std::string& s) {
+    return s == "on" ? hs::Toggle::On : s == "off" ? hs::Toggle::Off : hs::Toggle::Auto;
+  };
+  const hs::ParallelOptions popts{toggle(helper_counts), toggle(helper_slices)};
 
   try {
     hs::SolverConfig cfg;
@@ -255,11 +268,11 @@ int hs::cli::run(int argc, char** argv, hs::Transport* peers) {
       hs::CsrMatrix<hs::cplx> b;
       if (lb)
         b = lb->is_complex() ? std::get<1>(std::move(lb->matrix)) : hs::to_complex(std::get<0>(std::move(lb->matrix)));
-      return run_solve<hs::cplx>(a, lb ? &b : nullptr, cfg, log, out_dir, notes, quiet, peers);
+      return run_solve<hs::cplx>(a, lb ? &b : nullptr, cfg, log, out_dir, notes, quiet, peers, popts);
     }
     const auto& a = std::get<0>(la.matrix);
     const hs::CsrMatrix<double>* b = lb ? &std::get<0>(lb->matrix) : nullptr;
-    return run_solve<double>(a, b, cfg, log, out_dir, notes, quiet, peers);
+    return run_solve<double>(a, b, cfg, log, out_dir, notes, quiet, peers, popts);
   } catch (const hs::Error& e) {
     std::fprintf(stderr, "hsolve: error [%s]: %s\n", hs::to_string(e.code()), e.what());
     return 2;

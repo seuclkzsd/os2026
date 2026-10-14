@@ -167,7 +167,7 @@ TYPED_TEST(ParallelSessionTyped, OneRankIsTheSingleProcessSolve) {
   using T = TypeParam;
   const auto a = laplacian3d<T>();
   with_session(1, [&](hs::Transport& peers) {
-    const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers);
+    const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers, kForce);
     expect_nearest_certified(sol);
     EXPECT_EQ(sol.report.parallel.processes, 1);
     EXPECT_EQ(sol.report.parallel.helper_counts, 0);
@@ -181,7 +181,7 @@ TYPED_TEST(ParallelSessionTyped, TwoHelpersMakeTheCertificateCounts) {
   const auto a = laplacian3d<T>();
   const auto ref = hs::solve(a, nullptr, nearest_cfg());
   with_session(3, [&](hs::Transport& peers) {
-    const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers);
+    const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers, kForce);
     expect_nearest_certified(sol);
     const auto& p = sol.report.parallel;
     EXPECT_EQ(p.processes, 3);
@@ -194,7 +194,7 @@ TYPED_TEST(ParallelSessionTyped, TwoHelpersMakeTheCertificateCounts) {
         << sol.report.certificate.statement;
     expect_same_set(sol.eigenvalues, ref.eigenvalues, 1e-12);
     // A second solve in the same session (the helpers dropped the first problem).
-    const auto again = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers);
+    const auto again = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers, kForce);
     expect_nearest_certified(again);
     EXPECT_EQ(again.report.parallel.helper_counts, 2);
   });
@@ -206,7 +206,7 @@ TYPED_TEST(ParallelSessionTyped, OneHelperLeavesTheCountsToTheLeader) {
   using T = TypeParam;
   const auto a = laplacian3d<T>();
   with_session(2, [&](hs::Transport& peers) {
-    const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers);
+    const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers, kForce);
     expect_nearest_certified(sol);
     EXPECT_EQ(sol.report.parallel.processes, 2);
     EXPECT_EQ(sol.report.parallel.helper_counts, 0);
@@ -222,7 +222,7 @@ TYPED_TEST(ParallelSessionTyped, HelpersSolveTheSlices) {
   expect_interval_certified(ref);
   for (int ranks : {2, 3}) {
     with_session(ranks, [&](hs::Transport& peers) {
-      const auto sol = hs::solve_parallel(a, nullptr, interval_cfg(), nullptr, peers);
+      const auto sol = hs::solve_parallel(a, nullptr, interval_cfg(), nullptr, peers, kForce);
       expect_interval_certified(sol);
       const auto& p = sol.report.parallel;
       if (ranks == 3) {
@@ -249,7 +249,7 @@ TEST(ParallelSessionSlices, AutoSliceSizeKeepsEveryHelperBusy) {
   const auto want = inside(spectrum(), kLower, kUpper);
   ASSERT_GE(want.size(), 32u);
   with_session(3, [&](hs::Transport& peers) {
-    const auto sol = hs::solve_parallel(a, nullptr, cfg, nullptr, peers);
+    const auto sol = hs::solve_parallel(a, nullptr, cfg, nullptr, peers, kForce);
     EXPECT_TRUE(sol.report.success) << warnings(sol.report);
     expect_same_set(sol.eigenvalues, want, 1e-9);
     EXPECT_GE(sol.report.slices.size(), 2u);
@@ -265,7 +265,7 @@ TYPED_TEST(ParallelSessionTyped, FailingHelpersAreReplacedByTheLeader) {
   const auto a = laplacian3d<T>();
   for (index_t kind : {index_t{0}, d::kFaultOtherError, d::kFaultBadAlloc}) {
     with_session(3, [&](hs::Transport& peers) {
-      const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(d::kFaultHelperTasks | kind), nullptr, peers);
+      const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(d::kFaultHelperTasks | kind), nullptr, peers, kForce);
       expect_nearest_certified(sol);
       const auto& p = sol.report.parallel;
       EXPECT_EQ(p.helper_counts, 0);
@@ -273,7 +273,7 @@ TYPED_TEST(ParallelSessionTyped, FailingHelpersAreReplacedByTheLeader) {
       EXPECT_TRUE(has_note(sol.report, "could not count")) << warnings(sol.report);
       EXPECT_TRUE(has_note(sol.report, kind == d::kFaultBadAlloc ? "std::bad_alloc" : "fault injection"))
           << warnings(sol.report);
-      const auto iv = hs::solve_parallel(a, nullptr, interval_cfg(d::kFaultHelperTasks | kind), nullptr, peers);
+      const auto iv = hs::solve_parallel(a, nullptr, interval_cfg(d::kFaultHelperTasks | kind), nullptr, peers, kForce);
       expect_interval_certified(iv);
       EXPECT_EQ(iv.report.parallel.helper_slices, 0);
       EXPECT_EQ(iv.report.parallel.fallbacks, 2) << warnings(iv.report);  // the first slice of each helper
@@ -290,6 +290,7 @@ class FakeHelpers final : public hs::driver::HelpersOf<double> {
  public:
   FakeHelpers(int n, std::vector<double> spectrum) : usable_(static_cast<std::size_t>(n) + 1, true), w_(std::move(spectrum)) {}
   int size() const override { return static_cast<int>(usable_.size()) - 1; }
+  const hs::ParallelOptions& options() const override { return opts; }
   bool usable(int h) const override { return usable_.at(static_cast<std::size_t>(h)); }
   void abandon(int h, const std::string&) override { usable_.at(static_cast<std::size_t>(h)) = false; }
   bool shared() const override { return true; }
@@ -319,6 +320,7 @@ class FakeHelpers final : public hs::driver::HelpersOf<double> {
   int busy() const override { return 0; }
 
   double memory = 0.0, estimate_mb = 1.0;
+  hs::ParallelOptions opts;
   int failing = 0, prepared = 0;
   std::vector<std::pair<int, hs::driver::CountTask>> posted;
 
@@ -361,7 +363,7 @@ TEST(ParallelDriverHooks, TwoHelpersCountBothEnds) {
   hs::driver::CountSource<double> counts(*f.fac, f.pencil, true, hs::driver::MainFactors::Release);
   double a = f.gap(40), b = f.gap(60);
   index_t nu_a = -1, nu_b = -1;
-  ASSERT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b));
+  ASSERT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 0.0));
   EXPECT_EQ(nu_a, 41);
   EXPECT_EQ(nu_b, 61);
   ASSERT_EQ(h.posted.size(), 2u);
@@ -381,15 +383,15 @@ TEST(ParallelDriverHooks, FewerThanTwoHelpersOrNoEstimateCountOnTheLeader) {
   index_t nu_a = -1, nu_b = -1;
   FakeHelpers one(1, f.w);
   f.c.helpers = &one;
-  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b));
+  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 0.0));
   FakeHelpers two(2, f.w);
   two.abandon(1, "test");
   f.c.helpers = &two;
-  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b));
+  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 0.0));
   FakeHelpers none(2, f.w);
   none.estimate_mb = 0.0;
   f.c.helpers = &none;
-  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b));
+  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 0.0));
   EXPECT_TRUE(one.posted.empty() && two.posted.empty() && none.posted.empty());
   EXPECT_TRUE(has_note(f.rep, "fewer than two helpers"));
   EXPECT_TRUE(has_note(f.rep, "could not prepare"));
@@ -406,11 +408,32 @@ TEST(ParallelDriverHooks, TwoCountsBeyondTheBudgetStayOnTheLeader) {
   hs::driver::CountSource<double> counts(*f.fac, f.pencil, true, hs::driver::MainFactors::Release);
   double a = f.gap(40), b = f.gap(60);
   index_t nu_a = -1, nu_b = -1;
-  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b));
+  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 0.0));
   EXPECT_TRUE(h.posted.empty());
   EXPECT_TRUE(has_note(f.rep, "two counts at once")) << warnings(f.rep);
   h.memory = 0.0;
-  EXPECT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b));
+  EXPECT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 0.0));
+}
+
+// The cost rule (Auto): counts after a main factorization too short for the helpers' preparation
+// stay with the leader; On ignores the rule, Off never hands counts out.
+TEST(ParallelDriverHooks, CountsTooCheapForTheHelpersStayOnTheLeader) {
+  HookFixture f;
+  FakeHelpers h(2, f.w);
+  f.c.helpers = &h;
+  hs::driver::CountSource<double> counts(*f.fac, f.pencil, true, hs::driver::MainFactors::Release);
+  double a = f.gap(40), b = f.gap(60);
+  index_t nu_a = -1, nu_b = -1;
+  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 1e-6));
+  EXPECT_TRUE(has_note(f.rep, "too cheap for the helpers")) << warnings(f.rep);
+  EXPECT_EQ(h.prepared, 0);  // nothing was sent
+  EXPECT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 1e3));  // a long one
+  h.opts.helper_counts = hs::Toggle::On;
+  EXPECT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 1e-6));
+  h.opts.helper_counts = hs::Toggle::Off;
+  EXPECT_FALSE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 1e3));
+  EXPECT_EQ(nu_a, 41);
+  EXPECT_EQ(nu_b, 61);
 }
 
 // A helper's failed count is made by the leader (same rules: the same count), the helper abandoned.
@@ -422,7 +445,7 @@ TEST(ParallelDriverHooks, AFailedHelperCountIsMadeByTheLeader) {
   hs::driver::CountSource<double> counts(*f.fac, f.pencil, true, hs::driver::MainFactors::Release);
   double a = f.gap(40), b = f.gap(60);
   index_t nu_a = -1, nu_b = -1;
-  ASSERT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b));
+  ASSERT_TRUE(hs::driver::concurrent_counts(f.c, counts, a, b, 1e-9, nu_a, nu_b, 0.0));
   EXPECT_EQ(nu_a, 41);
   EXPECT_EQ(nu_b, f.below(b));
   EXPECT_EQ(nu_b, 61);
@@ -439,10 +462,35 @@ TEST(ParallelSessionScope, NothingSharedWithoutHelperWork) {
   hs::SolverConfig cfg = nearest_cfg();
   cfg.certificate = hs::CertificateMode::Off;
   with_session(3, [&](hs::Transport& peers) {
-    const auto sol = hs::solve_parallel(a, nullptr, cfg, nullptr, peers);
+    const auto sol = hs::solve_parallel(a, nullptr, cfg, nullptr, peers, kForce);
     EXPECT_TRUE(sol.report.success);
     EXPECT_EQ(sol.report.parallel.share_s, 0.0);
     EXPECT_EQ(sol.report.parallel.helper_counts, 0);
+  });
+}
+
+// With the default options (Auto) the cost rules keep this small problem's counts and slices on the
+// leader; Off does the same unconditionally. Results are the single-process ones either way.
+TEST(ParallelSessionScope, AutoAndOffKeepSmallWorkOnTheLeader) {
+  const auto a = laplacian3d<double>();
+  with_session(3, [&](hs::Transport& peers) {
+    const auto sol = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers);
+    expect_nearest_certified(sol);
+    EXPECT_EQ(sol.report.parallel.helper_counts, 0);
+    EXPECT_TRUE(has_note(sol.report, "too cheap for the helpers")) << warnings(sol.report);
+    EXPECT_EQ(sol.report.parallel.share_s, 0.0);  // nothing was sent
+    const auto iv = hs::solve_parallel(a, nullptr, interval_cfg(), nullptr, peers);
+    expect_interval_certified(iv);  // the slicing cost model decides; when it keeps them, it says so
+    if (iv.report.parallel.helper_slices == 0) {
+      EXPECT_TRUE(has_note(iv.report, "too small for the helpers")) << warnings(iv.report);
+    }
+    const hs::ParallelOptions off{hs::Toggle::Off, hs::Toggle::Off};
+    const auto o = hs::solve_parallel(a, nullptr, nearest_cfg(), nullptr, peers, off);
+    expect_nearest_certified(o);
+    EXPECT_EQ(o.report.parallel.helper_counts, 0);
+    const auto oi = hs::solve_parallel(a, nullptr, interval_cfg(), nullptr, peers, off);
+    expect_interval_certified(oi);
+    EXPECT_EQ(oi.report.parallel.helper_slices, 0);
   });
 }
 

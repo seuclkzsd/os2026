@@ -521,7 +521,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
           const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
           // Multi-process solves: nu(a) and nu(b) on two helper processes at once (DESIGN §3.9);
           // otherwise both here, one after the other.
-          if (!concurrent_counts(c, counts, a_end, b_end, step, nu_a, nu_b)) {
+          if (!concurrent_counts(c, counts, a_end, b_end, step, nu_a, nu_b, timings.factorize_s)) {
             nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
             nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
           }
@@ -1372,9 +1372,24 @@ int WindowSolver<T>::slice_helpers(double& need_bytes) {
   need_bytes = 0.0;
   if (!c_.helpers || !c_.helpers->shared() || slices_.size() < 2) return 0;
   Helpers& hp = *c_.helpers;
+  if (hp.options().helper_slices == Toggle::Off) return 0;
   int usable = 0;
   for (int h = 1; h <= hp.size(); ++h) usable += hp.usable(h) ? 1 : 0;
   if (usable < 2) return 0;
+  if (hp.options().helper_slices == Toggle::Auto) {
+    // One slice's predicted work (the slicing cost model: its factorization and pairs) must outweigh
+    // what a helper needs before it can start (its analysis and the messages).
+    const index_t cc = std::max<index_t>(1, c_target_);
+    const double work = cost_.t_factor + static_cast<double>(cc) * cost_.per_pair(cc);
+    const double prep = helper_preparation_s(mumps_input_size(pencil_), fac_.estimate(), 1);
+    if (work < prep) {
+      const std::string why = "spectrum slices on the leader: too small for the helpers (a slice ~" + fmt(work) +
+                              " s, their preparation ~" + fmt(prep) + " s)";
+      auto& notes = c_.rep.parallel.notes;
+      if (std::find(notes.begin(), notes.end(), why) == notes.end()) notes.push_back(why);
+      return 0;
+    }
+  }
   {
     PhaseScope phase(c_.clock, Phase::Iterate);
     hp.prepare(c_);  // the helpers get the problem now (the leader waits)
@@ -1768,7 +1783,7 @@ Solution<T> WindowSolver<T>::solve() {
   // of at least two minimum slices is cut into at least as many slices as there are helpers - the
   // sequential cost model's optimum would leave helpers idle (yee-pec-box-1e5 [40, 400], 108
   // eigenvalues: one slice).
-  if (cfg.slice_size == 0 && c_.helpers && c_.helpers->shared()) {
+  if (cfg.slice_size == 0 && c_.helpers && c_.helpers->shared() && c_.helpers->options().helper_slices != Toggle::Off) {
     int usable = 0;
     for (int h = 1; h <= c_.helpers->size(); ++h) usable += c_.helpers->usable(h) ? 1 : 0;
     if (usable >= 2 && total >= 2 * kHelperMinSlice) {

@@ -53,13 +53,25 @@ class Transport {
 /// MUMPS lock (DESIGN §3.4), so the helpers' work is correct but not concurrent.
 std::vector<std::unique_ptr<Transport>> make_thread_transports(int n);
 
+/// What a multi-process solve hands to its helpers (hsolve-mpi: --helper-counts, --helper-slices).
+/// Both need at least two usable helpers and room in the memory budget for the work at once.
+struct ParallelOptions {
+  /// The nearest certificate's two exact counts on two helpers at once. Auto: when they pay - the
+  /// main factorization measured in this solve is long enough against the helpers' preparation
+  /// (DESIGN §3.9); On: whenever possible; Off: never (the leader counts).
+  Toggle helper_counts = Toggle::Auto;
+  /// The slices of window targets on the helpers. Auto: when one slice's predicted work (the
+  /// slicing cost model) exceeds the helpers' preparation; On: whenever possible; Off: never.
+  Toggle helper_slices = Toggle::Auto;
+};
+
 /// Rank 0 of `peers`: hs::solve(a, b, cfg, log) with the helpers 1..size-1, which must be in
 /// serve(). With size() == 1 it is hs::solve itself. report.parallel describes the session
 /// (DESIGN §3.9, docs/FORMATS.md §3). a and b are only read; the helpers get copies of the
 /// matrices the solve factorizes (after its Hermitian check) when they first get work.
 template <class T>
 Solution<T> solve_parallel(const CsrMatrix<T>& a, const non_deduced_t<CsrMatrix<T>>* b, const SolverConfig& cfg,
-                           Logger* log, Transport& peers);
+                           Logger* log, Transport& peers, const ParallelOptions& options = {});
 
 /// Ranks 1..size-1: serve the leader's tasks - any number of solves - until the leader calls
 /// release_helpers(). log (optional): the helper's own events. Returns normally then; throws only

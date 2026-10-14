@@ -326,8 +326,9 @@ def hsolve_table(rows: list[dict[str, Any]], verdicts: dict[str, Any], base: str
 def cmd_table(a: argparse.Namespace) -> int:
     rows = read_jsonl(a.out / f"{a.tag}.jsonl")
     for r in rows:  # runs logged before peak_sampled_gib was recorded: from their guard summaries
-        if r.get("event") == "guard" and r.get("peak_sampled_gib") is None:
-            g = a.out / a.tag / r["case"] / f"guard-{r['placement']}-{r['split']}-r{r['rep']}.json"
+        if r.get("event") == "guard" and r.get("peak_sampled_gib") is None and ":" in r.get("layout", ""):
+            place, split = r["layout"].split(":", 1)
+            g = a.out / a.tag / r["case"] / f"guard-{place}-{split}-r{r['rep']}.json"
             if g.exists():
                 r["peak_sampled_gib"] = json.loads(g.read_text()).get("peak_sampled_gib")
     vpath = a.out / f"{a.tag}.eval.json"

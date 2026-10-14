@@ -20,6 +20,7 @@
 #include "driver/projection.hpp"
 #include "hsolve/dense.hpp"
 #include "hsolve/factor.hpp"
+#include "hsolve/parallel.hpp"
 #include "hsolve/solver.hpp"
 #include "hsolve/sparse.hpp"
 #include "hsolve/types.hpp"
@@ -109,6 +110,8 @@ class Helpers {
   virtual ~Helpers() = default;
   /// Helper processes of the session (ranks 1..size()).
   virtual int size() const = 0;
+  /// What may be handed to them (hs::ParallelOptions: Auto by the cost rules, On, Off).
+  virtual const ParallelOptions& options() const = 0;
   /// Helper h (1..size()) has not failed in this solve.
   virtual bool usable(int h) const = 0;
   /// Stops using helper h for the rest of the solve (why: for the report's notes).
@@ -163,17 +166,33 @@ Solution<T> solve_with_helpers(const CsrMatrix<T>& a, const CsrMatrix<T>* b, con
 
 template <class T>
 class CountSource;
+struct MumpsInputSize;
 
-/// The nearest certificate's two exact counts, nu(a) by the leader (count_below on `counts`) and
-/// nu(b) by a helper process at the same time (CountTask; helpers.cpp). Returns false - nothing
-/// counted, the caller counts both - when no helper can take it: none usable, the problem not
-/// shared, no count estimate, or two counts at once beyond the memory the budget leaves for counts.
-/// A helper whose count fails is abandoned and the leader counts nu(b) itself (true is returned).
-/// a, b: moved outward like count_below's s. Throws what count_below throws (after collecting the
-/// helper's reply, so that the session stays in step).
+/// A helper's count runs on one socket's cores, the leader's on all of them: measured (results/
+/// p10_mpi.md §2.1) a count on 8 cores of one socket takes 1.53x the leader's 16-thread count over
+/// two sockets at 1e6 and 0.85x at 1e5; the larger is the rule's.
+constexpr double kHelperCountSlowdown = 1.53;
+/// An inertia-only count costs this share of a factorization (the ordering model's `count`, 0.896).
+constexpr double kCounterCountShare = 0.9;
+/// Fixed cost of handing a problem to the helpers and hearing back (messages, the helper's pencil;
+/// measured ~0.05 s of the 0.18 s preparation on a 1e5 2-D case besides its two analyses).
+constexpr double kHelperMessageS = 0.05;
+
+/// Predicted seconds until the helpers can work: `analyses` analyses on a given pivot order each
+/// (counts: their main object and InertiaCounter, 2; slices: the main object, 1; model_analysis_s,
+/// an upper bound of one) and the messages.
+double helper_preparation_s(const MumpsInputSize& in, const FactorEstimate& e, int analyses);
+
+/// The nearest certificate's two exact counts nu(a), nu(b) on two helper processes at once
+/// (CountTask; helpers.cpp), the leader waiting. Returns false - nothing counted, the caller counts
+/// both - when no helper pair can take them: fewer than two usable, the problem not shared, the
+/// counts too cheap for the helpers' preparation (factorize_s: the measured main factorization;
+/// 0 = unknown, no such check), no count estimate, or two counts at once beyond the memory the
+/// budget leaves. A helper whose count fails is abandoned and the leader makes that count itself
+/// (true is returned). a, b: moved outward like count_below's s.
 template <class T>
 bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, double step, index_t& nu_a,
-                       index_t& nu_b);
+                       index_t& nu_b, double factorize_s);
 
 // ------------------------------------------------------------------------------ helper side
 

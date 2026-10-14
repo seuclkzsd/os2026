@@ -30,10 +30,14 @@ void note(Ctx& c, const std::string& what) {
 // the sequential path. The leader's main factors are released first, as before counter counts
 // (MainFactors::Release; a rerun refactorizes at sigma), and the two counts at once must fit what
 // the budget then leaves for counts (count_allowance_mb, charged with the helpers' memory).
+double helper_preparation_s(const MumpsInputSize& in, const FactorEstimate& e, int analyses) {
+  return analyses * model_analysis_s(in.order, in.entries, static_cast<double>(e.factor_entries)) + kHelperMessageS;
+}
+
 template <class T>
 bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, double step, index_t& nu_a,
-                       index_t& nu_b) {
-  if (!c.helpers || !c.helpers->shared()) return false;
+                       index_t& nu_b, double factorize_s) {
+  if (!c.helpers || !c.helpers->shared() || c.helpers->options().helper_counts == Toggle::Off) return false;
   Helpers& hp = *c.helpers;
   int h[2] = {0, 0};
   for (int i = 1, k = 0; i <= hp.size() && k < 2; ++i)
@@ -43,6 +47,17 @@ bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, dou
     return false;
   }
   SparseFactorization<T>& fac = counts.fac();
+  // Worth it? The leader's pair takes ~2 counts of kCounterCountShare x its main factorization;
+  // on the helpers both at once take one count at kHelperCountSlowdown of the leader's speed after
+  // their preparation (helper_preparation_s): they pay when (2 - kHelperCountSlowdown) counts
+  // outweigh it (cav2d-rect-pert-1e5: a 0.035 s factorization against ~0.18 s of preparation).
+  const double prep = helper_preparation_s(mumps_input_size(counts.pencil()), fac.estimate(), 2);
+  if (hp.options().helper_counts == Toggle::Auto && factorize_s > 0 &&
+      (2.0 - kHelperCountSlowdown) * kCounterCountShare * factorize_s < prep) {
+    note(c, "certificate counts on the leader: too cheap for the helpers (main factorization " + fmt(factorize_s) +
+                " s, their preparation ~" + fmt(prep) + " s)");
+    return false;
+  }
   {
     PhaseScope phase(c.clock, Phase::Certificate);
     hp.prepare(c);  // the helpers get the problem now and analyse their counters (the leader waits)
@@ -139,7 +154,8 @@ CountReply count_on_helper(Ctx& c, InertiaCounter<T>& counter, const CountTask& 
 }
 
 #define HS_INSTANTIATE_HELPERS(T)                                                                         \
-  template bool concurrent_counts<T>(Ctx&, CountSource<T>&, double&, double&, double, index_t&, index_t&); \
+  template bool concurrent_counts<T>(Ctx&, CountSource<T>&, double&, double&, double, index_t&, index_t&,    \
+                                    double);                                                              \
   template CountReply count_on_helper<T>(Ctx&, InertiaCounter<T>&, const CountTask&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_HELPERS)
 #undef HS_INSTANTIATE_HELPERS

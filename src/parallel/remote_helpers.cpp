@@ -15,8 +15,8 @@
 namespace hs::parallel {
 
 template <class T>
-RemoteHelpers<T>::RemoteHelpers(Transport& peers, std::uint32_t generation)
-    : peers_(peers), generation_(generation), helpers_(static_cast<std::size_t>(peers.size())) {
+RemoteHelpers<T>::RemoteHelpers(Transport& peers, std::uint32_t generation, const ParallelOptions& options)
+    : peers_(peers), generation_(generation), options_(options), helpers_(static_cast<std::size_t>(peers.size())) {
   HS_ASSERT(peers.rank() == 0, "RemoteHelpers on rank " << peers.rank());
 }
 
