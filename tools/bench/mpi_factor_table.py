@@ -8,7 +8,8 @@ factorization with ICNTL(31) = 1), the numeric factorization keeping the factors
 (--nrhs right-hand sides; the median over every solve call), the factorization rate, MUMPS'
 memory (INFOG(22) total over the ranks, INFOG(21) the largest rank) and the guard's process-tree
 peak RSS, with the ratios against the baseline layout (default seq1x16: hsolve's sequential MUMPS,
-16 threads). "inertia" is the INFOG(12) of every factorization of the layout: one value when they
+16 threads). "flop balance" (bench builds from 872d39a on) is the elimination flops of the busiest
+rank over the mean of the ranks (RINFO(3); 1 = perfectly balanced). "inertia" is the INFOG(12) of every factorization of the layout: one value when they
 all agree, and whether it equals the bench's --expect-neg (the exact count of the case) in every
 run.
 
@@ -46,6 +47,8 @@ def summarize(lines: list[dict]) -> dict[str, dict[str, dict]]:
                 a["mem_total_mb"].append(d["mem_total_mb"])
                 a["mem_max_mb"].append(d["mem_max_mb"])
                 a["entries"].append(d["entries"])
+                if d.get("rank_flops_sum"):   # busiest rank's elimination flops over the mean
+                    a["imbalance"].append(d["rank_flops_max"] * d["ranks"] / d["rank_flops_sum"])
             else:
                 a["count_mem_total_mb"].append(d["mem_total_mb"])
         elif ev == "solve":
@@ -75,6 +78,7 @@ def summarize(lines: list[dict]) -> dict[str, dict[str, dict]]:
             "flops_est": median(a["flops_est"]), "entries": median(a["entries"]),
             "mem_total_mb": median(a["mem_total_mb"]), "mem_max_mb": median(a["mem_max_mb"]),
             "count_mem_total_mb": median(a["count_mem_total_mb"]), "peak_gib": max(a["peak_gib"]) if a["peak_gib"] else None,
+            "imbalance": median(a["imbalance"]),
             "neg": sorted(set(a["neg"])), "expect_neg": a["expect_neg"][0] if a["expect_neg"] else None,
             "inertia_ok": bool(a["inertia_ok"]) and all(a["inertia_ok"]) and len(a["inertia_ok"]) == len(a["rc"]),
         }
@@ -93,8 +97,8 @@ def table(name: str, order: str, rows: dict[str, dict], base: str) -> str:
     b = rows.get(base, {})
     head = (f"**{name}**, order `{order}` (medians; ratio = {base} time / layout time, > 1 = faster than {base})\n\n"
             "| layout | runs ok | analysis s (count / full) | count s | ratio | factor s | ratio | GF/s | solve s (nrhs) | ratio | "
-            "flops | MUMPS MB total (max rank) | count MB total | peak GiB | inertia |\n"
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+            "flops | flop balance | MUMPS MB total (max rank) | count MB total | peak GiB | inertia |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
     lines = []
     for lay in sorted(rows, key=lambda k: (k != base, -int(k.split("x")[-1].rstrip("h") or 0), k)):
         r = rows[lay]
@@ -104,7 +108,8 @@ def table(name: str, order: str, rows: dict[str, dict], base: str) -> str:
             f"{_f(r['count_s'])} | {_ratio(b.get('count_s'), r['count_s'])} | {_f(r['factor_s'])} | "
             f"{_ratio(b.get('factor_s'), r['factor_s'])} | {_f(r['gflops_per_s'], '{:.0f}')} | "
             f"{_f(r['solve_s'], '{:.3f}')} ({r['nrhs']}) | {_ratio(b.get('solve_s'), r['solve_s'])} | "
-            f"{_f(r['flops'], '{:.3e}')} | {_f(r['mem_total_mb'], '{:.0f}')} ({_f(r['mem_max_mb'], '{:.0f}')}) | "
+            f"{_f(r['flops'], '{:.3e}')} | {_f(r['imbalance'])} | "
+            f"{_f(r['mem_total_mb'], '{:.0f}')} ({_f(r['mem_max_mb'], '{:.0f}')}) | "
             f"{_f(r['count_mem_total_mb'], '{:.0f}')} | {_f(r['peak_gib'])} | "
             f"{neg} {'ok' if r['inertia_ok'] else 'MISMATCH'} |")
     return head + "\n".join(lines) + "\n"
