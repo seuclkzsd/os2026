@@ -65,8 +65,9 @@ inline CallMutex& call_mutex() {
 ///   P9    - kFullRankPanelWidth, kCbUpdateBlock and, for a MUMPS patched with
 ///           patches/mumps-5.8.2-l0-blocking.patch, kL0PanelWidth / kL0Block below. Every
 ///           factorization of the 1e6 3-D cases 1.04-1.06x faster, end to end 1.03-1.04x with the
-///           environment's MUMPS (below the 1.05x a default needs); with the patched MUMPS 1.07-1.08x
-///           per factorization and 1.07-1.13x end to end.
+///           environment's MUMPS (below the 1.05x a default needs); with the patched MUMPS a count
+///           1.07-1.08x faster on a fixed pivot order, end to end syn-mem27-100 ~1.09-1.12x but
+///           yee-pec-box-1e6 only at the 1.05x bar (results/p9_factspeed.md §4.4-4.5).
 /// The build's default (default_blocking()): P9 when hsolve links a MUMPS of tools/dev/build_mumps.sh
 /// (CMake HSOLVE_MUMPS_ROOT; HSOLVE_MUMPS_BLOCKING overrides), else Mumps. Each object reads the
 /// environment variable HS_MUMPS_BLOCKING at construction: unset or "" -> the build's default,
@@ -206,6 +207,9 @@ class Instance {
   int keep(int i) const { return s_->keep[i - 1]; }
   int infog(int i) const { return s_->infog[i - 1]; }
   double rinfog(int i) const { return static_cast<double>(s_->rinfog[i - 1]); }
+  /// MUMPS' internal real statistics (read only; e.g. DKEEP(16): elimination flops of the last
+  /// factorization under the L0-OpenMP layer, 0 without one - dfac_b.F).
+  double dkeep(int i) const { return static_cast<double>(s_->dkeep[i - 1]); }
   Struc& raw() { return *s_; }
 
   /// Run one job under call_mutex(); returns INFOG(1) (negative: error, positive: warning).

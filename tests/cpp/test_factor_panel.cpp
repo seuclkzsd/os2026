@@ -7,17 +7,30 @@
 // patches/mumps-5.8.2-l0-blocking.patch reads (a build with HSOLVE_MUMPS_ROOT runs these tests
 // against it). Changing them changes how a front is blocked, not the factorization's meaning: the
 // Sylvester counts with the P9 blocks equal those with MUMPS' defaults (128, 2000 / 1000, unset)
-// and the analytic counts - real and through the complex embedding, at mid-gap shifts and next to
-// eigenvalues (1e-6 away with null-pivot detection, 1e-9 without), main factorizations and
-// inertia-only counts alike; at an exact eigenvalue both report a singular K. Also the measurement
-// hooks (MumpsControlOverrides, instance()). The fronts must be wider than the panels for the
-// setting to matter: 2-D grids of 200 x 210 (real) and 140 x 150 (complex embedding), whose largest
-// fronts are wider than 256.
+// and the exact counts - real and through the complex embedding, main factorizations and
+// inertia-only counts alike. Also the measurement hooks (MumpsControlOverrides, instance()).
+// Which test reaches which blocking path (MUMPS 5.8.2):
+//   * CountsEqualMumpsDefaultAndAnalytic, SingularShiftAgrees - 2-D grids of 200 x 210 (real) and
+//     140 x 150 (complex embedding), mid-gap shifts and shifts next to eigenvalues (1e-6 away with
+//     null-pivot detection, 1e-9 without), and an exact eigenvalue: fronts wider than 256 fully
+//     summed columns, so KEEP(420) = 256 changes the panels above the L0 layer. Their contribution
+//     blocks have at most ~600 rows, which KEEP(57/58) leave alone (both blockings take one block
+//     of NFRONT - NASS rows, dfac_front_aux.F DMUMPS_FAC_T_LDLT), and which of their fronts lie
+//     under the L0 layer is not known.
+//   * CountsEqualOnLargeContributionBlocksAndWideL0Fronts - a matrix whose assembly tree is known
+//     (asserted): two leaf fronts of 200 fully summed columns with 1100-row contribution blocks
+//     under one root front of 2100, the two leaves forming the L0 layer of 2 threads (asserted
+//     from MUMPS' flops under L0, DKEEP(16)). So every path differs between the two blockings: the
+//     contribution-block update (MUMPS' own 1000 / 2000: two blocks of 550 rows; P9: one of 1100),
+//     the root's panels (128 vs 256), and on the leaves under L0 the patched MUMPS' KEEP(498) =
+//     128 panels (unpatched: 256) and KEEP(499) = 64 stripes, diagonal blocks and zeroed band
+//     (MUMPS: 150 / 120, 250, 249).
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdlib>
 #include <random>
 #include <string>
@@ -91,6 +104,57 @@ std::vector<double> test_shifts(const std::vector<double>& w, double d) {
     s.push_back(w[j] + d);
   }
   return s;
+}
+
+// Two dense "leaf" cliques of p vertices, each coupled densely to the first cb vertices of a dense
+// "root" clique of r >= cb vertices, the leaves not coupled to each other; random entries in
+// [-1, 1] (and i [-1, 1]). Vertices 0..p-1 and p..2p-1 are the leaves, 2p..2p+r-1 the root.
+template <class T>
+CsrMatrix<T> two_leaves_and_root(index_t p, index_t cb, index_t r, std::uint64_t seed) {
+  std::mt19937_64 rng(seed);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  auto draw = [&]() -> T {
+    if constexpr (std::is_same_v<T, double>) {
+      return u(rng);
+    } else {
+      const double re = u(rng);
+      return T(re, u(rng));
+    }
+  };
+  const index_t n = 2 * p + r;
+  auto part = [p](index_t i) { return i < p ? 0 : (i < 2 * p ? 1 : 2); };
+  std::vector<index_t> rows, cols;
+  std::vector<T> vals;
+  for (index_t i = 0; i < n; ++i)
+    for (index_t j = 0; j <= i; ++j) {
+      if (part(i) != 2 && part(j) != 2 && part(i) != part(j)) continue;  // leaf 1 - leaf 2
+      if (part(i) == 2 && part(j) != 2 && i - 2 * p >= cb) continue;     // root beyond cb - leaf
+      if (i == j) {
+        rows.push_back(i), cols.push_back(i), vals.push_back(T(u(rng)));
+        continue;
+      }
+      const T v = draw();
+      rows.push_back(i), cols.push_back(j), vals.push_back(v);
+      rows.push_back(j), cols.push_back(i), vals.push_back(hs::conj_if(v));
+    }
+  return hs::csr_from_coo<T>(n, n, rows, cols, vals);
+}
+
+// Pivot order (MumpsFactorization::set_pivot_order: 1-based pivot position of every variable of
+// the matrix MUMPS factorizes) that eliminates the vertices in their natural order - the leaves
+// before the root; for complex T the embedding's variables v (Re) and n + v (Im) one after the
+// other.
+std::vector<int> natural_pivot_order(index_t n, bool embedding) {
+  std::vector<int> o(static_cast<std::size_t>(embedding ? 2 * n : n));
+  for (index_t v = 0; v < n; ++v) {
+    if (embedding) {
+      o[static_cast<std::size_t>(v)] = static_cast<int>(2 * v + 1);
+      o[static_cast<std::size_t>(n + v)] = static_cast<int>(2 * v + 2);
+    } else {
+      o[static_cast<std::size_t>(v)] = static_cast<int>(v + 1);
+    }
+  }
+  return o;
 }
 
 // The P9 block sizes and MUMPS' own, as explicit overrides (independent of the environment).
@@ -256,6 +320,69 @@ TYPED_TEST(FactorPanelWidth, CountsEqualMumpsDefaultAndAnalytic) {
         EXPECT_EQ(ours.inertia().neg, count_below(w, s)) << "s=" << s << " discard=" << discard;
         EXPECT_EQ(theirs.inertia().neg, ours.inertia().neg) << "s=" << s << " discard=" << discard;
         EXPECT_EQ(ours.inertia().zero, 0);
+      }
+    }
+  }
+}
+
+// Every path the P9 setting changes, on a matrix whose assembly tree is known (header comment).
+// MUMPS sizes (variables of the matrix it factorizes; the complex embedding from half as many
+// vertices): leaves of p = 200 fully summed columns with a contribution block of cb = 1100 rows,
+// a root of r = 2100. A father of more than 2000 pivots keeps MUMPS from amalgamating children
+// with more than KEEP(1) pivots into it (dana_aux.F: MAXNODE = max(2000, ...)); the leaves hold
+// ~10% of the factor, so the L0 layer of 2 threads is the two leaves (ana_omp_m.F: at most 50% of
+// the factor under it, the threads' loads within 90%). The preconditions are asserted, so a MUMPS
+// whose tree, L0 layer or contribution-block rule differs fails here instead of passing without
+// reaching those paths.
+TYPED_TEST(FactorPanelWidth, CountsEqualOnLargeContributionBlocksAndWideL0Fronts) {
+  using T = TypeParam;
+  const bool real = std::is_same_v<T, double>;
+  const index_t m = real ? 1 : 2;  // MUMPS variables per vertex
+  const index_t p = 200 / m, cb = 1100 / m, r = 2100 / m;
+  const auto a = two_leaves_and_root<T>(p, cb, r, 2026);
+  const auto w = hs::test::dense_eigenvalues<T>(a, nullptr);
+  ShiftedPencil<T> pencil(a, nullptr);
+  FactorOptions o;
+  o.threads = 2;
+  o.deterministic = false;  // the L0-OpenMP layer
+  constexpr int kMumpsCbBlock = 1000;  // MUMPS' KEEP(58)
+  // Contribution blocks in (1000, 2000] rows: MUMPS' own KEEP(57/58) update them in two row
+  // blocks, the P9 ones in one (DMUMPS_FAC_T_LDLT). Panels: the root wider than the P9 panel, the
+  // leaves wider than the L0 panel and than MUMPS' triangle-stripe threshold KEEP(7) = 150.
+  ASSERT_GT(m * cb, kMumpsCbBlock);
+  ASSERT_LE(m * cb, hs::mumps::kCbUpdateBlock);
+  ASSERT_GT(m * r, hs::mumps::kFullRankPanelWidth);
+  ASSERT_GT(m * p, hs::mumps::kL0PanelWidth);
+  ASSERT_GT(m * p, 150);
+  for (bool discard : {false, true}) {
+    Mumps<T, double> ours(o), theirs(o);
+    ours.set_control_overrides(p9_blocks());
+    theirs.set_control_overrides(mumps_blocks());
+    for (auto* f : {&ours, &theirs}) {
+      f->set_discard_factors(discard);
+      f->set_pivot_order(natural_pivot_order(a.nrows, !real));
+      f->analyze(pencil, 1.0, -4.0);
+      // Three fronts (INFOG(6)): the two leaves (NASS = m p) under the root (NASS = m r); the
+      // largest contribution block (KEEP(2), rows) is a leaf's.
+      ASSERT_EQ(f->instance().infog(6), 3);
+      ASSERT_EQ(f->instance().keep(2), m * cb);
+    }
+    EXPECT_EQ(theirs.pivot_order(), ours.pivot_order());
+    // Two isolated eigenvalues: the gap's middle and 1e-3 to either side (gaps here ~0.05; the
+    // dense fronts make each factorization ~4 GFlop, so fewer shifts than the grid tests).
+    auto shifts = test_shifts(w, 1e-3);
+    ASSERT_GE(shifts.size(), 6u);
+    shifts.resize(6);
+    for (double s : shifts) {
+      ASSERT_TRUE(ours.factorize(1.0, -s)) << "s=" << s;
+      ASSERT_TRUE(theirs.factorize(1.0, -s)) << "s=" << s;
+      EXPECT_EQ(ours.inertia().neg, count_below(w, s)) << "s=" << s << " discard=" << discard;
+      EXPECT_EQ(theirs.inertia().neg, ours.inertia().neg) << "s=" << s << " discard=" << discard;
+      EXPECT_EQ(ours.inertia().zero, 0);
+      // Work under the L0 layer and above it: with three fronts that layer is the two leaves.
+      for (auto* f : {&ours, &theirs}) {
+        EXPECT_GT(f->instance().dkeep(16), 0.0) << "s=" << s;
+        EXPECT_LT(f->instance().dkeep(16), f->instance().rinfog(3)) << "s=" << s;
       }
     }
   }
