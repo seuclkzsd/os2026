@@ -1307,7 +1307,9 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
   数据见 `docs/BLAS.md` §8。旧构建目录保留缓存的 `HSOLVE_BLAS_HOOK` / `HSOLVE_BLAS_ROUTE_DEFAULT`，须
   `-U` 后重新配置。
 
-**所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：
+**所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的，`env/hosts/CISL-NF5468M6.sh`；
+集群节点见上；没有主机文件的机器——用户或评测机——`HS_CORES` 默认取该 shell 可用的全部 CPU，`env/activate.sh`，
+否则 guard 会因绑到不存在的核而拒绝构建与测试）：
 - 默认绑定 NUMA node1 的 16 个物理核 `24-30,33-41`，进程树 RSS 上限 30 GiB；系统可用内存低于
   12 GiB 时只终止「大」进程树（≥ max(2 GiB, mem_gb/4)），小的构建/测试不受连带。RSS 上限（与外层
   guard 或调用方已声明的较小值取小）作为 `HSOLVE_MEMORY_LIMIT_GB` 导出给子进程，hsolve 的自动内存

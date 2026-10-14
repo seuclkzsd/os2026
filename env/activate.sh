@@ -1,7 +1,8 @@
 # Source this file to enter the project environment:  source env/activate.sh
 # Activates the conda env and sets the resource policy defaults (docs/DESIGN.md §6).
 # Per-host settings (conda location, environment prefix, cores, memory limits) live in
-# env/hosts/<short hostname>.sh; without such a file the defaults below apply (development server).
+# env/hosts/<short hostname>.sh (cluster nodes, the development server); without such a file the
+# defaults below apply - on any other machine (a user's, the judges') every CPU this shell may use.
 _hs_host_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hosts/$(hostname -s).sh"
 # shellcheck disable=SC1090
 [ -f "$_hs_host_file" ] && source "$_hs_host_file"
@@ -13,7 +14,9 @@ unset _conda_bin _hs_host_file
 export PATH="$CONDA_PREFIX/bin:$PATH"
 # conda compiler activation injects -march=nocona -O2 ...; CMake owns optimisation flags.
 export CFLAGS="-pipe" CXXFLAGS="-pipe" CPPFLAGS="" DEBUG_CFLAGS="" DEBUG_CXXFLAGS=""
-export HS_CORES="${HS_CORES:-24-30,33-41}"     # 16 physical cores on NUMA node 1
+# guard.py pins runs to HS_CORES; a list naming CPUs this machine lacks would make every guarded
+# build and test fail, so the generic default is the shell's own CPU list.
+export HS_CORES="${HS_CORES:-$(sed -n 's/^Cpus_allowed_list:[[:space:]]*//p' /proc/self/status)}"
 export HS_MEM_GB="${HS_MEM_GB:-30}"            # RSS limit enforced by tools/run/guard.py
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}" # interactive default; guard.py overrides per run
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
