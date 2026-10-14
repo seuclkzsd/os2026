@@ -10,20 +10,31 @@
 #   * ranks 1..S, the helpers: one per NUMA node (socket) with allowed cores, bound to them,
 #     OMP_NUM_THREADS = their number - they make the certificate's two counts and solve spectrum
 #     slices at the same time while the leader waits (it never computes while they do).
-# Default R = S + 1 when the allowed cores span S >= 2 NUMA nodes; on one node R = 1 (plain hsolve:
-# helpers sharing one socket's memory bandwidth were measured slower, results/p10_mpi.md). --ranks
-# R forces R - 1 helpers: on R - 1 nodes if there are that many, else the allowed cores split into
-# R - 1 equal contiguous blocks. --dry-run prints the plan and the mpiexec command.
+# Default R = S + 1 when the allowed cores span S >= 2 NUMA nodes. On one NUMA node the launcher
+# runs the plain hsolve next to it (or $HSOLVE) with the same arguments - no MPI job, no mpiexec
+# needed: helpers sharing one socket's memory bandwidth were measured slower, and an MPI start-up
+# costs ~1.7-1.9 s (results/p10_mpi.md). --ranks R forces an MPI job of R ranks, R - 1 helpers: on
+# R - 1 nodes if there are that many, else the allowed cores split into R - 1 equal contiguous
+# blocks. --dry-run prints the plan and the command.
 # mpiexec: --mpiexec, else $MPIEXEC, else mpiexec on PATH, else $HS_REF_ENV/bin/mpiexec (the Open
-# MPI 5 of the os2026-ref environment on the cluster nodes). hsolve-mpi: next to this script, or
-# $HSOLVE_MPI. Exit status: hsolve's (0 success, 1 not successful, 2 error).
+# MPI 5 of the os2026-ref environment on the cluster nodes). The plan reaches the ranks through
+# the environment (HSOLVE_MPIRUN_PLAN, HSOLVE_MPIRUN_EXE: exported, which every launcher passes to
+# local ranks; Open MPI also gets -x for them and --bind-to none, its default binding being per
+# core / socket); each rank finds its number in OMPI_COMM_WORLD_RANK (Open MPI), PMIX_RANK,
+# PMI_RANK (MPICH, Intel MPI: Hydra) or MV2_COMM_WORLD_RANK (MVAPICH2). Tested with Open MPI 5.0.11
+# only (docs/PARALLEL.md). hsolve-mpi: next to this script, or $HSOLVE_MPI. Exit status: hsolve's
+# (0 success, 1 not successful, 2 error).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- per-rank stage: bind this rank and exec hsolve-mpi (started by mpiexec below)
 if [ -n "${HSOLVE_MPIRUN_PLAN:-}" ]; then
-  rank="${OMPI_COMM_WORLD_RANK:-${PMIX_RANK:-${PMI_RANK:-0}}}"
   IFS=';' read -r -a blocks <<< "$HSOLVE_MPIRUN_PLAN"
+  rank="${OMPI_COMM_WORLD_RANK:-${PMIX_RANK:-${PMI_RANK:-${MV2_COMM_WORLD_RANK:-}}}}"
+  if [ -z "$rank" ]; then
+    [ ${#blocks[@]} -eq 1 ] || { echo "hsolve-mpirun: this MPI launcher sets no rank variable (OMPI_COMM_WORLD_RANK, PMIX_RANK, PMI_RANK, MV2_COMM_WORLD_RANK)" >&2; exit 2; }
+    rank=0
+  fi
   block="${blocks[$rank]:-}"
   [ -n "$block" ] || { echo "hsolve-mpirun: no cores planned for rank $rank" >&2; exit 2; }
   n=$(awk -v l="$block" 'BEGIN { n = 0; k = split(l, p, ","); for (i = 1; i <= k; i++) { if (p[i] ~ /-/) { split(p[i], r, "-"); n += r[2] - r[1] + 1 } else n++ } print n }')
@@ -41,13 +52,6 @@ while [ $# -gt 0 ]; do
     *) break ;;
   esac
 done
-exe="${HSOLVE_MPI:-$here/hsolve-mpi}"
-[ -x "$exe" ] || { echo "hsolve-mpirun: $exe not found (build with -DHSOLVE_WITH_MPI=ON, or set HSOLVE_MPI)" >&2; exit 2; }
-if [ -z "$mpiexec" ]; then
-  if command -v mpiexec > /dev/null 2>&1; then mpiexec=$(command -v mpiexec)
-  elif [ -n "${HS_REF_ENV:-}" ] && [ -x "$HS_REF_ENV/bin/mpiexec" ]; then mpiexec="$HS_REF_ENV/bin/mpiexec"
-  else echo "hsolve-mpirun: no mpiexec (--mpiexec, \$MPIEXEC, PATH or \$HS_REF_ENV)" >&2; exit 2; fi
-fi
 
 # Allowed CPUs, and their NUMA nodes.
 expand() { awk -v l="$1" 'BEGIN { k = split(l, p, ","); for (i = 1; i <= k; i++) { if (p[i] ~ /-/) { split(p[i], r, "-"); for (c = r[1]; c <= r[2]; c++) print c } else if (p[i] != "") print p[i] } }'; }
@@ -65,9 +69,27 @@ for nd in /sys/devices/system/node/node[0-9]*; do
   [ ${#mine[@]} -gt 0 ] && groups+=("$(join "${mine[@]}")")
 done
 [ ${#groups[@]} -gt 0 ] || groups=("$(join "${cpus[@]}")")
-if [ -z "$ranks" ]; then
-  if [ ${#groups[@]} -ge 2 ]; then ranks=$(( ${#groups[@]} + 1 )); else ranks=1; fi
+
+# One NUMA node and no --ranks: the plain hsolve, as if called directly (all allowed cores).
+if [ -z "$ranks" ] && [ ${#groups[@]} -lt 2 ]; then
+  plain="${HSOLVE:-$here/hsolve}"
+  [ -x "$plain" ] || { echo "hsolve-mpirun: $plain not found (set HSOLVE)" >&2; exit 2; }
+  if [ "$dry" = 1 ]; then
+    echo "rank 0: cores $(join "${cpus[@]}") (one NUMA node: plain hsolve, no MPI job)"
+    printf '%q ' "$plain" "$@"; echo
+    exit 0
+  fi
+  exec "$plain" "$@"
 fi
+
+exe="${HSOLVE_MPI:-$here/hsolve-mpi}"
+[ -x "$exe" ] || { echo "hsolve-mpirun: $exe not found (build with -DHSOLVE_WITH_MPI=ON, or set HSOLVE_MPI)" >&2; exit 2; }
+if [ -z "$mpiexec" ]; then
+  if command -v mpiexec > /dev/null 2>&1; then mpiexec=$(command -v mpiexec)
+  elif [ -n "${HS_REF_ENV:-}" ] && [ -x "$HS_REF_ENV/bin/mpiexec" ]; then mpiexec="$HS_REF_ENV/bin/mpiexec"
+  else echo "hsolve-mpirun: no mpiexec (--mpiexec, \$MPIEXEC, PATH or \$HS_REF_ENV)" >&2; exit 2; fi
+fi
+[ -n "$ranks" ] || ranks=$(( ${#groups[@]} + 1 ))
 [[ "$ranks" =~ ^[1-9][0-9]*$ ]] || { echo "hsolve-mpirun: --ranks must be a positive integer" >&2; exit 2; }
 helpers=$((ranks - 1))
 plan=("$(join "${cpus[@]}")")
@@ -81,11 +103,17 @@ if [ "$helpers" -gt 0 ]; then
     for ((h = 0; h < helpers; h++)); do plan+=("$(join "${cpus[@]:h*per:per}")"); done
   fi
 fi
-plan_str=$(IFS=';'; echo "${plan[*]}")
-cmd=("$mpiexec" -n "$ranks" --bind-to none -x HSOLVE_MPIRUN_PLAN="$plan_str" -x HSOLVE_MPIRUN_EXE="$exe"
-     "$here/hsolve-mpirun" "$@")
+HSOLVE_MPIRUN_PLAN=$(IFS=';'; echo "${plan[*]}")
+HSOLVE_MPIRUN_EXE="$exe"
+export HSOLVE_MPIRUN_PLAN HSOLVE_MPIRUN_EXE
+cmd=("$mpiexec" -n "$ranks")
+if "$mpiexec" --version 2>&1 | grep -qiE 'open mpi|open-mpi|openrte|prrte'; then
+  cmd+=(--bind-to none -x HSOLVE_MPIRUN_PLAN -x HSOLVE_MPIRUN_EXE)
+fi
+cmd+=("$here/hsolve-mpirun" "$@")
 if [ "$dry" = 1 ]; then
   for ((r = 0; r < ranks; r++)); do echo "rank $r: cores ${plan[$r]}"; done
+  printf 'HSOLVE_MPIRUN_PLAN=%q HSOLVE_MPIRUN_EXE=%q ' "$HSOLVE_MPIRUN_PLAN" "$HSOLVE_MPIRUN_EXE"
   printf '%q ' "${cmd[@]}"; echo
   exit 0
 fi
