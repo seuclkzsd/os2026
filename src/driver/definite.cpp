@@ -757,8 +757,8 @@ class WindowSolver {
   template <class Here>
   void solve_slices(Here& solve_here);
   /// Helpers that may take slices now (0: none), and the memory one helper's slice may take.
-  int slice_helpers(double& need_bytes);
-  SliceTask task_of(std::size_t i, double need_bytes) const;
+  int slice_helpers(double& need_bytes, double& share_bytes);
+  SliceTask task_of(std::size_t i, double need_bytes, double share_bytes) const;
   void merge_remote(std::size_t i, int h, SliceReply<T>& r);
   double multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const;
   double multiplet_rerun_shift(double mean, const Block<T>& sel, const Slice& s) const;
@@ -1366,10 +1366,13 @@ index_t WindowSolver<T>::deduplicate() {
 // plan, solve() step 2). The leader's main factors are released first (it computes nothing while
 // helpers work, and refactorizes if it must solve a slice itself). As many helpers as such slices
 // fit in what the budget leaves (memory_in_use counts the helpers already) - at least two: one
-// helper alone, on its socket's cores, would be slower than the leader on all of them.
+// helper alone, on its socket's cores, would be slower than the leader on all of them. Each helper
+// then gets an equal share of what is left (share_bytes): its slices' Krylov bases need the room the
+// leader's would have had (yee-pec-cube-32 [40, 400], slices of 104 and 167 pairs: with just
+// need_bytes the helper halved its block width to 1 and missed 4 pairs).
 template <class T>
-int WindowSolver<T>::slice_helpers(double& need_bytes) {
-  need_bytes = 0.0;
+int WindowSolver<T>::slice_helpers(double& need_bytes, double& share_bytes) {
+  need_bytes = share_bytes = 0.0;
   if (!c_.helpers || !c_.helpers->shared() || slices_.size() < 2) return 0;
   Helpers& hp = *c_.helpers;
   if (hp.options().helper_slices == Toggle::Off) return 0;
@@ -1412,11 +1415,12 @@ int WindowSolver<T>::slice_helpers(double& need_bytes) {
     if (std::find(notes.begin(), notes.end(), why) == notes.end()) notes.push_back(why);
   }
   if (take < 2) take = 0;
+  if (take > 0) share_bytes = avail / take;
   return take;
 }
 
 template <class T>
-SliceTask WindowSolver<T>::task_of(std::size_t i, double need_bytes) const {
+SliceTask WindowSolver<T>::task_of(std::size_t i, double need_bytes, double share_bytes) const {
   const Slice& s = slices_[i];
   SliceTask t;
   t.id = static_cast<index_t>(i);
@@ -1433,10 +1437,12 @@ SliceTask WindowSolver<T>::task_of(std::size_t i, double need_bytes) const {
   t.band = band_;
   t.band_lo = band_lo_;
   t.band_hi = band_hi_;
-  t.cap_mb = need_bytes / 1e6;
+  // MUMPS' working memory: the share less the slice's Krylov work, at least the factorization's need.
+  const double krylov = 7.0 * static_cast<double>(n_) * sizeof(T) * static_cast<double>(c_max_);
+  t.cap_mb = std::max(need_bytes - krylov, share_bytes - krylov) / 1e6;
   const double cap = fac_.options().max_memory_mb;
   if (cap > 0) t.cap_mb = std::min(t.cap_mb, cap);
-  t.budget_gb = need_bytes / 1073741824.0;  // beside what the helper holds (it adds its own RSS)
+  t.budget_gb = std::max(need_bytes, share_bytes) / 1073741824.0;  // beside what the helper holds
   return t;
 }
 
@@ -1469,8 +1475,8 @@ void WindowSolver<T>::merge_remote(std::size_t i, int h, SliceReply<T>& r) {
 template <class T>
 template <class Here>
 void WindowSolver<T>::solve_slices(Here& solve_here) {
-  double need = 0.0;
-  const int take = slice_helpers(need);
+  double need = 0.0, share = 0.0;
+  const int take = slice_helpers(need, share);
   auto* hp = dynamic_cast<HelpersOf<T>*>(c_.helpers);
   if (take == 0 || hp == nullptr) {
     for (std::size_t i = 0; i < slices_.size(); ++i) solve_here(i, false);
@@ -1491,7 +1497,7 @@ void WindowSolver<T>::solve_slices(Here& solve_here) {
       if (!hp->usable(h) || on_helper[static_cast<std::size_t>(h)] >= 0) continue;
       const std::size_t i = queue.front();
       queue.pop_front();
-      hp->post_slice(c_, h, task_of(i, need));
+      hp->post_slice(c_, h, task_of(i, need, share));
       on_helper[static_cast<std::size_t>(h)] = static_cast<std::ptrdiff_t>(i);
       ++handed;
     }
@@ -1526,7 +1532,8 @@ void WindowSolver<T>::solve_slices(Here& solve_here) {
   event(c_, "slices_parallel", {{"slices", static_cast<std::int64_t>(slices_.size())},
                                 {"on_helpers", static_cast<std::int64_t>(handed)},
                                 {"on_leader", static_cast<std::int64_t>(leader.size())},
-                                {"helpers", static_cast<std::int64_t>(take)}, {"need_mb", need / 1e6}});
+                                {"helpers", static_cast<std::int64_t>(take)}, {"need_mb", need / 1e6},
+                                {"share_mb", share / 1e6}});
 }
 
 template <class T>
