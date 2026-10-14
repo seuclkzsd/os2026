@@ -555,6 +555,11 @@ Reading:
     shipped tarball 84 s - the same key `df9061400e43252d` as the measured build (same inputs) -, hsolve
     211 s, 0 compiler warnings, ctest 1009/1009, pytest 380 passed; `hsolve --A x --version`:
     `mumps=mumps-5.8.2-df9061400e43252d mumps_blocking=p9`.
+  * the review fix (aba8516, branch p9int-fix: `tools/bench/thread_scaling.py`, `tools/dev/mumps_cache.sh`,
+    tests and documents; no compiled code changed) from a fresh `build/release` in `~/os2026-wt/p9int`
+    (cached MUMPS `df9061400e43252d`: `mumps_cache.sh` is not a key input), `tools/dev/test.sh release`:
+    0 compiler warnings, ctest 1009/1009 (3 disabled performance tests, 2 skipped paths as before),
+    pytest 384 passed (380 + the new `--variant` / fastest-baseline tests and `test_mumps_cache.py`).
 * **Other machines.** `env/activate.sh` used to default the guard's cores to the development
   server's NUMA node (`24-30,33-41`); on a machine without a host file (a user's, the judges') the
   guarded build and tests would have refused to start. The default is now the shell's own CPU list;
