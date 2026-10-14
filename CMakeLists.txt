@@ -30,9 +30,11 @@ find_package(LAPACK REQUIRED)
 # tools/dev/build_mumps.sh (same library names and sonames). Its lib/ then goes first into the
 # executables' RPATH, ahead of the environment's (conda's LDFLAGS carry -rpath $CONDA_PREFIX/lib),
 # so that the dynamic loader picks the rebuilt libraries (test_factor_mumps_build checks it).
-# P9 "factspeed" (results/p9_factspeed.md §3.3-4.4): a rebuild alone gains nothing; built with
-# patches/mumps-5.8.2-l0-blocking.patch and run with hsolve's P9 block sizes it is 1.07-1.13x end to
-# end at 1e6. Not the default build (that needs the tarball and a MUMPS build step in the
+# P9 "factspeed" (results/p9_factspeed.md §3.3-4.5): a rebuild alone gains nothing; built with
+# patches/mumps-5.8.2-l0-blocking.patch and run with hsolve's P9 block sizes a count is 1.07-1.08x
+# faster on a fixed pivot order, end to end at 1e6 syn-mem27-100 is past the 1.05x bar but
+# yee-pec-box-1e6 only at it (~1.055x; 1.040x on a fixed METIS order). Not the default build (the
+# gate is not clearly passed, and it would need the tarball and a MUMPS build step in the
 # deployment). HSOLVE_MUMPS_BLOCKING: the block sizes hsolve gives MUMPS when HS_MUMPS_BLOCKING is
 # unset (src/factor/mumps_api.hpp Blocking) - "p9" by default with HSOLVE_MUMPS_ROOT, else "mumps".
 set(HSOLVE_MUMPS_ROOT "" CACHE PATH "MUMPS install of tools/dev/build_mumps.sh (empty: the environment's)")

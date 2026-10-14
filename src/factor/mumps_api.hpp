@@ -66,8 +66,9 @@ inline CallMutex& call_mutex() {
 ///           patches/mumps-5.8.2-l0-blocking.patch, kL0PanelWidth / kL0Block below. Every
 ///           factorization of the 1e6 3-D cases 1.04-1.06x faster, end to end 1.03-1.04x with the
 ///           environment's MUMPS (below the 1.05x a default needs); with the patched MUMPS a count
-///           1.07-1.08x faster on a fixed pivot order, end to end syn-mem27-100 ~1.09-1.12x but
-///           yee-pec-box-1e6 only at the 1.05x bar (results/p9_factspeed.md §4.4-4.5).
+///           1.07-1.08x faster on a fixed pivot order, end to end syn-mem27-100 past the 1.05x bar
+///           but yee-pec-box-1e6 only at it (~1.055x; 1.040x on a fixed METIS order), so not the
+///           default build (results/p9_factspeed.md §4.4-4.5).
 /// The build's default (default_blocking()): P9 when hsolve links a MUMPS of tools/dev/build_mumps.sh
 /// (CMake HSOLVE_MUMPS_ROOT; HSOLVE_MUMPS_BLOCKING overrides), else Mumps. Each object reads the
 /// environment variable HS_MUMPS_BLOCKING at construction: unset or "" -> the build's default,
