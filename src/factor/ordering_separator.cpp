@@ -20,7 +20,6 @@ namespace {
 
 // The two-stage scheme for large graphs: kTwoStageSize, kTwoStageLevels, kTwoStageRuns and
 // kParallelRunSize in ordering_detail.hpp.
-constexpr int kRuns = kTwoStageRuns;
 
 // Indexed binary max-heap of vertices keyed by gain; ties go to the lower rank, then the lower
 // vertex number, so the order of extraction is a function of keys and ranks alone.
@@ -627,6 +626,20 @@ struct Hierarchy {
       }
     }
   }
+
+  // The same without freeing anything, so that several separators of the top can be carried
+  // down the same hierarchy (concurrently: const).
+  void refine_down(const Graph& base, Random& rng, NodeFm& fm, std::vector<std::uint8_t>& where,
+                   std::int64_t max_part, const SeparatorParams& p) const {
+    for (std::size_t k = coarse.size(); k-- > 0;) {
+      const Graph& fine = k == 0 ? base : coarse[k - 1];
+      std::vector<std::uint8_t> projected(static_cast<std::size_t>(fine.n));
+      const std::vector<std::int32_t>& cmap = cmaps[k];
+      for (std::int32_t v = 0; v < fine.n; ++v) projected[v] = where[cmap[v]];
+      where.swap(projected);
+      refine(fm, fine, rng, where, max_part, p);
+    }
+  }
 };
 
 // One multilevel bisection (METIS MlevelNodeBisectionL1): coarsen to min(coarsen_to,
@@ -681,10 +694,11 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     const Graph& mid = h.top(g);
     const int tries = std::max(1, static_cast<int>(0.7 * p.init_tries));
     // Independent runs, each with its own seed: the same result whichever thread runs which.
-    std::vector<std::vector<std::uint8_t>> runs(kRuns);
-    std::vector<SeparatorTrace> run_traces(kRuns);
-    std::uint64_t run_seed[kRuns];
-    for (int r = 0; r < kRuns; ++r) run_seed[r] = rng.next();
+    const int nruns = std::max(1, p.runs);
+    std::vector<std::vector<std::uint8_t>> runs(static_cast<std::size_t>(nruns));
+    std::vector<SeparatorTrace> run_traces(static_cast<std::size_t>(nruns));
+    std::vector<std::uint64_t> run_seed(static_cast<std::size_t>(nruns));
+    for (int r = 0; r < nruns; ++r) run_seed[r] = rng.next();
     const bool parallel = mid.n >= kParallelRunSize;
     // A taskgroup, not a taskwait: the caller (the dissection) may already have spawned other
     // tasks from the task it runs in - the other half of a separator - and a taskwait would wait
@@ -692,7 +706,7 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     // of work, the trial runs' wall time 16 s instead of 3 s summed over the separators).
 #pragma omp taskgroup
     {
-      for (int r = 0; r < kRuns; ++r) {
+      for (int r = 0; r < nruns; ++r) {
 #pragma omp task if (parallel) default(shared) firstprivate(r)
         {
           Random run_rng(run_seed[r]);
@@ -700,16 +714,53 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
         }
       }
     }
-    std::int64_t best_w = -1, best_diff = 0;
-    int best = 0;
-    for (int r = 0; r < kRuns; ++r) {
-      std::int64_t diff = 0;
-      const std::int64_t sw = separator_score(mid, runs[r], diff);
-      if (best_w < 0 || sw < best_w || (sw == best_w && diff < best_diff)) {
-        best_w = sw;
-        best_diff = diff;
-        best = r;
+    // Runs ranked by their separator on the mid graph (weight, then balance, then run number).
+    std::vector<std::pair<std::int64_t, std::int64_t>> score(static_cast<std::size_t>(nruns));
+    std::vector<int> rank(static_cast<std::size_t>(nruns));
+    for (int r = 0; r < nruns; ++r) {
+      score[r].first = separator_score(mid, runs[r], score[r].second);
+      rank[r] = r;
+    }
+    std::stable_sort(rank.begin(), rank.end(), [&](int a, int b) { return score[a] < score[b]; });
+    const int best = rank[0];
+    const int finalists = std::clamp(p.finalists, 1, nruns);
+    if (finalists > 1) {
+      // Carry the best `finalists` separators of the mid graph down to g, each refined with its
+      // own random stream (concurrent tasks), and keep the best one there: the mid graph's
+      // ranking is a poor predictor of the final separator (projection and refinement through
+      // the four finest levels change it most).
+      std::vector<std::uint64_t> fin_seed(static_cast<std::size_t>(finalists));
+      for (int f = 0; f < finalists; ++f) fin_seed[f] = rng.next();
+      std::vector<std::vector<std::uint8_t>> fin(static_cast<std::size_t>(finalists));
+      std::vector<std::pair<std::int64_t, std::int64_t>> fscore(static_cast<std::size_t>(finalists));
+      if (timing) timing->runs_s += stage.lap();
+#pragma omp taskgroup
+      {
+        for (int f = 0; f < finalists; ++f) {
+#pragma omp task if (parallel) default(shared) firstprivate(f)
+          {
+            Random frng(fin_seed[f]);
+            NodeFm ffm(g.n);
+            fin[f] = std::move(runs[rank[f]]);
+            h.refine_down(g, frng, ffm, fin[f], max_part, p);
+            fscore[f].first = separator_score(g, fin[f], fscore[f].second);
+          }
+        }
       }
+      int pick = 0;
+      for (int f = 1; f < finalists; ++f)
+        if (fscore[f] < fscore[pick]) pick = f;
+      where = std::move(fin[pick]);
+      if (timing) timing->uncoarsen_s += stage.lap();
+      if (trace) {
+        local.vertices.push_back(g.n);
+        local.edges.push_back(g.edges());
+        local.projected.push_back(-1);
+        local.refined.push_back(fscore[pick].first);
+        local.coarsen_s = outer_coarsen;
+        *trace = std::move(local);
+      }
+      return where;
     }
     where = std::move(runs[best]);
     runs.clear();

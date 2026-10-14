@@ -192,6 +192,47 @@ namespace hs {
 /// Double or Single, docs/DESIGN.md §3.6-3); FactorOptions rejects it (InvalidInput).
 enum class FactorPrecision { Double, Single, Auto };
 
+/// Options of compute_ordering (nested dissection). The defaults follow METIS_NodeND.
+struct OrderingOptions {
+  int threads = 0;              ///< OpenMP threads; 0 = omp_get_max_threads(). The ordering does
+                                ///< NOT depend on it (bitwise the same for every thread count)
+  index_t leaf_size = 120;      ///< subgraphs of at most this many vertices: minimum degree
+                                ///< (1..2048: the largest subgraph minimum degree is run on)
+  double imbalance = 1.2;       ///< each half of a separator weighs at most imbalance * |V| / 2;
+                                ///< in [1, 1.5] (above, the halves may be so unequal that the
+                                ///< dissection degenerates: 1.6-5x the flops at 1.9, natural
+                                ///< order from 2 on; see kMaxImbalance in src/factor)
+  index_t coarsen_to = 100;     ///< multilevel separators coarsen down to this many vertices (>= 2)
+  int init_tries = 7;           ///< greedy-growing attempts for the coarsest separator
+  int refine_passes = 10;       ///< node-FM refinement passes per level (stop early without gain)
+  /// Graphs of >= 5000 vertices are bisected in two stages (METIS): a few contractions to a "mid"
+  /// graph, `separator_runs` complete multilevel bisections of it (concurrent tasks), then the
+  /// best `separator_finalists` of those separators are refined back down to the graph itself,
+  /// where the smallest is kept. 1 <= finalists <= runs <= 64.
+  int separator_runs = 5;
+  int separator_finalists = 1;
+  /// The same for the separators of the top `top_depth` levels of the dissection (the largest:
+  /// they set most of the flops, and most threads would idle while they are computed).
+  int top_depth = 0;
+  index_t top_size = 0;  ///< ... and for every subgraph of at least this many vertices (0: none)
+  int top_runs = 5;
+  int top_finalists = 1;
+  /// Merge indistinguishable vertices (identical closed neighbourhoods) into one weighted vertex
+  /// before the dissection when that leaves at most 85% of the vertices (METIS and SCOTCH do the
+  /// same): e.g. the two variables of every node of a vector field.
+  bool compress = true;
+  std::uint64_t seed = 2026;    ///< seed of the (counter-based, thread-independent) random choices
+  /// Complex T only. Compressed: order the n-vertex graph of K, then eliminate the two embedding
+  /// variables of every vertex back to back (half the graph; right when most couplings are
+  /// complex). Full: order the 2n-vertex graph of the embedding itself, which can exploit
+  /// couplings without imaginary part (if Im K vanishes on most of them, the embedding nearly
+  /// decouples into two copies of Re K: measured 2.95e12 vs 2.24e12 flops for METIS on the 2n
+  /// graph on a Bloch-periodic Yee cell, n = 1e5). Auto: Compressed when at least half of the
+  /// off-diagonal couplings have an imaginary part, else Full.
+  enum class Embedding { Auto, Compressed, Full };
+  Embedding embedding = Embedding::Auto;
+};
+
 /// FactorOptions::ordering value selecting hsolve's own multithreaded nested dissection
 /// (compute_ordering below), handed to MUMPS as its pivot order (PERM_IN, ICNTL(7) = 1).
 inline constexpr int kOrderingNestedDissection = 10;
@@ -202,6 +243,8 @@ struct FactorOptions {
                               ///< 2 AMF; or kOrderingNestedDissection (hsolve, multithreaded)
   int ordering_threads = 0;   ///< threads of compute_ordering for kOrderingNestedDissection;
                               ///< 0 = `threads` (the ordering itself does not depend on it)
+  OrderingOptions nested_dissection;  ///< compute_ordering's options for kOrderingNestedDissection
+                                      ///< (its `threads` is replaced by ordering_threads)
   int block_analysis = 0;     ///< complex T with a MUMPS ordering: declare the embedding's pairs
                               ///< {i, n+i} as blocks (ICNTL(15) = 1), so that MUMPS orders the
                               ///< n-vertex graph of K. 1 on, 0 off, -1 auto (on when at least
@@ -523,31 +566,6 @@ class InertiaCounter {
 
 // ------------------------------------------------------------------ hsolve's own orderings
 
-/// Options of compute_ordering (nested dissection). The defaults follow METIS_NodeND.
-struct OrderingOptions {
-  int threads = 0;              ///< OpenMP threads; 0 = omp_get_max_threads(). The ordering does
-                                ///< NOT depend on it (bitwise the same for every thread count)
-  index_t leaf_size = 120;      ///< subgraphs of at most this many vertices: minimum degree
-                                ///< (1..2048: the largest subgraph minimum degree is run on)
-  double imbalance = 1.2;       ///< each half of a separator weighs at most imbalance * |V| / 2;
-                                ///< in [1, 1.5] (above, the halves may be so unequal that the
-                                ///< dissection degenerates: 1.6-5x the flops at 1.9, natural
-                                ///< order from 2 on; see kMaxImbalance in src/factor)
-  index_t coarsen_to = 100;     ///< multilevel separators coarsen down to this many vertices (>= 2)
-  int init_tries = 7;           ///< greedy-growing attempts for the coarsest separator
-  int refine_passes = 10;       ///< node-FM refinement passes per level (stop early without gain)
-  std::uint64_t seed = 2026;    ///< seed of the (counter-based, thread-independent) random choices
-  /// Complex T only. Compressed: order the n-vertex graph of K, then eliminate the two embedding
-  /// variables of every vertex back to back (half the graph; right when most couplings are
-  /// complex). Full: order the 2n-vertex graph of the embedding itself, which can exploit
-  /// couplings without imaginary part (if Im K vanishes on most of them, the embedding nearly
-  /// decouples into two copies of Re K: measured 2.95e12 vs 2.24e12 flops for METIS on the 2n
-  /// graph on a Bloch-periodic Yee cell, n = 1e5). Auto: Compressed when at least half of the
-  /// off-diagonal couplings have an imaginary part, else Full.
-  enum class Embedding { Auto, Compressed, Full };
-  Embedding embedding = Embedding::Auto;
-};
-
 struct OrderingStats {
   double seconds = 0.0;         ///< wall time of compute_ordering (graph construction included)
   int threads = 0;              ///< OpenMP threads used
@@ -555,6 +573,8 @@ struct OrderingStats {
   double complex_fraction = 0;  ///< complex T: share of off-diagonal couplings with Im != 0
   bool compressed = false;      ///< complex T: the n-vertex graph of K was ordered
   std::int64_t edges = 0;       ///< its undirected edges
+  index_t ordered_vertices = 0; ///< vertices the dissection ordered (fewer than `vertices` after
+                                ///< merging indistinguishable vertices, OrderingOptions::compress)
   index_t separators = 0;       ///< separators computed (nonleaf subgraphs)
   index_t leaves = 0;           ///< subgraphs ordered by minimum degree
   index_t top_separator = 0;    ///< vertices of the first separator

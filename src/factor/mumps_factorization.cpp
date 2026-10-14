@@ -195,7 +195,7 @@ void MumpsFactorization<T, U>::analyze(const ShiftedPencil<T>& pencil, double al
   pivot_order_out_.clear();
   std::vector<int> computed_order;
   if (pivot_order_in_.empty() && options_.ordering == kOrderingNestedDissection) {
-    OrderingOptions oo;
+    OrderingOptions oo = options_.nested_dissection;
     oo.threads = options_.ordering_threads > 0 ? options_.ordering_threads : mumps_.icntl(16);
     Timer ordering_timer;
     computed_order = compute_ordering(pencil, oo);

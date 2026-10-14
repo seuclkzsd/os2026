@@ -483,7 +483,25 @@ struct OrderingCandidate {
   /// plus numeric_s less the expected gain of knowing their actual estimate (choose_ordering).
   /// Factors beyond the in-core cap score kOverCapScore-scaled by their size (steps.cpp).
   double score_s = 0.0;
+  /// hsolve's nested dissection only: priced (and to be run) with the extra effort on its top
+  /// separators, nd_ordering_options(true) - chosen where the planned numeric work dwarfs the
+  /// ordering (kNdEffortWorkRatio).
+  bool nd_effort = false;
 };
+
+/// compute_ordering's options for hsolve's nested dissection in the driver: the defaults, or with
+/// `effort` the top kNdEffortDepth levels' separators from kNdEffortRuns trial bisections, each
+/// refined down to its graph (OrderingOptions::top_*; steps.cpp: measurements).
+OrderingOptions nd_ordering_options(bool effort);
+/// The effort is taken when the predicted planned numeric time is at least this multiple of the
+/// predicted ordering time; it then costs kNdEffortTime times the ordering time and saves the
+/// factors kNdEffortFlops of their flops and kNdEffortEntries of their entries (steps.cpp).
+constexpr double kNdEffortWorkRatio = 30.0;
+constexpr int kNdEffortDepth = 4;
+constexpr int kNdEffortRuns = 16;
+constexpr double kNdEffortTime = 1.5;
+constexpr double kNdEffortFlops = 0.93;
+constexpr double kNdEffortEntries = 0.98;
 
 /// Orderings the adaptive analysis chooses from, in order of preference on near-equal scores: AMD,
 /// SCOTCH, hsolve's nested dissection (multithreaded), METIS, PORD (steps.cpp: why this order).

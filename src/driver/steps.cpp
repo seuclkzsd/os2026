@@ -977,18 +977,40 @@ void OrderingPricer::analysed(std::vector<OrderingCandidate>& cand, std::size_t 
   if (cap_mb > 0 && e.incore_mb > cap_mb) c.score_s = kOverCapScore * (e.incore_mb / cap_mb);
 }
 
+OrderingOptions nd_ordering_options(bool effort) {
+  OrderingOptions o;
+  if (effort) {
+    o.top_depth = kNdEffortDepth;
+    o.top_runs = kNdEffortRuns;
+    o.top_finalists = kNdEffortRuns;
+  }
+  return o;
+}
+
 void OrderingPricer::predict(std::vector<OrderingCandidate>& cand, std::size_t anchor) const {
   FactorEstimate a;
   a.flops = cand[anchor].flops;
   a.factor_entries = static_cast<std::int64_t>(cand[anchor].entries);
   for (auto& c : cand) {
     if (c.analysed) continue;
-    const auto [flops, entries] = predicted_shape(model, c.ordering, amd, pencil_nnz, cand[anchor].ordering, a);
-    c.flops = flops;
-    c.entries = entries;
+    auto [flops, entries] = predicted_shape(model, c.ordering, amd, pencil_nnz, cand[anchor].ordering, a);
     c.analysis_s = ordering_analysis_s(model, c.ordering, in, entries, threads);
     c.numeric_s = planned_numeric_s(model, cfg, work, in.mumps, flops, entries, threads,
                                     c.ordering == 0 ? entries / std::max(1.0, pencil_nnz) : 0.0);
+    c.nd_effort = false;
+    if (c.ordering == kOrderingNestedDissection) {
+      // The effort on the top separators where the numeric work dwarfs the ordering (nd_ordering_options).
+      const double ordering_s = c.analysis_s - given_order_analysis_s(model, in.mumps, entries);
+      if (c.numeric_s >= kNdEffortWorkRatio * ordering_s) {
+        c.nd_effort = true;
+        flops *= kNdEffortFlops;
+        entries *= kNdEffortEntries;
+        c.analysis_s = given_order_analysis_s(model, in.mumps, entries) + kNdEffortTime * ordering_s;
+        c.numeric_s = planned_numeric_s(model, cfg, work, in.mumps, flops, entries, threads, 0.0);
+      }
+    }
+    c.flops = flops;
+    c.entries = entries;
     const double gain = nested_dissection(cand[anchor].ordering) ? kGainFromNd : kGainFromAmd;
     c.score_s = c.analysis_s + (1.0 - gain) * c.numeric_s;
     // In-core size in proportion to the factor entries, from the anchor's estimate: a candidate
@@ -1101,6 +1123,7 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   auto analyse = [&](std::size_t i) {
     FactorOptions o = fopts;
     o.ordering = orderings[i];
+    if (o.ordering == kOrderingNestedDissection) o.nested_dissection = nd_ordering_options(cand[i].nd_effort);
     obj[i] = make_mumps_factorization<T>(o);
     Timer t;
     obj[i]->analyze(pencil, 1.0, -sigma0);
@@ -1116,8 +1139,8 @@ std::unique_ptr<SparseFactorization<T>> adaptive_analysis(Ctx& c, const FactorOp
   // The log: every candidate's price, which were analysed (with their wall time), the choice.
   std::string summary;
   for (std::size_t i = 0; i < cand.size(); ++i) {
-    summary += (i ? " " : "") + std::to_string(orderings[i]) + (cand[i].analysed ? ":a" : ":p") + "/" +
-               fmt(cand[i].score_s) + "s";
+    summary += (i ? " " : "") + std::to_string(orderings[i]) + (cand[i].nd_effort ? "e" : "") +
+               (cand[i].analysed ? ":a" : ":p") + "/" + fmt(cand[i].score_s) + "s";
     if (cand[i].analysed) summary += "/" + fmt(seconds[i]) + "s";
   }
   event(c, "ordering", {{"choice", static_cast<std::int64_t>(orderings[pick])},

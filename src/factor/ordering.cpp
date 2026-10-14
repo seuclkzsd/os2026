@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -111,8 +112,12 @@ class Dissector {
       return;
     }
     SeparatorTiming timing;
-    const std::vector<std::uint8_t> where =
-        vertex_separator(g, pc->seed, p_.separator, nullptr, &timing);
+    SeparatorParams sp = p_.separator;
+    if (pc->depth < p_.top_depth || g.total_vwgt >= p_.top_size) {
+      sp.runs = p_.top_runs;
+      sp.finalists = p_.top_finalists;
+    }
+    const std::vector<std::uint8_t> where = vertex_separator(g, pc->seed, sp, nullptr, &timing);
     sep_ns_[0] += ns(timing.coarsen_s);
     sep_ns_[1] += ns(timing.runs_s);
     sep_ns_[2] += ns(timing.uncoarsen_s);
@@ -316,6 +321,14 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
                                << ordering::kMaxImbalance << "], got " << o.imbalance);
   if (o.coarsen_to < 2 || o.coarsen_to > INT_MAX)
     HS_THROW(InvalidInput, "OrderingOptions.coarsen_to must be >= 2, got " << o.coarsen_to);
+  if (o.separator_runs < 1 || o.separator_runs > 64 || o.separator_finalists < 1 ||
+      o.separator_finalists > o.separator_runs)
+    HS_THROW(InvalidInput, "OrderingOptions: need 1 <= separator_finalists <= separator_runs <= 64, got "
+                               << o.separator_finalists << ", " << o.separator_runs);
+  if (o.top_depth < 0 || o.top_size < 0 || o.top_runs < 1 || o.top_runs > 64 || o.top_finalists < 1 ||
+      o.top_finalists > o.top_runs)
+    HS_THROW(InvalidInput, "OrderingOptions: need top_depth, top_size >= 0 and 1 <= top_finalists <= top_runs <= 64, got "
+                               << o.top_depth << ", " << o.top_finalists << ", " << o.top_runs);
   if (o.init_tries < 1 || o.refine_passes < 0)
     HS_THROW(InvalidInput, "OrderingOptions: init_tries must be >= 1 and refine_passes >= 0, got "
                                << o.init_tries << ", " << o.refine_passes);
@@ -341,17 +354,38 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
                                    pencil.colind().data());
   const std::int64_t edges = g.edges() / 2;
   const index_t vertices = g.n;
+  const int threads = o.threads > 0 ? o.threads : max_threads();
+  // Indistinguishable vertices (identical closed neighbourhoods) as one weighted vertex.
+  ordering::Graph cg;
+  std::vector<std::int32_t> class_first, class_members;
+  const bool graph_compressed =
+      o.compress &&
+      ordering::compress_graph(g, ordering::kCompressionRatio, threads, cg, class_first, class_members);
+  if (graph_compressed) g = std::move(cg);
+  const index_t ordered_vertices = g.n;
   ordering::DissectionParams p;
   p.separator.imbalance = o.imbalance;
   p.separator.coarsen_to = static_cast<std::int32_t>(o.coarsen_to);
   p.separator.init_tries = o.init_tries;
   p.separator.refine_passes = o.refine_passes;
+  p.separator.runs = o.separator_runs;
+  p.separator.finalists = o.separator_finalists;
+  p.top_depth = o.top_depth;
+  p.top_size = o.top_size > 0 ? o.top_size : std::numeric_limits<std::int64_t>::max();
+  p.top_runs = o.top_runs;
+  p.top_finalists = o.top_finalists;
   p.leaf_size = static_cast<std::int32_t>(o.leaf_size);
   p.seed = o.seed;
-  const int threads = o.threads > 0 ? o.threads : max_threads();
   ordering::DissectionStats ds;
-  const std::vector<std::int32_t> order =
-      ordering::nested_dissection(std::move(g), p, threads, &ds);
+  std::vector<std::int32_t> order = ordering::nested_dissection(std::move(g), p, threads, &ds);
+  if (graph_compressed) {
+    // Each class eliminated as a block, its members in increasing order.
+    std::vector<std::int32_t> expanded;
+    expanded.reserve(static_cast<std::size_t>(vertices));
+    for (const std::int32_t q : order)
+      for (std::int32_t m = class_first[q]; m < class_first[q + 1]; ++m) expanded.push_back(class_members[m]);
+    order = std::move(expanded);
+  }
 
   std::vector<int> perm(static_cast<std::size_t>(n * kFactor), 0);
   for (index_t k = 0; k < vertices; ++k) {
@@ -372,6 +406,7 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
     stats->complex_fraction = complex_fraction;
     stats->compressed = compressed;
     stats->edges = edges;
+    stats->ordered_vertices = ordered_vertices;
     stats->separators = ds.separators;
     stats->leaves = ds.leaves;
     stats->top_separator = ds.top_separator;
