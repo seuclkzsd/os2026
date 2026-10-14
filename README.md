@@ -12,10 +12,12 @@ LDLᵀ、惯性计数）+ 自研 Krylov-Schur（含块模式）、LOBPCG、Jacob
 - 方案说明（交付物 a）：`docs/SOLUTION.md`；文件格式：`docs/FORMATS.md`
 - Python 接口（scipy/numpy 进出）：`docs/PYTHON.md`
 - MUMPS 之下的稠密 BLAS（剖析、替换库、BLAS hook）：`docs/BLAS.md`
+- 并行方案（多线程、多进程 `hsolve-mpi`、GPU 卸载 `--gpu`；分工与实测加速比）：`docs/SOLUTION.md` §6、`docs/PARALLEL.md`
 - 实测汇总：`results/p9_measurements.md`（P9 集成的最终测量：1e6 与 1e5 对 main a831d79、对调优 SLEPc、
   1–16 线程的加速比，摘要见 `docs/SOLUTION.md` §6、§9.1）；P9 的三个实验 `results/p9_ordering.md`（自研嵌套剖分）、
   `results/p9_factspeed.md`（1e6 的数值分解、MUMPS 块参数与自编 MUMPS）、`results/p9_mpi.md`（1e6 对 SLEPc、
-  MPI MUMPS 的上界：负结果）；更早的 `results/p8_certcost.md`、`results/p7_membudget.md`、
+  MPI MUMPS 的上界：负结果）；P10 的 `results/p10_mpi.md`（每 socket 一个 helper 进程的多进程模式）、`results/p10_gpu.md`
+  （cuBLAS 卸载 1e6 分解的大 dgemm）；负结果记录 `results/gpu_g1.md`（SPRAL SSIDS on GPU）、`results/p6_mixprec.md`（单精度分解）；更早的 `results/p8_certcost.md`、`results/p7_membudget.md`、
   `results/p5c_measurements.md`、`results/p3_measurements.md`、`results/p4_measurements.md`；SLEPc 调优与公平对比：
   `results/baseline_tuning.md`、`results/baseline_tuning_p16.md`、`results/cmp-p9-1e6-profiles.json`（1e6）；
   测量程序：`bench/README.md`

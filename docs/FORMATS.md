@@ -157,7 +157,9 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 （→ `zero_filter_tol`，< 0 关闭）、`--certificate exact|randomized|auto|off`（P5，→ `certificate`）、
 `--helper-counts auto|on|off` 与 `--helper-slices auto|on|off`（P10，`hs::ParallelOptions`：多进程模式 `hsolve-mpi`
 把 nearest 证书的两次计数 / 窗口目标的切片交给 helper 进程，auto 按代价规则；`hsolve` 接受而不起作用，见
-`docs/PARALLEL.md`）；
+`docs/PARALLEL.md`）、`--gpu off|auto|on`（P10，也可用环境变量 `HS_GPU`：BLAS hook 把 MUMPS 分解中的大 dgemm 以
+FP64 cuBLAS 卸载到 GPU，CUDA 库运行时加载；默认 off，auto 只在分解估计 ≥ 3e12 flops 时用 GPU，无 GPU 时为 CPU 路径，
+`docs/DESIGN.md` §3.10）；
 另有 `--log FILE`（JSON-lines 事件日志；P7 起每条记录带进程当时的 `rss_mb` 与峰值 `peak_rss_mb`，以及地址
 空间 `vm_mb`（VmSize）与其峰值 `peak_vm_mb`（VmPeak））、`-v/--verbose`、`-q/--quiet`、`--version`。stdout
 摘要的证书行注明方法（计数时为窗口、两个计数与结论；随机检验时为找到数、结论与失败概率）。退出码：0 = 全部达标
@@ -262,6 +264,10 @@ slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
   helper 任务时间之和，以及 `notes`（为何没交给 helper——代价规则、内存规则（发送前预测或 helper 报告后）、可用 helper
   不足——与失败、回退）。多进程模式的证书 `statement` 注明各次计数在哪里做（例如 "2 of the 2 counts made by helper
   processes"；一次由 helper、一次由 leader 时分别写明 InertiaCounter 或 main factorization）。
+- `gpu`（P10，可选，只在 GPU 模式不是 off——`--gpu` 或 `HS_GPU`——时由命令行写入，`docs/DESIGN.md` §3.10、
+  `docs/BLAS.md` §10）：GPU 卸载的报告——`mode`、`available`（true / false / null = auto 低于阈值、未加载 CUDA）、
+  `device`、分解数与卸载的分解数、GPU 上的 GFlop 与占估计的份额、`init_s`；不能卸载时 `reason` 说明为何走 CPU 路径
+  （无 GPU、无 CUDA 库、显存不足、构建不带 GPU 模块、可执行文件不带 BLAS hook）。没有该键时即 CPU 路径。
 
 ## 4. 评测输出（`tools/eval`）
 

@@ -282,6 +282,17 @@ T_solve 部分线性增长，T_factor 与 k 无关。
 
 ## 6. 并行方案
 
+赛题要求多线程 / MPI / GPU 的分工与实测加速比，并要求无 GPU 时可复现。三层的分工与实测（证书均为 exact，每次运行经
+`tools/eval` 判定有效；细节见下文与 `docs/PARALLEL.md`、`results/p9_measurements.md`、`results/p10_mpi.md`、
+`results/p10_gpu.md`）：
+
+| 层 | 负责的计算 | 实测加速比（16 核） | 何时启用 |
+|---|---|---|---|
+| 多线程（OpenMP，进程内） | 全部数值计算：排序（自研并行嵌套剖分）、MUMPS 分解与回代（L0 子树 + 多线程 BLAS + BLAS hook）、稀疏核、正交化 | 1 → 16 线程：1e5 三维 3.6–4.5 倍（对最快的 1 线程配置；同一主元顺序 4.3–5.1 倍），二维 2.7 倍；1e6 三维 4 → 16 线程 1.82 倍；受一个 socket 的内存带宽限制 | 总是（默认） |
+| 多进程（MPI，`hsolve-mpirun` / `hsolve-mpi`） | 每个 socket 一个 helper 进程：nearest 证书的两次 Sylvester 计数同时做、窗口目标的谱切片；leader 占全部核做主分解与 Krylov | 两 socket（8 + 8 核）对单进程：1e6 nearest 1.09–1.11 倍，1e5 三维 nearest 1.10–1.20 倍，多片窗口 1.50–1.74 倍；单 socket 0.86–0.93 倍，故单 socket 时启动脚本直接运行单进程 hsolve | 多 socket 机器可选 |
+| GPU（`--gpu auto\|on`，一张卡） | 1e6 分解（含证书计数）中 L0 层之上的大 dgemm（贡献块更新，k ≥ ~1000），FP64 cuBLAS，运行时加载 | 1e6 三维：三次分解 1.07–1.09 倍（配 P9 块参数 1.08–1.10 倍），整次运行 1.058–1.069 倍；1e5 无值得卸载的调用（强制 on 0.72–0.97 倍） | 有 GPU 且分解估计 ≥ 3e12 flops 时 auto；默认 off |
+| 降级 | 没有 MPI、没有 GPU：单进程 CPU 路径即默认路径，结果相同 | — | 评测机 |
+
 | 组件 | 并行方式 |
 |---|---|
 | MUMPS 分解 / 回代 | OpenMP + L0-OpenMP 子树并行（ICNTL(48)=1；比确定性模式回代快 1.75 倍）：L0 层以下每棵子树一个线程，其上的大前沿由多线程 BLAS 处理；P9 的块参数与补丁让大前沿的尾随更新用更宽的面板（§2.2）；块 Krylov 的多右端回代一次扫过因子服务 p 列；顺序版 MUMPS 实例间非线程安全，进程内所有 MUMPS 调用串行 |
@@ -335,7 +346,25 @@ P9 集成初稿以默认配置自己的 1 线程运行作基线，报告的 5.39
 8 线程进程也只有顺序对的 0.92–0.93 倍。另外 ScaLAPACK 根节点（MUMPS 并行的默认）报告的 INFOG(12) 漏掉根前沿的
 负主元，不能用于证书（hsolve 设 ICNTL(13) = 1）。因此单次 16 核运行内 hsolve 用顺序版 MUMPS + OpenMP；多进程只可能
 在跨 socket / 跨节点（更多内存带宽）时有收益。
-GPU：赛题允许但非必需；当前为纯 CPU 实现，无 GPU 时即为完整功能（降级模式无需特殊处理）。
+**多进程模式（P10，`docs/PARALLEL.md`、`results/p10_mpi.md`）**：既然同一 socket 上多进程只会抢带宽，hsolve-mpi 改为
+每个 socket（NUMA 节点）一个 helper 进程：leader 绑定全部核运行与单进程相同的 hs::solve（主分解、Krylov），只把彼此
+独立的大块分解交给 helper——nearest 证书的两次精确计数（两个 helper 同时，各用本 socket 的核与带宽），窗口目标的
+谱切片（每片一次分解 + Krylov）；leader 与 helper 从不同时计算，一次运行不超过 16 核。是否交出由代价规则与覆盖整棵
+进程树的内存预算决定（发送前预测、helper 报告后复核），helper 任务失败由 leader 接手，结果与单进程相同。两 socket
+（每个 8 核）上：1e6 nearest 1.11 / 1.09 倍（syn-mem27-100 75.8 → 68.5 s，yee-pec-box-1e6 64.1 → 59.0 s；证书
+36.0 → 29.2 s），1e5 三维 nearest 1.10–1.20 倍，多片窗口 1.50–1.74 倍（syn-mem27-46 [0.1, 0.3] 33.0 → 19.0 s）；
+MPI 启动约 1.7–2.0 s 墙钟不计入求解时间，所以只在 1e6 与多片窗口净赚。单 socket 上 0.86–0.93 倍，启动脚本在只有
+一个 NUMA 节点时直接运行普通 hsolve（不起 MPI 作业）。
+
+GPU（P10，`results/p10_gpu.md`）：BLAS hook 的 GPU 路由（`src/gpu`）在 MUMPS 分解（含证书的两次精确计数）中把
+L0 层之上、主机流量模型判为划算的大 dgemm（前沿贡献块的更新，k ≥ ~1000）以 FP64 cuBLAS 卸载到一张 GPU，CUDA 库在
+运行时 dlopen（构建不依赖 CUDA）。分工：分析与排序、L0 子树、面板与组装、回代与 Krylov 迭代都在 CPU（16 线程）；
+GPU 承担 1e6 分解约 43–47% 的 flops（只占 CPU 时间的 22%），每次调用 1.7–5.0 倍；1e6 三维测例上三次分解 1.07–1.09 倍
+（配 P9 块参数 1.08–1.10 倍），整次运行 1.058–1.069 倍（证书 exact，每次有效、计数相同）。受主机内存带宽（暂存与
+加回的流量，约 30 GB/s）限制，1e5 规模没有值得卸载的调用（`on` 为 0.72–0.97 倍），所以 `--gpu auto` 只在分解估计
+≥ 3e12 flops 时用 GPU；默认 `off`。无 GPU / 无 CUDA 库 / 显存不足时自动为 CPU 路径并在报告中说明（降级模式，评测机
+即此情形）；每次惯性计数仍是双精度 LDLᵀ 的精确 Sylvester 惯性，证书的条件与保证同 CPU 路径（实测计数与 CPU 路径
+相同）。更大的收益需要因子常驻 GPU（GPU 稀疏直接解法），G1 的 SPRAL SSIDS 实验在 V100 上为负结果（`results/gpu_g1.md`）。
 
 ---
 
