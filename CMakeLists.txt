@@ -26,6 +26,17 @@ find_package(nlohmann_json 3.10 REQUIRED)
 set(BLA_VENDOR OpenBLAS)
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+# MUMPS: the environment's (conda-forge mumps-seq) unless HSOLVE_MUMPS_ROOT names an install of
+# tools/dev/build_mumps.sh (same library names and sonames). Its lib/ then goes first into the
+# executables' RPATH, ahead of the environment's (conda's LDFLAGS carry -rpath $CONDA_PREFIX/lib),
+# so that the dynamic loader picks the rebuilt libraries (test_factor_mumps_build checks it).
+# P9 "factspeed" measured no gain from a rebuild (results/p9_factspeed.md §3.3): not the default.
+set(HSOLVE_MUMPS_ROOT "" CACHE PATH "MUMPS install of tools/dev/build_mumps.sh (empty: the environment's)")
+if(HSOLVE_MUMPS_ROOT)
+  foreach(_kind EXE SHARED MODULE)
+    string(PREPEND CMAKE_${_kind}_LINKER_FLAGS "-Wl,-rpath,${HSOLVE_MUMPS_ROOT}/lib ")
+  endforeach()
+endif()
 find_package(MUMPS 5.6 REQUIRED)
 
 # ---- common compile options ----
@@ -107,7 +118,8 @@ if(HSOLVE_BUILD_TESTS)
     get_filename_component(name "${src}" NAME_WE)
     add_executable(${name} "${src}")
     target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_compile_definitions(${name} PRIVATE HSOLVE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    target_compile_definitions(${name} PRIVATE HSOLVE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
+                                               HSOLVE_MUMPS_ROOT="${HSOLVE_MUMPS_ROOT}")
     target_link_libraries(${name} PRIVATE hsolve hsolve_test_support GTest::gtest_main LAPACK::LAPACK
                                           BLAS::BLAS MUMPS::MUMPS nlohmann_json::nlohmann_json)
     # Test names are "<executable>.<Suite>.<Name>", so `ctest -R test_factor` selects one file.

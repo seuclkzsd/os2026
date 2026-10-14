@@ -4,17 +4,21 @@
 # or the upstream layout without the _seq suffix) and defines the imported target
 #   MUMPS::MUMPS  (all four arithmetics: s, d, c, z + common + pord + mpiseq)
 # Result variables: MUMPS_FOUND, MUMPS_INCLUDE_DIR, MUMPS_LIBRARIES, MUMPS_VERSION.
+# HSOLVE_MUMPS_ROOT (CMakeLists.txt): search only there (an install of tools/dev/build_mumps.sh);
+# otherwise $CONDA_PREFIX, MUMPS_ROOT and the default paths.
 
-find_path(MUMPS_INCLUDE_DIR NAMES dmumps_c.h
-  HINTS ENV CONDA_PREFIX ${MUMPS_ROOT} ENV MUMPS_ROOT
-  PATH_SUFFIXES include)
+if(HSOLVE_MUMPS_ROOT)
+  set(_mumps_search PATHS "${HSOLVE_MUMPS_ROOT}" NO_DEFAULT_PATH)
+else()
+  set(_mumps_search HINTS ENV CONDA_PREFIX ${MUMPS_ROOT} ENV MUMPS_ROOT)
+endif()
+
+find_path(MUMPS_INCLUDE_DIR NAMES dmumps_c.h ${_mumps_search} PATH_SUFFIXES include)
 
 set(_mumps_components smumps dmumps cmumps zmumps mumps_common pord mpiseq)
 set(MUMPS_LIBRARIES "")
 foreach(_c IN LISTS _mumps_components)
-  find_library(MUMPS_${_c}_LIBRARY NAMES ${_c}_seq ${_c}
-    HINTS ENV CONDA_PREFIX ${MUMPS_ROOT} ENV MUMPS_ROOT
-    PATH_SUFFIXES lib lib64)
+  find_library(MUMPS_${_c}_LIBRARY NAMES ${_c}_seq ${_c} ${_mumps_search} PATH_SUFFIXES lib lib64)
   if(MUMPS_${_c}_LIBRARY)
     list(APPEND MUMPS_LIBRARIES ${MUMPS_${_c}_LIBRARY})
   endif()
