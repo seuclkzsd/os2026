@@ -2,7 +2,7 @@
 """Symbolise and aggregate the SIGPROF samples of bench_factspeed_factor (P9 "factspeed").
 
     python3 tools/bench/factspeed_symbolize.py SAMPLES [--job JOB] [--t0 S] [--t1 S]
-        [--top 40] [--timeline BIN_S] [--threads] [--json OUT]
+        [--tid TID] [--top 40] [--timeline BIN_S] [--threads] [--json OUT]
 
 SAMPLES: the --sample-out file of bench_factspeed_factor ("# obj" lines with the mapped objects and
 their load bases, then one line per sample: job, microseconds since the job's start, thread id,
@@ -89,6 +89,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("samples")
     ap.add_argument("--job", help="only this job")
+    ap.add_argument("--tid", type=int, help="only this thread id")
     ap.add_argument("--t0", type=float, default=0.0, help="window start, seconds of the job")
     ap.add_argument("--t1", type=float, default=float("inf"), help="window end, seconds of the job")
     ap.add_argument("--top", type=int, default=40)
@@ -107,7 +108,8 @@ def main():
                 continue
             job, t_us, tid, idx, off = parts
             t = int(t_us) * 1e-6
-            if (args.job and job != args.job) or not (args.t0 <= t < args.t1):
+            if (args.job and job != args.job) or not (args.t0 <= t < args.t1) or \
+                    (args.tid is not None and int(tid) != args.tid):
                 continue
             rows.append((job, t, int(tid), int(idx), int(off, 16)))
 
