@@ -73,7 +73,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 取值与语义（校验见 `parse_config`；算法见 `docs/DESIGN.md` §3.6）：
 - `tol ∈ (0, 1)`；`inner_tol_factor ∈ (0, 1]`；`ncv, block_size, slice_size, threads, max_shift_retries ≥ 0`；
   `max_restarts ≥ 1`；`memory_budget_gb > 0`（GiB）或 `"auto"` / `0`；`certificate_delta ∈ (0, 1)`；
-  `certificate_fault_drop ≥ 0`；`certificate_fault_count ∈ [0, 127]`（位 16 与 32 不同时）；
+  `certificate_fault_drop ≥ 0`；`certificate_fault_count ∈ [0, 255]`（位 16 与 32 不同时）；
   `ordering ∈ {−1, 0, 2..7, 10}`；interval 需 `lower < upper`，其它模式 `k ≥ 1`。
 - `memory_budget_gb`（P7）：`"auto"`（默认；`0` 同义，`config_to_json` 写作 `"auto"`）= 由进程的最小
   内存上限 L 推出：max(0.5, min(0.85·L, L − 1)) GiB；L 取内存 cgroup（v2 `memory.max`、v1
@@ -137,13 +137,15 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 - `certificate_fault_drop`（P5）：整数 ≥ 0，默认 0；**只用于测试与测量的故障注入**：nearest 目标第一次
   Krylov 运行后、完备性检验之前删掉这么多已找到的对（先删最大重特征值的副本、留一个，再删最远的选中对），
   检验须发现它们缺失、重跑须找回。
-- `certificate_fault_count`（P8）：整数 0..127，默认 0；**只用于测试与测量的故障注入**，各位相加：1 = 每个
+- `certificate_fault_count`（P8）：整数 0..255，默认 0；**只用于测试与测量的故障注入**，各位相加：1 = 每个
   InertiaCounter 的工作内存上限 ICNTL(23) 设为 1 MB（其计数在 MUMPS 内以 INFO −19 失败）；2 = 主分解对象上的计数
   失败；4 = 计数器的计数余量为 0（被预判放不下，不尝试）；8 = σ 处的重分解（证书收缩重跑前、随机检验前）失败。
   位 1、2、8 的失败种类：默认内存不足（OutOfMemoryBudget），16 = 其它 MUMPS 错误（FactorizationFailed；位 1 改为
   每次计数前抛出），32 = 内存分配失败（`std::bad_alloc`）；16 与 32 不可同时给。64 = 位 1、2 只从窗口目标的第一片
-  起生效（窗口端点与切点照常计数；nearest 自身的证书不受影响）。计数失败时改在另一个计数来源上计数；都不能计数时
-  nearest 目标返回已收敛的对、窗口目标返回已完成各片的对，证书「已做但未完成」（§3）。
+  起生效（窗口端点与切点照常计数；nearest 自身的证书不受影响）。128（P10，只对多进程模式 `hsolve-mpi`）= helper 进程
+  拿到的每个任务（证书计数、切片）都在 helper 上失败（种类同上，默认内存不足），由 leader 自己做（`report.parallel.
+  fallbacks`）。计数失败时改在另一个计数来源上计数；都不能计数时 nearest 目标返回已收敛的对、窗口目标返回已完成各片
+  的对，证书「已做但未完成」（§3）。
 - 当前限制：B 不定（GHIEP）只支持 `mode = nearest`（其余抛 Unsupported）；`method = lanczos`
   （免分解）抛 Unsupported。
 
@@ -152,7 +154,10 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 `--smallest K`、`--largest K`、`--tol`、`--threads`（0 = 全部）、`--memory-budget-gb GiB|auto`、
 `--precision double|single|auto`、`--slice-size N`（→ `slice_size`）、`--block-size N`（→ `block_size`，
 0 = 自动，1 = 单向量；HEP/GHEP 的 Lanczos 与 GHIEP 的 Krylov-Schur 都用）、`--zero-filter-tol TOL`
-（→ `zero_filter_tol`，< 0 关闭）、`--certificate exact|randomized|auto|off`（P5，→ `certificate`）；
+（→ `zero_filter_tol`，< 0 关闭）、`--certificate exact|randomized|auto|off`（P5，→ `certificate`）、
+`--helper-counts auto|on|off` 与 `--helper-slices auto|on|off`（P10，`hs::ParallelOptions`：多进程模式 `hsolve-mpi`
+把 nearest 证书的两次计数 / 窗口目标的切片交给 helper 进程，auto 按代价规则；`hsolve` 接受而不起作用，见
+`docs/PARALLEL.md`）；
 另有 `--log FILE`（JSON-lines 事件日志；P7 起每条记录带进程当时的 `rss_mb` 与峰值 `peak_rss_mb`，以及地址
 空间 `vm_mb`（VmSize）与其峰值 `peak_vm_mb`（VmPeak））、`-v/--verbose`、`-q/--quiet`、`--version`。stdout
 摘要的证书行注明方法（计数时为窗口、两个计数与结论；随机检验时为找到数、结论与失败概率）。退出码：0 = 全部达标
@@ -172,7 +177,7 @@ data/refs/<name>/ref.json        {"kind","note","count","complete","window"}
 solver, version, n, nnz_a, nnz_b, complex_scalars, problem, norm2_a, norm2_b, scale, hermitian_defect_a,
 hermitian_defect_b, method, sigma_requested, sigma_used, shift_retries, block_size, factor_options{...},
 factor_stats{...}, restarts, op_applies, time_total_s, time_setup_s, time_factor_s, time_iterate_s, time_verify_s,
-time_certificate_s, peak_rss_bytes, memory{...}, precision{...}, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
+time_certificate_s, peak_rss_bytes, memory{...}, precision{...}, parallel{...}, pairs[{lambda_re, lambda_im, abs_residual, rel_residual,
 backward_error, accepted}], certificate{performed, lower, upper, count_inertia, count_found,
 endpoint_moves, passed, note, method, rigorous, failure_probability, solves, seconds, statement},
 slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
@@ -248,6 +253,14 @@ slices[...], zero_cluster_dim, zero_modes_filtered, success, warnings[]`。
   （各精度内存内估计对 cap；auto 选了单精度而尝试被放弃时仍保留），否则空；`fallback` 为真时非精确
   （单精度 / BLR）尝试被放弃并以双精度重解，
   `fallback_reason` 说明原因，`attempt_s` 为被放弃尝试的墙钟时间（已计入各阶段时间）。
+- `parallel`（P10，`docs/DESIGN.md` §3.9）：`{processes, threads, helper_threads, helper_counts, helper_slices,
+  fallbacks, share_s, wait_s, helper_busy_s, notes[]}`——多进程模式（`hsolve-mpi`、`hs::solve_parallel`）的进程数
+  （leader + helper；`hsolve` 恒为 1，其余为 0 / 空）、leader 与每个 helper 的分解线程数（helper 报告的；没有 helper
+  拿到问题时 0）、helper 做的证书计数与切片数、helper 任务失败而由 leader 重做的次数、leader 发送问题的时间、leader
+  等待 helper 结果的时间（发送计入 setup，等计数计入 certificate，等切片与 helper 放下问题计入 iterate：阶段仍互斥）、
+  helper 任务时间之和，以及 `notes`（为何没交给 helper——代价规则、内存规则（发送前预测或 helper 报告后）、可用 helper
+  不足——与失败、回退）。多进程模式的证书 `statement` 注明各次计数在哪里做（例如 "2 of the 2 counts made by helper
+  processes"；一次由 helper、一次由 leader 时分别写明 InertiaCounter 或 main factorization）。
 
 ## 4. 评测输出（`tools/eval`）
 
