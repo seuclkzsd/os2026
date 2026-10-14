@@ -140,6 +140,8 @@ def cmd_run(a: argparse.Namespace) -> int:
                         line = line.strip()
                         if line.startswith("{"):
                             d = json.loads(line)
+                            if "rep" in d:  # the bench's own repetition index, not the campaign's
+                                d["bench_rep"] = d.pop("rep")
                             f.write(json.dumps({**meta, **d}) + "\n")
                     g = json.loads(gsum.read_text()) if gsum.exists() else {"returncode": proc.returncode,
                                                                             "killed": "no summary"}
@@ -241,11 +243,18 @@ def bench_table(rows: list[dict[str, Any]], base: str) -> list[str]:
         if r.get("event") == "guard":
             d["peak"].append(r.get("peak_rss_gib"))
             ok.setdefault(key, []).append(r.get("returncode") == 0 and not r.get("killed"))
-    # group the bench events of one run (rep) by mode
+    # group the bench events of one run by mode: a run's lines precede its guard line, which
+    # carries the campaign's repetition (logs before bench_rep was split off have the bench's own
+    # repetition index in "rep")
     runs: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    pending: list[dict[str, Any]] = []
     for r in rows:
         if r.get("event") in ("factorize", "solve", "run"):
-            runs.setdefault((r["case"], r["layout"], r["rep"]), []).append(r)
+            pending.append(r)
+        elif r.get("event") == "guard":
+            for e in pending:
+                runs.setdefault((r["case"], r["layout"], r["rep"]), []).append(e)
+            pending = []
     for (name, lay, rep), ev in runs.items():
         d = per[(name, lay)]
         cnt = [e["s"] for e in ev if e["event"] == "factorize" and e.get("mode") == "count"]
