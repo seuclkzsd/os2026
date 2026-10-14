@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -239,7 +241,12 @@ void factorization_begin(double est_flops) {
   if (!s.tried) {
     s.tried = true;
     const double t0 = now_s();
-    std::unique_ptr<GemmEngine> e = GemmEngine::create(o.engine, &s.reason);
+    std::unique_ptr<GemmEngine> e;
+    try {  // called from the dmumps_c wrapper: nothing may propagate into MUMPS' C / Fortran frames
+      e = GemmEngine::create(o.engine, &s.reason);
+    } catch (const std::exception& ex) {
+      s.reason = std::string("GPU set-up failed: ") + ex.what();
+    }
     s.init_s = now_s() - t0;
     s.engine.store(e.release(), std::memory_order_release);
   }

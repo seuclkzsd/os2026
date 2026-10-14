@@ -20,6 +20,8 @@
 #include <random>
 #include <string>
 #include <thread>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "gpu/cuda_lib.hpp"
