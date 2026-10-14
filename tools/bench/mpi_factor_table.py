@@ -9,9 +9,17 @@ factorization with ICNTL(31) = 1), the numeric factorization keeping the factors
 memory (INFOG(22) total over the ranks, INFOG(21) the largest rank) and the guard's process-tree
 peak RSS, with the ratios against the baseline layout (default seq1x16: hsolve's sequential MUMPS,
 16 threads). "flop balance" (bench builds from 872d39a on) is the elimination flops of the busiest
-rank over the mean of the ranks (RINFO(3); 1 = perfectly balanced). "inertia" is the INFOG(12) of every factorization of the layout: one value when they
-all agree, and whether it equals the bench's --expect-neg (the exact count of the case) in every
-run.
+rank over the mean of the ranks (RINFO(3); 1 = perfectly balanced). "inertia" is the INFOG(12)
+of every factorization of the layout (one value when they all agree) and its verdict: "ok" when
+every run of the layout (one per guard line) ended with the bench's "run" event, the bench's own
+check passed in each and every factorization's INFOG(12) equals the bench's --expect-neg (the
+exact count of the case); "unchecked" when the runs were made without --expect-neg (the counts
+then only agree with each other); "MISMATCH" otherwise - a count off, counts that disagree, or a
+run that ended without its "run" event (a crash: its inertia is unknown). Lines of the bench run
+directly (no layout annotation, no guard lines) are grouped under layout "?", one run per "run"
+event.
+
+Tests: tests/py/test_bench_mpi.py.
 
 usage: python3 tools/bench/mpi_factor_table.py RUNS.jsonl... [--base seq1x16] [--json OUT.json]
 """
@@ -19,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -27,6 +36,19 @@ from pathlib import Path
 
 def median(xs: list[float]) -> float | None:
     return statistics.median(xs) if xs else None
+
+
+def inertia_verdict(negs: list[int], run_ok: list[bool], expect: list[int], runs: int) -> str:
+    """"ok" / "unchecked" / "MISMATCH" of one layout (module docstring), "-" when nothing was
+    factorized. negs: INFOG(12) of every factorization; run_ok / expect: inertia_ok / expect_neg of
+    every "run" event; runs: the layout's runs (guard lines)."""
+    if runs == 0 and not negs:
+        return "-"
+    if runs == 0 or len(run_ok) != runs or not all(run_ok) or not negs or len(set(expect)) > 1:
+        return "MISMATCH"
+    if expect[0] < 0:   # no --expect-neg: the bench checked only that its counts agree
+        return "unchecked" if len(set(negs)) == 1 else "MISMATCH"
+    return "ok" if all(v == expect[0] for v in negs) else "MISMATCH"
 
 
 def summarize(lines: list[dict]) -> dict[str, dict[str, dict]]:
@@ -67,8 +89,10 @@ def summarize(lines: list[dict]) -> dict[str, dict[str, dict]]:
     for (order, layout), a in acc.items():
         fl = median(a["flops"])
         ff = median(a["factor_full"])
+        runs = len(a["rc"]) or len(a["inertia_ok"])    # direct bench output has no guard lines
+        verdict = inertia_verdict(a["neg"], a["inertia_ok"], a["expect_neg"], runs)
         out[order][layout] = {
-            "runs": len(a["rc"]), "failed_runs": sum(1 for r in a["rc"] if r != 0),
+            "runs": runs, "failed_runs": sum(1 for r in a["rc"] if r != 0),
             "analysis_count_s": median(a["analysis_count"]), "analysis_full_s": median(a["analysis_full"]),
             "count_s": median(a["factor_count"]), "count_all_s": a["factor_count"],
             "factor_s": ff, "factor_all_s": a["factor_full"],
@@ -80,7 +104,7 @@ def summarize(lines: list[dict]) -> dict[str, dict[str, dict]]:
             "count_mem_total_mb": median(a["count_mem_total_mb"]), "peak_gib": max(a["peak_gib"]) if a["peak_gib"] else None,
             "imbalance": median(a["imbalance"]),
             "neg": sorted(set(a["neg"])), "expect_neg": a["expect_neg"][0] if a["expect_neg"] else None,
-            "inertia_ok": bool(a["inertia_ok"]) and all(a["inertia_ok"]) and len(a["inertia_ok"]) == len(a["rc"]),
+            "inertia": verdict, "inertia_ok": verdict == "ok",
         }
     return out
 
@@ -93,6 +117,13 @@ def _ratio(base, x) -> str:
     return "-" if base is None or x is None or x == 0 else f"{base / x:.2f}"
 
 
+def _layout_key(layout: str, base: str) -> tuple:
+    """Table order: the base layout, then by threads per rank (descending; RxT[h]), then the name;
+    names that are no layout (e.g. "?" of direct bench output) last."""
+    m = re.fullmatch(r"(?:seq)?(\d+)x(\d+)h?", layout)
+    return (layout != base, m is None, -int(m.group(2)) if m else 0, layout)
+
+
 def table(name: str, order: str, rows: dict[str, dict], base: str) -> str:
     b = rows.get(base, {})
     head = (f"**{name}**, order `{order}` (medians; ratio = {base} time / layout time, > 1 = faster than {base})\n\n"
@@ -100,7 +131,7 @@ def table(name: str, order: str, rows: dict[str, dict], base: str) -> str:
             "flops | flop balance | MUMPS MB total (max rank) | count MB total | peak GiB | inertia |\n"
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
     lines = []
-    for lay in sorted(rows, key=lambda k: (k != base, -int(k.split("x")[-1].rstrip("h") or 0), k)):
+    for lay in sorted(rows, key=lambda k: _layout_key(k, base)):
         r = rows[lay]
         neg = ",".join(str(v) for v in r["neg"])
         lines.append(
@@ -111,7 +142,7 @@ def table(name: str, order: str, rows: dict[str, dict], base: str) -> str:
             f"{_f(r['flops'], '{:.3e}')} | {_f(r['imbalance'])} | "
             f"{_f(r['mem_total_mb'], '{:.0f}')} ({_f(r['mem_max_mb'], '{:.0f}')}) | "
             f"{_f(r['count_mem_total_mb'], '{:.0f}')} | {_f(r['peak_gib'])} | "
-            f"{neg} {'ok' if r['inertia_ok'] else 'MISMATCH'} |")
+            f"{neg} {r['inertia']} |")
     return head + "\n".join(lines) + "\n"
 
 
