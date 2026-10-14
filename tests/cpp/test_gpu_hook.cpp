@@ -3,10 +3,14 @@
 // dgemm calls through the hook (CMake hsolve_link_blas_hook), whose dmumps_c wrapper opens the
 // offload window. Checked:
 //   * the inertia of an indefinite 3-D Laplacian is the exact Sylvester count with the GPU off and
-//     on (and the solutions agree): the offload is IEEE double arithmetic like the CPU BLAS;
+//     on (and the solutions agree): the offload is IEEE double arithmetic like the CPU BLAS, and
+//     the shift sits in a wide spectral gap, where a double LDL^T counts exactly on either path
+//     (pivot choices may differ between the paths; the counts are equal under that condition);
 //   * without a GPU, mode on runs the CPU path and the report says why ("degrade mode");
 //   * the hsolve executable with --gpu on finds the same eigenvalues and certificate count as
-//     with the GPU off, and its report carries the gpu object.
+//     with the GPU off, and its report carries the gpu object;
+//   * in a build without the GPU module (HSOLVE_GPU=OFF) the hook and hsolve's report.json give the
+//     mode asked for with "available": false and the reason.
 // GPU use is opt-in, as in test_gpu.cpp: only with HSOLVE_TEST_GPU_DEVICE (e.g. 7 on gpu02),
 // otherwise the process sees no GPU (CUDA_VISIBLE_DEVICES is set to the empty list before main).
 // HS_GPU_OPTS makes every dgemm outside OpenMP parallel regions eligible (min_speedup=0,

@@ -9,20 +9,21 @@
 //                        [--modes cpu,gpu,hyb,gpu-p3-s6,hyb-c8,...] [--slot-mb 16] [--mem-mb 1024]
 //
 // info: loads the CUDA libraries, initializes the engine (device 0 of CUDA_VISIBLE_DEVICES) and
-// prints its description and set-up time. copy: host memcpy from pageable into pinned memory (one
-// thread), pinned / pageable / strided-pageable host-to-device and device-to-host copies, both
-// directions at once, and cudaHostRegister + cudaHostUnregister of touched pageable memory (MB/s,
-// best of reps). devgemm: cublasDgemm on device-resident operands (GFlop/s, median). gemm: per
-// shape, the modes interleaved per repetition on the same operands (C restored before every run):
-// cpu = the BLAS dgemm (all OpenMP threads), gpu = the engine as the hook uses it (GPU only: 2
-// packing threads, 6 slots of --slot-mb, non-temporal stores, guided tiles), hyb = the hybrid
-// engine; options appended with '-': -p<N> N issuing (packing) threads, -s<N> N pipeline slots,
-// -m<MB> slot size, -k<KB> pack/upload chunk, -c<N> N BLAS threads for the CPU share (default
-// max - N - 1), -nt0 regular stores when packing. Every mode offloads every shape here (the offload
-// model is printed as model_speedup, not applied). Output per shape and mode: wall time median
-// [min-max], GFlop/s, the GPU's share of the flops, the speedup over cpu and the largest difference
-// to the cpu result relative to max |C|. --ld L stores all three operands with leading dimension L
-// (MUMPS' fronts: lda = ldb = ldc = NFRONT); default the tight one.
+// prints its description, set-up time and the CPUs its pipeline threads may use. copy: host memcpy
+// from pageable into pinned memory (one thread), pinned / pageable / strided-pageable
+// host-to-device and device-to-host copies, both directions at once, and cudaHostRegister +
+// cudaHostUnregister of touched pageable memory (MB/s, best of reps). devgemm: cublasDgemm on
+// device-resident operands (GFlop/s, median). gemm: per shape, the modes interleaved per repetition
+// on the same operands (C restored before every run): cpu = the BLAS dgemm (all OpenMP threads),
+// gpu = the engine as the hook uses it (GPU only: 2 packing threads, 6 slots of --slot-mb,
+// non-temporal stores, guided tiles), hyb = the hybrid engine; options appended with '-': -p<N> N
+// issuing (packing) threads, -s<N> N pipeline slots, -m<MB> slot size, -k<KB> pack/upload chunk,
+// -c<N> N BLAS threads for the CPU share (default max - N - 1), -nt0 regular stores when packing.
+// Every mode offloads every shape here (the offload model is printed as model_speedup, not
+// applied). Output per shape and mode: wall time median [min-max], GFlop/s, the GPU's share of the
+// flops, the speedup over cpu and the largest difference to the cpu result relative to max |C|.
+// --ld L stores all three operands with leading dimension L (MUMPS' fronts: lda = ldb = ldc =
+// NFRONT); default the tight one.
 // Output: one JSON object per line on stdout (tools/bench/gpu_dgemm_table.py makes the tables).
 // Run in the measurement slot with exactly one idle GPU visible (tools/bench/gpu_slot.sh).
 //
@@ -33,6 +34,13 @@
 //   $S build/release/bench_gpu_dgemm devgemm --reps 5 --shapes 1000:9000:4000,1000:4000:2048,...
 //   $S build/release/bench_gpu_dgemm gemm --ld 15800 --slot-mb 16 --reps 3 --shapes ... >> $M
 //      --modes cpu,gpu,gpu-p1,gpu-p3,gpu-s3,gpu-m32,gpu-nt0,gpu-k1024-nt0,hyb,hyb-c8   (same line)
+// P10 review fixes (results/p10_gpu.md §10): OpenMP unbound / bound, 3 rounds alternating, and a
+// chunk larger than the staging ring:
+//   G="gemm --ld 15800 --reps 3 --modes cpu,gpu --shapes 1000:9000:4000,2000:8000:4000,1000:4000:2048"
+//   $S build/release/bench_gpu_dgemm $G;  $S env OMP_PROC_BIND=close OMP_PLACES=cores \
+//      build/release/bench_gpu_dgemm $G
+//   $S build/release/bench_gpu_dgemm gemm --ld 15800 --reps 3 --shapes 2000:8000:4000,1000:9000:4000 \
+//      --modes cpu,gpu,gpu-k65536
 #include <omp.h>
 #include <time.h>
 

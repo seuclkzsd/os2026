@@ -658,17 +658,29 @@ engine splits C into column (or row) tiles: pack the tile's operand into pinned 
 C = beta C + T on the host; 2 packing threads, 6 slots of 16 MB, guided tile sizes, 1 GiB of device
 memory, 224 MB pinned. The calling thread waits (GPU only); a hybrid mode in which the CPU computes a
 share is a measurement option - it is slower, because both sides need the same host memory
-bandwidth.
+bandwidth. The engine's threads (`hs-gpu-issue0/1`, `hs-gpu-add`) may run on every OpenMP place:
+threads inherit their creator's CPU affinity, and under `OMP_PROC_BIND` / `OMP_PLACES` the thread
+that creates the engine (at the first offloaded factorization) is bound to one core, so `create()`
+widens it to the union of the places while it starts them and then restores its binding
+(`src/gpu/affinity.hpp`; unbound runs are unchanged). Without that, the pipeline and the CUDA
+runtime's threads shared one core under `OMP_PROC_BIND=close OMP_PLACES=cores` and offloaded calls
+took 1.3-1.4x as long. With the fix, bound calls are as fast as unbound ones, and yee-pec-box-1e6's
+three factorizations gain 1.100x bound (1.072x unbound; 1.055x bound before the fix;
+results/p10_gpu.md §10).
 
 **Configuration.** `HS_GPU` = off (default: no CUDA library is loaded, the CPU path is unchanged) |
 auto (factorizations whose MUMPS estimate RINFOG(1) >= 3e12 flops) | on (every factorization); the
 hsolve CLI sets the same with `--gpu` (include/hsolve/gpu.hpp: `hsolve_gpu_set_mode` found with
 dlsym) and adds a `gpu` object to report.json when the mode is not off. `HS_GPU_OPTS` tunes the
-engine and the model (`device`, `mem_mb`, `slot_mb`, `chunk_kb`, `nt`, `pack`, `slots`, `hybrid`,
-`cpu_threads`, `min_gflop`, `cpu_gflops`, `host_gbs`, `min_speedup`, `auto_min_tflop`); `HS_GPU_REPORT=
-<file>` writes the report at exit (for programs with the hook preloaded); `HS_CUDA_LIBDIR` names the
-CUDA library directory. The GPU is device 0 of `CUDA_VISIBLE_DEVICES`. No GPU, no library or too
-little free device memory: the reason goes into the report and the process runs the CPU path.
+engine and the model (`device`, `mem_mb`, `slot_mb`, `chunk_kb` (at most `slot_mb`), `nt`, `pack`,
+`slots`, `hybrid`, `cpu_threads`, `min_gflop`, `cpu_gflops`, `host_gbs`, `min_speedup`,
+`auto_min_tflop`); `HS_GPU_REPORT=<file>` writes the report at exit (for programs with the hook
+preloaded); `HS_CUDA_LIBDIR` names the CUDA library directory. The GPU is device 0 of
+`CUDA_VISIBLE_DEVICES`. No GPU, no library or too little free device memory: the reason goes into
+the report and the process runs the CPU path. A build without the GPU module (`-DHSOLVE_GPU=OFF`)
+still reports the mode asked for (`--gpu`, `hsolve_gpu_set_mode` or `HS_GPU`) with
+`"available": false` and the reason, so `hsolve --gpu on` writes the same degrade-mode `gpu`
+object there.
 Under Python, preload `libhsolve_blashook.so` (section 4.2) and set `HS_GPU`.
 
 **Which calls.** The engine's time for a call is close to
@@ -687,14 +699,23 @@ whole runs (`--gpu auto`) 1.069x / 1.058x on syn-mem27-100 / yee-pec-box-1e6 (re
 
 **Accuracy.** IEEE double on both sides; each element of C is one cuBLAS product over the full K
 plus one double addition on the host - rounding-level differences against the CPU BLAS (<= 7e-15
-relative in `bench_gpu_dgemm`), the same inertia in every factorization measured, the same
-certificate counts and eigenvalues within 3e-15 relative in whole runs. GPU-only calls are
-bitwise reproducible (tile sizes depend on the shape only).
+relative in `bench_gpu_dgemm`; cuBLAS FP64 meets the same backward error bound as the CPU BLAS).
+Those differences reach the values MUMPS' threshold pivoting reads, so delayed and 2x2 pivot choices
+and individual pivot signs can differ from the CPU path's: the counts are not guaranteed to be the
+CPU path's. What carries over is the certificate's argument: each count is the exact Sylvester
+inertia of an IEEE-double LDL^T, equal to the inertia of K - s B when the factorization's backward
+error is below the distance from s to the nearest eigenvalue (s in a spectral gap, docs/DESIGN.md
+§3.4, §3.6-8) - the same condition and guarantee as on the CPU path. Measured: the same inertia in
+every factorization run (both 1e6 cases, 5 + 5 runs of each factorization), the same certificate
+counts and eigenvalues within 3e-15 relative in whole runs. GPU-only calls are bitwise reproducible
+(tile sizes depend on the shape only); the threaded CPU path itself is not.
 
 **Tests.** `test_gpu`, `test_gpu_hook` (docs/DESIGN.md §3.9): without `HSOLVE_TEST_GPU_DEVICE`
 the processes see no GPU and check the fallback; with it (gpu02: 7, through
 `tools/bench/gpu_slot.sh`) the engine against the CPU BLAS and the hooked factorization / CLI
-against the CPU path.
+against the CPU path. `test_gpu.AffinityUnderOmpProcBind` runs the affinity test under
+`OMP_PROC_BIND=close OMP_PLACES=cores`; `GpuHook.WithoutTheGpuModuleTheReportSaysWhy` runs in an
+`-DHSOLVE_GPU=OFF` build.
 
 **Provenance.** The CUDA runtime and cuBLAS (NVIDIA, CUDA 12.2 on the cluster nodes, proprietary
 license) are not part of hsolve and are not distributed with it: `src/gpu/cuda_lib.hpp` declares the
