@@ -91,7 +91,9 @@ def test_cli_build_info_names_mumps():
     if not exe.is_file():
         pytest.skip(f"{exe} not built")
     root = mumps_root()
-    info = subprocess.run([str(exe), "--version"], capture_output=True, text=True, check=True).stdout
+    # The parser wants --A even with --version (which prints before anything is read).
+    info = subprocess.run([str(exe), "--A", "unused.npz", "--version"], capture_output=True, text=True,
+                          check=True).stdout
     label = os.path.basename(root.rstrip("/")) if root else "env"
     assert f"mumps={label} " in info, info
     assert f"mumps_blocking={expected_blocking(root)}" in info, info
