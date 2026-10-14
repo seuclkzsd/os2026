@@ -106,7 +106,8 @@ class Dissector {
     const Graph& g = pc->g;
     if (g.n == 0) return;
     Timer work;
-    if (g.n <= p_.leaf_size || g.edges() == 0) {
+    // Leaf size in variables (vertex weight): a compressed graph keeps the tree of the original.
+    if (g.total_vwgt <= p_.leaf_size || g.edges() == 0) {
       leaf(*pc);
       add_work(work, pc->path_ns);
       return;
