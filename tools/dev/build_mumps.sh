@@ -143,7 +143,10 @@ EOF
       -lmpiseq_seq -L"$CONDA_PREFIX/lib" -lesmumps -lscotch -lscotcherr -lmetis -llapack -lblas -lpthread
   done
   ln -s libmpiseq_seq.so "$prefix/lib/libmpiseq.so"
-  cp "$lib"/*.a "$pord/libpord_seq.a" "$seq/libmpiseq_seq.a" "$prefix/lib/"
+  local ar
+  for ar in "$lib"/*.a "$pord/libpord_seq.a" "$seq/libmpiseq_seq.a"; do
+    [ -e "$prefix/lib/$(basename "$ar")" ] || cp "$ar" "$prefix/lib/"
+  done
   cp "$build"/include/*.h "$prefix/include/"
   cp "$seq"/mpi*.h "$prefix/include/mumps_seq/"
   for so in "$prefix"/lib/*.so; do
