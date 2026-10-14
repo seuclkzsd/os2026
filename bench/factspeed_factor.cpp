@@ -28,13 +28,13 @@
 // (ICNTL(3) = 6, ICNTL(4) = 2: elapsed times, the time and flops under the L0 layer, delayed and
 // 2x2 pivots) on stdout between the JSON lines. --thp-disable 1: prctl(PR_SET_THP_DISABLE) before
 // anything is allocated (transparent huge pages off for this process). --sample-us: a SIGPROF
-// sampler (setitimer ITIMER_PROF, every `us` microseconds of process CPU time, i.e. each busy thread
-// is sampled about every `us` * threads microseconds of wall time; the interrupted instruction
-// pointer of whichever thread the kernel signals) during the factorizations; --sample-out FILE gets
-// one line per (job, object, offset) with its sample count ("job<TAB>object<TAB>0xbase<TAB>
-// 0xoffset<TAB>count"), symbolised by tools/bench/factspeed_symbolize.py (nm), and the JSON line "samples"
-// a per-job summary by object file. CPU time includes system time (page faults count at the faulting
-// instruction).
+// sampler (setitimer ITIMER_PROF every `us` microseconds of process CPU time; the kernel signals
+// one running thread per expiry, at most about one per tick and CPU, so the effective rate is ~1-2
+// samples per wall millisecond at 16 threads) during the factorizations: the interrupted instruction
+// pointer, the time since the job's start and the thread id. --sample-out FILE gets the raw samples
+// (format at sampler::dump), aggregated and symbolised by tools/bench/factspeed_symbolize.py (nm;
+// by symbol, category, time window, thread), and the JSON line "samples" a per-job count by object.
+// CPU time includes system time (page faults count at the faulting instruction).
 // Output: one JSON object per line on stdout. Run through tools/run/guard.py (measurement slot for
 // timings: --exclusive).
 //
@@ -47,8 +47,10 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <ucontext.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -56,6 +58,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -118,32 +121,48 @@ struct Args {
 // The handler only stores the interrupted RIP (tagged with the current job in the top byte; user
 // addresses are below 2^47) into a preallocated array with one atomic increment: async-signal-safe.
 namespace sampler {
-constexpr std::size_t kCapacity = std::size_t{1} << 24;  // 16M samples, 128 MB
-std::uintptr_t* g_buf = nullptr;
+struct Sample {
+  std::uint64_t pc_tag;  ///< interrupted RIP, job tag in the top byte (user addresses < 2^47)
+  std::uint32_t t_us;    ///< microseconds since the job's start
+  std::uint32_t tid;     ///< kernel thread id
+};
+constexpr std::size_t kCapacity = std::size_t{1} << 22;  // 4M samples, 64 MB
+Sample* g_buf = nullptr;
 std::atomic<std::size_t> g_count{0};
 std::atomic<int> g_tag{0};
+std::atomic<std::int64_t> g_t0_ns{0};
 
-void handler(int, siginfo_t*, void* ctx) {
-  const auto* uc = static_cast<const ucontext_t*>(ctx);
-  const auto pc = static_cast<std::uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]);
-  const std::size_t i = g_count.fetch_add(1, std::memory_order_relaxed);
-  if (i < kCapacity)
-    g_buf[i] = (pc & ((std::uintptr_t{1} << 56) - 1)) |
-               (static_cast<std::uintptr_t>(g_tag.load(std::memory_order_relaxed)) << 56);
+std::int64_t now_ns() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<std::int64_t>(ts.tv_sec) * 1000000000 + ts.tv_nsec;
 }
 
-void install(int us) {
-  g_buf = new std::uintptr_t[kCapacity];
+// Async-signal-safe: clock_gettime, the gettid system call, one atomic increment.
+void handler(int, siginfo_t*, void* ctx) {
+  const auto* uc = static_cast<const ucontext_t*>(ctx);
+  const auto pc = static_cast<std::uint64_t>(uc->uc_mcontext.gregs[REG_RIP]);
+  const std::size_t i = g_count.fetch_add(1, std::memory_order_relaxed);
+  if (i >= kCapacity) return;
+  g_buf[i].pc_tag = (pc & ((std::uint64_t{1} << 56) - 1)) |
+                    (static_cast<std::uint64_t>(g_tag.load(std::memory_order_relaxed)) << 56);
+  g_buf[i].t_us = static_cast<std::uint32_t>((now_ns() - g_t0_ns.load(std::memory_order_relaxed)) / 1000);
+  g_buf[i].tid = static_cast<std::uint32_t>(syscall(SYS_gettid));
+}
+
+void install() {
+  g_buf = new Sample[kCapacity];
   struct sigaction sa;
   std::memset(&sa, 0, sizeof(sa));
   sa.sa_sigaction = handler;
   sa.sa_flags = SA_SIGINFO | SA_RESTART;
   sigemptyset(&sa.sa_mask);
   if (sigaction(SIGPROF, &sa, nullptr) != 0) HS_THROW(Internal, "sigaction(SIGPROF) failed");
-  (void)us;
 }
 
-void set_timer(int us) {
+void start(int tag, int us) {
+  g_t0_ns.store(now_ns());
+  g_tag.store(tag);
   itimerval it;
   it.it_interval.tv_sec = us / 1000000;
   it.it_interval.tv_usec = us % 1000000;
@@ -155,6 +174,7 @@ void stop() {
   itimerval it;
   std::memset(&it, 0, sizeof(it));
   setitimer(ITIMER_PROF, &it, nullptr);
+  g_tag.store(0);
 }
 
 // Executable mappings of the process (/proc/self/maps): [start, end) -> (object, load base =
@@ -184,36 +204,41 @@ std::vector<Mapping> read_maps() {
   return out;
 }
 
-// Writes "job<TAB>object<TAB>0xbase<TAB>0xoffset<TAB>count" lines (offset = pc - load base) and
-// returns a per-job summary by object.
+// Writes the raw samples - "# obj<TAB>index<TAB>path<TAB>0xbase" lines for the mapped objects, then
+// one "job<TAB>t_us<TAB>tid<TAB>object index (-1: unmapped)<TAB>0xoffset" line per sample (offset
+// = pc - load base) - and returns a per-job summary by object.
 json dump(const std::vector<std::string>& tags, const std::string& path) {
   const std::size_t n = std::min(g_count.load(), kCapacity);
   const std::vector<Mapping> maps = read_maps();
-  std::map<std::tuple<int, std::string, std::uintptr_t, std::uintptr_t>, std::size_t> by_offset;
+  std::ofstream f;
+  if (!path.empty()) {
+    f.open(path);
+    for (std::size_t m = 0; m < maps.size(); ++m) {
+      char hex[32];
+      std::snprintf(hex, sizeof(hex), "0x%lx", static_cast<unsigned long>(maps[m].base));
+      f << "# obj\t" << m << '\t' << maps[m].object << '\t' << hex << '\n';
+    }
+  }
   std::map<std::pair<int, std::string>, std::size_t> by_object;
   for (std::size_t i = 0; i < n; ++i) {
-    const int tag = static_cast<int>(g_buf[i] >> 56);
-    const std::uintptr_t pc = g_buf[i] & ((std::uintptr_t{1} << 56) - 1);
+    const int tag = static_cast<int>(g_buf[i].pc_tag >> 56);
+    const std::uintptr_t pc = g_buf[i].pc_tag & ((std::uint64_t{1} << 56) - 1);
     auto it = std::upper_bound(maps.begin(), maps.end(), pc,
                                [](std::uintptr_t v, const Mapping& m) { return v < m.start; });
-    std::string obj = "?";
+    long idx = -1;
     std::uintptr_t base = 0;
+    std::string obj = "?";
     if (it != maps.begin() && pc < std::prev(it)->end) {
-      obj = std::prev(it)->object;
+      idx = std::prev(it) - maps.begin();
       base = std::prev(it)->base;
+      obj = fs::path(std::prev(it)->object).filename().string();
     }
-    ++by_offset[{tag, obj, base, pc - base}];
-    ++by_object[{tag, fs::path(obj).filename().string()}];
-  }
-  if (!path.empty()) {
-    std::ofstream f(path);
-    for (const auto& [k, c] : by_offset) {
-      const auto& [tag, obj, base, off] = k;
-      char hex[64];
-      std::snprintf(hex, sizeof(hex), "0x%lx\t0x%lx", static_cast<unsigned long>(base),
-                    static_cast<unsigned long>(off));
-      f << (tag < static_cast<int>(tags.size()) ? tags[tag] : "?") << '\t' << obj << '\t' << hex
-        << '\t' << c << '\n';
+    const std::string job = tag < static_cast<int>(tags.size()) ? tags[tag] : "?";
+    ++by_object[{tag, obj}];
+    if (f.is_open()) {
+      char hex[32];
+      std::snprintf(hex, sizeof(hex), "0x%lx", static_cast<unsigned long>(pc - base));
+      f << job << '\t' << g_buf[i].t_us << '\t' << g_buf[i].tid << '\t' << idx << '\t' << hex << '\n';
     }
   }
   json j = json::object();
@@ -345,7 +370,7 @@ int run(const Args& args, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b) 
 
   std::vector<std::string> tags = {"none"};
   for (const std::string& j : args.jobs) tags.push_back(j);
-  if (args.sample_us > 0) sampler::install(args.sample_us);
+  if (args.sample_us > 0) sampler::install();
   for (int r = 0; r < args.reps; ++r) {
     for (std::size_t ji = 0; ji < args.jobs.size(); ++ji) {
       const std::string& job = args.jobs[ji];
@@ -363,17 +388,11 @@ int run(const Args& args, const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b) 
       std::cout.flush();
       const double before = f->stats().factorize_s;
       const Usage u0 = Usage::now();
-      if (args.sample_us > 0) {
-        sampler::g_tag.store(static_cast<int>(ji + 1));
-        sampler::set_timer(args.sample_us);
-      }
+      if (args.sample_us > 0) sampler::start(static_cast<int>(ji + 1), args.sample_us);
       hs::Timer tw;
       const bool ok = f->factorize(1.0, -shift);
       const double wall = tw.seconds();
-      if (args.sample_us > 0) {
-        sampler::stop();
-        sampler::g_tag.store(0);
-      }
+      if (args.sample_us > 0) sampler::stop();
       const Usage u1 = Usage::now();
       json rec = factor_record(*f);
       const hs::Inertia in = f->inertia();
