@@ -1,8 +1,8 @@
 /* bench/mpi_factor_bench.c - P9 "mpi": upper bound of hybrid MPI + OpenMP MUMPS for hsolve's
  * factorizations (the certificate's inertia-only counts and the main LDL^T with its block solves).
  *
- * A standalone C program (not part of the hsolve build: CMake globs only the .cpp files of bench/), built twice
- * by tools/bench/mpi_build.sh from this one source:
+ * A standalone C program (not part of the hsolve build: CMake globs only the .cpp files of
+ * bench/), built twice by tools/bench/mpi_build.sh from this one source:
  *   build/mpi/mpi_factor_bench      against the MPI MUMPS 5.8.2 of the os2026-ref env (Open MPI 5,
  *                                   ScaLAPACK, PT-SCOTCH, ParMETIS, OpenMP), run under mpiexec;
  *   build/mpi/seq_factor_bench      against the sequential MUMPS 5.8.2 hsolve links (os2026 env,
@@ -25,7 +25,8 @@
  *           relative residual of the first column
  * Every phase starts and ends at an MPI barrier; rank 0 prints one JSON line per phase to stdout:
  *   {"event":"analysis"|"factorize"|"solve"|"run", "s":..., "neg":INFOG(12), "null":INFOG(28),
- *    "flops":RINFOG(3), "mem_max_mb":INFOG(21), "mem_total_mb":INFOG(22), ...}
+ *    "flops":RINFOG(3), "mem_max_mb":INFOG(21), "mem_total_mb":INFOG(22),
+ *    "rank_flops_max" / "rank_flops_sum": RINFO(3) of the busiest rank / of all ranks, ...}
  * "run" (last) has the per-rank peak RSS (max and sum of ru_maxrss) and --expect-neg's verdict.
  *
  * usage:
@@ -43,11 +44,14 @@
  * block of the inherited cpuset (the guard's slot cores); tools/bench/mpi_factor_runs.sh runs the
  * P9 layouts 1x16 / 2x8 / 4x4 / 8x2 / 16x1 interleaved, each under its own guard.
  *
- * The P9 measurements (results/p9_mpi.md) - from the work tree on the node, the outer guard holding
- * the slot:
+ * The P9 measurements (results/p9_mpi.md section 5 lists every command), on a node from the work tree:
  *   bash tools/bench/mpi_build.sh
- *   env/run.sh python3 tools/run/guard.py --exclusive --timeout 2700 --mem-gb 32 -- \
- *       bash tools/bench/mpi_factor_runs.sh OUTDIR CASE.bin PERM.bin REPS
+ *   python3 tools/bench/mpi_dump_kernel.py --root DATA --case syn-mem27-100 --out K.bin
+ *   OMP_NUM_THREADS=16 build/mpi/seq_factor_bench --matrix K.bin --ordering 3 --threads 16 \
+ *       --write-perm P.bin --modes full            # hsolve's order: SCOTCH inside MUMPS, 16 threads
+ *   python3 tools/run/guard.py --exclusive --timeout 2700 --mem-gb 32 -- \
+ *       bash tools/bench/mpi_factor_runs.sh OUT syn-mem27-100-perm K.bin perm:P.bin 1 \
+ *       seq1x16,seq1x16h,1x16,2x8,4x4,8x2,16x1 --nrhs 16 --solve-reps 3 --expect-neg 20003
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -405,14 +409,18 @@ static int run_mode(const Options* o, const Matrix* m, int* perm, const char* mo
     *t_total += t;
     if (r == 0) neg_first = id.INFOG(12);
     else if (id.INFOG(12) != neg_first) inertia_stable = 0;
+    /* Load balance: the elimination flops of each rank (RINFO(3)), largest and sum. */
+    double rank_flops[2] = {id.rinfo[2], id.rinfo[2]};
+    reduce_max_d(&rank_flops[0], 1);
+    reduce_sum_d(&rank_flops[1], 1);
     if (g_rank == 0) {
       printf("{\"event\":\"factorize\",");
       print_common(o, mode);
       printf(",\"rep\":%d,\"s\":%.6f,\"neg\":%d,\"null\":%d,\"delayed\":%d,\"flops\":%.6e,"
              "\"entries\":%.0f,\"mem_max_mb\":%d,\"mem_total_mb\":%d,\"alloc_max_mb\":%d,"
-             "\"alloc_total_mb\":%d}\n",
+             "\"alloc_total_mb\":%d,\"rank_flops_max\":%.6e,\"rank_flops_sum\":%.6e}\n",
              r, t, id.INFOG(12), id.INFOG(28), id.INFOG(13), id.RINFOG(3), decode_count(id.INFOG(9)),
-             id.INFOG(21), id.INFOG(22), id.INFOG(18), id.INFOG(19));
+             id.INFOG(21), id.INFOG(22), id.INFOG(18), id.INFOG(19), rank_flops[0], rank_flops[1]);
       fflush(stdout);
     }
   }
