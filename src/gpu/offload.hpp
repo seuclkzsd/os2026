@@ -17,8 +17,8 @@
 // results are those of the CPU path ("degrade mode"). A CUDA error later also returns the process
 // to the CPU (the call in flight is completed on the CPU).
 // Options: HS_GPU_OPTS, comma-separated key=value (parse_offload_options): device, mem_mb, slot_mb,
-// chunk_kb, nt, pack, slots, hybrid, cpu_threads, min_gflop, cpu_gflops, host_gbs, min_speedup,
-// auto_min_tflop, fault_after (test hook);
+// chunk_kb (capped at slot_mb: normalized()), nt, pack, slots, hybrid, cpu_threads, min_gflop,
+// cpu_gflops, host_gbs, min_speedup, auto_min_tflop, fault_after (test hook);
 // unknown keys abort. HS_GPU_REPORT=<file> ("%p" = the process id) writes report_json() to the
 // file at exit (for programs that cannot ask, e.g. a benchmark with the hook preloaded).
 //

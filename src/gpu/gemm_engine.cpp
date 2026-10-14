@@ -308,13 +308,16 @@ bool GemmEngine::Impl::upload_shared(Call& call) {
   const double t0 = now_s();
   const View sv = call.shared();
   const std::int64_t col_bytes = 8 * sv.rows;
-  // Chunks of whole columns, at least chunk_bytes (or one slot without chunking), staged through
-  // a ring of 2 slot_bytes: as many chunks in flight as fit, each reused when its upload is done.
-  const std::int64_t want = opt.chunk_bytes > 0 ? static_cast<std::int64_t>(opt.chunk_bytes)
-                                                : static_cast<std::int64_t>(opt.slot_bytes);
+  // Chunks of whole columns, about chunk_bytes (one slot without chunking; never more: normalized()
+  // caps chunk_bytes, and so does this line), staged through a ring of 2 slot_bytes: as many chunks
+  // in flight as fit, each reused when its upload is done. One column fits a slot (eligible()), so
+  // a chunk is at most one slot and the ring holds at least two.
+  const std::int64_t slot = static_cast<std::int64_t>(opt.slot_bytes);
+  const std::int64_t want =
+      opt.chunk_bytes > 0 ? std::min(static_cast<std::int64_t>(opt.chunk_bytes), slot) : slot;
   const std::int64_t chunk_cols = std::max<std::int64_t>(1, want / col_bytes);
   const std::int64_t ring = std::clamp<std::int64_t>(
-      2 * static_cast<std::int64_t>(opt.slot_bytes) / (chunk_cols * col_bytes), 1,
+      2 * slot / (chunk_cols * col_bytes), 1,
       static_cast<std::int64_t>(stage_ev.size()));
   bool ok = true;
   double bytes_done = 0.0;
@@ -511,16 +514,24 @@ void GemmEngine::Impl::cpu_range(const Call& call, CpuDgemm cpu, int u0, int u1)
 
 // ---- GemmEngine ----
 
+EngineOptions normalized(const EngineOptions& in) noexcept {
+  EngineOptions opt = in;
+  opt.pack_threads = std::clamp(opt.pack_threads, 1, 4);
+  opt.slots = std::clamp(opt.slots, opt.pack_threads + 1, 8);
+  opt.slot_bytes = std::max<std::size_t>(opt.slot_bytes, std::size_t{1} << 20);
+  // A tile is at most one slot, so larger chunks change nothing for tiles; for the shared operand
+  // a chunk must leave room for two in the staging ring of 2 slot_bytes.
+  opt.chunk_bytes = std::min(opt.chunk_bytes, opt.slot_bytes);
+  return opt;
+}
+
 GemmEngine::GemmEngine(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 GemmEngine::~GemmEngine() = default;
 
 std::unique_ptr<GemmEngine> GemmEngine::create(const EngineOptions& opt_in, std::string* why) {
   const double t0 = now_s();
   auto impl = std::make_unique<Impl>();
-  EngineOptions opt = opt_in;
-  opt.pack_threads = std::clamp(opt.pack_threads, 1, 4);
-  opt.slots = std::clamp(opt.slots, opt.pack_threads + 1, 8);
-  opt.slot_bytes = std::max<std::size_t>(opt.slot_bytes, std::size_t{1} << 20);
+  const EngineOptions opt = normalized(opt_in);
   impl->opt = opt;
   impl->slots = opt.slots;
   const int slots = impl->slots;

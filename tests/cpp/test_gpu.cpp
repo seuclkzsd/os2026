@@ -155,6 +155,35 @@ TEST(GpuOptions, OffloadOptionsParse) {
   EXPECT_EQ(unknown, "pack=9,slots=1,mem_mb=x,bogus=1,hybrid=2,device");
 }
 
+// normalized(): what create() uses. A pack / upload chunk larger than a slot is capped at one slot
+// (the shared operand's staging ring is 2 slots and must hold two chunks; a tile is at most a slot).
+TEST(GpuOptions, NormalizedCapsTheChunkAtOneSlot) {
+  hs::gpu::EngineOptions o;
+  o.slot_bytes = std::size_t{16} << 20;
+  o.chunk_bytes = std::size_t{64} << 20;  // HS_GPU_OPTS chunk_kb=65536
+  EXPECT_EQ(hs::gpu::normalized(o).chunk_bytes, o.slot_bytes);
+  o.chunk_bytes = std::size_t{1} << 30;
+  EXPECT_EQ(hs::gpu::normalized(o).chunk_bytes, o.slot_bytes);
+  o.chunk_bytes = std::size_t{1} << 20;  // smaller chunks are kept
+  EXPECT_EQ(hs::gpu::normalized(o).chunk_bytes, std::size_t{1} << 20);
+  o.chunk_bytes = 0;  // whole tiles
+  EXPECT_EQ(hs::gpu::normalized(o).chunk_bytes, 0u);
+  o.slot_bytes = 1000;  // at least 1 MiB, and the chunk with it
+  o.chunk_bytes = std::size_t{8} << 20;
+  const hs::gpu::EngineOptions n = hs::gpu::normalized(o);
+  EXPECT_EQ(n.slot_bytes, std::size_t{1} << 20);
+  EXPECT_EQ(n.chunk_bytes, std::size_t{1} << 20);
+  o.pack_threads = 9;
+  o.slots = 2;
+  EXPECT_EQ(hs::gpu::normalized(o).pack_threads, 4);
+  EXPECT_EQ(hs::gpu::normalized(o).slots, 5);
+  // The HS_GPU_OPTS parser accepts such a chunk; create() normalizes it.
+  std::string unknown;
+  const hs::gpu::OffloadOptions p = hs::gpu::parse_offload_options("chunk_kb=65536,slot_mb=16", &unknown);
+  EXPECT_EQ(unknown, "");
+  EXPECT_EQ(hs::gpu::normalized(p.engine).chunk_bytes, std::size_t{16} << 20);
+}
+
 TEST(GpuLoader, LoadsOrSaysWhy) {
   std::string why;
   const hs::gpu::CudaLib* lib = hs::gpu::load(&why);
@@ -294,6 +323,39 @@ TEST(GpuEngine, GpuOnlyCallsAreBitwiseReproducible) {
   ASSERT_TRUE(e->dgemm('N', 'N', p.m, p.n, p.k, p.alpha, p.a.data(), p.lda, p.b.data(), p.ldb, p.beta,
                        c2.data(), p.ldc, dgemm_));
   EXPECT_EQ(std::memcmp(c1.data(), c2.data(), c1.size() * sizeof(double)), 0);
+}
+
+// A pack / upload chunk larger than the shared operand's staging ring (2 slots): capped at one slot
+// (normalized()). Before the cap, chunk_kb > 2 slot_mb packed the whole chunk past the end of the
+// ring (a host buffer overflow) and the upload then failed. Shared operands of 2.9 MiB with
+// 1 MiB slots, both split directions; every call on the GPU, no error, right results.
+TEST(GpuEngine, ChunksLargerThanTheStagingRingAreCapped) {
+  REQUIRE_GPU();
+  hs::gpu::EngineOptions o = small_engine();
+  o.chunk_bytes = std::size_t{64} << 20;
+  std::string why;
+  auto e = hs::gpu::GemmEngine::create(o, &why);
+  ASSERT_NE(e, nullptr) << why;
+  EXPECT_EQ(e->info().options.chunk_bytes, o.slot_bytes);
+  std::uint64_t seed = 300;
+  for (const char ta : {'N', 'T'})
+    for (const auto& [m, n, k] : {std::tuple{620, 2000, 620}, std::tuple{2000, 640, 600}}) {
+      const char tb = ta == 'N' ? 'T' : 'N';
+      Problem p = make_problem(ta, tb, m, n, k, 2, -1.0, 1.0, ++seed);
+      const std::vector<double> cref = reference(p);
+      std::vector<double> c = p.c;
+      ASSERT_TRUE(e->dgemm(ta, tb, m, n, k, p.alpha, p.a.data(), p.lda, p.b.data(), p.ldb, p.beta,
+                           c.data(), p.ldc, dgemm_))
+          << ta << tb << " " << m << "x" << n << "x" << k << ": " << e->error();
+      bool padding_ok = false;
+      EXPECT_LE(rel_error(p, c, cref, &padding_ok), 1e-15 * 8) << ta << tb << " " << m << "x" << n;
+      EXPECT_TRUE(padding_ok);
+    }
+  const hs::gpu::EngineStats s = e->stats();
+  EXPECT_EQ(s.errors, 0) << e->error();
+  EXPECT_FALSE(e->broken());
+  EXPECT_EQ(s.cpu_flops, 0.0);  // nothing fell back to the CPU
+  EXPECT_EQ(s.calls, 4);
 }
 
 // The model: small or thin calls stay on the CPU, large ones are taken; min_flops is a floor.

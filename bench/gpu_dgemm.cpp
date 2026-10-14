@@ -131,7 +131,8 @@ json info_json(const hs::gpu::EngineInfo& i) {
               {"free_mib", i.device_free_bytes >> 20},
               {"cudart", i.cudart_path},
               {"cublas_path", i.cublas_path},
-              {"init_s", i.init_seconds}};
+              {"init_s", i.init_seconds},
+              {"chunk_bytes", i.options.chunk_bytes}};
 }
 
 int cmd_info() {
