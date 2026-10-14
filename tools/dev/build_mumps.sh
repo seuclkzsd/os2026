@@ -5,10 +5,15 @@
 #
 #   env/run.sh tools/dev/build_mumps.sh NAME [--isa ISA] [--opt LEVEL] [--gemmt] [--patch FILE]...
 #
-#   --isa    -march of every MUMPS object (default x86-64-v3 = AVX2 + FMA + BMI2, any x86-64 CPU
-#            since ~2015 (Haswell, Zen 1); skylake-avx512 / native need the build CPU's ISA at run
-#            time - SIGILL elsewhere; nocona = conda-forge's own build flags, a control).
-#   --opt    optimisation level (default O3; conda-forge builds -O2).
+#   --isa    -march of every MUMPS object. Default nocona (SSE3; with -mtune=haswell
+#            -ftree-vectorize: conda-forge's own flags) - portable to any x86-64 CPU, and the
+#            configuration the P9 gates measured (results/p9_factspeed.md §3.3-4.5). Opt-in, NOT
+#            portable, ~0-0.4% faster in the P9 screens: x86-64-v3 needs AVX2, FMA, BMI1/2,
+#            LZCNT, F16C, MOVBE (Intel Core / Xeon from Haswell, AMD from Excavator / Zen; NOT
+#            Sandy / Ivy Bridge Xeons, NOT the many Atom / Celeron / Pentium parts without AVX2
+#            sold well after 2015); skylake-avx512 / native need the build CPU's ISA. On a CPU
+#            without them the libraries die with SIGILL in the first factorization.
+#   --opt    optimisation level (default O2, conda-forge's; O3 is opt-in, 1.000-1.005x).
 #   --gemmt  -DGEMMT_AVAILABLE: MUMPS' symmetric (LDL^T) updates call the BLAS extension dgemmt
 #            (OpenBLAS >= 0.3.22 provides it) instead of blocks of dgemm (MUMPS' INSTALL file).
 #   --patch  a patch (git diff format, -p1 against the tarball's top directory) applied after
@@ -26,7 +31,7 @@
 # Source: https://mumps-solver.org/MUMPS_5.8.2.tar.gz, sha256 below (the same as conda-forge's
 # mumps recipe). The cluster nodes have no internet: download on a machine that has, check the
 # checksum, copy it to $HS_DEPS/src/. License: CeCILL-C (doc/CeCILL-C_V1-en.txt in the tarball;
-# THIRD_PARTY_NOTICES). Build time ~6 min with HS_JOBS=4 (build lane: run through guard.py).
+# THIRD_PARTY_NOTICES). Build time ~1.5 min with HS_JOBS=4 (build lane: run through guard.py).
 # Conda-forge's build (recipe mumps 5.8.2, build 3): Makefile.inc from their Makefile.conda.SEQ,
 # FFLAGS = the toolchain's "-march=nocona -mtune=haswell -ftree-vectorize -fPIC
 # -fstack-protector-strong -fno-plt -O2 -ffunction-sections -pipe" + -fallow-argument-mismatch,
@@ -43,7 +48,7 @@ main() {
   local name="$1"
   shift
   [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || deps_die "bad NAME '$name'"
-  local isa=x86-64-v3 opt=O3 gemmt=0 patches=()
+  local isa=nocona opt=O2 gemmt=0 patches=()  # portable defaults (conda-forge's flags; header)
   while [ $# -gt 0 ]; do
     case "$1" in
       --isa) isa="$2"; shift 2 ;;
