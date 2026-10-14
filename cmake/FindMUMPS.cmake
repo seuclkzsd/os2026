@@ -5,7 +5,17 @@
 #   MUMPS::MUMPS  (all four arithmetics: s, d, c, z + common + pord + mpiseq)
 # Result variables: MUMPS_FOUND, MUMPS_INCLUDE_DIR, MUMPS_LIBRARIES, MUMPS_VERSION.
 # HSOLVE_MUMPS_ROOT (CMakeLists.txt): search only there (an install of tools/dev/build_mumps.sh);
-# otherwise $CONDA_PREFIX, MUMPS_ROOT and the default paths.
+# otherwise $CONDA_PREFIX, MUMPS_ROOT and the default paths. The results are cached; when
+# HSOLVE_MUMPS_ROOT changes in an existing build directory (tools/dev/build.sh HS_MUMPS=source|env)
+# they are searched again, so the headers and libraries always come from the configured MUMPS.
+
+if(NOT "${HSOLVE_MUMPS_ROOT}" STREQUAL "${_HSOLVE_MUMPS_ROOT_SEARCHED}")
+  unset(MUMPS_INCLUDE_DIR CACHE)
+  foreach(_c smumps dmumps cmumps zmumps mumps_common pord mpiseq)
+    unset(MUMPS_${_c}_LIBRARY CACHE)
+  endforeach()
+endif()
+set(_HSOLVE_MUMPS_ROOT_SEARCHED "${HSOLVE_MUMPS_ROOT}" CACHE INTERNAL "HSOLVE_MUMPS_ROOT of the cached MUMPS search")
 
 if(HSOLVE_MUMPS_ROOT)
   set(_mumps_search PATHS "${HSOLVE_MUMPS_ROOT}" NO_DEFAULT_PATH)

@@ -26,17 +26,22 @@ find_package(nlohmann_json 3.10 REQUIRED)
 set(BLA_VENDOR OpenBLAS)
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
-# MUMPS: the environment's (conda-forge mumps-seq) unless HSOLVE_MUMPS_ROOT names an install of
-# tools/dev/build_mumps.sh (same library names and sonames). Its lib/ then goes first into the
-# executables' RPATH, ahead of the environment's (conda's LDFLAGS carry -rpath $CONDA_PREFIX/lib),
-# so that the dynamic loader picks the rebuilt libraries (test_factor_mumps_build checks it).
+# MUMPS: HSOLVE_MUMPS_ROOT names an install of tools/dev/build_mumps.sh (same library names and
+# sonames as conda-forge's mumps-seq); empty = the environment's conda-forge mumps-seq. The default
+# build (tools/dev/build.sh, HS_MUMPS=source) sets it to MUMPS 5.8.2 built from
+# third_party/mumps/ with patches/mumps-5.8.2-l0-blocking.patch (tools/dev/mumps_cache.sh, P9
+# integration); `HS_MUMPS=env tools/dev/build.sh` or a plain `cmake --preset` without
+# -DHSOLVE_MUMPS_ROOT links the environment's. The install's lib/ goes first into the RPATH of
+# executables, shared libraries and the Python module, ahead of the environment's (conda's LDFLAGS
+# carry -rpath $CONDA_PREFIX/lib), so that the dynamic loader picks the rebuilt libraries
+# (test_factor_mumps_build, tests/py/test_mumps_build.py check it).
 # P9 "factspeed" (results/p9_factspeed.md §3.3-4.5): a rebuild alone gains nothing; built with
-# patches/mumps-5.8.2-l0-blocking.patch and run with hsolve's P9 block sizes a count is 1.07-1.08x
-# faster on a fixed pivot order, end to end at 1e6 syn-mem27-100 is past the 1.05x bar but
-# yee-pec-box-1e6 only at it (~1.055x; 1.040x on a fixed METIS order). Not the default build (the
-# gate is not clearly passed, and it would need the tarball and a MUMPS build step in the
-# deployment). HSOLVE_MUMPS_BLOCKING: the block sizes hsolve gives MUMPS when HS_MUMPS_BLOCKING is
-# unset (src/factor/mumps_api.hpp Blocking) - "p9" by default with HSOLVE_MUMPS_ROOT, else "mumps".
+# the patch and run with hsolve's P9 block sizes a count is 1.07-1.08x faster on a fixed pivot
+# order, end to end at 1e6 syn-mem27-100 pooled 1.084x, yee-pec-box-1e6 1.059x (1.040x on a fixed
+# METIS order); made the default build by the user's decision (2026-10-14; results/p9_measurements.md
+# measures the integrated build). HSOLVE_MUMPS_BLOCKING: the block sizes hsolve gives MUMPS when
+# HS_MUMPS_BLOCKING is unset (src/factor/mumps_api.hpp Blocking) - "p9" by default with
+# HSOLVE_MUMPS_ROOT, else "mumps".
 set(HSOLVE_MUMPS_ROOT "" CACHE PATH "MUMPS install of tools/dev/build_mumps.sh (empty: the environment's)")
 if(HSOLVE_MUMPS_ROOT)
   foreach(_kind EXE SHARED MODULE)
@@ -59,8 +64,10 @@ else()
 endif()
 if(HSOLVE_MUMPS_ROOT)
   message(STATUS "hsolve: MUMPS of ${HSOLVE_MUMPS_ROOT}, default block sizes ${_hs_blocking}")
+  get_filename_component(_hs_mumps_label "${HSOLVE_MUMPS_ROOT}" NAME)
 else()
   message(STATUS "hsolve: the environment's MUMPS, default block sizes ${_hs_blocking}")
+  set(_hs_mumps_label env)
 endif()
 find_package(MUMPS 5.6 REQUIRED)
 
@@ -92,7 +99,7 @@ target_link_libraries(hsolve
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _bt)
 target_compile_definitions(hsolve PRIVATE
   HSOLVE_VERSION="${PROJECT_VERSION}"
-  HSOLVE_BUILD_FLAGS="${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_bt}} native=${HSOLVE_NATIVE}"
+  HSOLVE_BUILD_FLAGS="${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_bt}} native=${HSOLVE_NATIVE} mumps=${_hs_mumps_label} mumps_blocking=${_hs_blocking}"
   HSOLVE_MUMPS_VERSION="${MUMPS_VERSION}")
 if(_hs_blocking STREQUAL "p9")
   target_compile_definitions(hsolve PRIVATE HSOLVE_MUMPS_BLOCKING_P9=1)
