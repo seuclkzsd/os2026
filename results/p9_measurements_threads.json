@@ -1,0 +1,1263 @@
+{
+ "note": "P9 integration thread scaling (results/p9_measurements.md section 5): tools/bench/thread_scaling.py table of the gpu01 slot runs, hsolve_int (md5 e0d2ef6343cf642a8ee35efb89342d13); 1e5 cases at 1/2/4/8/16 threads, yee-pec-box-1e6 at 4/8/16, 3 repetitions each",
+ "cases": [
+  {
+   "case": "syn-mem27-46",
+   "n": 97336,
+   "problem": "HEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "rows": [
+    {
+     "threads": 1,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 11.008357616,
+     "time_min": 10.996875863,
+     "time_max": 11.02802233,
+     "times": [
+      11.02802233,
+      10.996875863,
+      11.008357616
+     ],
+     "phases": {
+      "analysis": 2.345307081,
+      "numeric": 2.6624687230000004,
+      "solves": 0.762864482,
+      "iterate_other": 0.11132182700000037,
+      "certificate": 4.978398061000002,
+      "rest": 0.1501297729999992
+     },
+     "peak_rss_gib": 0.68,
+     "block_size": "8",
+     "ordering": "SCOTCH",
+     "certificate_method": "exact",
+     "speedup": 1.0,
+     "efficiency": 1.0,
+     "phase_speedup": {
+      "analysis": 1.0,
+      "numeric": 1.0,
+      "solves": 1.0,
+      "iterate_other": 1.0,
+      "certificate": 1.0,
+      "rest": 1.0
+     }
+    },
+    {
+     "threads": 2,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 5.583984986,
+     "time_min": 5.58092053,
+     "time_max": 5.600450548,
+     "times": [
+      5.600450548,
+      5.58092053,
+      5.583984986
+     ],
+     "phases": {
+      "analysis": 0.901048938,
+      "numeric": 1.432594141,
+      "solves": 0.432481766,
+      "iterate_other": 0.06665814100000023,
+      "certificate": 2.6343883549999996,
+      "rest": 0.11887241800000058
+     },
+     "peak_rss_gib": 0.686,
+     "block_size": "8",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.9714160485029641,
+     "efficiency": 0.9857080242514821,
+     "phase_speedup": {
+      "analysis": 2.6028631543650964,
+      "numeric": 1.8584947730845147,
+      "solves": 1.7639228794677093,
+      "iterate_other": 1.670040978190496,
+      "certificate": 1.8897737881171293,
+      "rest": 1.2629487607461511
+     }
+    },
+    {
+     "threads": 4,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 3.363695414,
+     "time_min": 3.34439943,
+     "time_max": 3.382923983,
+     "times": [
+      3.363695414,
+      3.34439943,
+      3.382923983
+     ],
+     "phases": {
+      "analysis": 0.527322494,
+      "numeric": 0.868890398,
+      "solves": 0.27648660799999997,
+      "iterate_other": 0.044531782000000075,
+      "certificate": 1.5482110510000002,
+      "rest": 0.09881241899999973
+     },
+     "peak_rss_gib": 0.691,
+     "block_size": "8",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 3.272697513033503,
+     "efficiency": 0.8181743782583758,
+     "phase_speedup": {
+      "analysis": 4.447576402837843,
+      "numeric": 3.064216993453299,
+      "solves": 2.759137187577635,
+      "iterate_other": 2.4998287066077927,
+      "certificate": 3.2155810138316867,
+      "rest": 1.519341136664204
+     }
+    },
+    {
+     "threads": 8,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 2.345722071,
+     "time_min": 2.316159629,
+     "time_max": 2.35072185,
+     "times": [
+      2.345722071,
+      2.316159629,
+      2.35072185
+     ],
+     "phases": {
+      "analysis": 0.353556856,
+      "numeric": 0.630110349,
+      "solves": 0.22676375,
+      "iterate_other": 0.033641109999999974,
+      "certificate": 1.0257306440000002,
+      "rest": 0.07699859999999954
+     },
+     "peak_rss_gib": 0.792,
+     "block_size": "8",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 4.692950521332244,
+     "efficiency": 0.5866188151665305,
+     "phase_speedup": {
+      "analysis": 6.633465144853535,
+      "numeric": 4.225400721041007,
+      "solves": 3.364137707195264,
+      "iterate_other": 3.309100888763791,
+      "certificate": 4.853514019612346,
+      "rest": 1.9497727621021692
+     }
+    },
+    {
+     "threads": 16,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 2.040709824,
+     "time_min": 2.036725341,
+     "time_max": 2.068554211,
+     "times": [
+      2.068554211,
+      2.040709824,
+      2.036725341
+     ],
+     "phases": {
+      "analysis": 0.296832286,
+      "numeric": 0.564899043,
+      "solves": 0.227713402,
+      "iterate_other": 0.029394370999999975,
+      "certificate": 0.8650955499999999,
+      "rest": 0.06660929299999999
+     },
+     "peak_rss_gib": 0.861,
+     "block_size": "8",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 5.394376744079417,
+     "efficiency": 0.33714854650496356,
+     "phase_speedup": {
+      "analysis": 7.901118549482855,
+      "numeric": 4.713176196689008,
+      "solves": 3.3501079659773385,
+      "iterate_other": 3.787181804298533,
+      "certificate": 5.754737798616583,
+      "rest": 2.2538863008199055
+     }
+    }
+   ]
+  },
+  {
+   "case": "yee-pec-box-1e5",
+   "n": 109744,
+   "problem": "GHEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "rows": [
+    {
+     "threads": 1,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 10.589522835,
+     "time_min": 10.581249814,
+     "time_max": 10.598260247999999,
+     "times": [
+      10.598260247999999,
+      10.589522835,
+      10.581249814
+     ],
+     "phases": {
+      "analysis": 1.601854626,
+      "numeric": 2.3296103529999996,
+      "solves": 1.726372466,
+      "iterate_other": 0.46269355300000026,
+      "certificate": 4.362815446,
+      "rest": 0.10680468700000025
+     },
+     "peak_rss_gib": 0.581,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.0,
+     "efficiency": 1.0,
+     "phase_speedup": {
+      "analysis": 1.0,
+      "numeric": 1.0,
+      "solves": 1.0,
+      "iterate_other": 1.0,
+      "certificate": 1.0,
+      "rest": 1.0
+     }
+    },
+    {
+     "threads": 2,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 6.1311371,
+     "time_min": 6.088925172,
+     "time_max": 6.141687657,
+     "times": [
+      6.141687657,
+      6.088925172,
+      6.1311371
+     ],
+     "phases": {
+      "analysis": 0.865072118,
+      "numeric": 1.3774929080000002,
+      "solves": 1.034556748,
+      "iterate_other": 0.259075229,
+      "certificate": 2.487571989,
+      "rest": 0.10103030199999992
+     },
+     "peak_rss_gib": 0.585,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.7271711041985998,
+     "efficiency": 0.8635855520992999,
+     "phase_speedup": {
+      "analysis": 1.851700676359101,
+      "numeric": 1.6911958961606497,
+      "solves": 1.668707366065143,
+      "iterate_other": 1.785942850599585,
+      "certificate": 1.753844899883217,
+      "rest": 1.0571549810867666
+     }
+    },
+    {
+     "threads": 4,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 3.750583992,
+     "time_min": 3.7091244059999995,
+     "time_max": 3.762467712,
+     "times": [
+      3.750583992,
+      3.7091244059999995,
+      3.762467712
+     ],
+     "phases": {
+      "analysis": 0.505137317,
+      "numeric": 0.835936932,
+      "solves": 0.7130687699999998,
+      "iterate_other": 0.1626650519999997,
+      "certificate": 1.4414457989999998,
+      "rest": 0.086997153
+     },
+     "peak_rss_gib": 0.614,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 2.823433059381543,
+     "efficiency": 0.7058582648453857,
+     "phase_speedup": {
+      "analysis": 3.1711270818663353,
+      "numeric": 2.786825493433277,
+      "solves": 2.4210462421457617,
+      "iterate_other": 2.8444558146392818,
+      "certificate": 3.026694065796088,
+      "rest": 1.2276802552377806
+     }
+    },
+    {
+     "threads": 8,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 2.7387363050000006,
+     "time_min": 2.694722549,
+     "time_max": 2.740874878,
+     "times": [
+      2.740874878,
+      2.694722549,
+      2.7387363050000006
+     ],
+     "phases": {
+      "analysis": 0.334421073,
+      "numeric": 0.6284097939999999,
+      "solves": 0.6326697210000001,
+      "iterate_other": 0.11016276800000013,
+      "certificate": 0.9667340829999997,
+      "rest": 0.061818907000000485
+     },
+     "peak_rss_gib": 0.654,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 3.866572629014022,
+     "efficiency": 0.48332157862675273,
+     "phase_speedup": {
+      "analysis": 4.789933276722666,
+      "numeric": 3.7071515677236566,
+      "solves": 2.7287104293078692,
+      "iterate_other": 4.200090115745818,
+      "certificate": 4.51294262064411,
+      "rest": 1.7277026104651025
+     }
+    },
+    {
+     "threads": 16,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 2.513870631,
+     "time_min": 2.496848633,
+     "time_max": 2.532347027,
+     "times": [
+      2.532347027,
+      2.496848633,
+      2.513870631
+     ],
+     "phases": {
+      "analysis": 0.271603599,
+      "numeric": 0.584586462,
+      "solves": 0.6638701230000001,
+      "iterate_other": 0.08968078499999987,
+      "certificate": 0.8364816039999998,
+      "rest": 0.05698679099999963
+     },
+     "peak_rss_gib": 0.775,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 4.212437467709928,
+     "efficiency": 0.2632773417318705,
+     "phase_speedup": {
+      "analysis": 5.897766568255232,
+      "numeric": 3.985056966645936,
+      "solves": 2.600467179029835,
+      "iterate_other": 5.159338792585289,
+      "certificate": 5.215674110628739,
+      "rest": 1.8742007599620927
+     }
+    }
+   ]
+  },
+  {
+   "case": "ss-qa8fk-qa8fm",
+   "n": 66127,
+   "problem": "GHEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "rows": [
+    {
+     "threads": 1,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 6.970898307,
+     "time_min": 6.955192576,
+     "time_max": 6.97863768,
+     "times": [
+      6.970898307,
+      6.97863768,
+      6.955192576
+     ],
+     "phases": {
+      "analysis": 1.692394644,
+      "numeric": 1.5149361500000003,
+      "solves": 1.146387651,
+      "iterate_other": 0.39216751699999985,
+      "certificate": 2.0606767489999998,
+      "rest": 0.16223786000000004
+     },
+     "peak_rss_gib": 0.379,
+     "block_size": "4",
+     "ordering": "SCOTCH",
+     "certificate_method": "exact",
+     "speedup": 1.0,
+     "efficiency": 1.0,
+     "phase_speedup": {
+      "analysis": 1.0,
+      "numeric": 1.0,
+      "solves": 1.0,
+      "iterate_other": 1.0,
+      "certificate": 1.0,
+      "rest": 1.0
+     }
+    },
+    {
+     "threads": 2,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 3.350699269,
+     "time_min": 3.337972606,
+     "time_max": 3.354564374,
+     "times": [
+      3.354564374,
+      3.337972606,
+      3.350699269
+     ],
+     "phases": {
+      "analysis": 0.584662662,
+      "numeric": 0.8013397810000001,
+      "solves": 0.657110802,
+      "iterate_other": 0.21854403200000005,
+      "certificate": 0.9677339770000004,
+      "rest": 0.12215154599999971
+     },
+     "peak_rss_gib": 0.375,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 2.0804309033321364,
+     "efficiency": 1.0402154516660682,
+     "phase_speedup": {
+      "analysis": 2.8946514870826485,
+      "numeric": 1.890504110640178,
+      "solves": 1.7445880474203495,
+      "iterate_other": 1.794455393776206,
+      "certificate": 2.129383485519594,
+      "rest": 1.3281686995594835
+     }
+    },
+    {
+     "threads": 4,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 2.136010133,
+     "time_min": 2.095510028,
+     "time_max": 2.136766937,
+     "times": [
+      2.136010133,
+      2.095510028,
+      2.136766937
+     ],
+     "phases": {
+      "analysis": 0.347511463,
+      "numeric": 0.5121825119999999,
+      "solves": 0.46122519400000006,
+      "iterate_other": 0.15361667499999998,
+      "certificate": 0.5637190970000003,
+      "rest": 0.09391161199999985
+     },
+     "peak_rss_gib": 0.399,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 3.26351368811601,
+     "efficiency": 0.8158784220290025,
+     "phase_speedup": {
+      "analysis": 4.87003976614147,
+      "numeric": 2.957805302809715,
+      "solves": 2.4855269528056176,
+      "iterate_other": 2.5528967932680477,
+      "certificate": 3.655502820405601,
+      "rest": 1.7275591009980777
+     }
+    },
+    {
+     "threads": 8,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 1.60674491,
+     "time_min": 1.5814518610000001,
+     "time_max": 1.6161241819999999,
+     "times": [
+      1.6161241819999999,
+      1.5814518610000001,
+      1.60674491
+     ],
+     "phases": {
+      "analysis": 0.241773246,
+      "numeric": 0.38933186599999997,
+      "solves": 0.39394703999999997,
+      "iterate_other": 0.11933501499999993,
+      "certificate": 0.3923563250000002,
+      "rest": 0.07254638000000016
+     },
+     "peak_rss_gib": 0.447,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 4.3385221036735695,
+     "efficiency": 0.5423152629591962,
+     "phase_speedup": {
+      "analysis": 6.99992522745879,
+      "numeric": 3.8911177899833156,
+      "solves": 2.9100044792822914,
+      "iterate_other": 3.286273664104371,
+      "certificate": 5.252054364103851,
+      "rest": 2.2363329500383022
+     }
+    },
+    {
+     "threads": 16,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 1.5309726640000003,
+     "time_min": 1.516667069,
+     "time_max": 1.534192384,
+     "times": [
+      1.516667069,
+      1.5309726640000003,
+      1.534192384
+     ],
+     "phases": {
+      "analysis": 0.203597415,
+      "numeric": 0.356996601,
+      "solves": 0.41807858200000003,
+      "iterate_other": 0.09746396300000004,
+      "certificate": 0.3775147849999998,
+      "rest": 0.06924213900000023
+     },
+     "peak_rss_gib": 0.746,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 4.553248056557069,
+     "efficiency": 0.2845780035348168,
+     "phase_speedup": {
+      "analysis": 8.31245644253391,
+      "numeric": 4.24355903041217,
+      "solves": 2.7420386988396355,
+      "iterate_other": 4.023718151087286,
+      "certificate": 5.458532568466162,
+      "rest": 2.3430509562969957
+     }
+    }
+   ]
+  },
+  {
+   "case": "syn-near-singular-complex-1e5",
+   "n": 100000,
+   "problem": "HEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "rows": [
+    {
+     "threads": 1,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 5.030689976999999,
+     "time_min": 5.0189599,
+     "time_max": 5.090591481,
+     "times": [
+      5.0189599,
+      5.030689976999999,
+      5.090591481
+     ],
+     "phases": {
+      "analysis": 0.307228076,
+      "numeric": 0.992105153,
+      "solves": 1.4293652839999997,
+      "iterate_other": 0.8460191829999997,
+      "certificate": 0.966674266000001,
+      "rest": 0.487179910999999
+     },
+     "peak_rss_gib": 0.396,
+     "block_size": "4",
+     "ordering": "AMD",
+     "certificate_method": "exact",
+     "speedup": 1.0,
+     "efficiency": 1.0,
+     "phase_speedup": {
+      "analysis": 1.0,
+      "numeric": 1.0,
+      "solves": 1.0,
+      "iterate_other": 1.0,
+      "certificate": 1.0,
+      "rest": 1.0
+     }
+    },
+    {
+     "threads": 2,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 4.2023455,
+     "time_min": 4.14437044,
+     "time_max": 4.216780108,
+     "times": [
+      4.2023455,
+      4.14437044,
+      4.216780108
+     ],
+     "phases": {
+      "analysis": 0.29816661,
+      "numeric": 0.891470457,
+      "solves": 1.36317726,
+      "iterate_other": 0.5009808419999997,
+      "certificate": 0.8551311950000002,
+      "rest": 0.28811823300000017
+     },
+     "peak_rss_gib": 0.388,
+     "block_size": "4",
+     "ordering": "AMD",
+     "certificate_method": "exact",
+     "speedup": 1.1971147962489042,
+     "efficiency": 0.5985573981244521,
+     "phase_speedup": {
+      "analysis": 1.030390612818786,
+      "numeric": 1.1128861817122448,
+      "solves": 1.0485542313110474,
+      "iterate_other": 1.6887256199709133,
+      "certificate": 1.1304397169138483,
+      "rest": 1.6909027447769984
+     }
+    },
+    {
+     "threads": 4,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 3.439683195,
+     "time_min": 3.402279283,
+     "time_max": 3.4527259510000006,
+     "times": [
+      3.439683195,
+      3.402279283,
+      3.4527259510000006
+     ],
+     "phases": {
+      "analysis": 0.407446467,
+      "numeric": 0.9176162630000001,
+      "solves": 0.9911117140000001,
+      "iterate_other": 0.3353803550000001,
+      "certificate": 0.5785227600000002,
+      "rest": 0.20883629799999995
+     },
+     "peak_rss_gib": 0.524,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.4625445693117092,
+     "efficiency": 0.3656361423279273,
+     "phase_speedup": {
+      "analysis": 0.7540329856388227,
+      "numeric": 1.081176514632021,
+      "solves": 1.4421838263128426,
+      "iterate_other": 2.5225663053520218,
+      "certificate": 1.6709355842802114,
+      "rest": 2.3328315798817654
+     }
+    },
+    {
+     "threads": 8,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 2.7227111689999997,
+     "time_min": 2.7095321089999995,
+     "time_max": 2.72960081,
+     "times": [
+      2.72960081,
+      2.7095321089999995,
+      2.7227111689999997
+     ],
+     "phases": {
+      "analysis": 0.394037931,
+      "numeric": 0.7388459519999999,
+      "solves": 0.74758769,
+      "iterate_other": 0.27934619799999993,
+      "certificate": 0.40873013000000036,
+      "rest": 0.16108846600000054
+     },
+     "peak_rss_gib": 0.522,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.847676696036648,
+     "efficiency": 0.230959587004581,
+     "phase_speedup": {
+      "analysis": 0.7796916282153558,
+      "numeric": 1.3427767321651376,
+      "solves": 1.911970064675623,
+      "iterate_other": 3.0285688119513976,
+      "certificate": 2.3650673024765756,
+      "rest": 3.0243003928040224
+     }
+    },
+    {
+     "threads": 16,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 2.247487431,
+     "time_min": 2.242426138,
+     "time_max": 2.2525122810000004,
+     "times": [
+      2.2525122810000004,
+      2.242426138,
+      2.247487431
+     ],
+     "phases": {
+      "analysis": 0.394162765,
+      "numeric": 0.627082198,
+      "solves": 0.537342121,
+      "iterate_other": 0.257693763,
+      "certificate": 0.2939183910000005,
+      "rest": 0.13728819299999953
+     },
+     "peak_rss_gib": 0.673,
+     "block_size": "4",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 2.2383617846359374,
+     "efficiency": 0.1398976115397461,
+     "phase_speedup": {
+      "analysis": 0.7794446946301485,
+      "numeric": 1.5820974605310036,
+      "solves": 2.660065586036572,
+      "iterate_other": 3.283040975267995,
+      "certificate": 3.2889206514470857,
+      "rest": 3.548592929619233
+     }
+    }
+   ]
+  },
+  {
+   "case": "wg-square-1e5",
+   "n": 99225,
+   "problem": "GHIEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "rows": [
+    {
+     "threads": 1,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 1.4346210040000003,
+     "time_min": 1.4189081880000003,
+     "time_max": 1.434983705,
+     "times": [
+      1.4346210040000003,
+      1.4189081880000003,
+      1.434983705
+     ],
+     "phases": {
+      "analysis": 0.052156763,
+      "numeric": 0.205389667,
+      "solves": 0.690164322,
+      "iterate_other": 0.29000905500000007,
+      "certificate": 0.0,
+      "rest": 0.196340837
+     },
+     "peak_rss_gib": 0.164,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "none",
+     "speedup": 1.0,
+     "efficiency": 1.0,
+     "phase_speedup": {
+      "analysis": 1.0,
+      "numeric": 1.0,
+      "solves": 1.0,
+      "iterate_other": 1.0,
+      "certificate": null,
+      "rest": 1.0
+     }
+    },
+    {
+     "threads": 2,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 1.020285556,
+     "time_min": 1.009128735,
+     "time_max": 1.042832162,
+     "times": [
+      1.042832162,
+      1.009128735,
+      1.020285556
+     ],
+     "phases": {
+      "analysis": 0.053159078,
+      "numeric": 0.158570882,
+      "solves": 0.4803752480000001,
+      "iterate_other": 0.1783862839999999,
+      "certificate": 0.0,
+      "rest": 0.14979406399999995
+     },
+     "peak_rss_gib": 0.169,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "none",
+     "speedup": 1.4060975337378983,
+     "efficiency": 0.7030487668689491,
+     "phase_speedup": {
+      "analysis": 0.9811449890082744,
+      "numeric": 1.295254616796544,
+      "solves": 1.4367191583526382,
+      "iterate_other": 1.6257362869894203,
+      "certificate": null,
+      "rest": 1.3107384348688214
+     }
+    },
+    {
+     "threads": 4,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.690264333,
+     "time_min": 0.688836042,
+     "time_max": 0.731347174,
+     "times": [
+      0.731347174,
+      0.688836042,
+      0.690264333
+     ],
+     "phases": {
+      "analysis": 0.049955341,
+      "numeric": 0.10456751899999997,
+      "solves": 0.30872341400000003,
+      "iterate_other": 0.13137843500000007,
+      "certificate": 0.0,
+      "rest": 0.09652280599999997
+     },
+     "peak_rss_gib": 0.184,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "none",
+     "speedup": 2.0783646719292395,
+     "efficiency": 0.5195911679823099,
+     "phase_speedup": {
+      "analysis": 1.044067800478031,
+      "numeric": 1.9641822715522212,
+      "solves": 2.235542529987699,
+      "iterate_other": 2.2074327114644037,
+      "certificate": null,
+      "rest": 2.034139341121103
+     }
+    },
+    {
+     "threads": 8,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.524748268,
+     "time_min": 0.522748226,
+     "time_max": 0.5662302250000001,
+     "times": [
+      0.5662302250000001,
+      0.522748226,
+      0.524748268
+     ],
+     "phases": {
+      "analysis": 0.048938078,
+      "numeric": 0.074478989,
+      "solves": 0.21778752399999998,
+      "iterate_other": 0.10742103700000008,
+      "certificate": 0.0,
+      "rest": 0.07659774499999997
+     },
+     "peak_rss_gib": 0.203,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "none",
+     "speedup": 2.73392232330341,
+     "efficiency": 0.34174029041292625,
+     "phase_speedup": {
+      "analysis": 1.065770564181127,
+      "numeric": 2.7576860233696245,
+      "solves": 3.168980065175818,
+      "iterate_other": 2.6997417181887737,
+      "certificate": null,
+      "rest": 2.563271764723623
+     }
+    },
+    {
+     "threads": 16,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.533077831,
+     "time_min": 0.49558922,
+     "time_max": 0.546021263,
+     "times": [
+      0.533077831,
+      0.546021263,
+      0.49558922
+     ],
+     "phases": {
+      "analysis": 0.071517403,
+      "numeric": 0.078487336,
+      "solves": 0.203742816,
+      "iterate_other": 0.09688603500000004,
+      "certificate": 0.0,
+      "rest": 0.08003448599999996
+     },
+     "peak_rss_gib": 0.303,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "none",
+     "speedup": 2.6912036490221265,
+     "efficiency": 0.1682002280638829,
+     "phase_speedup": {
+      "analysis": 0.7292877091747866,
+      "numeric": 2.616851042058556,
+      "solves": 3.3874289928337893,
+      "iterate_other": 2.9933008921254745,
+      "certificate": null,
+      "rest": 2.4532029480391753
+     }
+    }
+   ]
+  },
+  {
+   "case": "cav2d-rect-pert-1e5",
+   "n": 99459,
+   "problem": "GHEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "rows": [
+    {
+     "threads": 1,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.91236637,
+     "time_min": 0.9107916120000001,
+     "time_max": 0.913975569,
+     "times": [
+      0.91236637,
+      0.913975569,
+      0.9107916120000001
+     ],
+     "phases": {
+      "analysis": 0.030734223,
+      "numeric": 0.15299677099999998,
+      "solves": 0.290243664,
+      "iterate_other": 0.16589429500000002,
+      "certificate": 0.1958402589999999,
+      "rest": 0.07668356500000005
+     },
+     "peak_rss_gib": 0.103,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "exact",
+     "speedup": 1.0,
+     "efficiency": 1.0,
+     "phase_speedup": {
+      "analysis": 1.0,
+      "numeric": 1.0,
+      "solves": 1.0,
+      "iterate_other": 1.0,
+      "certificate": 1.0,
+      "rest": 1.0
+     }
+    },
+    {
+     "threads": 2,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.7175770360000001,
+     "time_min": 0.715063623,
+     "time_max": 0.7254125969999999,
+     "times": [
+      0.715063623,
+      0.7175770360000001,
+      0.7254125969999999
+     ],
+     "phases": {
+      "analysis": 0.035508477,
+      "numeric": 0.122945678,
+      "solves": 0.251610774,
+      "iterate_other": 0.09362179400000004,
+      "certificate": 0.1631852199999999,
+      "rest": 0.050924242000000126
+     },
+     "peak_rss_gib": 0.124,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "exact",
+     "speedup": 1.2714542470391985,
+     "efficiency": 0.6357271235195993,
+     "phase_speedup": {
+      "analysis": 0.8655460779126067,
+      "numeric": 1.244425778025316,
+      "solves": 1.153542272398876,
+      "iterate_other": 1.7719623595335074,
+      "certificate": 1.2001102734671683,
+      "rest": 1.5058361595249639
+     }
+    },
+    {
+     "threads": 4,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.532039541,
+     "time_min": 0.53078948,
+     "time_max": 0.579241114,
+     "times": [
+      0.532039541,
+      0.53078948,
+      0.579241114
+     ],
+     "phases": {
+      "analysis": 0.032986317,
+      "numeric": 0.09582098700000001,
+      "solves": 0.18352685200000002,
+      "iterate_other": 0.05962541099999999,
+      "certificate": 0.12030010000000002,
+      "rest": 0.04097414800000011
+     },
+     "peak_rss_gib": 0.134,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "exact",
+     "speedup": 1.7148469233793284,
+     "efficiency": 0.4287117308448321,
+     "phase_speedup": {
+      "analysis": 0.9317264185631879,
+      "numeric": 1.5966937493557645,
+      "solves": 1.5814779191003614,
+      "iterate_other": 2.7822750773156106,
+      "certificate": 1.6279309742884658,
+      "rest": 1.871510909757046
+     }
+    },
+    {
+     "threads": 8,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.384783749,
+     "time_min": 0.382119179,
+     "time_max": 0.435383811,
+     "times": [
+      0.382119179,
+      0.384783749,
+      0.435383811
+     ],
+     "phases": {
+      "analysis": 0.029008338,
+      "numeric": 0.07770775800000002,
+      "solves": 0.11711729899999998,
+      "iterate_other": 0.045882512000000014,
+      "certificate": 0.084317894,
+      "rest": 0.030224956999999986
+     },
+     "peak_rss_gib": 0.17,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "exact",
+     "speedup": 2.3711146127431695,
+     "efficiency": 0.2963893265928962,
+     "phase_speedup": {
+      "analysis": 1.0594961696874878,
+      "numeric": 1.9688738285307361,
+      "solves": 2.4782305131541675,
+      "iterate_other": 3.61563235683347,
+      "certificate": 2.3226417277452387,
+      "rest": 2.5370942628636355
+     }
+    },
+    {
+     "threads": 16,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 0.32980357499999996,
+     "time_min": 0.304806162,
+     "time_max": 0.3578273390000001,
+     "times": [
+      0.304806162,
+      0.3578273390000001,
+      0.32980357499999996
+     ],
+     "phases": {
+      "analysis": 0.041768633,
+      "numeric": 0.07550260099999999,
+      "solves": 0.07489504599999999,
+      "iterate_other": 0.040248885,
+      "certificate": 0.06086598900000001,
+      "rest": 0.03870631800000006
+     },
+     "peak_rss_gib": 0.237,
+     "block_size": "2",
+     "ordering": "AMD",
+     "certificate_method": "exact",
+     "speedup": 2.7663932084423286,
+     "efficiency": 0.17289957552764554,
+     "phase_speedup": {
+      "analysis": 0.7358206575733518,
+      "numeric": 2.0263774886377757,
+      "solves": 3.875338617189714,
+      "iterate_other": 4.121711570395057,
+      "certificate": 3.2175647223936488,
+      "rest": 1.9811640311537753
+     }
+    }
+   ]
+  },
+  {
+   "case": "yee-pec-box-1e6",
+   "n": 1027733,
+   "problem": "GHEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "rows": [
+    {
+     "threads": 4,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 125.650302384,
+     "time_min": 125.644041844,
+     "time_max": 125.725235127,
+     "times": [
+      125.725235127,
+      125.650302384,
+      125.644041844
+     ],
+     "phases": {
+      "analysis": 6.174918525,
+      "numeric": 35.605865046,
+      "solves": 13.05908092,
+      "iterate_other": 2.602518045000002,
+      "certificate": 67.591252616,
+      "rest": 0.6247793379999962
+     },
+     "peak_rss_gib": 11.428,
+     "block_size": "8",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.0,
+     "efficiency": 1.0,
+     "phase_speedup": {
+      "analysis": 1.0,
+      "numeric": 1.0,
+      "solves": 1.0,
+      "iterate_other": 1.0,
+      "certificate": 1.0,
+      "rest": 1.0
+     }
+    },
+    {
+     "threads": 8,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 85.363356572,
+     "time_min": 85.32668029000001,
+     "time_max": 85.596662344,
+     "times": [
+      85.596662344,
+      85.32668029000001,
+      85.363356572
+     ],
+     "phases": {
+      "analysis": 3.793979489,
+      "numeric": 23.843258577,
+      "solves": 10.747417693,
+      "iterate_other": 2.2873441510000028,
+      "certificate": 44.10725106999999,
+      "rest": 0.5710866580000143
+     },
+     "peak_rss_gib": 11.862,
+     "block_size": "8",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.4719465989838374,
+     "efficiency": 0.7359732994919187,
+     "phase_speedup": {
+      "analysis": 1.6275571712770533,
+      "numeric": 1.4933304913425969,
+      "solves": 1.2150901075060692,
+      "iterate_other": 1.1377903250204864,
+      "certificate": 1.5324294980145092,
+      "rest": 1.0940184457959803
+     }
+    },
+    {
+     "threads": 16,
+     "reps": 3,
+     "valid": 3,
+     "ok": true,
+     "time_s": 69.159620783,
+     "time_min": 69.118315177,
+     "time_max": 69.179715144,
+     "times": [
+      69.159620783,
+      69.118315177,
+      69.179715144
+     ],
+     "phases": {
+      "analysis": 2.733883625,
+      "numeric": 18.793333973999996,
+      "solves": 10.910947835,
+      "iterate_other": 2.273134000000006,
+      "certificate": 33.90764552699999,
+      "rest": 0.5251812589999922
+     },
+     "peak_rss_gib": 11.316,
+     "block_size": "8",
+     "ordering": "ND",
+     "certificate_method": "exact",
+     "speedup": 1.8168159536075115,
+     "efficiency": 0.45420398840187787,
+     "phase_speedup": {
+      "analysis": 2.2586618056940884,
+      "numeric": 1.8946007714894881,
+      "solves": 1.1968786871209525,
+      "iterate_other": 1.1449030479505367,
+      "certificate": 1.9933926866782425,
+      "rest": 1.1896451506850236
+     }
+    }
+   ]
+  }
+ ]
+}

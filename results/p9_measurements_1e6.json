@@ -1,0 +1,231 @@
+{
+ "base": "main",
+ "new": "new",
+ "threshold": 0.03,
+ "geomean_ratio": 0.8370515971562423,
+ "cases": 3,
+ "comparable": 3,
+ "slower": [],
+ "faster": [
+  "syn-mem27-100",
+  "yee-pec-box-1e6"
+ ],
+ "rows": [
+  {
+   "case": "syn-mem27-100",
+   "n": 1000000,
+   "problem": "HEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "main": {
+    "reps": 8,
+    "valid": 8,
+    "ok": true,
+    "time_s": 111.2099240085,
+    "time_min": 102.49201925399998,
+    "time_max": 117.226435406,
+    "times": [
+     113.151710814,
+     115.519889549,
+     102.49201925399998,
+     115.875415555,
+     106.37042887999999,
+     117.226435406,
+     109.26813720300001,
+     108.63116489999999
+    ],
+    "wall_s": 112.048,
+    "peak_rss_gib": 15.885,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p9int/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 8,
+    "valid": 8,
+    "ok": true,
+    "time_s": 83.213161809,
+    "time_min": 82.552151338,
+    "time_max": 83.38847826900002,
+    "times": [
+     83.38847826900002,
+     82.552151338,
+     83.226215233,
+     83.200108385,
+     83.19470345,
+     83.11869333000001,
+     83.311632231,
+     83.27006481
+    ],
+    "wall_s": 83.9455,
+    "peak_rss_gib": 13.136,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p9int/bin/hsolve_int"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7482530228385,
+   "comparable": true
+  },
+  {
+   "case": "wg-square-1e6",
+   "n": 998001,
+   "problem": "GHIEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "main": {
+    "reps": 8,
+    "valid": 8,
+    "ok": true,
+    "time_s": 5.938096976500001,
+    "time_min": 5.818069607,
+    "time_max": 5.944685815,
+    "times": [
+     5.920510732,
+     5.941343886,
+     5.94448974,
+     5.944685815,
+     5.893697149,
+     5.934850067,
+     5.941680215,
+     5.818069607
+    ],
+    "wall_s": 6.640000000000001,
+    "peak_rss_gib": 1.934,
+    "factorizations": "1",
+    "block_size": "2",
+    "certificate_method": "none",
+    "completeness": "consistent",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p9int/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 8,
+    "valid": 8,
+    "ok": true,
+    "time_s": 5.9395580285000005,
+    "time_min": 5.852520136999999,
+    "time_max": 5.998529347,
+    "times": [
+     5.962196628,
+     5.938698024,
+     5.852520136999999,
+     5.860493107,
+     5.947144851,
+     5.940418033,
+     5.927876705,
+     5.998529347
+    ],
+    "wall_s": 6.6114999999999995,
+    "peak_rss_gib": 1.917,
+    "factorizations": "1",
+    "block_size": "2",
+    "certificate_method": "none",
+    "completeness": "consistent",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p9int/bin/hsolve_int"
+    ],
+    "invalid": []
+   },
+   "ratio": 1.000246047177367,
+   "comparable": true
+  },
+  {
+   "case": "yee-pec-box-1e6",
+   "n": 1027733,
+   "problem": "GHEP",
+   "hosts": [
+    "gpu01"
+   ],
+   "main": {
+    "reps": 8,
+    "valid": 8,
+    "ok": true,
+    "time_s": 88.23809230949999,
+    "time_min": 86.6989394,
+    "time_max": 93.929286439,
+    "times": [
+     86.794974797,
+     88.45715448599998,
+     93.929286439,
+     87.592241891,
+     88.019030133,
+     86.6989394,
+     88.84184468700002,
+     88.822249885
+    ],
+    "wall_s": 88.881,
+    "peak_rss_gib": 12.966,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p9int/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 8,
+    "valid": 8,
+    "ok": true,
+    "time_s": 69.1444735865,
+    "time_min": 68.964521364,
+    "time_max": 69.31330691099998,
+    "times": [
+     68.964521364,
+     69.31330691099998,
+     69.258258692,
+     69.23769353199998,
+     69.143767046,
+     69.062355918,
+     69.145180127,
+     69.117244148
+    ],
+    "wall_s": 69.7875,
+    "peak_rss_gib": 11.34,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu01"
+    ],
+    "binaries": [
+     "~/p9int/bin/hsolve_int"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7836125167345179,
+   "comparable": true
+  }
+ ]
+}
