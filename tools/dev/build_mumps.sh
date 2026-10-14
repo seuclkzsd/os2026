@@ -5,7 +5,12 @@
 #
 #   env/run.sh tools/dev/build_mumps.sh NAME [--isa ISA] [--opt LEVEL] [--gemmt] [--patch FILE]...
 #
-#   --isa    -march of every MUMPS object. Default nocona (SSE3; with -mtune=haswell
+# The default build (tools/dev/build.sh) does not call this directly but through
+# tools/dev/mumps_cache.sh, which builds the default configuration (these defaults plus
+# patches/mumps-5.8.2-l0-blocking.patch) once per cache key and reuses it. Use this script itself
+# for other configurations (link one with HS_MUMPS=<prefix> tools/dev/build.sh).
+#
+#   --isa   -march of every MUMPS object. Default nocona (SSE3; with -mtune=haswell
 #            -ftree-vectorize: conda-forge's own flags) - portable to any x86-64 CPU, and the
 #            configuration the P9 gates measured (results/p9_factspeed.md §3.3-4.5). Opt-in, NOT
 #            portable, ~0-0.4% faster in the P9 screens: x86-64-v3 needs AVX2, FMA, BMI1/2,
@@ -28,10 +33,12 @@
 #   BUILD-INFO.txt (tarball, sha256, flags, compiler, host).
 # The libraries are checked to need no glibc symbol newer than 2.17 (the cluster nodes').
 #
-# Source: https://mumps-solver.org/MUMPS_5.8.2.tar.gz, sha256 below (the same as conda-forge's
-# mumps recipe). The cluster nodes have no internet: download on a machine that has, check the
-# checksum, copy it to $HS_DEPS/src/. License: CeCILL-C (doc/CeCILL-C_V1-en.txt in the tarball;
-# THIRD_PARTY_NOTICES). Build time ~1.5 min with HS_JOBS=4 (build lane: run through guard.py).
+# Source: third_party/mumps/MUMPS_5.8.2.tar.gz in this repository - the official
+# https://mumps-solver.org/MUMPS_5.8.2.tar.gz unchanged (sha256 below, the same as conda-forge's
+# mumps recipe; checked before every unpack) - so that an offline checkout builds (the cluster
+# nodes have no internet). License: CeCILL-C (third_party/mumps/README.md, THIRD_PARTY_NOTICES).
+# Patches are applied with patch(1), or with `git apply` where patch is not installed.
+# Build time ~1.5 min with HS_JOBS=4 (build lane: run through guard.py).
 # Conda-forge's build (recipe mumps 5.8.2, build 3): Makefile.inc from their Makefile.conda.SEQ,
 # FFLAGS = the toolchain's "-march=nocona -mtune=haswell -ftree-vectorize -fPIC
 # -fstack-protector-strong -fno-plt -O2 -ffunction-sections -pipe" + -fallow-argument-mismatch,
@@ -60,14 +67,19 @@ main() {
   done
   local ver=5.8.2
   local sha=eb515aa688e6dbab414bb6e889ff4c8b23f1691a843c68da5230a33ac4db7039
-  local tarball="$HS_DEPS_SRC/MUMPS_$ver.tar.gz"
+  local tarball="$here/../../third_party/mumps/MUMPS_$ver.tar.gz"
   local build="$HS_DEPS_BUILD/mumps-$ver-$name"
   local prefix="$HS_DEPS/mumps-$ver-$name"
   deps_check "$tarball" "$sha"
   deps_unpack "$tarball" "$build"
   local p
   for p in ${patches[@]+"${patches[@]}"}; do
-    (cd "$build" && patch -p1 --forward < "$p") || deps_die "patch $p does not apply"
+    if command -v patch >/dev/null; then
+      (cd "$build" && patch -p1 --forward < "$p") || deps_die "patch $p does not apply"
+    else  # git apply as a plain patch: the ceiling keeps it from finding an enclosing repository
+      (cd "$build" && GIT_CEILING_DIRECTORIES="$(dirname "$build")" git apply -p1 "$p") ||
+        deps_die "patch $p does not apply (git apply; patch(1) is not installed)"
+    fi
   done
 
   local tune=""

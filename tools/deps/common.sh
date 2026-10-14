@@ -90,7 +90,7 @@ deps_glibc_compat() {
 # deps_check_glibc LIB: fails when LIB needs a glibc symbol version newer than 2.17.
 deps_check_glibc() {
   local bad
-  bad="$(objdump -T "$1" | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])' || true)"
+  bad="$("${OBJDUMP:-objdump}" -T "$1" | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])' || true)"
   [ -z "$bad" ] || deps_die "$1 needs glibc > 2.17: $bad"
 }
 

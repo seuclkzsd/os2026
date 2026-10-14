@@ -6,6 +6,9 @@
 export HS_CONDA_BIN="${HS_CONDA_BIN:-/share/apps/anaconda3/bin/conda}"
 export HS_CONDA_ENV="${HS_CONDA_ENV:-$HOME/envs/os2026}"
 export HS_REF_ENV="${HS_REF_ENV:-$HOME/envs/os2026-ref}"   # SLEPc baseline (tools/bench)
+# The default build's MUMPS (tools/dev/mumps_cache.sh): one cache for every work tree on the shared
+# home, so that a new clone reuses the install (builds link it by path: never delete it in use).
+export HS_MUMPS_CACHE="${HS_MUMPS_CACHE:-$HOME/deps/mumps-cache}"
 # Scheduling (docs/DESIGN.md §6, tools/run/guard.py): one run at a time in the measurement slot,
 # sized like the judging machine (16 cores, 32 GiB); builds, unit tests and smoke runs share a small
 # lane on the other socket. With two callers per node that is at most 24 of the 32 physical cores
