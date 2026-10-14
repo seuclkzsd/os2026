@@ -1,6 +1,7 @@
 // Unit tests of the MUMPS block sizes of P9 "factspeed" (src/factor/mumps_api.hpp Blocking,
-// mumps_factorization.cpp, docs/DESIGN.md §3.4): by default every MumpsFactorization keeps MUMPS'
-// own block sizes; HS_MUMPS_BLOCKING=p9 gives every instance (double and single, main objects and
+// mumps_factorization.cpp, docs/DESIGN.md §3.4): with HS_MUMPS_BLOCKING unset a MumpsFactorization
+// takes the build's default (CMake: MUMPS' own block sizes, P9 ones with HSOLVE_MUMPS_ROOT);
+// "mumps" keeps MUMPS' own; "p9" gives every instance (double and single, main objects and
 // InertiaCounter's) the full-rank panel width KEEP(420), the contribution-block row blocks
 // KEEP(57/58) and the L0-layer blocks KEEP(498/499) that only a MUMPS patched with
 // patches/mumps-5.8.2-l0-blocking.patch reads (a build with HSOLVE_MUMPS_ROOT runs these tests
@@ -29,6 +30,10 @@
 #include "hsolve/factor.hpp"
 #include "hsolve/sparse.hpp"
 #include "support/fixtures.hpp"
+
+#ifndef HSOLVE_MUMPS_BLOCKING_DEFAULT
+#define HSOLVE_MUMPS_BLOCKING_DEFAULT "mumps"
+#endif
 
 namespace {
 
@@ -138,10 +143,21 @@ class FactorPanelWidth : public ::testing::Test {};
 using Scalars = ::testing::Types<double, cplx>;
 TYPED_TEST_SUITE(FactorPanelWidth, Scalars);
 
-TYPED_TEST(FactorPanelWidth, DefaultKeepsMumpsOwnBlocking) {
-  using T = TypeParam;
-  for (const char* v : {static_cast<const char*>(nullptr), "", "mumps"}) {
+TYPED_TEST(FactorPanelWidth, UnsetMeansTheBuildsDefault) {
+  // CMake's HSOLVE_MUMPS_BLOCKING as resolved for this build (p9 with HSOLVE_MUMPS_ROOT, else mumps).
+  const auto expected = std::string(HSOLVE_MUMPS_BLOCKING_DEFAULT) == "p9" ? hs::mumps::Blocking::P9
+                                                                         : hs::mumps::Blocking::Mumps;
+  for (const char* v : {static_cast<const char*>(nullptr), ""}) {
     ScopedBlocking env(v);
+    EXPECT_EQ(hs::mumps::default_blocking(), expected);
+    EXPECT_EQ(hs::mumps::blocking_from_environment(), expected);
+  }
+}
+
+TYPED_TEST(FactorPanelWidth, MumpsKeepsMumpsOwnBlocking) {
+  using T = TypeParam;
+  {
+    ScopedBlocking env("mumps");
     EXPECT_EQ(hs::mumps::blocking_from_environment(), hs::mumps::Blocking::Mumps);
     Mumps<T, double> d(FactorOptions{});
     Mumps<T, float> s(FactorOptions{});

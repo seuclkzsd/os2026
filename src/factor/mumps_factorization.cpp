@@ -112,9 +112,16 @@ int grown_relaxation(int pct) {
 
 namespace mumps {
 
+#ifndef HSOLVE_MUMPS_BLOCKING_P9
+#define HSOLVE_MUMPS_BLOCKING_P9 0  // CMake: 1 when hsolve links a MUMPS of tools/dev/build_mumps.sh
+#endif
+
+Blocking default_blocking() { return HSOLVE_MUMPS_BLOCKING_P9 ? Blocking::P9 : Blocking::Mumps; }
+
 Blocking blocking_from_environment() {
   const char* v = std::getenv("HS_MUMPS_BLOCKING");
-  if (v == nullptr || *v == '\0' || std::strcmp(v, "mumps") == 0) return Blocking::Mumps;
+  if (v == nullptr || *v == '\0') return default_blocking();
+  if (std::strcmp(v, "mumps") == 0) return Blocking::Mumps;
   if (std::strcmp(v, "p9") == 0) return Blocking::P9;
   HS_THROW(InvalidInput, "HS_MUMPS_BLOCKING must be unset, \"mumps\" or \"p9\", got \"" << v << "\"");
 }
@@ -142,8 +149,8 @@ void MumpsFactorization<T, U>::configure_static_controls() {
   // INFOG(12) counts the negative pivots of fronts MUMPS factorizes itself; keep the root front
   // out of ScaLAPACK (a no-op for the sequential library, but it keeps the inertia exact).
   mumps_.icntl(13) = 1;
-  // Opt-in block sizes (mumps_api.hpp, Blocking): wider full-rank panels make the trailing updates
-  // of large fronts compute- instead of memory-bound.
+  // P9 block sizes (mumps_api.hpp, Blocking; the build's default or HS_MUMPS_BLOCKING): wider
+  // full-rank panels make the trailing updates of large fronts compute- instead of memory-bound.
   if (blocking_from_environment() == Blocking::P9) {
     mumps_.keep(420) = kFullRankPanelWidth;
     mumps_.keep(58) = kCbUpdateBlock;

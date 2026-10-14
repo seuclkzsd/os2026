@@ -61,14 +61,19 @@ inline CallMutex& call_mutex() {
 }
 
 /// Block sizes a MumpsFactorization gives MUMPS (P9 "factspeed", results/p9_factspeed.md):
-///   Mumps - MUMPS' own (the default);
-///   P9    - kFullRankPanelWidth, kCbUpdateBlock and, for a patched MUMPS, kL0PanelWidth /
-///           kL0Block below: every factorization of the 1e6 3-D cases 1.05-1.06x faster (1.07-1.08x
-///           with the patch), end to end 1.03-1.04x - below the 1.05x a default needs, so opt-in.
-/// Chosen per object at construction from the environment variable HS_MUMPS_BLOCKING: unset, ""
-/// or "mumps" -> Mumps, "p9" -> P9, anything else -> InvalidInput. Only the blocking changes: the
+///   Mumps - MUMPS' own;
+///   P9    - kFullRankPanelWidth, kCbUpdateBlock and, for a MUMPS patched with
+///           patches/mumps-5.8.2-l0-blocking.patch, kL0PanelWidth / kL0Block below. Every
+///           factorization of the 1e6 3-D cases 1.04-1.06x faster, end to end 1.03-1.04x with the
+///           environment's MUMPS (below the 1.05x a default needs); with the patched MUMPS 1.07-1.08x
+///           per factorization and 1.07-1.13x end to end.
+/// The build's default (default_blocking()): P9 when hsolve links a MUMPS of tools/dev/build_mumps.sh
+/// (CMake HSOLVE_MUMPS_ROOT; HSOLVE_MUMPS_BLOCKING overrides), else Mumps. Each object reads the
+/// environment variable HS_MUMPS_BLOCKING at construction: unset or "" -> the build's default,
+/// "mumps" -> Mumps, "p9" -> P9, anything else -> InvalidInput. Only the blocking changes: the
 /// same threshold-pivoted LDL^T, the same counts (test_factor_panel).
 enum class Blocking { Mumps, P9 };
+Blocking default_blocking();
 Blocking blocking_from_environment();
 
 /// MUMPS' full-rank outer panel width of LDL^T / LU fronts: KEEP(420), the block NBLR_ORIG of
