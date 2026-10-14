@@ -1,0 +1,40 @@
+{
+ "schema_version": 1,
+ "note": "P9 'mpi': the SLEPc profiles of the 1e6 head-to-head (results/cmp-p9-1e6.md), the best of five variants screened per case (results/p9_mpi.md section 2.1), starting from the 16-core 1e5 winners; for tools/bench/compare.py --slepc-profile best --slepc-profile-file results/cmp-p9-1e6-profiles.json",
+ "profiles": [
+  {
+   "scope": "case",
+   "name": "syn-mem27-100",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 1,
+    "threads": 16,
+    "bind": "none",
+    "options": {}
+   },
+   "note": "best of the P9 screening (results/p9_mpi.md section 2.1); not tuned by tools/bench/tune_slepc.py"
+  },
+  {
+   "scope": "case",
+   "name": "yee-pec-box-1e6",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 4,
+    "threads": 4,
+    "bind": "core",
+    "options": {
+     "eps_nev": "k+2",
+     "st_mat_mumps_cntl_7": "1e-10",
+     "st_mat_mumps_icntl_28": "2",
+     "st_mat_mumps_icntl_29": "2",
+     "st_mat_mumps_icntl_35": "2"
+    }
+   },
+   "note": "best of the P9 screening (results/p9_mpi.md section 2.1); not tuned by tools/bench/tune_slepc.py"
+  }
+ ]
+}
