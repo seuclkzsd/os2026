@@ -66,6 +66,9 @@ struct EngineOptions {
   int pack_threads = 2;  ///< issuing (packing) threads, 1..4
   int slots = 6;         ///< pipeline slots, pack_threads + 1 .. 8
   bool stream_stores = true;  ///< non-temporal stores when packing (x86; else memcpy)
+  /// Pack and upload a tile (and the shared operand) in chunks of about this many bytes, each
+  /// copied as soon as it is packed; 0 = whole tiles (the shared operand then in slot_bytes chunks).
+  std::size_t chunk_bytes = 0;
   bool hybrid = false;        ///< the CPU computes a share of each call (measurement option)
   /// BLAS threads of the CPU share in hybrid mode; 0 = omp_get_max_threads() minus the pipeline
   /// threads (pack_threads + 1), at least 1.

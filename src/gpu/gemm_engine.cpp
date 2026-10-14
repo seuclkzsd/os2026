@@ -142,6 +142,9 @@ struct Call {
   std::int64_t result_per_unit() const { return split_n ? m : n; }
 };
 
+// Events of the shared operand's staging ring (the most chunks in flight at once).
+constexpr int kStageRing = 64;
+
 // The model's CPU dgemm rate, flop/s.
 double cpu_rate(const EngineOptions& o) {
   const double g = o.cpu_gflops > 0.0 ? o.cpu_gflops
@@ -165,12 +168,12 @@ struct GemmEngine::Impl {
   std::vector<cublasHandle_t> handles;  // one per issuing thread
   std::vector<cudaStream_t> streams;    // one per slot
   std::vector<cudaEvent_t> done_ev;     // per slot: the tile's result is in pin_out
-  cudaEvent_t stage_ev[2] = {nullptr, nullptr};  // the shared staging buffers are free again
+  std::vector<cudaEvent_t> stage_ev;  // per staging-ring chunk: its upload is done
   cudaEvent_t shared_ev = nullptr;               // the shared operand is on the device
   double* dev_shared = nullptr;
   std::size_t shared_cap = 0;  // bytes
   std::vector<double*> dev_in, dev_out, pin_in, pin_out;
-  double* pin_stage[2] = {nullptr, nullptr};
+  double* pin_stage = nullptr;  // staging ring of the shared operand: 2 slot_bytes
 
   std::mutex call_mu;  // one call at a time (try_lock)
   std::atomic<std::int64_t> tiles_issued{0};  // lifetime count (fault injection)
@@ -241,8 +244,7 @@ GemmEngine::Impl::~Impl() {
     if (p != nullptr) L->FreeHost(p);
   for (double* p : pin_out)
     if (p != nullptr) L->FreeHost(p);
-  for (double* p : pin_stage)
-    if (p != nullptr) L->FreeHost(p);
+  if (pin_stage != nullptr) L->FreeHost(pin_stage);
   for (cudaEvent_t e : done_ev)
     if (e != nullptr) L->EventDestroy(e);
   for (cudaEvent_t e : stage_ev)
@@ -305,19 +307,27 @@ int GemmEngine::Impl::take_free_slot(Call& call) {
 bool GemmEngine::Impl::upload_shared(Call& call) {
   const double t0 = now_s();
   const View sv = call.shared();
-  const std::int64_t chunk =
-      std::max<std::int64_t>(1, static_cast<std::int64_t>(opt.slot_bytes) / (8 * sv.rows));
+  const std::int64_t col_bytes = 8 * sv.rows;
+  // Chunks of whole columns, at least chunk_bytes (or one slot without chunking), staged through
+  // a ring of 2 slot_bytes: as many chunks in flight as fit, each reused when its upload is done.
+  const std::int64_t want = opt.chunk_bytes > 0 ? static_cast<std::int64_t>(opt.chunk_bytes)
+                                                : static_cast<std::int64_t>(opt.slot_bytes);
+  const std::int64_t chunk_cols = std::max<std::int64_t>(1, want / col_bytes);
+  const std::int64_t ring = std::clamp<std::int64_t>(
+      2 * static_cast<std::int64_t>(opt.slot_bytes) / (chunk_cols * col_bytes), 1,
+      static_cast<std::int64_t>(stage_ev.size()));
   bool ok = true;
   double bytes_done = 0.0;
-  int idx = 0;
-  for (std::int64_t j0 = 0; ok && j0 < sv.cols; j0 += chunk, ++idx) {
-    const std::int64_t w = std::min(chunk, sv.cols - j0);
-    const int bi = idx & 1;
-    if (idx >= 2 && !(ok = check(L->EventSynchronize(stage_ev[bi]), "staging wait"))) break;
-    pack(View{sv.p + j0 * sv.ld, sv.rows, w, sv.ld}, pin_stage[bi], opt.stream_stores);
+  std::int64_t idx = 0;
+  for (std::int64_t j0 = 0; ok && j0 < sv.cols; j0 += chunk_cols, ++idx) {
+    const std::int64_t w = std::min(chunk_cols, sv.cols - j0);
+    const std::int64_t bi = idx % ring;
+    if (idx >= ring && !(ok = check(L->EventSynchronize(stage_ev[bi]), "staging wait"))) break;
+    double* buf = pin_stage + bi * chunk_cols * sv.rows;
+    pack(View{sv.p + j0 * sv.ld, sv.rows, w, sv.ld}, buf, opt.stream_stores);
     const std::size_t bytes = 8 * static_cast<std::size_t>(sv.rows * w);
-    ok = check(L->MemcpyAsync(dev_shared + j0 * sv.rows, pin_stage[bi], bytes,
-                              kCudaMemcpyHostToDevice, streams[0]),
+    ok = check(L->MemcpyAsync(dev_shared + j0 * sv.rows, buf, bytes, kCudaMemcpyHostToDevice,
+                              streams[0]),
                "upload of the shared operand") &&
          check(L->EventRecord(stage_ev[bi], streams[0]), "event record");
     if (ok) bytes_done += static_cast<double>(bytes);
@@ -363,7 +373,29 @@ void GemmEngine::Impl::run_issue(Call& call, int id) {
     }
     const double tp = now_s();
     const View tv = call.tile_view(t0, t1);
-    pack(tv, pin_in[s], opt.stream_stores);
+    const std::int64_t serial = tiles_issued.fetch_add(1);
+    const bool injected =
+        opt.inject_fault_after_tiles >= 0 && serial >= opt.inject_fault_after_tiles;
+    if (injected) fail("injected fault (EngineOptions::inject_fault_after_tiles)");
+    // Pack and upload in chunks of whole columns, each copied as soon as it is packed (with
+    // chunks small enough to stay in the last-level cache the copy engine reads them from there).
+    bool tok = !injected;
+    {
+      const std::int64_t col = 8 * tv.rows;
+      const std::int64_t cc =
+          opt.chunk_bytes > 0
+              ? std::max<std::int64_t>(1, static_cast<std::int64_t>(opt.chunk_bytes) / col)
+              : tv.cols;
+      for (std::int64_t j0 = 0; tok && j0 < tv.cols; j0 += cc) {
+        const std::int64_t w = std::min(cc, tv.cols - j0);
+        pack(View{tv.p + j0 * tv.ld, tv.rows, w, tv.ld}, pin_in[s] + j0 * tv.rows,
+             opt.stream_stores);
+        tok = check(L->MemcpyAsync(dev_in[s] + j0 * tv.rows, pin_in[s] + j0 * tv.rows,
+                                   8 * static_cast<std::size_t>(tv.rows * w),
+                                   kCudaMemcpyHostToDevice, streams[s]),
+                    "tile upload");
+      }
+    }
     const double pack_time = now_s() - tp;
     if (!waited_shared) {  // the shared operand's event must be recorded before streams wait on it
       std::unique_lock<std::mutex> lk(mu);
@@ -385,14 +417,7 @@ void GemmEngine::Impl::run_issue(Call& call, int id) {
     const int dldb = call.split_n ? tile_ld : shared_ld;
     const std::size_t in_bytes = static_cast<std::size_t>(tv.bytes());
     const std::size_t out_bytes = 8 * static_cast<std::size_t>(rows_t) * cols_t;
-    const std::int64_t serial = tiles_issued.fetch_add(1);
-    const bool injected =
-        opt.inject_fault_after_tiles >= 0 && serial >= opt.inject_fault_after_tiles;
-    if (injected) fail("injected fault (EngineOptions::inject_fault_after_tiles)");
-    const bool tok =
-        !injected &&
-        check(L->MemcpyAsync(dev_in[s], pin_in[s], in_bytes, kCudaMemcpyHostToDevice, streams[s]),
-              "tile upload") &&
+    tok = tok &&
         check(L->StreamWaitEvent(streams[s], shared_ev, 0), "stream wait") &&
         check_blas(L->BlasSetStream(handles[id], streams[s]), "cublasSetStream") &&
         check_blas(L->Dgemm(handles[id], call.ta ? kCublasOpT : kCublasOpN,
@@ -588,10 +613,12 @@ std::unique_ptr<GemmEngine> GemmEngine::create(const EngineOptions& opt_in, std:
         (e = alloc_pin(&I.pin_out[s], opt.slot_bytes)) != kCudaSuccess)
       return failed("CUDA set-up: " + error_text(L, e));
   }
-  for (int i = 0; i < 2; ++i)
-    if ((e = L->EventCreateWithFlags(&I.stage_ev[i], evf)) != kCudaSuccess ||
-        (e = alloc_pin(&I.pin_stage[i], opt.slot_bytes)) != kCudaSuccess)
+  I.stage_ev.assign(kStageRing, nullptr);
+  for (cudaEvent_t& ev : I.stage_ev)
+    if ((e = L->EventCreateWithFlags(&ev, evf)) != kCudaSuccess)
       return failed("CUDA set-up: " + error_text(L, e));
+  if ((e = alloc_pin(&I.pin_stage, 2 * opt.slot_bytes)) != kCudaSuccess)
+    return failed("CUDA set-up: " + error_text(L, e));
   if ((e = L->EventCreateWithFlags(&I.shared_ev, kCudaEventDisableTiming)) != kCudaSuccess)
     return failed("CUDA set-up: " + error_text(L, e));
   I.shared_cap = opt.mem_bytes - tiles_bytes;

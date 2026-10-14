@@ -16,8 +16,8 @@
 // interleaved per repetition on the same operands (C restored before every run): cpu = the BLAS
 // dgemm (all OpenMP threads), gpu = the engine with the GPU computing every column (CPU idle),
 // hyb = the hybrid engine; options appended with '-': -p<N> N issuing (packing) threads (default
-// 2), -s<N> N pipeline slots, -m<MB> slot size, -c<N> N BLAS threads for the CPU share (default
-// max - N - 1), -nt0 memcpy packing;
+// 2), -s<N> N pipeline slots, -m<MB> slot size, -k<KB> pack/upload chunk, -c<N> N BLAS threads
+// for the CPU share (default max - N - 1), -nt0 regular stores when packing;
 // wall time median [min-max] of reps, GFlop/s, the GPU's share of the flops, and the largest
 // difference to the cpu result relative to max |C|. --ld L stores all three operands with leading
 // dimension L (MUMPS' fronts: lda = ldb = ldc = NFRONT); default the tight one.
@@ -334,6 +334,7 @@ int cmd_gemm(const Args& args) {
       if (t[0] == 'p') o.pack_threads = std::stoi(t.substr(1));
       else if (t[0] == 's') o.slots = std::stoi(t.substr(1));
       else if (t[0] == 'm') o.slot_bytes = std::stoull(t.substr(1)) << 20;
+      else if (t[0] == 'k') o.chunk_bytes = std::stoull(t.substr(1)) << 10;
       else if (t[0] == 'c') o.cpu_threads = std::stoi(t.substr(1));
       else if (t == "nt0") o.stream_stores = false;
       else {

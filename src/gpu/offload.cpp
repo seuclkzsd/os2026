@@ -169,6 +169,10 @@ OffloadOptions parse_offload_options(const std::string& spec, std::string* unkno
       e.mem_bytes = static_cast<std::size_t>(v) << 20;
     } else if (key == "slot_mb" && parse_double(val, 1, 1024, &v)) {
       e.slot_bytes = static_cast<std::size_t>(v) << 20;
+    } else if (key == "chunk_kb" && parse_double(val, 0, 1 << 20, &v)) {
+      e.chunk_bytes = static_cast<std::size_t>(v) << 10;
+    } else if (key == "nt" && (val == "0" || val == "1")) {
+      e.stream_stores = val == "1";
     } else if (key == "pack" && parse_double(val, 1, 4, &v) && v == std::floor(v)) {
       e.pack_threads = static_cast<int>(v);
     } else if (key == "slots" && parse_double(val, 2, 8, &v) && v == std::floor(v)) {
