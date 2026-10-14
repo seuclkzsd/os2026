@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# hsolve-mpirun: run hsolve as one MPI job laid out over the sockets of this machine (DESIGN §3.9,
+# docs/PARALLEL.md). CMake copies it next to hsolve-mpi (build/<preset>/hsolve-mpirun).
+#
+#   hsolve-mpirun [--ranks R] [--dry-run] [--mpiexec PATH] [--] <hsolve arguments>
+#
+# Layout (the cores this process may use: its affinity, e.g. a cgroup or taskset; per NUMA node):
+#   * rank 0, the leader: every allowed core, OMP_NUM_THREADS = their number - it runs the solve as
+#     hsolve does (analysis, main factorization, Krylov, verification);
+#   * ranks 1..S, the helpers: one per NUMA node (socket) with allowed cores, bound to them,
+#     OMP_NUM_THREADS = their number - they make the certificate's two counts and solve spectrum
+#     slices at the same time while the leader waits (it never computes while they do).
+# Default R = S + 1 when the allowed cores span S >= 2 NUMA nodes; on one node R = 1 (plain hsolve:
+# helpers sharing one socket's memory bandwidth were measured slower, results/p10_mpi.md). --ranks
+# R forces R - 1 helpers: on R - 1 nodes if there are that many, else the allowed cores split into
+# R - 1 equal contiguous blocks. --dry-run prints the plan and the mpiexec command.
+# mpiexec: --mpiexec, else $MPIEXEC, else mpiexec on PATH, else $HS_REF_ENV/bin/mpiexec (the Open
+# MPI 5 of the os2026-ref environment on the cluster nodes). hsolve-mpi: next to this script, or
+# $HSOLVE_MPI. Exit status: hsolve's (0 success, 1 not successful, 2 error).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---- per-rank stage: bind this rank and exec hsolve-mpi (started by mpiexec below)
+if [ -n "${HSOLVE_MPIRUN_PLAN:-}" ]; then
+  rank="${OMPI_COMM_WORLD_RANK:-${PMIX_RANK:-${PMI_RANK:-0}}}"
+  IFS=';' read -r -a blocks <<< "$HSOLVE_MPIRUN_PLAN"
+  block="${blocks[$rank]:-}"
+  [ -n "$block" ] || { echo "hsolve-mpirun: no cores planned for rank $rank" >&2; exit 2; }
+  n=$(awk -v l="$block" 'BEGIN { n = 0; k = split(l, p, ","); for (i = 1; i <= k; i++) { if (p[i] ~ /-/) { split(p[i], r, "-"); n += r[2] - r[1] + 1 } else n++ } print n }')
+  export OMP_NUM_THREADS="$n" OPENBLAS_NUM_THREADS="$n"
+  exec taskset -c "$block" "$HSOLVE_MPIRUN_EXE" "$@"
+fi
+
+ranks="" dry=0 mpiexec="${MPIEXEC:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ranks) ranks="$2"; shift 2 ;;
+    --dry-run) dry=1; shift ;;
+    --mpiexec) mpiexec="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exe="${HSOLVE_MPI:-$here/hsolve-mpi}"
+[ -x "$exe" ] || { echo "hsolve-mpirun: $exe not found (build with -DHSOLVE_WITH_MPI=ON, or set HSOLVE_MPI)" >&2; exit 2; }
+if [ -z "$mpiexec" ]; then
+  if command -v mpiexec > /dev/null 2>&1; then mpiexec=$(command -v mpiexec)
+  elif [ -n "${HS_REF_ENV:-}" ] && [ -x "$HS_REF_ENV/bin/mpiexec" ]; then mpiexec="$HS_REF_ENV/bin/mpiexec"
+  else echo "hsolve-mpirun: no mpiexec (--mpiexec, \$MPIEXEC, PATH or \$HS_REF_ENV)" >&2; exit 2; fi
+fi
+
+# Allowed CPUs, and their NUMA nodes.
+expand() { awk -v l="$1" 'BEGIN { k = split(l, p, ","); for (i = 1; i <= k; i++) { if (p[i] ~ /-/) { split(p[i], r, "-"); for (c = r[1]; c <= r[2]; c++) print c } else if (p[i] != "") print p[i] } }'; }
+allowed=$(awk '/^Cpus_allowed_list/ { print $2 }' /proc/self/status)
+mapfile -t cpus < <(expand "$allowed")
+join() { local IFS=,; echo "$*"; }
+groups=()
+for nd in /sys/devices/system/node/node[0-9]*; do
+  [ -r "$nd/cpulist" ] || continue
+  mapfile -t ncpus < <(expand "$(cat "$nd/cpulist")")
+  mine=()
+  for c in "${cpus[@]}"; do
+    for d in "${ncpus[@]}"; do [ "$c" = "$d" ] && mine+=("$c"); done
+  done
+  [ ${#mine[@]} -gt 0 ] && groups+=("$(join "${mine[@]}")")
+done
+[ ${#groups[@]} -gt 0 ] || groups=("$(join "${cpus[@]}")")
+if [ -z "$ranks" ]; then
+  if [ ${#groups[@]} -ge 2 ]; then ranks=$(( ${#groups[@]} + 1 )); else ranks=1; fi
+fi
+[[ "$ranks" =~ ^[1-9][0-9]*$ ]] || { echo "hsolve-mpirun: --ranks must be a positive integer" >&2; exit 2; }
+helpers=$((ranks - 1))
+plan=("$(join "${cpus[@]}")")
+if [ "$helpers" -gt 0 ]; then
+  if [ "$helpers" -eq ${#groups[@]} ]; then
+    plan+=("${groups[@]}")
+  else
+    n=${#cpus[@]}
+    [ $((n % helpers)) -eq 0 ] || { echo "hsolve-mpirun: $n allowed CPUs do not split into $helpers equal blocks" >&2; exit 2; }
+    per=$((n / helpers))
+    for ((h = 0; h < helpers; h++)); do plan+=("$(join "${cpus[@]:h*per:per}")"); done
+  fi
+fi
+plan_str=$(IFS=';'; echo "${plan[*]}")
+cmd=("$mpiexec" -n "$ranks" --bind-to none -x HSOLVE_MPIRUN_PLAN="$plan_str" -x HSOLVE_MPIRUN_EXE="$exe"
+     "$here/hsolve-mpirun" "$@")
+if [ "$dry" = 1 ]; then
+  for ((r = 0; r < ranks; r++)); do echo "rank $r: cores ${plan[$r]}"; done
+  printf '%q ' "${cmd[@]}"; echo
+  exit 0
+fi
+exec "${cmd[@]}"
