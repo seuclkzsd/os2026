@@ -1,0 +1,147 @@
+{
+ "base": "main",
+ "new": "new",
+ "threshold": 0.03,
+ "geomean_ratio": 0.8066179611773125,
+ "cases": 2,
+ "comparable": 2,
+ "slower": [],
+ "faster": [
+  "syn-mem27-100",
+  "yee-pec-box-1e6"
+ ],
+ "rows": [
+  {
+   "case": "syn-mem27-100",
+   "n": 1000000,
+   "problem": "HEP",
+   "hosts": [
+    "gpu02"
+   ],
+   "main": {
+    "reps": 5,
+    "valid": 5,
+    "ok": true,
+    "time_s": 113.55653737699998,
+    "time_min": 111.04435614799999,
+    "time_max": 116.424021843,
+    "times": [
+     116.424021843,
+     113.182424163,
+     113.55653737699998,
+     114.328190776,
+     111.04435614799999
+    ],
+    "wall_s": 114.334,
+    "peak_rss_gib": 15.642,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu02"
+    ],
+    "binaries": [
+     "~/p9_p9-ordering/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 5,
+    "valid": 5,
+    "ok": true,
+    "time_s": 89.37089033199999,
+    "time_min": 88.27725393,
+    "time_max": 89.923937316,
+    "times": [
+     89.41022053999998,
+     89.923937316,
+     88.27725393,
+     89.37089033199999,
+     89.19836610299998
+    ],
+    "wall_s": 90.163,
+    "peak_rss_gib": 13.18,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu02"
+    ],
+    "binaries": [
+     "~/p9_p9-ordering/bin/hsolve_v16"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.7870166913886667,
+   "comparable": true
+  },
+  {
+   "case": "yee-pec-box-1e6",
+   "n": 1027733,
+   "problem": "GHEP",
+   "hosts": [
+    "gpu02"
+   ],
+   "main": {
+    "reps": 5,
+    "valid": 5,
+    "ok": true,
+    "time_s": 89.125692729,
+    "time_min": 86.904106002,
+    "time_max": 89.748726774,
+    "times": [
+     89.748726774,
+     89.428922637,
+     89.095695752,
+     86.904106002,
+     89.125692729
+    ],
+    "wall_s": 89.78,
+    "peak_rss_gib": 12.876,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu02"
+    ],
+    "binaries": [
+     "~/p9_p9-ordering/bin/hsolve_main"
+    ],
+    "invalid": []
+   },
+   "new": {
+    "reps": 5,
+    "valid": 5,
+    "ok": true,
+    "time_s": 73.680871136,
+    "time_min": 73.458341714,
+    "time_max": 73.953432094,
+    "times": [
+     73.953432094,
+     73.458341714,
+     73.831477347,
+     73.614098921,
+     73.680871136
+    ],
+    "wall_s": 74.312,
+    "peak_rss_gib": 11.345,
+    "factorizations": "1",
+    "block_size": "8",
+    "certificate_method": "exact",
+    "completeness": "complete",
+    "hosts": [
+     "gpu02"
+    ],
+    "binaries": [
+     "~/p9_p9-ordering/bin/hsolve_v16"
+    ],
+    "invalid": []
+   },
+   "ratio": 0.8267074160089584,
+   "comparable": true
+  }
+ ]
+}
