@@ -13,12 +13,13 @@ KIND bench runs build/mpi/seq_factor_bench (mpi_factor_bench for 2x8m) on a K(si
 fixed pivot order (--kdir: <case>.K.bin from tools/bench/mpi_dump_kernel.py, its .json for the exact
 inertia, <case>.perm: hsolve's raw pivot order from bench_factspeed_factor --perm-out); KIND hsolve
 runs the CLI (build/release/hsolve; 2x8m: mpiexec ... build/release/hsolve-mpi) on the case with its
-config (or --target), output under OUT/TAG/<case>/<layout>-r<rep>/.
+config (or --target), output under OUT/TAG/<case>/<layout>-r<rep>/ (--events: also its event log,
+<layout>-r<rep>.events.jsonl, and the helpers' .rank<r> next to it).
 
   python3 tools/bench/mpi_layouts.py run --tag T --kind bench|hsolve --layouts one:1x16,two:1x16,...
       --case NAME [--case NAME ...] [--reps 3] [--rep0 0] [--out OUT] [--root DATA] [--kdir DIR]
       [--bench-args "--modes count,full --nrhs 16 --solve-reps 3"] [--target JSON]
-      [--timeout 1500] [--lock-wait 600]
+      [--timeout 1500] [--lock-wait 600] [--mem-gb 32] [--events]
   python3 tools/bench/mpi_layouts.py eval --tag T [--out OUT] [--root DATA]    (lane: tools/eval)
   python3 tools/bench/mpi_layouts.py table --tag T [--out OUT] [--base one:1x16] [--md FILE]
 
@@ -127,6 +128,10 @@ def cmd_run(a: argparse.Namespace) -> int:
                     if out.exists():
                         subprocess.run(["rm", "-rf", str(out)], check=True)
                     args = hsolve_args(a.root, name, out, target)
+                    if a.events:
+                        for old in out.parent.glob(out.name + ".events.jsonl*"):
+                            old.unlink()
+                        args += ["--log", str(out.parent / (out.name + ".events.jsonl"))]
                 cmd = [sys.executable, str(GUARD), "--exclusive", "--cores", cores[place], "--mem-gb", str(a.mem_gb),
                        "--timeout", str(a.timeout), "--lock-wait", str(a.lock_wait), "--summary", str(gsum), "--",
                        "bash", str(RUN), split, a.kind] + args
@@ -368,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--mem-gb", type=float, default=32.0)
             p.add_argument("--timeout", type=int, default=1500)
             p.add_argument("--lock-wait", type=int, default=600)
+            p.add_argument("--events", action="store_true", help="KIND hsolve: write each run's event log")
         if name == "table":
             p.add_argument("--base", default="one:1x16")
             p.add_argument("--md", default=None)
