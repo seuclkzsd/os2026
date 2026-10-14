@@ -1,7 +1,7 @@
 # P9 "mpi": hsolve against tuned SLEPc at 1e6, and the upper bound of hybrid MPI + OpenMP MUMPS
 
-P9 measurement task "mpi" (branch `p9-mpi` from main a831d79; no change to hsolve's code, defaults or
-build). Two questions:
+P9 measurement task "mpi" (branch `p9-mpi` from main a831d79, review fixes on `p9-mpi-fix`; no change
+to hsolve's code, defaults or build). Two questions:
 
 1. **Where we stand at 1e6.** On the two 3-D 1e6 cases in core (16 cores, 32 GiB), how does hsolve
    (certificate exact / auto / off) compare with SLEPc configured like the best 16-core configurations
@@ -14,14 +14,22 @@ build). Two questions:
 
 **Answers.**
 
-* **At 1e6 hsolve wins on syn-mem27-100 and loses on yee-pec-box-1e6 with the exact certificate**
-  (medians of 3 interleaved runs, all valid): syn-mem27-100 **1.15x** (hsolve 108.0 s vs SLEPc 123.9 s),
-  yee-pec-box-1e6 **0.74x** (92.4 vs 68.3 s). The exact certificate - two inertia-only factorizations,
-  54.3 / 47.6 s, half of hsolve's run - is the whole gap: without it hsolve is 2.33x / 1.57x faster, with
-  `certificate = auto` (the randomized check, P8) 1.73x / 1.04x. SLEPc's best yee configuration
-  factorizes with BLR (`cntl_7 = 1e-10`): its numeric factorization costs what hsolve's does (24.4 vs
-  24.5 s) and makes its 78 single-RHS solves cheap; on syn BLR made every SLEPc pair inaccurate (12 of
-  12 above tol). hsolve's solves are 5-8x cheaper per right-hand side (blocks + BLAS hook).
+* **At 1e6 with the exact certificate hsolve is level with tuned SLEPc on syn-mem27-100 and loses on
+  yee-pec-box-1e6** (medians of 5 interleaved runs, all valid; SLEPc with `-eps_ncv 3k`, found by
+  screening SLEPc's Krylov group at 1e6 in the review fix, section 2.1): syn-mem27-100 **1.04x**
+  (hsolve 111.6 s vs SLEPc 115.7 s; hsolve's runs spread 102.6-117.1 s with its SCOTCH order, so per run
+  0.99-1.13x; over all 8 exact runs of both campaigns the median is 108.4 s, 1.07x), yee-pec-box-1e6
+  **0.67x** (88.9 vs 59.6 s). The exact certificate - two inertia-only factorizations, 57.1 / 45.4 s,
+  half of hsolve's run - is the gap: without it hsolve is 2.13x / 1.38x faster; with `certificate =
+  auto` (the randomized check, P8) 1.60x on syn-mem27-100 but still **0.91x** on yee-pec-box-1e6.
+  SLEPc's best yee configuration factorizes with BLR (`cntl_7 = 1e-10`, 4 x 4 ranks, ParMETIS): its
+  numeric factorization costs what hsolve's does (24.4 vs 23.5 s) and makes its 57-60 single-RHS
+  solves cheap; on syn BLR made every SLEPc pair inaccurate (12 of 12 above tol). hsolve's solves are
+  5-8x cheaper per right-hand side (blocks + BLAS hook). (The first version of this report, with
+  SLEPc's default ncv, said 1.15x / 0.74x, auto 1.73x / 1.04x, off 2.33x / 1.57x: SLEPc's syn profile
+  had not been screened for ncv, and its yee profile was bimodal - 78 or 60 solves, 68.3 or 59.8 s -
+  with 1.04x for auto inside that spread; `-eps_ncv 3k` makes SLEPc 1.08x / 1.16x faster and its
+  yee runs unimodal, section 2.2.)
 * **MPI MUMPS is slower than hsolve's path at every layout - a negative result.** Same matrix, same
   pivot order (hsolve's SCOTCH order as PERM_IN), same MUMPS 5.8.2 and controls, 16 cores of the slot,
   medians of 3 interleaved runs: the numeric factorization keeping the factors runs at
@@ -50,7 +58,9 @@ build). Two questions:
   `tools/dev/cluster_nodes.sh` before the campaign, and every timed run's guard checked its cores and
   their hyperthreads idle), measurement slot cores 16-31 (NUMA node 1), `guard.py --exclusive --mem-gb
   32`, one run at a time, 16 threads; 2026-10-14 09:26-13:22, the batches chained one guard call after
-  the other. Builds, conversions, evaluations and the test suite in the build/test lane (cores 8-15).
+  the other; the review fixes (SLEPc's Krylov group, the 5-repetition head-to-head) 14:12-15:53 on
+  the same node and slot. Builds, conversions, evaluations and the test suite in the build/test lane
+  (cores 8-15).
 * **hsolve.** main a831d79 (this branch adds only measurement tools), `tools/dev/build.sh release`
   (conda gcc 13.4, `-O3`, BLAS hook linked, route all), md5 5f93952b3005dfaa8ec96fc97d27d23b; sequential
   MUMPS 5.8.2 (conda-forge `mumps-seq`, OpenMP), SCOTCH 7.0.11 (int64), METIS 5.1.0, OpenBLAS 0.3.34
@@ -90,62 +100,120 @@ is `results/cmp-p9-1e6-profiles.json`):
 | 5 | yee-pec-box-1e6 | `4x4/core eps_nev=k+2 cntl_7=1e-10 icntl_35=2` (sequential analysis) | 70.87 | yes | 13.98 | 25.17 | 65 / 30.41 | 16.8 |
 
 (MUMPS controls carry the prefix `st_mat_mumps_`; solver s = `-log_view` setup + solve + vectors.)
-The 1e5 winners are also the 1e6 winners. Already here the MPI layouts factorize slower than one
-rank with 16 threads (syn-mem27-100: 36.6 s at 4 x 4, 51.2 s at 16 x 1 against 23.2 s; yee-pec-box-1e6
-without BLR 33.1 s at 4 x 4 against 24.1 s) - section 3 measures this on hsolve's own matrix and order.
+Among these layout / analysis / BLR variants the 1e5 winners are also the 1e6 winners. Already here
+the MPI layouts factorize slower than one rank with 16 threads (syn-mem27-100: 36.6 s at 4 x 4, 51.2 s
+at 16 x 1 against 23.2 s; yee-pec-box-1e6 without BLR 33.1 s at 4 x 4 against 24.1 s) - section 3
+measures this on hsolve's own matrix and order.
+
+**The Krylov group at 1e6 (review fix).** None of the five variants changed SLEPc's Krylov
+parameters, although SLEPc's 1e6 runs are solve-bound (syn-mem27-100: 85 of 125 s in 118
+single-RHS solves), and the 1e5 tuning (`tune-p16`, syn-mem27-46) had screened `-eps_ncv` only on an
+8 x 2 BLR incumbent, which then failed 1 of its 20 confirmation runs, so the plain `1x16` won - never
+on `1x16` itself. So the winners above were
+screened again with `tools/bench/tune_slepc.py --groups ncv,restart` at 1e6 (`-eps_ncv` k+8 / 2k /
+3k / 4k against SLEPc's default 27, then `-eps_krylovschur_restart` 0.3 / 0.7; every trial and both
+tune.json reports in `results/cmp-p9-1e6-krylov.md`):
+
+| case | configuration | screening s (solves) | confirmation, median of 2 interleaved (min-max) |
+|---|---|---|---|
+| syn-mem27-100 | `1x16` (default ncv 27) | 124.65 (118) | 124.83 (124.69-124.96) |
+| syn-mem27-100 | `1x16 eps_ncv=k+8` / `2k` / `4k` | 141.97 (142) / 121.79 (114) / 125.43 (117) | - |
+| syn-mem27-100 | **`1x16 eps_ncv=3k`** | 115.87 (105) | **115.63** (115.57-115.68) |
+| syn-mem27-100 | `1x16 eps_ncv=3k` + restart 0.3 / 0.7 | 120.39 (112) / 119.15 (109) | 118.84 (0.7) |
+| yee-pec-box-1e6 | `4x4/core` BLR profile above (default ncv 27) | 69.22 (78) | 68.82 (68.30-69.35) |
+| yee-pec-box-1e6 | ... `eps_ncv=2k` | 63.56 (68) | - |
+| yee-pec-box-1e6 | ... `eps_ncv=k+8` / `4k` | 60.26 (60) / 59.71 (58), **each 1 pair above tol** | - |
+| yee-pec-box-1e6 | **... `eps_ncv=3k`** | 58.15 (57) | **59.53** (59.01-60.04) |
+| yee-pec-box-1e6 | ... `eps_ncv=3k` + restart 0.3 / 0.7 | 68.10 (77) / 63.15 (67) | 63.82 (0.7) |
+
+`-eps_ncv 3k` (36 / 30 basis vectors) wins on both cases, by 1.08x / 1.16x, all of it in fewer
+solves (105 instead of 118, 57-59 instead of 78); it is now the profile of both cases in
+`results/cmp-p9-1e6-profiles.json`, and the head-to-head below was rerun with it. `-eps_mpd` was not
+screened: with nev = 12 it can only shrink the projected problem and the orthogonalization, which
+cost 0.7-2 s of 60-125 s. The ordering was not screened further either: MUMPS' automatic choice is
+METIS on both cases (section 3.5), and section 3.3 shows why that suits SLEPc - on syn-mem27-100
+SCOTCH would save ~8 s of analysis but cost ~6 s more numeric factorization (28.8 vs 23.1 s) and make
+the factors 14% larger (15665 vs 13746 MB), and every one of the ~105 solves reads them.
 
 ### 2.2 Result
 
-`results/cmp-p9-1e6.md` / `.json` (`compare.py`, 3 interleaved repetitions, tools/eval on every run
+`results/cmp-p9-1e6.md` / `.json` (`compare.py`, 5 interleaved repetitions, 2026-10-14 14:59-15:53,
+the SLEPc profiles of `results/cmp-p9-1e6-profiles.json` with `-eps_ncv 3k`; tools/eval on every run
 against the complete references; `--mem-gb 32`, so hsolve ran its automatic budget of 27.2 GiB and
 factorized in core):
 
-| case | solver | solver s, median [min-max] | valid | peak GiB | speedup vs SLEPc |
+| case | solver | solver s, median [min-max] | valid | peak GiB | speedup vs SLEPc (per run: min-max) |
 |---|---|---|---|---|---|
-| syn-mem27-100 | hsolve (exact) | 108.02 [103.47-108.81] | 3/3 | 15.2 | **1.15x** |
-| syn-mem27-100 | hsolve-auto (randomized) | 71.79 [69.27-72.48] | 3/3 | 16.2 | 1.73x |
-| syn-mem27-100 | hsolve-nocert | 53.18 [52.19-56.43] | 3/3 | 15.5 | 2.33x |
-| syn-mem27-100 | SLEPc `1x16` | 123.90 [117.27-124.95] | 3/3 | 12.6 | - |
-| yee-pec-box-1e6 | hsolve (exact) | 92.44 [90.77-92.60] | 3/3 | 13.2 | **0.74x** |
-| yee-pec-box-1e6 | hsolve-auto (randomized) | 65.49 [64.64-66.31] | 3/3 | 14.0 | 1.04x |
-| yee-pec-box-1e6 | hsolve-nocert | 43.48 [42.91-43.88] | 3/3 | 13.0 | 1.57x |
-| yee-pec-box-1e6 | SLEPc `4x4/core` BLR | 68.27 [59.80-68.31] | 3/3 | 15.4 | - |
+| syn-mem27-100 | hsolve (exact) | 111.61 [102.62-117.07] | 5/5 | 16.0 | **1.04x** (0.99-1.13x) |
+| syn-mem27-100 | hsolve-auto (randomized) | 72.44 [67.16-74.35] | 5/5 | 16.6 | 1.60x (1.56-1.72x) |
+| syn-mem27-100 | hsolve-nocert | 54.41 [49.88-57.06] | 5/5 | 15.6 | 2.13x (2.03-2.32x) |
+| syn-mem27-100 | SLEPc `1x16 eps_ncv=3k` | 115.68 [115.49-115.83] | 5/5 | 12.7 | - |
+| yee-pec-box-1e6 | hsolve (exact) | 88.91 [87.89-89.61] | 5/5 | 13.0 | **0.67x** (0.66-0.68x) |
+| yee-pec-box-1e6 | hsolve-auto (randomized) | 65.53 [63.69-67.07] | 5/5 | 14.2 | **0.91x** (0.89-0.94x) |
+| yee-pec-box-1e6 | hsolve-nocert | 43.12 [42.77-43.92] | 5/5 | 12.8 | 1.38x (1.36-1.39x) |
+| yee-pec-box-1e6 | SLEPc `4x4/core eps_ncv=3k` BLR | 59.58 [57.97-59.80] | 5/5 | 15.4 | - |
 
-All eigenvalue sets agree with the complete references to 3e-17..2e-14 (relative to |lambda| + ||A||/||B||).
+(Per-run ratios: SLEPc's median over each hsolve run.) All eigenvalue sets agree with the complete
+references to 3e-17..4e-14 (relative to |lambda| + ||A||/||B||).
+
+* **hsolve's spread on syn-mem27-100 is its ordering.** The SCOTCH order hsolve computes differs from
+  run to run: over the 15 hsolve runs the factor holds 1.26-1.40e9 entries, and the main numeric
+  factorization (25.3-31.3 s) and the two counts (51.7-60.2 s) follow it - the exact runs with
+  1.31e9 entries took 102.6-105.5 s, those with 1.37-1.40e9 111.6-117.1 s. SLEPc's MUMPS analysis
+  (METIS, sequential) is deterministic: 115.49-115.83 s. The first campaign's 3 exact runs drew
+  1.31-1.35e9 entries (103.5-108.8 s); over all 8 exact runs hsolve's median is 108.4 s, 1.07x of
+  SLEPc's 115.7 s. Either way hsolve with the exact certificate is within a few percent of SLEPc on
+  syn-mem27-100, not 1.15x ahead.
+* **SLEPc's yee runs with the default ncv were bimodal; with `-eps_ncv 3k` they are not.** The
+  profile of the first version (default ncv = 27) took 78 single-RHS solves (68.3-69.3 s) in 6 of
+  its 7 runs at 1e6 (screening, head-to-head, tuning) and 60 solves (59.8 s) in one (4 ranks with
+  BLR are not bitwise reproducible from run to run; the two modes differ by 18 solves).
+  The first campaign's median (68.27 s) was the slow mode, so its 1.04x for `certificate = auto`
+  sat inside that spread (0.91x against the 59.8 s run). With `-eps_ncv 3k` all 8 runs took 57-60
+  solves and 57.97-60.04 s: hsolve-auto is 0.89-0.94x of SLEPc in every run - a loss, not parity -
+  and the exact certificate 0.66-0.68x.
+
+First version of this table (`compare.py`, 3 interleaved repetitions, 09:54-10:27, SLEPc profiles
+without `-eps_ncv`; superseded): syn-mem27-100 hsolve 108.02 [103.47-108.81] / auto 71.79 / nocert
+53.18 against SLEPc `1x16` 123.90 [117.27-124.95] s (118 solves) - 1.15x / 1.73x / 2.33x;
+yee-pec-box-1e6 hsolve 92.44 [90.77-92.60] / auto 65.49 / nocert 43.48 against SLEPc 68.27
+[59.80-68.31] s (78, 60, 78 solves) - 0.74x / 1.04x / 1.57x.
 
 ### 2.3 Per-phase split
 
-`tools/bench/compare_phases.py results/raw/cmp-p9-1e6-<case>` (medians over the 3 runs, seconds;
+`tools/bench/compare_phases.py results/raw/cmp-p9fix-1e6-<case>` (medians over the 5 runs, seconds;
 hsolve's phases are exclusive and add up to its total, SLEPc's are `-log_view` events):
 
 | phase | syn hsolve | syn auto | syn nocert | syn SLEPc | yee hsolve | yee auto | yee nocert | yee SLEPc |
 |---|---|---|---|---|---|---|---|---|
-| total | 108.02 | 71.79 | 53.18 | 123.90 | 92.44 | 65.49 | 43.48 | 68.27 |
-| MUMPS analysis | 6.08 | 5.86 | 5.88 | 14.29 | 4.49 | 4.51 | 4.49 | 6.72 |
-| main numeric factorization | 28.49 | 29.41 | 28.14 | 23.23 | 24.46 | 23.54 | 23.15 | 24.40 (BLR) |
-| hsolve factor phase (ordering choice, analyses, main factorization) | 35.32 | 35.99 | 34.77 | - | 29.94 | 29.08 | 28.71 | - |
-| iterate (Krylov incl. its solves) | 17.31 | 17.79 | 17.66 | 86.29 (EPSSolve) | 14.23 | 14.22 | 14.23 | 29.51 (EPSSolve) |
-| solves: RHS / s | 168 / 15.72 | 260 / 31.09 | 168 / 16.05 | 117 / 84.26 | 136 / 11.97 | 258 / 30.24 | 136 / 11.97 | 78 / 35.48 |
-| s per RHS | 0.094 | 0.120 | 0.096 | 0.720 | 0.088 | 0.117 | 0.088 | 0.455 |
-| certificate | **54.26** (2 exact counts) | 16.94 (randomized) | 0 | - | **47.55** (2 exact counts) | 21.69 (randomized) | 0 | - |
-| verify + setup | 0.75 | 0.74 | 0.74 | - | 0.54 | 0.51 | 0.52 | - |
-| orthogonalization / vectors | - | - | - | 1.75 / 0.03 | - | - | - | 1.18 / 7.32 |
+| total | 111.61 | 72.44 | 54.41 | 115.68 | 88.91 | 65.53 | 43.12 | 59.58 |
+| MUMPS analysis | 6.21 | 6.16 | 6.08 | 14.20 | 4.45 | 4.51 | 4.60 | 6.73 |
+| main numeric factorization | 29.67 | 29.52 | 28.92 | 23.22 | 23.46 | 23.54 | 22.95 | 24.39 (BLR) |
+| hsolve factor phase (ordering choice, analyses, main factorization) | 36.41 | 36.48 | 35.70 | - | 28.83 | 28.75 | 28.59 | - |
+| iterate (Krylov incl. its solves) | 17.44 | 17.47 | 17.86 | 78.17 (EPSSolve) | 14.23 | 14.39 | 14.19 | 19.95 (EPSSolve) |
+| solves: RHS / s | 168 / 15.84 | 252 / 31.36 | 168 / 16.27 | 105 / 75.94 | 136 / 11.97 | 258 / 30.58 | 136 / 11.92 | 60 / 27.25 |
+| s per RHS | 0.094 | 0.124 | 0.097 | 0.723 | 0.088 | 0.119 | 0.088 | 0.454 |
+| certificate | **57.07** (2 exact counts) | 17.16 (randomized) | 0 | - | **45.36** (2 exact counts) | 21.85 (randomized) | 0 | - |
+| verify + setup | 0.74 | 0.74 | 0.74 | - | 0.51 | 0.51 | 0.53 | - |
+| orthogonalization / vectors | - | - | - | 1.98 / 0.03 | - | - | - | 0.75 / 8.21 |
 
-* **The certificate is the gap.** hsolve's run is three factorizations of ~25-28 s each on one pivot
-  order (main + two inertia-only counts): 28.5 + 54.3 s of 108 s on syn-mem27-100, 24.5 + 47.6 of 92.4
-  s on yee-pec-box-1e6. SLEPc factorizes once. Everything else hsolve does faster: the analysis
-  (SCOTCH 4.5-6.1 s vs MUMPS' sequential METIS 14.3 s / ParMETIS 6.7 s) and the Krylov phase (17.3 vs
-  86.3 s, 14.2 vs 29.5 + 7.3 s): hsolve's block solves cost 0.09 s per right-hand side against SLEPc's
-  0.72 s (full-rank factors, one RHS per call) and 0.46 s (BLR factors).
+* **The certificate is the gap.** hsolve's run is three factorizations of ~23-30 s each on one pivot
+  order (main + two inertia-only counts): 29.7 + 57.1 s of 111.6 s on syn-mem27-100, 23.5 + 45.4 of
+  88.9 s on yee-pec-box-1e6. SLEPc factorizes once. Everything else hsolve does faster: the analysis
+  (SCOTCH 4.5-6.2 s vs MUMPS' sequential METIS 14.2 s / ParMETIS 6.7 s) and the Krylov phase (17.4 vs
+  78.2 s, 14.2 vs 20.0 + 8.2 s): hsolve's block solves cost 0.09 s per right-hand side against SLEPc's
+  0.72 s (full-rank factors, one RHS per call) and 0.45 s (BLR factors). On yee-pec-box-1e6 even the
+  randomized certificate (21.9 s) costs more than hsolve's lead without a certificate (16.5 s).
 * **SLEPc's yee configuration wins with BLR.** Low-rank compression at `cntl_7 = 1e-10` keeps SLEPc's
-  4 x 4 factorization at 24.4 s (33.1 s without BLR) and its solves at 0.46 s per RHS. hsolve does not
+  4 x 4 factorization at 24.4 s (33.1 s without BLR) and its solves at 0.45 s per RHS. hsolve does not
   use BLR by default (rejected at 1e5 in P1); a BLR factor's inertia is that of the compressed matrix,
   so the exact certificate would still need its own double-precision full-rank counts (DESIGN §3.4) -
   the user's decision for the default.
-* **SLEPc's 1 x 16 numeric factorization of syn-mem27-100 is faster than hsolve's** (23.2 vs 28.5 s):
+* **SLEPc's 1 x 16 numeric factorization of syn-mem27-100 is faster than hsolve's** (23.2 vs 29.7 s):
   MUMPS' automatic ordering takes METIS there (INFOG(7) = 5, section 3.5), hsolve's adaptive choice is
   SCOTCH. In the same bench (section 3.3) METIS needs 6.76e12 flops and 23.1 s against 8.95e12 flops and
-  28.8 s for the SCOTCH order - input for the ordering lever (P9 ordering).
+  28.8 s for the SCOTCH order - input for the ordering lever (P9 ordering), as is the run-to-run spread
+  of hsolve's SCOTCH order (section 2.2: 1.26-1.40e9 factor entries, exact runs 102.6-117.1 s).
 
 ## 3. Hybrid MPI + OpenMP MUMPS: the upper bound (task 2)
 
@@ -163,7 +231,12 @@ hsolve's phases are exclusive and add up to its total, SLEPc's are `-log_view` e
   a centralized dense RHS, residual of the first column checked). Phases start and end at MPI barriers.
 * **Matrix and order.** `tools/bench/mpi_dump_kernel.py` writes K(sigma) of the case (upper triangle of
   A - sigma B on the union pattern, exactly what hsolve's pencil hands MUMPS) and its exact inertia from
-  the complete reference. hsolve's adaptive ordering picks SCOTCH on both cases (P7 logs, 16 threads);
+  the complete reference. (Review fix: the first version built K with scipy's sparse sum, which drops
+  entries that cancel to zero, did not force the diagonal into the pattern, ignored sigma for a
+  standard problem and lost the lower triangle of a not exactly symmetric matrix; the fixed version
+  follows hsolve's loader and ShiftedPencil and has tests in `tests/py/test_bench_mpi.py`. On the two
+  P9 cases - HEP at sigma = 0, no stored zeros, no cancellations, full diagonal - both versions write
+  byte-identical files, so no number of this section changes.) hsolve's adaptive ordering picks SCOTCH on both cases (P7 logs, 16 threads);
   the sequential bench ran that analysis once at 16 threads (SCOTCH inside MUMPS, as hsolve) and wrote its
   SYM_PERM; every layout then analyses with it as PERM_IN (ICNTL(7) = 1), as hsolve's InertiaCounter
   does with the main order. Flops of this order: syn-mem27-100 8.95e12 (hsolve's P7 run: 8.04e12 - SCOTCH
@@ -253,7 +326,7 @@ The same with ICNTL(7) = 5 (each mode analyses for itself; medians of 3):
   51.8 = 85 s in hsolve's P7 run (SCOTCH at 8.04e12); hsolve's cost model priced METIS at 128 s against
   SCOTCH's 109 s on this case (P7 log, `candidates`). On yee-pec-box-1e6 METIS and SCOTCH need the same flops (7.05e12 vs 7.13e12) and
   SCOTCH's analysis is 8 s cheaper. This is also why SLEPc's 1 x 16 factorization of syn-mem27-100
-  takes 23.2 s against hsolve's 28.5 s (section 2.3): MUMPS' automatic choice there is METIS (section 3.5).
+  takes 23.2 s against hsolve's 29.7 s (section 2.3): MUMPS' automatic choice there is METIS (section 3.5).
 
 ### 3.4 Parallel analysis (ParMETIS)
 
@@ -360,8 +433,9 @@ hsolve's order, sequential MUMPS, inertia-only counts, every count exact):
   1.3x that would justify an MPI helper (MPI singleton + `MPI_Comm_spawn`, or a count server), so no
   design is proposed and docs/DESIGN.md is unchanged.
 * **Projected effect, had hsolve adopted the best layout** (2 x 8, hsolve's order; section 2.3 phases
-  scaled by the section 3.2 ratios): syn-mem27-100 108.0 -> ~125 s (6.1 + 28.5 / 0.84 + 54.3 / 0.83 +
-  (17.3 - 15.7) + 15.7 / 0.92 + 1.1), yee-pec-box-1e6 92.4 -> ~106 s - 0.86-0.87x. At 1e5, where hsolve
+  scaled by the section 3.2 ratios): syn-mem27-100 111.6 -> ~130 s (6.2 + 29.7 / 0.84 + 57.1 / 0.83 +
+  (17.4 - 15.8) + 15.8 / 0.92 + 1.3), yee-pec-box-1e6 88.9 -> ~103 s (4.5 + 23.5 / 0.85 + 45.4 / 0.83 +
+  (14.2 - 12.0) + 12.0 / 0.94 + 1.4) - 0.86x on both. At 1e5, where hsolve
   takes 0.3-3 s, the helper ranks alone would cost about as much as the whole solve: starting an Open
   MPI 5.0.11 job that only calls MPI_Init / MPI_Finalize takes 1.65-1.80 s on c005 (1-8 ranks, 3 runs
   each, lane; section 5), before any matrix is distributed.
@@ -373,9 +447,11 @@ hsolve's order, sequential MUMPS, inertia-only counts, every count exact):
 * **Where the 1e6 time can come from instead** (inputs for the other P9 levers, not measured further
   here): the factorization kernel (310 / 295 GF/s of a ~600 GF/s FP64 peak of 16 Silver 4314 cores at
   AVX-512 frequency; P9 factspeed), the ordering (METIS saves 24% of the flops of SCOTCH on
-  syn-mem27-100, section 3.3; P9 ordering), and the certificate's cost - the exact counts are the whole
-  gap to SLEPc on yee-pec-box-1e6 (0.74x with them, 1.57x without), where SLEPc's BLR factorization
-  wins; `certificate = auto` (P8, randomized) gives 1.73x / 1.04x.
+  syn-mem27-100, section 3.3, and the run-to-run spread of hsolve's SCOTCH order, section 2.2; P9
+  ordering), and the certificate's cost - against SLEPc tuned at 1e6 the exact counts turn hsolve's
+  2.13x / 1.38x without a certificate into 1.04x / 0.67x; `certificate = auto` (P8, randomized) gives
+  1.60x / 0.91x, so on yee-pec-box-1e6, where SLEPc's BLR factorization wins, hsolve loses with either
+  certificate.
 
 ## 5. Commands
 
@@ -388,18 +464,26 @@ tools/dev/build.sh release && bash tools/bench/mpi_build.sh            # lane
 # K(sigma) and its exact inertia (lane), per case:
 python3 tools/run/guard.py --skip-busy-check --mem-gb 12 --timeout 900 -- \
   python3 tools/bench/mpi_dump_kernel.py --root $D --case syn-mem27-100 --out $S/k/syn-mem27-100.K.bin
-# SLEPc screening (slot), variant v = 1..5; v1 = results/cmp-p9-1e6-profiles.json, the others as in 2.1:
+# SLEPc screening (slot), variant v = 1..5; v1 = the first profiles file (fd27a13), the others as in 2.1:
 python3 tools/run/guard.py --exclusive --timeout 2700 --mem-gb 32 -- python3 tools/bench/compare.py \
   syn-mem27-100 yee-pec-box-1e6 --tag p9-screen-v$v --cores 16-31 --solvers slepc --slepc-profile best \
   --slepc-profile-file prof_v$v.json --reps 1 --root $D --mem-gb 32 --timeout 1500 --out-dir $S/cmp
-# head-to-head (slot), one call per case, then the merge and the phases (lane):
+# SLEPc's Krylov group (slot, review fix; results/cmp-p9-1e6-krylov.md), from the first profiles file;
+# yee-pec-box-1e6 with --from-profile:
+python3 tools/run/guard.py --exclusive --timeout 2700 --mem-gb 32 -- python3 tools/bench/tune_slepc.py \
+  $CASE --cores 16-31 --tag p9fix-krylov --root $D --mem-gb 32 --timeout 900 --groups ncv,restart \
+  --screen-reps 1 --confirm-reps 2 --confirm-top 1 --flaky-confirm-reps 2 \
+  --profiles-file results/cmp-p9-1e6-profiles.json [--from-profile]
+python3 tools/bench/tune_slepc.py --report results/raw/p9fix-krylov/*/tune.json
+# head-to-head (slot), one call per case, then the merge and the phases (lane); the first version
+# ran the same with --tag cmp-p9-1e6-$CASE --reps 3 and the first profiles file:
 python3 tools/run/guard.py --exclusive --timeout 2700 --mem-gb 32 -- python3 tools/bench/compare.py \
-  $CASE --tag cmp-p9-1e6-$CASE --cores 16-31 --solvers hsolve,hsolve-auto,hsolve-nocert,slepc \
-  --slepc-profile best --slepc-profile-file results/cmp-p9-1e6-profiles.json --reps 3 --root $D \
-  --mem-gb 32 --timeout 1500 --out-dir $S/cmp
+  $CASE --tag cmp-p9fix-1e6-$CASE --cores 16-31 --solvers hsolve,hsolve-auto,hsolve-nocert,slepc \
+  --slepc-profile best --slepc-profile-file results/cmp-p9-1e6-profiles.json --reps 5 --root $D \
+  --mem-gb 32 --timeout 1500 --out-dir $S/fix/cmp
 python3 tools/bench/compare_merge.py --tag cmp-p9-1e6 --out-dir results \
-  $S/cmp/cmp-p9-1e6-syn-mem27-100.json@c005 $S/cmp/cmp-p9-1e6-yee-pec-box-1e6.json@c005
-python3 tools/bench/compare_phases.py results/raw/cmp-p9-1e6-$CASE
+  $S/fix/cmp/cmp-p9fix-1e6-syn-mem27-100.json@c005 $S/fix/cmp/cmp-p9fix-1e6-yee-pec-box-1e6.json@c005
+python3 tools/bench/compare_phases.py results/raw/cmp-p9fix-1e6-$CASE
 # hsolve's order, once per case (slot): SCOTCH inside the sequential MUMPS at 16 threads
 OMP_NUM_THREADS=16 build/mpi/seq_factor_bench --matrix $S/k/$CASE.K.bin --ordering 3 --threads 16 \
   --write-perm $S/k/$CASE.perm.bin --modes full --nrhs 16 --solve-reps 1 --expect-neg $NEG
