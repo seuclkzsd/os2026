@@ -55,6 +55,12 @@ class Dissector {
       stats->top_separator_s = top_separator_s_;
       stats->work_s = static_cast<double>(work_ns_.load()) * 1e-9;
       stats->critical_path_s = static_cast<double>(critical_ns_.load()) * 1e-9;
+      stats->separator.coarsen_s = static_cast<double>(sep_ns_[0].load()) * 1e-9;
+      stats->separator.runs_s = static_cast<double>(sep_ns_[1].load()) * 1e-9;
+      stats->separator.uncoarsen_s = static_cast<double>(sep_ns_[2].load()) * 1e-9;
+      stats->separator.small_s = static_cast<double>(sep_ns_[3].load()) * 1e-9;
+      stats->extract_s = static_cast<double>(extract_ns_.load()) * 1e-9;
+      stats->leaf_s = static_cast<double>(leaf_ns_.load()) * 1e-9;
       stats->depth_separator.clear();
       for (const auto& d : depth_separator_) stats->depth_separator.push_back(d.load());
       while (!stats->depth_separator.empty() && stats->depth_separator.back() == 0)
@@ -68,7 +74,10 @@ class Dissector {
     order_[static_cast<std::size_t>(pos)] = pc.label.empty() ? local : pc.label[local];
   }
 
+  static std::int64_t ns(double seconds) { return static_cast<std::int64_t>(seconds * 1e9); }
+
   void leaf(const Piece& pc) {
+    Timer t;
     ++leaves_;
     if (pc.g.n <= kMaxMinimumDegree && pc.g.edges() > 0) {
       const std::vector<std::int32_t> md = minimum_degree(pc.g);
@@ -76,6 +85,7 @@ class Dissector {
     } else {
       for (std::int32_t k = 0; k < pc.g.n; ++k) place(pc, k, pc.first + k);
     }
+    leaf_ns_ += ns(t.seconds());
   }
 
   // Accounts the work of one piece (started at t, after `path_ns` of work on its ancestors):
@@ -100,7 +110,13 @@ class Dissector {
       add_work(work, pc->path_ns);
       return;
     }
-    const std::vector<std::uint8_t> where = vertex_separator(g, pc->seed, p_.separator);
+    SeparatorTiming timing;
+    const std::vector<std::uint8_t> where =
+        vertex_separator(g, pc->seed, p_.separator, nullptr, &timing);
+    sep_ns_[0] += ns(timing.coarsen_s);
+    sep_ns_[1] += ns(timing.runs_s);
+    sep_ns_[2] += ns(timing.uncoarsen_s);
+    sep_ns_[3] += ns(timing.small_s);
     if (pc->depth == 0) top_separator_s_ = work.seconds();
     std::int32_t count[3] = {0, 0, 0};
     for (const std::uint8_t w : where) ++count[w];
@@ -118,6 +134,7 @@ class Dissector {
     for (std::int32_t v = 0; v < g.n; ++v)
       if (where[v] == kSeparator) place(*pc, v, pos++);
 
+    Timer extract;
     std::unique_ptr<Piece> half[2];
     for (int side = 0; side < 2; ++side) {
       auto h = std::make_unique<Piece>();
@@ -134,6 +151,7 @@ class Dissector {
       h->depth = pc->depth + 1;
       half[side] = std::move(h);
     }
+    extract_ns_ += ns(extract.seconds());
     const std::int64_t path = pc->path_ns;
     pc.reset();  // free the parent before descending
     half[0]->path_ns = half[1]->path_ns = add_work(work, path);
@@ -149,7 +167,8 @@ class Dissector {
   std::vector<std::int32_t> order_;
   static constexpr int kMaxDepth = 64;
   std::atomic<std::int64_t> separators_{0}, leaves_{0}, top_separator_{0}, work_ns_{0},
-      critical_ns_{0};
+      critical_ns_{0}, extract_ns_{0}, leaf_ns_{0};
+  std::atomic<std::int64_t> sep_ns_[4] = {};
   double top_separator_s_ = 0.0;  // written by the task at depth 0 only
   std::atomic<std::int64_t> depth_separator_[kMaxDepth] = {};
   std::mutex error_mutex_;

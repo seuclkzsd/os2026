@@ -658,8 +658,10 @@ std::vector<std::uint8_t> bisect_once(const Graph& g, Random& rng, const Separat
 }  // namespace
 
 std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
-                                           const SeparatorParams& p, SeparatorTrace* trace) {
+                                           const SeparatorParams& p, SeparatorTrace* trace,
+                                           SeparatorTiming* timing) {
   HS_ASSERT(g.n >= 1, "vertex_separator: empty graph");
+  Lap stage;
   Random rng(seed);
   const std::int64_t max_part = max_part_weight(g, p.imbalance);
   SeparatorTrace local;
@@ -667,6 +669,7 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
   std::vector<std::uint8_t> where;
   if (g.n < kTwoStageSize) {
     where = bisect_once(g, rng, p, max_part, p.init_tries, tr);
+    if (timing) timing->small_s += stage.lap();
   } else {
     // A few contractions without a weight bound (METIS: CoarsenTo = max(100, n/30)).
     Lap timer;
@@ -674,6 +677,7 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     const std::int32_t target = std::max<std::int32_t>(100, g.n / 30);
     h.build(g, rng, g.total_vwgt, target, kTwoStageLevels);
     const double outer_coarsen = timer.lap();
+    if (timing) timing->coarsen_s += stage.lap();
     const Graph& mid = h.top(g);
     const int tries = std::max(1, static_cast<int>(0.7 * p.init_tries));
     // Independent runs, each with its own seed: the same result whichever thread runs which.
@@ -682,14 +686,20 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     std::uint64_t run_seed[kRuns];
     for (int r = 0; r < kRuns; ++r) run_seed[r] = rng.next();
     const bool parallel = mid.n >= kParallelRunSize;
-    for (int r = 0; r < kRuns; ++r) {
+    // A taskgroup, not a taskwait: the caller (the dissection) may already have spawned other
+    // tasks from the task it runs in - the other half of a separator - and a taskwait would wait
+    // for those whole subtrees too (P9: at n = 1e6 the 16-thread dissection took 7.3 s for 18 s
+    // of work, the trial runs' wall time 16 s instead of 3 s summed over the separators).
+#pragma omp taskgroup
+    {
+      for (int r = 0; r < kRuns; ++r) {
 #pragma omp task if (parallel) default(shared) firstprivate(r)
-      {
-        Random run_rng(run_seed[r]);
-        runs[r] = bisect_once(mid, run_rng, p, max_part, tries, tr ? &run_traces[r] : nullptr);
+        {
+          Random run_rng(run_seed[r]);
+          runs[r] = bisect_once(mid, run_rng, p, max_part, tries, tr ? &run_traces[r] : nullptr);
+        }
       }
     }
-#pragma omp taskwait
     std::int64_t best_w = -1, best_diff = 0;
     int best = 0;
     for (int r = 0; r < kRuns; ++r) {
@@ -704,6 +714,7 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     where = std::move(runs[best]);
     runs.clear();
     timer.lap();
+    if (timing) timing->runs_s += stage.lap();
     if (tr) {
       local = std::move(run_traces[best]);
       local.coarsen_s = outer_coarsen;
@@ -717,6 +728,7 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     NodeFm fm(g.n);
     h.uncoarsen(g, rng, fm, where, max_part, p, tr);
     if (tr) local.refine_s += timer.lap();
+    if (timing) timing->uncoarsen_s += stage.lap();
   }
   if (trace) {
     // Collected coarsest first; report finest first.

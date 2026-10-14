@@ -8,7 +8,7 @@
 //   bench_ordering_cost --case DIR --ordering O [--threads 16] [--numeric 0|1] [--counts 1]
 //       [--solves 5] [--block-solves 3] [--blocks 4,8] [--max-mb 27000] [--perm-in FILE]
 //       [--perm-out FILE] [--nd-leaf L] [--nd-imbalance F] [--nd-coarsen C] [--nd-tries T]
-//       [--nd-passes P] [--nd-seed S] [--nd-embedding auto|compressed|full]
+//       [--nd-passes P] [--nd-seed S] [--nd-embedding auto|compressed|full] [--nd-profile 0|1]
 //
 // O: FactorOptions::ordering - 0 AMD, 2 AMF, 3 SCOTCH, 4 PORD, 5 METIS, 6 QAMD (MUMPS, serial,
 // inside the analysis), 10 hsolve's nested dissection (hs::compute_ordering with --threads
@@ -16,7 +16,9 @@
 // -1 with --perm-in FILE: a pivot order from a .npy file (int32, 1-based pivot positions, as
 // --perm-out writes them: the analysed object's SYM_PERM). DIR holds A.npz (and B.npz) and
 // config.json (sigma = target.sigma). The numeric steps are skipped when --numeric 0 or the
-// in-core estimate exceeds --max-mb MB.
+// in-core estimate exceeds --max-mb MB. --nd-profile 1 (real T) first runs the nested dissection
+// alone (hs::ordering::nested_dissection, --nd-* options) and reports its DissectionStats: wall
+// time, work, critical path, and where the work went (separator stages, extraction, leaves).
 // Output: one JSON line - order / entries (mumps_input_size), analyze_s (ordering included),
 // ordering_s (hsolve ND only: compute_ordering), given_s (= analyze_s - ordering_s for ND and
 // --perm-in), nd_* (OrderingStats), est_flops, est_entries, est_incore_mb, factorize_s,
@@ -47,6 +49,7 @@
 #include <nlohmann/json.hpp>
 
 #include "driver/internal.hpp"
+#include "factor/ordering_detail.hpp"
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
 #include "hsolve/io.hpp"
@@ -72,6 +75,7 @@ struct Args {
   double max_mb = 27000.0;
   fs::path perm_in, perm_out;
   hs::OrderingOptions nd;
+  bool nd_profile = false;
 };
 
 double median(std::vector<double> v) {
@@ -89,6 +93,44 @@ void fill(std::vector<T>& x, std::mt19937_64& rng) {
       xi = T(u(rng), u(rng));
     else
       xi = u(rng);
+  }
+}
+
+// --nd-profile 1 (real T): hs::ordering::nested_dissection on the pencil's graph with the --nd-*
+// options, timed apart, with its DissectionStats (work, critical path, where the work went).
+template <class T>
+json nd_profile(const hs::ShiftedPencil<T>& pencil, const hs::OrderingOptions& o, int threads) {
+  if constexpr (hs::is_complex_v<T>) {
+    return json{{"skipped", "complex"}};
+  } else {
+    hs::Timer t;
+    hs::ordering::Graph g = hs::ordering::graph_from_upper(static_cast<std::int32_t>(pencil.order()),
+                                                           pencil.rowptr().data(), pencil.colind().data());
+    const double graph_s = t.seconds();
+    hs::ordering::DissectionParams p;
+    p.separator.imbalance = o.imbalance;
+    p.separator.coarsen_to = static_cast<std::int32_t>(o.coarsen_to);
+    p.separator.init_tries = o.init_tries;
+    p.separator.refine_passes = o.refine_passes;
+    p.leaf_size = static_cast<std::int32_t>(o.leaf_size);
+    p.seed = o.seed;
+    hs::ordering::DissectionStats st;
+    t.reset();
+    const auto order = hs::ordering::nested_dissection(std::move(g), p, threads, &st);
+    return json{{"graph_s", graph_s},
+                {"seconds", t.seconds()},
+                {"work_s", st.work_s},
+                {"critical_path_s", st.critical_path_s},
+                {"top_separator_s", st.top_separator_s},
+                {"sep_coarsen_s", st.separator.coarsen_s},
+                {"sep_runs_s", st.separator.runs_s},
+                {"sep_uncoarsen_s", st.separator.uncoarsen_s},
+                {"sep_small_s", st.separator.small_s},
+                {"extract_s", st.extract_s},
+                {"leaf_s", st.leaf_s},
+                {"separators", st.separators},
+                {"leaves", st.leaves},
+                {"depth_separator", st.depth_separator}};
   }
 }
 
@@ -114,6 +156,7 @@ int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>
               {"threads", args.threads},
               {"sigma", sigma}};
 
+  if (args.nd_profile) out["nd_profile"] = nd_profile(pencil, args.nd, args.threads);
   auto f = hs::make_mumps_factorization<T>(fo);
   double ordering_s = 0.0;
   hs::Timer t;
@@ -272,6 +315,8 @@ int main(int argc, char** argv) {
         args.nd.refine_passes = std::stoi(v);
       else if (k == "--nd-seed")
         args.nd.seed = std::stoull(v);
+      else if (k == "--nd-profile")
+        args.nd_profile = std::stoi(v) != 0;
       else if (k == "--nd-embedding")
         args.nd.embedding = v == "compressed" ? hs::OrderingOptions::Embedding::Compressed
                             : v == "full"     ? hs::OrderingOptions::Embedding::Full

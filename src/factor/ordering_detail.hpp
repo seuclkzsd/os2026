@@ -127,12 +127,22 @@ struct SeparatorTrace {
   double refine_s = 0.0;                ///< time in projection + FM refinement
 };
 
+/// Wall time of vertex_separator's stages, added to by every call that receives it (benches; the
+/// fields are plain doubles: one SeparatorTiming per thread or per call).
+struct SeparatorTiming {
+  double coarsen_s = 0.0;    ///< two-stage: contractions of the input graph down to the mid graph
+  double runs_s = 0.0;       ///< two-stage: the trial bisections of the mid graph (wall time)
+  double uncoarsen_s = 0.0;  ///< two-stage: projection and refinement back to the input graph
+  double small_s = 0.0;      ///< graphs below kTwoStageSize: the whole (single) bisection
+};
+
 /// Multilevel vertex separator of g (g.n >= 1). Returns the part label of every vertex. The
 /// separator is minimal in the FM sense (no single move reduces its weight within the balance
 /// constraint) but not optimal. Deterministic in (g, seed, params). O(edges * levels).
 std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
                                            const SeparatorParams& params,
-                                           SeparatorTrace* trace = nullptr);
+                                           SeparatorTrace* trace = nullptr,
+                                           SeparatorTiming* timing = nullptr);
 
 /// Weight of the separator and of the two halves of `where`, and whether it is a valid vertex
 /// separator of g (no edge between parts 0 and 1). For tests and assertions. O(edges).
@@ -176,6 +186,11 @@ struct DissectionStats {
                                  ///< critical). Exact with 1 thread; with more, a piece's
                                  ///< time includes waiting for its stolen trial bisections
   int threads = 1;               ///< OpenMP threads that ran the dissection
+  // Where the work went (summed over the pieces, like work_s): separators by stage
+  // (SeparatorTiming), the extraction of the two halves, the leaves' minimum degree.
+  SeparatorTiming separator;
+  double extract_s = 0.0;
+  double leaf_s = 0.0;
 };
 
 /// Nested-dissection elimination order of g with `threads` OpenMP threads (>= 1): order[k] =
