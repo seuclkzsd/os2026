@@ -40,6 +40,17 @@ def test_equal_flops_speedup_removes_the_pivot_orders_luck(tmp_path):
     assert p["equal_flops_speedup"] == pytest.approx((10 + 27) / (10 + 18))
     lo, hi = p["bootstrap"]["speedup"]
     assert lo == pytest.approx(40.0 / 26.0) and hi == pytest.approx(40.0 / 26.0)  # identical runs
+    assert p["gate_pass_probability"] == 1.0  # every 5-run gate sees 40 / 26 >= 1.05
+    gf.main([str(rd), "--boot", "50", "--bar", "1.6", "--json", str(out)])
+    assert json.loads(out.read_text())["cases"]["case1"]["pooled"]["gate_pass_probability"] == 0.0
+
+
+def test_gate_probability_counts_the_draws_that_reach_the_bar():
+    base = [{"time": t} for t in (100.0, 100.0, 110.0, 110.0)]
+    new = [{"time": 100.0}]
+    # Median of 1 draw per binary: base 110 (ratio 1.1) or 100 (ratio 1.0) with probability 1/2 each.
+    p = gf.gate_probability(base, new, reps=1, bar=1.05, n_boot=4000)
+    assert p == pytest.approx(0.5, abs=0.05)
 
 
 def test_samples_are_pooled_and_invalid_runs_dropped(tmp_path):

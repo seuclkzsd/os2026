@@ -2,7 +2,7 @@
 """End-to-end A/B of tools/bench/ab_cases.py runs, pooled and normalised for the pivot order's flops.
 
     python3 tools/bench/factspeed_gate_flops.py [--base main] [--new new] [--boot 10000]
-        [--md OUT.md] [--json OUT.json] RUNDIR [RUNDIR...]
+        [--gate-reps 5] [--bar 1.05] [--md OUT.md] [--json OUT.json] RUNDIR [RUNDIR...]
 
 P9 "factspeed" (results/p9_factspeed.md §4.5): at n = 1e6 SCOTCH draws a different pivot order in
 every run (docs/DESIGN.md §3.4), and the flops of those orders scatter by more than the effect of a
@@ -17,7 +17,9 @@ reports per case, per sample and pooled:
   * the rest of a run (time_total_s - numeric_s - time_certificate_s: analysis, iteration, I/O)
     and the end-to-end speedup at equal flops: (rest + F * rate) of base over that of new, F the
     median flops of all runs of the case (both binaries, all samples);
-  * pooled: a bootstrap interval (2.5-97.5%) of both speedups, resampling each binary's runs.
+  * pooled: a bootstrap interval (2.5-97.5%) of both speedups, resampling each binary's runs, and
+    the probability that a gate of --gate-reps runs per binary (median ratio) reaches --bar,
+    drawing that many runs per binary from the pooled ones.
 The run directories need the result directories (report.json, evaluation.json) of every run.
 """
 from __future__ import annotations
@@ -88,6 +90,19 @@ def bootstrap(base: list[dict[str, Any]], new: list[dict[str, Any]], f_ref: floa
     return {"speedup": interval(sp), "equal_flops_speedup": interval(eq)}
 
 
+def gate_probability(base: list[dict[str, Any]], new: list[dict[str, Any]], reps: int, bar: float,
+                     n_boot: int, seed: int = 2027) -> float:
+    """Share of gates of `reps` runs per binary (drawn from the pooled runs) whose median speedup
+    reaches `bar`."""
+    rng = random.Random(seed)
+    hits = 0
+    for _ in range(n_boot):
+        tb = med([rng.choice(base)["time"] for _ in range(reps)])
+        tn = med([rng.choice(new)["time"] for _ in range(reps)])
+        hits += tb / tn >= bar
+    return hits / n_boot
+
+
 def row(case: str, label: str, s: dict[str, Any]) -> str:
     """One markdown table row; the pooled row carries the bootstrap intervals."""
     sb, sn = s["base"], s["new"]
@@ -106,12 +121,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", default="main")
     ap.add_argument("--new", default="new")
     ap.add_argument("--boot", type=int, default=10000, help="bootstrap resamples of the pooled runs")
+    ap.add_argument("--gate-reps", type=int, default=5, help="runs per binary of one gate")
+    ap.add_argument("--bar", type=float, default=1.05, help="speedup a gate must reach")
     ap.add_argument("--md")
     ap.add_argument("--json")
     a = ap.parse_args(argv)
     dirs = [Path(p) for p in a.run_dirs]
     data = load(dirs)
-    doc: dict[str, Any] = {"base": a.base, "new": a.new, "run_dirs": [str(d) for d in dirs], "cases": {}}
+    doc: dict[str, Any] = {"base": a.base, "new": a.new, "run_dirs": [str(d) for d in dirs],
+                           "gate_reps": a.gate_reps, "bar": a.bar, "cases": {}}
+    notes = []
     lines = [f"| case | sample | runs {a.base} / {a.new} | {a.base} s [min-max] | {a.new} s [min-max] | speedup | "
              f"flops {a.base} / {a.new} | s per Tflop {a.base} / {a.new} | per-flop speedup | "
              f"rest s {a.base} / {a.new} | speedup at equal flops |", "|" + "---|" * 11]
@@ -129,14 +148,18 @@ def main(argv: list[str] | None = None) -> int:
             s = stats(b, n, f_ref)
             if name == "pooled":
                 s["bootstrap"] = bootstrap(b, n, f_ref, a.boot)
+                s["gate_pass_probability"] = gate_probability(b, n, a.gate_reps, a.bar, a.boot)
                 entry["pooled"] = s
+                notes.append(f"{case} {s['gate_pass_probability']:.2f}")
             else:
                 entry["samples"][name] = s
             label = "**pooled**" if name == "pooled" else "/".join(Path(name).parts[-2:])
             lines.append(row(case, label, s))
         doc["cases"][case] = entry
     lines += ["", "speedup = median time of the base / median time of the new binary (> 1: new faster); "
-              "pooled intervals: bootstrap 2.5-97.5% over the runs of each binary."]
+              "pooled intervals: bootstrap 2.5-97.5% over the runs of each binary.",
+              "", f"Probability that a gate of {a.gate_reps} runs per binary (median ratio) reaches "
+              f"{a.bar}x, drawn from the pooled runs: " + ", ".join(notes) + "."]
     md = "\n".join(lines) + "\n"
     if a.md:
         Path(a.md).write_text(md)
