@@ -76,7 +76,7 @@ def test_hsolve_table_uses_valid_runs_only():
     base, mpi = _cells(lines, "one:1x16"), _cells(lines, "two:1+2x8")
     assert base[2] == "2/3" and base[3].startswith("11.000")   # median of the two valid runs
     assert mpi[2] == "3/3" and mpi[4] == "2.00"                 # 11 / 5.5
-    assert mpi[7] == "1.50"
+    assert mpi[8] == "1.50"                                     # certificate phase
 
 
 def test_cli_table_reads_the_campaign_files(tmp_path, capsys):
