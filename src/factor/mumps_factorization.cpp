@@ -18,6 +18,12 @@
 #include "hsolve/factor.hpp"
 #include "hsolve/util.hpp"
 
+// CMake (HSOLVE_MUMPS_BLOCKING): 1 when the build's default block sizes are P9 - by default when
+// hsolve links a MUMPS of tools/dev/build_mumps.sh (mumps_api.hpp, Blocking).
+#ifndef HSOLVE_MUMPS_BLOCKING_P9
+#define HSOLVE_MUMPS_BLOCKING_P9 0
+#endif
+
 namespace hs {
 
 namespace {
@@ -111,10 +117,6 @@ int grown_relaxation(int pct) {
 }  // namespace
 
 namespace mumps {
-
-#ifndef HSOLVE_MUMPS_BLOCKING_P9
-#define HSOLVE_MUMPS_BLOCKING_P9 0  // CMake: 1 when hsolve links a MUMPS of tools/dev/build_mumps.sh
-#endif
 
 Blocking default_blocking() { return HSOLVE_MUMPS_BLOCKING_P9 ? Blocking::P9 : Blocking::Mumps; }
 

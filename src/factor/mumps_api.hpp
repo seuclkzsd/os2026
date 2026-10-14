@@ -200,7 +200,8 @@ class Instance {
   int& icntl(int i) { return s_->icntl[i - 1]; }
   U& cntl(int i) { return s_->cntl[i - 1]; }
   /// MUMPS' internal KEEP array (exposed by [sd]mumps_c.h; set by JOB=-1, read at analysis and
-  /// factorization). Only measurement code touches it (MumpsControlOverrides).
+  /// factorization). Written only for the block sizes above (Blocking) and by measurement code
+  /// (MumpsControlOverrides).
   int& keep(int i) { return s_->keep[i - 1]; }
   int keep(int i) const { return s_->keep[i - 1]; }
   int infog(int i) const { return s_->infog[i - 1]; }
