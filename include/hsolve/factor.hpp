@@ -221,6 +221,12 @@ struct OrderingOptions {
   /// before the dissection when that leaves at most 85% of the vertices (METIS and SCOTCH do the
   /// same): e.g. the two variables of every node of a vector field.
   bool compress = true;
+  /// > 0: every separator is refined, after FM, by the minimum vertex cut in a band of this many
+  /// BFS layers on each side of it (a maximum flow), in [0, 16]. FM stops in local minima on
+  /// meshes (separators of a Yee grid 12-14% above its plane separators); the cut finds the
+  /// smallest separator in the band: MUMPS flops of the order -27% on yee-pec-box-1e5, -10%
+  /// geomean over 19 data cases (src/factor/ordering_separator.cpp, results/p9_ordering.md).
+  int flow_depth = 2;
   std::uint64_t seed = 2026;    ///< seed of the (counter-based, thread-independent) random choices
   /// Complex T only. Compressed: order the n-vertex graph of K, then eliminate the two embedding
   /// variables of every vertex back to back (half the graph; right when most couplings are

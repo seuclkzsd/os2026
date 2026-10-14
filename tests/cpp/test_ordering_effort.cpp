@@ -232,6 +232,46 @@ TEST(FactorOrderingSeparator, FinalistsAreValidDeterministicAndThreadIndependent
   EXPECT_TRUE(ord::check_separator(g, ord::vertex_separator(g, 7, p)).valid);
 }
 
+TEST(FactorOrderingSeparator, FlowRefinementNeverEnlargesTheSeparator) {
+  // The minimum cut in the band is accepted only when it beats FM's separator (weight, then
+  // balance), and the FM round after it only improves: the separator with the flow weighs at
+  // most the one without, for every seed (same coarse levels, same FM before the flow).
+  struct Case {
+    std::int32_t n;
+    Edges edges;
+  };
+  const Case cases[] = {{24 * 24 * 24, grid_edges(24, 24, 24)}, {60 * 50, grid_edges(60, 50)}};
+  for (const Case& cs : cases) {
+    const ord::Graph g = graph_from_edges(cs.n, cs.edges);
+    ord::SeparatorParams fm;
+    ord::SeparatorParams flow = fm;
+    flow.flow_depth = 2;
+    for (std::uint64_t seed : {1ULL, 2ULL, 3ULL, 4ULL}) {
+      const auto a = ord::vertex_separator(g, seed, fm);
+      const auto b = ord::vertex_separator(g, seed, flow);
+      const ord::SeparatorCheck ca = ord::check_separator(g, a), cb = ord::check_separator(g, b);
+      ASSERT_TRUE(cb.valid) << "n=" << g.n << " seed " << seed;
+      EXPECT_LE(cb.weight[2], ca.weight[2]) << "n=" << g.n << " seed " << seed;
+      const std::int64_t max_part = static_cast<std::int64_t>(0.6 * static_cast<double>(g.n)) + 1;
+      EXPECT_LE(std::max(cb.weight[0], cb.weight[1]), max_part);
+      // Thread-independent like everything else.
+      std::vector<std::uint8_t> par;
+#pragma omp parallel num_threads(3) default(shared)
+#pragma omp single
+      par = ord::vertex_separator(g, seed, flow);
+      EXPECT_EQ(par, b);
+    }
+  }
+  // On the 24^3 grid the flow finds a plane (576 vertices) for most seeds.
+  const ord::Graph g = graph_from_edges(24 * 24 * 24, grid_edges(24, 24, 24));
+  ord::SeparatorParams flow;
+  flow.flow_depth = 2;
+  int planes = 0;
+  for (std::uint64_t seed = 1; seed <= 8; ++seed)
+    planes += ord::check_separator(g, ord::vertex_separator(g, seed, flow)).weight[2] == 24 * 24;
+  EXPECT_GE(planes, 4);
+}
+
 TEST(FactorOrderingDissection, TopEffortIsThreadIndependentAndOnlyChangesTheTop) {
   const ord::Graph g = graph_from_edges(30 * 30 * 30, grid_edges(30, 30, 30));
   ord::DissectionParams p;

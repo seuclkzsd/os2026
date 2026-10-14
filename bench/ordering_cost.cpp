@@ -9,7 +9,7 @@
 //       [--solves 5] [--block-solves 3] [--blocks 4,8] [--max-mb 27000] [--perm-in FILE]
 //       [--perm-out FILE] [--nd-leaf L] [--nd-imbalance F] [--nd-coarsen C] [--nd-tries T]
 //       [--nd-passes P] [--nd-runs R] [--nd-finalists F] [--nd-compress 0|1]
-//       [--nd-top-depth D] [--nd-top-size S] [--nd-top-runs R] [--nd-top-finalists F] [--nd-seed S] [--nd-embedding auto|compressed|full] [--nd-profile 0|1]
+//       [--nd-top-depth D] [--nd-top-size S] [--nd-top-runs R] [--nd-top-finalists F] [--nd-flow L] [--nd-seed S] [--nd-embedding auto|compressed|full] [--nd-profile 0|1]
 //
 // O: FactorOptions::ordering - 0 AMD, 2 AMF, 3 SCOTCH, 4 PORD, 5 METIS, 6 QAMD (MUMPS, serial,
 // inside the analysis), 10 hsolve's nested dissection (hs::compute_ordering with --threads
@@ -80,6 +80,9 @@ struct Args {
   hs::OrderingOptions nd;
   bool nd_profile = false;
   int nd_mode = -1;  // SeparatorParams::refine_mode for --ordering 11 (-1: default)
+  int flow_trials = 0;  // SeparatorParams::flow_in_trials for --ordering 11
+  int flow_min = 0;     // SeparatorParams::flow_min_vertices for --ordering 11
+  int flow_finest = 1;  // SeparatorParams::flow_finest_only for --ordering 11
 };
 
 double median(std::vector<double> v) {
@@ -104,7 +107,7 @@ void fill(std::vector<T>& x, std::mt19937_64& rng) {
 // options, timed apart, with its DissectionStats (work, critical path, where the work went).
 template <class T>
 json nd_profile(const hs::ShiftedPencil<T>& pencil, const hs::OrderingOptions& o, int threads, int mode = -1,
-                std::vector<int>* perm = nullptr) {
+                std::vector<int>* perm = nullptr, int flow_trials = 0, int flow_min = 0, int flow_finest = 1) {
   if constexpr (hs::is_complex_v<T>) {
     if (perm) HS_THROW(Unsupported, "--ordering 11 needs a real pencil");
     return json{{"skipped", "complex"}};
@@ -132,6 +135,10 @@ json nd_profile(const hs::ShiftedPencil<T>& pencil, const hs::OrderingOptions& o
     p.leaf_size = static_cast<std::int32_t>(o.leaf_size);
     p.seed = o.seed;
     if (mode >= 0) p.separator.refine_mode = mode;
+    p.separator.flow_depth = o.flow_depth;
+    p.separator.flow_in_trials = flow_trials != 0;
+    p.separator.flow_min_vertices = flow_min;
+    p.separator.flow_finest_only = flow_finest != 0;
     hs::ordering::DissectionStats st;
     t.reset();
     const auto order = hs::ordering::nested_dissection(std::move(g), p, threads, &st);
@@ -207,7 +214,7 @@ int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>
     f->set_pivot_order(std::move(perm));
   } else if (args.ordering == 11) {
     std::vector<int> perm;
-    out["nd_profile"] = nd_profile(pencil, args.nd, args.threads, args.nd_mode, &perm);
+    out["nd_profile"] = nd_profile(pencil, args.nd, args.threads, args.nd_mode, &perm, args.flow_trials, args.flow_min, args.flow_finest);
     ordering_s = t.seconds();
     f->set_pivot_order(std::move(perm));
   } else if (args.ordering < 0) {
@@ -366,6 +373,14 @@ int main(int argc, char** argv) {
         args.nd.separator_finalists = std::stoi(v);
       else if (k == "--nd-seed")
         args.nd.seed = std::stoull(v);
+      else if (k == "--nd-flow")
+        args.nd.flow_depth = std::stoi(v);
+      else if (k == "--nd-flow-trials")
+        args.flow_trials = std::stoi(v);
+      else if (k == "--nd-flow-finest")
+        args.flow_finest = std::stoi(v);
+      else if (k == "--nd-flow-min")
+        args.flow_min = std::stoi(v);
       else if (k == "--nd-mode")
         args.nd_mode = std::stoi(v);
       else if (k == "--nd-profile")

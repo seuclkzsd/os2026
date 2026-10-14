@@ -497,11 +497,11 @@ OrderingOptions nd_ordering_options(bool effort);
 /// predicted ordering time; it then costs kNdEffortTime times the ordering time and saves the
 /// factors kNdEffortFlops of their flops and kNdEffortEntries of their entries (steps.cpp).
 constexpr double kNdEffortWorkRatio = 30.0;
-constexpr int kNdEffortDepth = 4;
+constexpr int kNdEffortDepth = 2;
 constexpr int kNdEffortRuns = 16;
-constexpr double kNdEffortTime = 1.5;
-constexpr double kNdEffortFlops = 0.93;
-constexpr double kNdEffortEntries = 0.98;
+constexpr double kNdEffortTime = 1.2;
+constexpr double kNdEffortFlops = 0.97;
+constexpr double kNdEffortEntries = 0.99;
 
 /// Orderings the adaptive analysis chooses from, in order of preference on near-equal scores: AMD,
 /// SCOTCH, hsolve's nested dissection (multithreaded), METIS, PORD (steps.cpp: why this order).

@@ -139,6 +139,15 @@ struct SeparatorParams {
   int finalists = 1;              ///< two-stage scheme: the best this many trial separators (on
                                   ///< the mid graph) are refined down to the input graph, where
                                   ///< the best one is kept (1: METIS' scheme)
+  int flow_depth = 0;             ///< > 0: after FM, the minimum vertex cut in a band of this
+                                  ///< many BFS layers on each side of the separator (max flow,
+                                  ///< FlowRefiner in ordering_separator.cpp; compute_ordering: 2)
+  bool flow_finest_only = true;   ///< the flow on the input graph only, not on the coarser
+                                  ///< levels (same separators at a fraction of the cost: the
+                                  ///< coarse levels' weighted networks need 80-95 phases)
+  bool flow_in_trials = false;    ///< two-stage scheme: also in the trial bisections of the mid
+                                  ///< graph (with flow_finest_only: on the mid graph itself)
+  std::int32_t flow_min_vertices = 0;  ///< no flow on graphs with fewer vertices
 };
 
 /// What vertex_separator did, level by level (index 0 = the input graph), for benches and tests.

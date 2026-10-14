@@ -329,6 +329,8 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
       o.top_finalists > o.top_runs)
     HS_THROW(InvalidInput, "OrderingOptions: need top_depth, top_size >= 0 and 1 <= top_finalists <= top_runs <= 64, got "
                                << o.top_depth << ", " << o.top_finalists << ", " << o.top_runs);
+  if (o.flow_depth < 0 || o.flow_depth > 16)
+    HS_THROW(InvalidInput, "OrderingOptions.flow_depth must lie in [0, 16], got " << o.flow_depth);
   if (o.init_tries < 1 || o.refine_passes < 0)
     HS_THROW(InvalidInput, "OrderingOptions: init_tries must be >= 1 and refine_passes >= 0, got "
                                << o.init_tries << ", " << o.refine_passes);
@@ -370,6 +372,7 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
   p.separator.refine_passes = o.refine_passes;
   p.separator.runs = o.separator_runs;
   p.separator.finalists = o.separator_finalists;
+  p.separator.flow_depth = o.flow_depth;
   p.top_depth = o.top_depth;
   p.top_size = o.top_size > 0 ? o.top_size : std::numeric_limits<std::int64_t>::max();
   p.top_runs = o.top_runs;
