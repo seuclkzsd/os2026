@@ -109,11 +109,13 @@ Result factor_and_solve(const hs::CsrMatrix<double>& a, double sigma) {
   return r;
 }
 
-// The shift halfway between two consecutive eigenvalues near the middle of the spectrum, and the
-// number of eigenvalues below it.
+// The shift halfway across the widest gap among 64 consecutive eigenvalues a third into the
+// spectrum (well inside it, far from both neighbours), and the number of eigenvalues below it.
 std::pair<double, hs::index_t> gap_shift(const std::vector<double>& w) {
-  const std::size_t i = w.size() / 3;
-  return {0.5 * (w[i] + w[i + 1]), static_cast<hs::index_t>(i + 1)};
+  std::size_t best = w.size() / 3;
+  for (std::size_t i = best; i + 1 < w.size() && i < w.size() / 3 + 64; ++i)
+    if (w[i + 1] - w[i] > w[best + 1] - w[best]) best = i;
+  return {0.5 * (w[best] + w[best + 1]), static_cast<hs::index_t>(best + 1)};
 }
 
 TEST(GpuHook, InertiaIsTheExactCountWithTheGpuOffAndOn) {
