@@ -63,6 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.bench.ab_cases import GUARD, PROBLEM, collect, hsolve_command, report_fields  # noqa: E402
 
 PHASES = ("analysis", "numeric", "solves", "iterate_other", "certificate", "rest")
+LABELS = dict(zip(PHASES, ("analysis", "factorization", "solves", "iteration", "certificate", "rest")))
 ORDERINGS = {0: "AMD", 2: "AMF", 3: "SCOTCH", 4: "PORD", 5: "METIS", 6: "QAMD", 7: "auto", 10: "ND"}
 
 
@@ -209,7 +210,7 @@ def cmd_table(a: argparse.Namespace) -> int:
         if last["speedup"]:
             lines.append("")
             lines.append(f"Phase speedups {base['threads']} -> {last['threads']} threads: " + ", ".join(
-                f"{k} {f(v)}x" for k, v in last["phase_speedup"].items() if v))
+                f"{LABELS[k]} {f(v)}x" for k, v in last["phase_speedup"].items() if v))
         lines.append("")
     md = "\n".join(lines)
     if a.md:
