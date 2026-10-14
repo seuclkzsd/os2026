@@ -90,7 +90,7 @@ brackets: its multithreaded orderings differ from run to run); count = one Inert
 | syn-mem27-100 | ND P5c (m1, taskwait bug) | 1 | 7.99 (7.38) | 6.81e12 | 1.17e9 | 24.0 | 22.4 | 0.627 | 91.3 |
 | syn-mem27-100 | **ND P9** | 3 | **3.05 (2.44)** | **6.72e12** | 1.16e9 | **23.5** | **22.1** | 0.628 | **85.2** |
 | syn-mem27-100 | ND P9 + effort | 3 | 3.31 (2.71) | 6.75e12 | 1.16e9 | 23.4 | 21.9 | 0.630 | 85.0 |
-| syn-mem27-100 | geometric (lattice) | - | - | 6.73e12 | 1.16e9 | - | - | - | (reference: coordinates known) |
+| syn-mem27-100 | geometric (lattice) | - | - | 6.72e12 | 1.16e9 | - | - | - | (reference: coordinates known) |
 | yee-pec-box-1e6 | AMD | - | 0.92 (P7 logs) | 6.28e13 | 3.49e9 | - | - | - | - |
 | yee-pec-box-1e6 | SCOTCH | 3 | 4.3-4.7 | 7.01e12 (0.97-1.03) | 1.15e9 | 24.0 | 23.1 | 0.629 | 88.1 |
 | yee-pec-box-1e6 | METIS | 3 | 13.4 | 7.05e12 | 1.16e9 | 24.7 | 23.1 | 0.635 | 97.7 |
@@ -108,12 +108,13 @@ brackets: its multithreaded orderings differ from run to run); count = one Inert
   takes 0.94-0.96 of a factorization.
 * **SCOTCH (main's choice on both 3-D cases) is not the best ordering at 1e6**: on syn-mem27-100 its
   16-thread orders vary between 8.5e12 (P7) and 1.11e13 flops (1.25-1.63x METIS / ND); on
-  yee-pec-box-1e6 it equals METIS. ND P9 saves **23.5 s (syn-mem27-100) and 17.9 s
+  yee-pec-box-1e6 it equals METIS. ND P9 saves **18.5 s (syn-mem27-100) and 14.4 s
   (yee-pec-box-1e6) of the three factorizations against SCOTCH's median run**, and its parallel
   ordering 2.0-2.4 s against SCOTCH's 4.3-6.3 s serial analysis.
-* Geometric references (`~/p9_p9-ordering/geo_nd.py`, `geo_yee.py`: coordinate bisection of the
-  lattice / of the Yee edge grid, plane separators, `bench_ordering_cost --perm-in`): ND P9 is within
-  0% (syn-mem27-100) and 2.7% (yee-pec-box-1e6) of them. Before the flow refinement hsolve's ND
+* Geometric references (`tools/bench/ordering_geometric.py lattice 100 100 100` / `yee 92 71 54`:
+  coordinate bisection of the lattice / of the Yee edge grid with plane separators, then
+  `bench_ordering_cost --ordering -1 --perm-in`): ND P9 is within 0% (syn-mem27-100) and 2.7%
+  (yee-pec-box-1e6) of them. Before the flow refinement hsolve's ND
   was 40% above the Yee reference while its top separator was only 12-14% above the plane (8472-8615
   vs 7543 unknowns): the deeper, irregular separators and their larger borders cost the rest.
 * wg-square-1e6 (2-D, GHIEP: no counts in the real run): AMD stays cheapest for the whole run
@@ -321,7 +322,9 @@ Three changes (10be12a), all in `src/driver/steps.cpp`:
 
    ```bash
    S=$HOME/p9_p9-ordering
-   python3 $S/merge_fit.py $S/fit2          # ord16.jsonl, ord4.jsonl, cases/ (links)
+   python3 tools/bench/ordering_fit_merge.py --base $HOME/p5b_anaint_fix --nd $S/m8 --nd $S/m5 \
+     --extra $S/m4 --cases data/cases/* $HOME/p7_p7-membudget/data/cases/{syn-mem27-100,yee-pec-box-1e6} \
+     --out $S/fit2                          # ord16.jsonl, ord4.jsonl, cases/ (links)
    python3 tools/run/guard.py --skip-busy-check --mem-gb 11 --timeout 1100 -- \
      build/release/bench_anaint_fix_fit --ord16 $S/fit2/ord16.jsonl --ord4 $S/fit2/ord4.jsonl \
      --data $S/fit2/cases --loo 1 --verbose 1
@@ -410,7 +413,7 @@ Medians of the phases (reports):
 | yee-pec-box-1e6 | main | SCOTCH | 89.13 | 29.12 (4.63, 23.54) | 14.26 (11.98) | 45.47 | 6.83e12 | 1.18e9 | 12.8 |
 | yee-pec-box-1e6 | new | ND (+ effort) | 73.68 | 22.97 (2.74, 19.33) | 13.22 (10.96) | 36.94 | 5.45e12 | 1.04e9 | 11.3 |
 
-The gain is the factorizations (main + 2 certificate counts: -19.8 s / -14.5 s), the analysis
+The gain is the factorizations (main + 2 certificate counts: -19.6 s / -12.7 s), the analysis
 (-2.9 s / -1.9 s) and the solves (-1.7 s / -1.0 s, fewer factor entries); peak RSS -1.5..-2.3 GiB.
 Both cases pass the gate (>= 1.05x, every run valid, certificate exact).
 

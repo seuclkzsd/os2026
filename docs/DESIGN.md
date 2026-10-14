@@ -388,7 +388,7 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
       次、FM 20 遍、双侧或两种 FM、其它种子——都在 ±1% 的几何平均内，单例 ±5–10%。
     - 实测（16 线程，测量槽，`bench/ordering_cost.cpp`）：1e6 时排序 2.0–2.4 s（SCOTCH 整个分析 4.3–6.3 s 串行，
       METIS 13–14 s），因子 flops 为 SCOTCH 中位运行的 0.76（syn-mem27-100）/ 0.77（yee-pec-box-1e6），三次分解
-      分别省 23.5 s、17.9 s；10 个 1e5 三维测例上分析 + 3 次分解 + 回代比最好的 MUMPS 排序省 7–24%。
+      分别省 18.5 s、14.4 s；10 个 1e5 三维测例上分析 + 3 次分解 + 回代比最好的 MUMPS 排序省 7–24%。
 
 ### 3.4b ops（`include/hsolve/operator.hpp`）
 - 稀疏乘积走 §3.2 的内核，构造参数 `KernelPath kernels`（默认 Auto；Reference 只换稀疏乘积，修正
