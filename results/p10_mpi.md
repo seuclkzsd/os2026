@@ -14,19 +14,21 @@ that pay as an optional multi-process mode of hsolve (section 3; `docs/DESIGN.md
 * **Processes pay where they get their own memory bandwidth - one per socket - and where the work
   splits into independent factorizations.** Two processes, one per socket, each make an 8-thread
   inertia count in the time one alone takes (27.1 vs 27.0 s at 1e6), so the certificate's two counts
-  at once take 27.1 / 22.5 s instead of 35.3 / 30.4 s for one process spreading 16 threads over both
-  sockets and 43.3 / 35.5 s on one socket (1e5: 0.50-0.52 s instead of 1.1-1.2 s / 0.85 s). On ONE
-  socket two processes slow each other down (each 1.6-1.8x), confirming P9 (section 2).
-* **MPI MUMPS across two sockets (task 1b)** factorizes 1.13-1.38x faster than the sequential MUMPS
-  spread over both at 1e5, but only 0.95x / 1.10x at 1e6, and needs a distributed main factorization;
-  for the certificate it loses to one count per socket (37.2 vs 27.1 s). Not adopted (section 2.2).
+  at once take 27.1 / 22.5 s instead of 35.2 / 29.7 s for one process spreading 16 threads over both
+  sockets and 43.2 / 35.7 s on one socket (1e5: 0.49-0.54 s instead of 1.1-1.2 s / 0.85 s). On ONE
+  socket two processes slow each other down (each 1.4-1.8x), confirming P9 (section 2).
+* **MPI MUMPS across two sockets (task 1b)** factorizes 1.16-1.39x faster than the sequential MUMPS
+  spread over both at 1e5, but only 0.95x / 1.09x at 1e6, and needs a distributed main factorization;
+  for the certificate it loses to one count per socket (37.3 vs 27.1 s). Not adopted (section 2.2).
 * **Implemented: hsolve-mpi, a leader + one helper per socket** (`mpiexec -n 1+S hsolve-mpi`, or
   `hsolve-mpirun`, which reads the NUMA topology; `docs/PARALLEL.md`, DESIGN §3.9). The leader runs the
   solve on all cores exactly as hsolve does; the helpers, each on its socket, make the nearest
   certificate's two counts at once and solve the slices of window targets, while the leader waits -
   no core is ever shared. Results equal hsolve's (exact integer counts, the same slices; every run of
-  every campaign valid); a failing helper task is redone by the leader; the single-process hsolve and
-  its default are unchanged. Tests run the protocol over threads and over MPI with 1, 2 and 3 ranks.
+  the final code valid - an earlier version gave slice helpers too little memory and missed 4 pairs
+  of one window, which tools/eval caught, section 4); a failing helper task is redone by the leader;
+  the single-process hsolve and its default are unchanged. Tests run the protocol over threads and
+  over MPI with 1, 2 and 3 ranks.
 * **Measured end to end (5 interleaved repetitions, every run valid; section 4).** On two sockets (8 +
   8 cores) against hsolve spread over the same cores: **1e6 nearest 1.10x** (syn-mem27-100 75.4 -> 68.3
   s, yee-pec-box-1e6 64.1 -> 58.5 s; against hsolve on one socket 1.28x / 1.23x), 1e5 3-D nearest
@@ -75,7 +77,7 @@ that pay as an optional multi-process mode of hsolve (section 3; `docs/DESIGN.md
   completeness against the complete reference); bench runs check INFOG(12) against the exact
   inertia of the complete reference (1e6, syn-mem27-46, yee-pec-box-1e5).
 
-## 2. Measure first: what a process per socket buys (screening, 3 interleaved repetitions)
+## 2. Measure first: what a process per socket buys (5 interleaved repetitions)
 
 ### 2.1 Phases
 
@@ -86,55 +88,55 @@ the pair takes the slower one), one numeric factorization keeping the factors, o
 solve; medians [min-max] in seconds, x = speedup over `one:1x16` (hsolve's layout on one socket).
 Every count reproduced the exact inertia.
 
-**1e6** (a1e6c: counts only; a1e6: the rest):
+**1e6** (a1e6c, counts only: the counts of one:1x16, one:2x8, two:1x16 and two:2x8; a1e6: the rest):
 
 | case | layout | one count | count pair | x | factorization | x | 16-RHS solve | x |
 |---|---|---|---|---|---|---|---|---|
-| syn-mem27-100 | one:1x16 | 21.59 | 43.19 [43.18-43.36] | 1.00 | 22.94 [22.93-23.01] | 1.00 | 0.842 | 1.00 |
-| syn-mem27-100 | one:1x8 | 26.96 | 53.93 | 0.80 | 28.24 | 0.81 | 0.934 | 0.90 |
-| syn-mem27-100 | one:2x8 (two counts at once on one socket) | 47.95 | 47.95 [47.75-48.00] | 0.90 | - | - | - | - |
-| syn-mem27-100 | two:1x16 | 17.33 | 34.65 [34.04-36.47] | 1.25 | 18.07 [17.85-18.98] | 1.27 | 0.879 | 0.96 |
-| syn-mem27-100 | two:1x16i | 17.07 | 34.14 | 1.27 | 18.08 | 1.27 | 0.808 | 1.04 |
-| syn-mem27-100 | **two:2x8** (one count per socket at once) | 27.07 | **27.08** [27.07-27.11] | **1.59** | - | - | - | - |
-| yee-pec-box-1e6 | one:1x16 | 17.83 | 35.67 [35.55-35.71] | 1.00 | 18.91 [18.91-18.95] | 1.00 | 0.791 | 1.00 |
-| yee-pec-box-1e6 | one:1x8 | 22.37 | 44.75 | 0.79 | 23.66 | 0.80 | 0.849 | 0.93 |
-| yee-pec-box-1e6 | one:2x8 | 39.50 | 39.51 [39.50-39.60] | 0.90 | - | - | - | - |
-| yee-pec-box-1e6 | two:1x16 | 14.87 | 29.74 [28.74-31.27] | 1.20 | 15.97 [15.87-16.04] | 1.18 | 0.896 | 0.88 |
-| yee-pec-box-1e6 | two:1x16i | 14.86 | 29.72 | 1.19 | 15.71 | 1.20 | 0.804 | 0.98 |
-| yee-pec-box-1e6 | **two:2x8** | 22.45 | **22.47** [22.44-22.48] | **1.59** | - | - | - | - |
+| syn-mem27-100 | one:1x16 | 21.59 | 43.19 [43.11-43.36] | 1.00 | 22.93 [22.92-23.01] | 1.00 | 0.842 | 1.00 |
+| syn-mem27-100 | one:1x8 | 26.95 | 53.90 | 0.80 | 28.24 | 0.81 | 0.934 | 0.90 |
+| syn-mem27-100 | one:2x8 (two counts at once on one socket) | 47.95 | 47.95 [47.75-48.06] | 0.90 | - | - | - | - |
+| syn-mem27-100 | two:1x16 | 17.59 | 35.18 [34.04-36.47] | 1.23 | 18.07 [17.66-18.98] | 1.27 | 0.879 | 0.96 |
+| syn-mem27-100 | two:1x16i | 17.07 | 34.14 | 1.27 | 18.08 | 1.27 | 0.812 | 1.04 |
+| syn-mem27-100 | **two:2x8** (one count per socket at once) | 27.07 | **27.10** [27.07-27.11] | **1.59** | - | - | - | - |
+| yee-pec-box-1e6 | one:1x16 | 17.83 | 35.67 [35.55-35.74] | 1.00 | 18.94 [18.91-18.95] | 1.00 | 0.790 | 1.00 |
+| yee-pec-box-1e6 | one:1x8 | 22.37 | 44.75 | 0.79 | 23.66 | 0.80 | 0.848 | 0.93 |
+| yee-pec-box-1e6 | one:2x8 | 39.51 | 39.52 [39.50-39.60] | 0.90 | - | - | - | - |
+| yee-pec-box-1e6 | two:1x16 | 14.87 | 29.74 [28.74-31.27] | 1.20 | 15.97 [15.55-16.19] | 1.19 | 0.913 | 0.87 |
+| yee-pec-box-1e6 | two:1x16i | 14.79 | 29.58 | 1.20 | 15.64 | 1.21 | 0.803 | 0.98 |
+| yee-pec-box-1e6 | **two:2x8** | 22.45 | **22.46** [22.43-22.48] | **1.59** | - | - | - | - |
 
 **1e5** (a1e5; pair / factorization / solve, x over one:1x16):
 
 | case | one:1x16 | one:1x8 | one:2x8 | two:1x16 | two:1x16i | **two:2x8** |
 |---|---|---|---|---|---|---|
-| syn-mem27-46 pair | 0.846 | 1.013 (0.83) | 0.804 (1.05) | 1.221 (0.69) | 1.080 (0.78) | **0.521 (1.62)** |
-| syn-mem27-46 factorization / solve | 0.462 / 0.054 | 0.548 / 0.053 | 0.911 / 0.072 (both at once) | 0.570 / 0.062 | 0.508 / 0.058 | 0.551 / 0.054 (both at once) |
-| yee-pec-box-1e5 pair | 0.852 | 0.967 (0.88) | 0.761 (1.12) | 1.116 (0.76) | 1.064 (0.80) | **0.503 (1.70)** |
-| yee-pec-box-1e5 factorization / solve | 0.450 / 0.054 | 0.518 / 0.054 | 0.858 / 0.073 | 0.491 / 0.063 | 0.513 / 0.062 | 0.519 / 0.054 |
-| ss-qa8fk-qa8fm pair | 0.374 | 0.411 (0.91) | 0.293 (1.28) | 0.595 (0.63) | 0.482 (0.78) | **0.228 (1.64)** |
-| ss-qa8fk-qa8fm factorization / solve | 0.198 / 0.032 | 0.209 / 0.030 | 0.328 / 0.038 | 0.238 / 0.037 | 0.244 / 0.037 | 0.213 / 0.030 |
-| cav2d-rect-pert-1e5 pair | 0.090 | 0.104 (0.87) | 0.066 (1.36) | 0.170 (0.53) | 0.114 (0.79) | **0.072 (1.26)** |
-| cav2d-rect-pert-1e5 factorization / solve | 0.036 / 0.018 | 0.047 / 0.029 | 0.053 / 0.032 | 0.052 / 0.026 | 0.064 / 0.023 | 0.050 / 0.029 |
+| syn-mem27-46 pair | 0.849 | 1.013 (0.84) | 0.813 (1.04) | 1.221 [1.165-2.190] (0.70) | 1.080 (0.79) | **0.538** [0.507-0.557] **(1.58)** |
+| syn-mem27-46 factorization / solve | 0.462 / 0.054 | 0.548 / 0.053 | 0.912 / 0.073 (both at once) | 0.521 / 0.066 | 0.508 / 0.058 | 0.551 / 0.054 (both at once) |
+| yee-pec-box-1e5 pair | 0.852 | 0.950 (0.90) | 0.763 (1.12) | 1.116 [1.039-2.672] (0.76) | 1.064 (0.80) | **0.490** [0.481-0.518] **(1.74)** |
+| yee-pec-box-1e5 factorization / solve | 0.451 / 0.054 | 0.516 / 0.054 | 0.858 / 0.073 | 0.491 / 0.062 | 0.513 / 0.062 | 0.519 / 0.054 |
+| ss-qa8fk-qa8fm pair | 0.367 | 0.411 (0.89) | 0.293 (1.25) | 1.031 [0.571-1.578] (0.36) | 0.486 (0.76) | **0.220** [0.199-0.232] **(1.67)** |
+| ss-qa8fk-qa8fm factorization / solve | 0.198 / 0.031 | 0.209 / 0.030 | 0.329 / 0.038 | 0.241 / 0.037 | 0.244 / 0.037 | 0.213 / 0.030 |
+| cav2d-rect-pert-1e5 pair | 0.089 | 0.115 (0.78) | 0.079 (1.13) | 0.184 [0.157-0.268] (0.49) | 0.115 (0.77) | **0.072** [0.052-0.083] **(1.24)** |
+| cav2d-rect-pert-1e5 factorization / solve | 0.035 / 0.018 | 0.047 / 0.029 | 0.056 / 0.032 | 0.056 / 0.026 | 0.050 / 0.023 | 0.050 / 0.029 |
 
 What the phases say:
 
 * **Two processes, one per socket, do not slow each other down.** Each of two concurrent 8-thread
-  counts on its own socket takes what one 8-thread count takes alone (1e6: 27.07 vs 26.96 s,
-  22.45 vs 22.37 s; 1e5: 0.517 vs 0.506 s, 0.489 vs 0.483 s), and two concurrent factorizations
+  counts on its own socket takes what one 8-thread count takes alone (1e6: 27.07 vs 26.95 s,
+  22.45 vs 22.37 s; 1e5: 0.520 vs 0.507 s, 0.484 vs 0.475 s), and two concurrent factorizations
   equal one alone (syn-mem27-46 0.551 vs 0.548 s): each socket has its own memory bandwidth. On ONE
-  socket two concurrent processes share it and each takes 1.6-1.8x longer (P9: 0.92x for the pair;
-  here 0.90x at 1e6, 1.05-1.36x at 1e5 where a single count does not saturate the socket).
+  socket two concurrent processes share it and each takes 1.4-1.8x longer (P9: 0.92x for the pair;
+  here 0.90x at 1e6, 1.04-1.25x at 1e5 where a single count does not saturate the socket).
 * **Hence the certificate's two counts pay most**: the pair at once on two sockets takes 1.59x less
-  than hsolve's pair on one socket (1e6) and 1.62-1.70x less at 1e5 - and against the fairer
+  than hsolve's pair on one socket (1e6) and 1.58-1.74x less at 1e5 (3-D cases) - and against the fairer
   baseline on a two-socket machine, one process spreading its 16 threads over both sockets
-  (`two:1x16`), 1.28x (syn-mem27-100: 34.65 -> 27.08 s), 1.32x (yee-pec-box-1e6: 29.74 -> 22.47 s)
-  and 2.0-2.6x at 1e5.
-* **One process over two sockets is good at 1e6, poor at 1e5.** `two:1x16` factorizes 1.18-1.27x
-  faster than one socket at 1e6 (it has both sockets' bandwidth) but 0.70-0.92x at 1e5, and its
-  counts are worse still (0.53-0.76x; the first numeric phase of a fresh MUMPS instance places its
+  (`two:1x16`), 1.30x (syn-mem27-100: 35.18 -> 27.10 s), 1.32x (yee-pec-box-1e6: 29.74 -> 22.46 s)
+  and 2.3-4.7x at 1e5 (4.7x: ss-qa8fk-qa8fm, whose `two:1x16` pair varied 0.57-1.58 s).
+* **One process over two sockets is good at 1e6, poor at 1e5.** `two:1x16` factorizes 1.19-1.27x
+  faster than one socket at 1e6 (it has both sockets' bandwidth) but 0.63-0.92x at 1e5, and its
+  counts are worse still (0.36-0.76x; the first numeric phase of a fresh MUMPS instance places its
   memory on one socket by first touch, which half the threads then read remotely); interleaving the
-  pages (`1x16i`) helps a little (0.78-0.80x). A single factorization on one socket's 8 cores
-  (`1x8`) is 0.80x of one socket's 16 at 1e6, 0.78-0.95x at 1e5.
+  pages (`1x16i`) helps a little (0.76-0.80x). A single factorization on one socket's 8 cores
+  (`1x8`) is 0.80-0.81x of one socket's 16 at 1e6, 0.75-0.95x at 1e5.
 * **So a process per socket helps where the work splits into independent factorizations** (the two
   counts, spectrum slices), and the leader of the sequential part (analysis, main factorization,
   Krylov) should keep all cores: at 1e6 a leader on one socket's 8 cores would lose 1.6x on its
@@ -149,27 +151,27 @@ two-socket cores (`two:1x16`) and against hsolve's layout on one socket (`one:1x
 
 | case | factorization 2x8m s | speedup over two:1x16 | over one:1x16 (one socket, 2x8m on it: speedup) | 16-RHS solve speedup (two sockets) | count speedup (two sockets) |
 |---|---|---|---|---|---|
-| syn-mem27-100 | 19.06 | **0.95** (18.07) | 1.20 (22.94; on one socket 27.01 s: 0.85) | 1.08 | 0.95 |
-| yee-pec-box-1e6 | 14.58 | **1.10** (15.97) | 1.30 (18.91; on one socket 22.89 s: 0.83) | 1.34 | 1.08 |
-| syn-mem27-46 | 0.448 | 1.27 (0.570) | 1.03 (0.462; on one socket 0.560 s: 0.82) | 1.35 | 1.20 |
-| yee-pec-box-1e5 | 0.375 | 1.31 (0.491) | 1.20 (0.450; on one socket 0.493 s: 0.91) | 1.05 | 1.27 |
-| ss-qa8fk-qa8fm | 0.173 | 1.38 (0.238) | 1.14 (0.198; on one socket 0.213 s: 0.93) | 1.28 | 1.23 |
-| cav2d-rect-pert-1e5 | 0.046 | 1.13 (0.052) | 0.78 (0.036; on one socket 0.045 s: 0.80) | 0.74 | 1.55 |
+| syn-mem27-100 | 19.04 | **0.95** (18.07) | 1.20 (22.93; on one socket 26.98 s: 0.85) | 1.08 | 0.95 |
+| yee-pec-box-1e6 | 14.60 | **1.09** (15.97) | 1.30 (18.94; on one socket 22.89 s: 0.83) | 1.37 | 1.08 |
+| syn-mem27-46 | 0.448 | 1.16 (0.521) | 1.03 (0.462; on one socket 0.555 s: 0.83) | 1.43 | 1.19 |
+| yee-pec-box-1e5 | 0.375 | 1.31 (0.491) | 1.20 (0.451; on one socket 0.494 s: 0.91) | 1.05 | 1.27 |
+| ss-qa8fk-qa8fm | 0.173 | 1.39 (0.241) | 1.14 (0.198; on one socket 0.213 s: 0.93) | 1.28 | 2.19 (two:1x16's counts varied) |
+| cav2d-rect-pert-1e5 | 0.046 | 1.22 (0.056) | 0.76 (0.035; on one socket 0.045 s: 0.78) | 0.74 | 1.67 |
 
 (speedup = the baseline's time / 2x8m's; baselines in parentheses, same campaign.)
 
-* Unlike one socket (0.80-0.93x, P9's verdict), across two sockets MPI MUMPS 2x8 beats the
-  sequential MUMPS spread over both sockets at 1e5 (1.13-1.38x per factorization) and is mixed at 1e6
-  (0.95x syn-mem27-100, 1.10x yee-pec-box-1e6). Against hsolve's sequential MUMPS on ONE socket it
+* Unlike one socket (0.78-0.93x, P9's verdict), across two sockets MPI MUMPS 2x8 beats the
+  sequential MUMPS spread over both sockets at 1e5 (1.16-1.39x per factorization) and is mixed at 1e6
+  (0.95x syn-mem27-100, 1.09x yee-pec-box-1e6). Against hsolve's sequential MUMPS on ONE socket it
   gains at 1e6 what the second socket's bandwidth gives any layout (1.20 / 1.30x; `two:1x16` 1.27 /
-  1.18x) and at 1e5 0.78-1.20x per factorization; the certificate's pair as two MPI counts one after
-  the other is 0.77-0.97x of one:1x16's pair at 1e5.
+  1.19x) and at 1e5 0.76-1.20x per factorization; the certificate's pair as two MPI counts one after
+  the other is 0.78-0.97x of one:1x16's pair at 1e5.
 * Against the per-socket concurrency of section 2.1 it loses where hsolve has independent
-  factorizations: the certificate's pair as two MPI counts takes 37.2 / 28.2 s (1e6) against 27.1 /
-  22.5 s for one count per socket, 1.0 / 0.88 s against 0.52 / 0.50 s at 1e5.
+  factorizations: the certificate's pair as two MPI counts takes 37.3 / 28.2 s (1e6) against 27.1 /
+  22.5 s for one count per socket, 1.03 / 0.88 s against 0.54 / 0.49 s at 1e5.
 * Not adopted: the main factorization would have to become a distributed MUMPS object (hsolve
   links the sequential MUMPS, whose libmpiseq defines MPI symbols; solves, refinement and the
-  Krylov basis would have to follow the distributed factors), for at most 1.10x on one of the two
+  Krylov basis would have to follow the distributed factors), for at most 1.09x on one of the two
   1e6 cases and 0.95x on the other. The measured gains are per-socket concurrency of independent
   work, which needs no distributed factorization at all.
 
@@ -333,18 +335,21 @@ freed memory (`MALLOC_MMAP_MAX_=0`, no trimming; Open MPI may change the allocat
 
 ## 5. The "并行方案" table and the limits
 
-**Per phase** (section 2, the phase bench, 3 repetitions; syn-mem27-100 / yee-pec-box-1e6, seconds;
+**Per phase** (section 2, the phase bench, 5 repetitions; syn-mem27-100 / yee-pec-box-1e6, seconds;
 16 cores in every row):
 
 | R x T | what | placement | one count | the certificate's two counts | one factorization | 16-RHS solve |
 |---|---|---|---|---|---|---|
-| 1 x 16 | hsolve (sequential MUMPS, OpenMP) | one socket | 21.6 / 17.7 | 43.3 / 35.5 | 22.9 / 18.9 | 0.84 / 0.79 |
-| 1 x 16 | hsolve | two sockets (8 + 8) | 17.6 / 15.2 | 35.3 / 30.4 | 18.1 / 16.0 | 0.88 / 0.90 |
+| 1 x 16 | hsolve (sequential MUMPS, OpenMP) | one socket | 21.6 / 17.8 | 43.2 / 35.7 | 22.9 / 18.9 | 0.84 / 0.79 |
+| 1 x 16 | hsolve | two sockets (8 + 8) | 17.6 / 14.9 | 35.2 / 29.7 | 18.1 / 16.0 | 0.88 / 0.91 |
 | 1 x 8 | hsolve on half the cores | one socket | 27.0 / 22.4 | 53.9 / 44.7 | 28.2 / 23.7 | 0.93 / 0.85 |
-| 2 x 8 | two hsolve processes, one count each, at once | one socket | 48.0 / 39.5 each | 48.0 / 39.5 | - | - |
+| 2 x 8 | two hsolve processes, one count each, at once | one socket | 47.9 / 39.5 each | 48.0 / 39.5 | - | - |
 | 2 x 8 | the same - **hsolve's helpers** | two sockets | 27.1 / 22.5 each | **27.1 / 22.5** | - | - |
-| 2 x 8 | MPI MUMPS (one distributed factorization) | one socket | 25.8 / 21.6 | 51.6 / 43.1 | 27.0 / 22.9 | 0.98 / 0.87 |
-| 2 x 8 | MPI MUMPS | two sockets | 18.6 / 14.1 | 37.2 / 28.2 | 19.1 / 14.6 | 0.81 / 0.67 |
+| 2 x 8 | MPI MUMPS (one distributed factorization) | one socket | 25.8 / 21.6 | 51.6 / 43.2 | 27.0 / 22.9 | 0.98 / 0.87 |
+| 2 x 8 | MPI MUMPS | two sockets | 18.6 / 14.1 | 37.3 / 28.2 | 19.0 / 14.6 | 0.81 / 0.67 |
+
+(Counts of the 1 x 16 and the concurrent 2 x 8 rows from the count campaign a1e6c, which ran these layouts
+interleaved with each other; the rest from a1e6.)
 
 **End to end** (section 4, 5 repetitions, solver time; speedup over hsolve on one socket / over hsolve
 on the same two sockets):
@@ -380,8 +385,8 @@ leader as in hsolve and take the same time.
 * **Emulated topology.** The two-socket layouts use 8 of each socket's 16 cores (the run's 16 cores);
   each socket then serves 8 cores with its whole memory bandwidth and L3, as a 2 x 8-core machine
   would, but a machine with smaller sockets may have less bandwidth per socket.
-* **MPI MUMPS stays out.** A distributed main factorization gained 0.95-1.10x at 1e6 on two sockets
-  (1.13-1.38x at 1e5) against the sequential MUMPS spread over both, would need a distributed main
+* **MPI MUMPS stays out.** A distributed main factorization gained 0.95-1.09x at 1e6 on two sockets
+  (1.16-1.39x at 1e5) against the sequential MUMPS spread over both, would need a distributed main
   object in place of hsolve's, and loses to the per-socket counts for the certificate.
 * **Failures.** A helper task that fails is redone by the leader (tests: fault bit 128, every kind);
   a helper process that dies ends the MPI job.

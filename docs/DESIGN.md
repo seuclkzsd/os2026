@@ -1199,13 +1199,13 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
 ### 3.9 多进程（MPI，P10「mpi」；`src/parallel`、`src/mpi`、`apps/hsolve_mpi.cpp`；实测 `results/p10_mpi.md`，用法 `docs/PARALLEL.md`）
 - **动机（实测，测量节点 2 socket × 16 核，每次运行 16 核）**：数值分解与计数受内存带宽限制。一个 socket 上 MPI 无益
   （P9，`results/p9_mpi.md`）；两个 socket 时：
-  - 一个进程 16 线程分在两个 socket（各 8 核）：1e6 的分解 / 计数比单 socket 16 线程快 1.18–1.27 倍（多了一个 socket
-    的带宽），1e5 反而慢（分解 0.70–0.92 倍、计数 0.53–0.76 倍：新实例的首次触摸把内存放在一个 socket 上）；
+  - 一个进程 16 线程分在两个 socket（各 8 核）：1e6 的分解 / 计数比单 socket 16 线程快 1.19–1.27 倍（多了一个 socket
+    的带宽），1e5 反而慢（分解 0.63–0.92 倍、计数 0.36–0.76 倍：新实例的首次触摸把内存放在一个 socket 上）；
   - **每 socket 一个进程、同时各做一个独立分解，互不干扰**：两个并发的 8 线程计数各自只用一个 8 线程计数单独时的时间
-    （1e6：27.07 对 26.96 s，22.45 对 22.37 s；1e5：0.517 对 0.506 s），证书的两次计数因此比单 socket 上 hsolve
-    的顺序两次快 1.59 倍（1e6）/ 1.62–1.70 倍（1e5），比两 socket 上 16 线程的顺序两次快 1.28 / 1.32 倍（1e6）、
-    2.0–2.6 倍（1e5）。同一 socket 上的两个并发进程则互相拖慢（各 1.6–1.8 倍）。
-  - MPI MUMPS 2×8 跨 socket 做一次分解：1e5 比 16 线程跨 socket 快 1.13–1.38 倍，1e6 只有 0.95 / 1.10 倍；要用它，
+    （1e6：27.07 对 26.95 s，22.45 对 22.37 s；1e5：0.520 对 0.507 s），证书的两次计数因此比单 socket 上 hsolve
+    的顺序两次快 1.59 倍（1e6）/ 1.58–1.74 倍（1e5 三维），比两 socket 上 16 线程的顺序两次快 1.30 / 1.32 倍（1e6）、
+    2.3–4.7 倍（1e5）。同一 socket 上的两个并发进程则互相拖慢（各 1.4–1.8 倍）。
+  - MPI MUMPS 2×8 跨 socket 做一次分解：1e5 比 16 线程跨 socket 快 1.16–1.39 倍，1e6 只有 0.95 / 1.09 倍；要用它，
     主对象须换成分布式 MUMPS（与 hsolve 链接的顺序 MUMPS 及其 libmpiseq 冲突，回代、修正与 Krylov 基也须随之分布），
     收益不稳——未采用。实测的收益来自彼此独立的分解按 socket 并发，不需要分布式分解。
 - **布局（leader + 每 socket 一个 helper）**：rank 0（leader）占全部核（OMP 线程 = 核数），做 hs::solve 的全部顺序
@@ -1410,4 +1410,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |
 | P8 | **已完成**（p8-certcost-fix）：证书的计数失败不再结束求解——计数源（InertiaCounter / 主对象）失败时换另一个，计数前按计数余量检查估计（主对象代替计数器时按其上次分解的 INFOG(21)），SCOTCH 分析超上限时至多再分析两次；都不行时 nearest 交回已收敛的对、证书标为未完成（success = false），窗口目标只丢失败的切片；一般 HPD B 的 κ 与 λ_min 严格界（只用于 auto / randomized）；更便宜的精确计数全部实测为负（两进程并行、单次合并分解、省缩放/检测、换计数源），默认证书仍为 exact（`results/p8_certcost.md`）。 |
 | P9 | **ordering 已完成**（分支 p9-ordering，评审修正 p9-ordering-fix）：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割；driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时采用）、顶层投入（代价模型决定）；代价模型按新剖分重拟合，候选顺序中它先于 SCOTCH，图规模按压缩后计。最终代码的门槛（测量槽，ABBA，全部有效、证书 exact）：1e6 内存内（5 次）syn-mem27-100 111.0 → 89.0 s（1.25×）、yee-pec-box-1e6 89.7 → 73.7 s（1.22×）；26 个 n ≤ 1e5 数据测例（3 次）几何平均 0.919，18 例快 3% 以上；初稿的 yee-pec-cube-16 系统性变慢（+9%：流精修后的排列在 16 线程下分析、分解、回代都更慢）已消除（20 次 1.015），剩 wg-square-n289（n = 289）以与 main 相同的排列慢 1.6 ms（`results/p9_ordering.md` §8）。**未做**：三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分 |
-| P10 | **mpi 已完成**（分支 p10mpi）：多进程模式 hsolve-mpi（leader 占全部核 + 每 socket 一个 helper；`src/parallel` 会话与协议、`src/mpi` 传输，`HSOLVE_WITH_MPI=AUTO`，启动脚本 `hsolve-mpirun`）：nearest 证书的两次计数由两个 helper 同时做、窗口目标的切片交给 helper，代价规则与内存（预算覆盖整棵进程树）决定是否交出；结果与单进程相同，helper 的失败由 leader 接手（§3.9）。实测（5 次交错、全部有效，`results/p10_mpi.md`）：两 socket（各 8 核）上对单进程 hsolve，1e6 nearest 1.10 倍、1e5 三维 nearest 1.06–1.14 倍、多片窗口 1.16–1.75 倍；单 socket 上无益（0.86–0.95 倍，启动脚本因此只起一个进程）；MPI 版 MUMPS 跨 socket 一次分解 0.95–1.10 倍（1e6），未采用。**未做**：主分解与 Krylov 的进程级并行（顺序计算，实测无可分的独立分解）；单 socket 机器上的进程级收益 |
+| P10 | **mpi 已完成**（分支 p10mpi）：多进程模式 hsolve-mpi（leader 占全部核 + 每 socket 一个 helper；`src/parallel` 会话与协议、`src/mpi` 传输，`HSOLVE_WITH_MPI=AUTO`，启动脚本 `hsolve-mpirun`）：nearest 证书的两次计数由两个 helper 同时做、窗口目标的切片交给 helper，代价规则与内存（预算覆盖整棵进程树）决定是否交出；结果与单进程相同，helper 的失败由 leader 接手（§3.9）。实测（5 次交错、全部有效，`results/p10_mpi.md`）：两 socket（各 8 核）上对单进程 hsolve，1e6 nearest 1.10 倍、1e5 三维 nearest 1.06–1.14 倍、多片窗口 1.16–1.75 倍；单 socket 上无益（0.86–0.95 倍，启动脚本因此只起一个进程）；MPI 版 MUMPS 跨 socket 一次分解 0.95–1.09 倍（1e6），未采用。**未做**：主分解与 Krylov 的进程级并行（顺序计算，实测无可分的独立分解）；单 socket 机器上的进程级收益 |
