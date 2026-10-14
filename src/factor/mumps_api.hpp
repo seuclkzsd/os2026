@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 #include "hsolve/error.hpp"
 
@@ -57,6 +59,48 @@ inline CallMutex& call_mutex() {
   static CallMutex m;
   return m;
 }
+
+/// Block sizes a MumpsFactorization gives MUMPS (P9 "factspeed", results/p9_factspeed.md):
+///   Mumps - MUMPS' own;
+///   P9    - kFullRankPanelWidth, kCbUpdateBlock and, for a MUMPS patched with
+///           patches/mumps-5.8.2-l0-blocking.patch, kL0PanelWidth / kL0Block below. Every
+///           factorization of the 1e6 3-D cases 1.04-1.06x faster, end to end 1.03-1.04x with the
+///           environment's MUMPS (below the 1.05x a default needs); with the patched MUMPS a count
+///           1.07-1.08x faster on a fixed pivot order, end to end syn-mem27-100 past the 1.05x bar
+///           but yee-pec-box-1e6 only at it (~1.055x; 1.040x on a fixed METIS order), so not the
+///           default build (results/p9_factspeed.md §4.4-4.5).
+/// The build's default (default_blocking()): P9 when hsolve links a MUMPS of tools/dev/build_mumps.sh
+/// (CMake HSOLVE_MUMPS_ROOT; HSOLVE_MUMPS_BLOCKING overrides), else Mumps. Each object reads the
+/// environment variable HS_MUMPS_BLOCKING at construction: unset or "" -> the build's default,
+/// "mumps" -> Mumps, "p9" -> P9, anything else -> InvalidInput. Only the blocking changes: the
+/// same threshold-pivoted LDL^T, the same counts (test_factor_panel).
+enum class Blocking { Mumps, P9 };
+Blocking default_blocking();
+Blocking blocking_from_environment();
+
+/// MUMPS' full-rank outer panel width of LDL^T / LU fronts: KEEP(420), the block NBLR_ORIG of
+/// [sd]fac_front_LDLT_type1.F (MUMPS sets 4 * KEEP(6) = 128 at JOB=-1; the analysis sizes its
+/// buffers with it, so it is set before the analysis). A front's fully summed columns are
+/// factorized in panels of this width, each followed by a rank-KEEP(420) dgemm update of the rest
+/// of the front; at 128 that update is memory-bound on 16 cores (~350 GFlop/s against 585-620 at
+/// larger ranks, ~500 at 256, gpu01 slot).
+inline constexpr int kFullRankPanelWidth = 256;
+
+/// Row block of the contribution-block update at the end of a front's LDL^T (KEEP(58), used only
+/// by [sd]fac_front_aux.F DMUMPS_FAC_T_LDLT: blocks of KEEP(58) rows once the contribution block
+/// has more than KEEP(57) = 2 * KEEP(58) rows, else two halves; MUMPS: 1000 / 2000). Fewer, larger
+/// dgemm calls on the big fronts; the same arithmetic (P9 "factspeed").
+inline constexpr int kCbUpdateBlock = 2000;
+
+/// Block sizes under MUMPS' L0-OpenMP layer, read only by a MUMPS built with
+/// patches/mumps-5.8.2-l0-blocking.patch (tools/dev/build_mumps.sh --patch; CMake
+/// HSOLVE_MUMPS_ROOT): KEEP(498) the full-rank panel width there (its small fronts prefer MUMPS'
+/// 128 to kFullRankPanelWidth), KEEP(499) the triangle stripes / contribution-block diagonal blocks
+/// there and hence the band above the diagonal zeroed at assembly (64 instead of 150 / 120 / 250:
+/// less memset on small fronts). MUMPS 5.8.2 itself does not use these two entries (0 after JOB=-1),
+/// so with the environment's library they change nothing.
+inline constexpr int kL0PanelWidth = 128;
+inline constexpr int kL0Block = 64;
 
 /// Fortran communicator understood by the sequential (libmpiseq) MUMPS build.
 inline constexpr int kUseCommWorld = -987654;
@@ -116,6 +160,16 @@ inline bool is_memory_error(int info1) {
   return info1 == -5 || info1 == -7 || info1 == -13 || info1 == -19;
 }
 
+/// Extra MUMPS controls for measurements (bench/factspeed_*.cpp): (1-based index, value) pairs
+/// written after hsolve's own settings, before every analysis (JOB=1) and factorization (JOB=2)
+/// of a MumpsFactorization. Not used by the library itself.
+struct MumpsControlOverrides {
+  std::vector<std::pair<int, int>> icntl;
+  std::vector<std::pair<int, int>> keep;
+  std::vector<std::pair<int, double>> cntl;
+  bool empty() const { return icntl.empty() && keep.empty() && cntl.empty(); }
+};
+
 /// One MUMPS instance with SYM=2 (symmetric indefinite LDL^T) and PAR=1 (host works).
 /// JOB=-1 runs at construction, JOB=-2 at destruction (which also deletes out-of-core files);
 /// every job holds call_mutex().
@@ -147,8 +201,16 @@ class Instance {
 
   int& icntl(int i) { return s_->icntl[i - 1]; }
   U& cntl(int i) { return s_->cntl[i - 1]; }
+  /// MUMPS' internal KEEP array (exposed by [sd]mumps_c.h; set by JOB=-1, read at analysis and
+  /// factorization). Written only for the block sizes above (Blocking) and by measurement code
+  /// (MumpsControlOverrides).
+  int& keep(int i) { return s_->keep[i - 1]; }
+  int keep(int i) const { return s_->keep[i - 1]; }
   int infog(int i) const { return s_->infog[i - 1]; }
   double rinfog(int i) const { return static_cast<double>(s_->rinfog[i - 1]); }
+  /// MUMPS' internal real statistics (read only; e.g. DKEEP(16): elimination flops of the last
+  /// factorization under the L0-OpenMP layer, 0 without one - dfac_b.F).
+  double dkeep(int i) const { return static_cast<double>(s_->dkeep[i - 1]); }
   Struc& raw() { return *s_; }
 
   /// Run one job under call_mutex(); returns INFOG(1) (negative: error, positive: warning).

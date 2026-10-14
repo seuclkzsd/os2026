@@ -26,6 +26,42 @@ find_package(nlohmann_json 3.10 REQUIRED)
 set(BLA_VENDOR OpenBLAS)
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+# MUMPS: the environment's (conda-forge mumps-seq) unless HSOLVE_MUMPS_ROOT names an install of
+# tools/dev/build_mumps.sh (same library names and sonames). Its lib/ then goes first into the
+# executables' RPATH, ahead of the environment's (conda's LDFLAGS carry -rpath $CONDA_PREFIX/lib),
+# so that the dynamic loader picks the rebuilt libraries (test_factor_mumps_build checks it).
+# P9 "factspeed" (results/p9_factspeed.md §3.3-4.5): a rebuild alone gains nothing; built with
+# patches/mumps-5.8.2-l0-blocking.patch and run with hsolve's P9 block sizes a count is 1.07-1.08x
+# faster on a fixed pivot order, end to end at 1e6 syn-mem27-100 is past the 1.05x bar but
+# yee-pec-box-1e6 only at it (~1.055x; 1.040x on a fixed METIS order). Not the default build (the
+# gate is not clearly passed, and it would need the tarball and a MUMPS build step in the
+# deployment). HSOLVE_MUMPS_BLOCKING: the block sizes hsolve gives MUMPS when HS_MUMPS_BLOCKING is
+# unset (src/factor/mumps_api.hpp Blocking) - "p9" by default with HSOLVE_MUMPS_ROOT, else "mumps".
+set(HSOLVE_MUMPS_ROOT "" CACHE PATH "MUMPS install of tools/dev/build_mumps.sh (empty: the environment's)")
+if(HSOLVE_MUMPS_ROOT)
+  foreach(_kind EXE SHARED MODULE)
+    string(PREPEND CMAKE_${_kind}_LINKER_FLAGS "-Wl,-rpath,${HSOLVE_MUMPS_ROOT}/lib ")
+  endforeach()
+endif()
+set(HSOLVE_MUMPS_BLOCKING "" CACHE STRING
+    "MUMPS block sizes when HS_MUMPS_BLOCKING is unset: mumps | p9 (empty: p9 with HSOLVE_MUMPS_ROOT)")
+set_property(CACHE HSOLVE_MUMPS_BLOCKING PROPERTY STRINGS "" mumps p9)
+if(HSOLVE_MUMPS_BLOCKING STREQUAL "")
+  if(HSOLVE_MUMPS_ROOT)
+    set(_hs_blocking p9)
+  else()
+    set(_hs_blocking mumps)
+  endif()
+elseif(HSOLVE_MUMPS_BLOCKING MATCHES "^(mumps|p9)$")
+  set(_hs_blocking "${HSOLVE_MUMPS_BLOCKING}")
+else()
+  message(FATAL_ERROR "HSOLVE_MUMPS_BLOCKING must be empty, mumps or p9, got '${HSOLVE_MUMPS_BLOCKING}'")
+endif()
+if(HSOLVE_MUMPS_ROOT)
+  message(STATUS "hsolve: MUMPS of ${HSOLVE_MUMPS_ROOT}, default block sizes ${_hs_blocking}")
+else()
+  message(STATUS "hsolve: the environment's MUMPS, default block sizes ${_hs_blocking}")
+endif()
 find_package(MUMPS 5.6 REQUIRED)
 
 # ---- common compile options ----
@@ -58,6 +94,9 @@ target_compile_definitions(hsolve PRIVATE
   HSOLVE_VERSION="${PROJECT_VERSION}"
   HSOLVE_BUILD_FLAGS="${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_bt}} native=${HSOLVE_NATIVE}"
   HSOLVE_MUMPS_VERSION="${MUMPS_VERSION}")
+if(_hs_blocking STREQUAL "p9")
+  target_compile_definitions(hsolve PRIVATE HSOLVE_MUMPS_BLOCKING_P9=1)
+endif()
 
 # ---- applications ----
 if(HSOLVE_BUILD_APPS)
@@ -107,7 +146,9 @@ if(HSOLVE_BUILD_TESTS)
     get_filename_component(name "${src}" NAME_WE)
     add_executable(${name} "${src}")
     target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_compile_definitions(${name} PRIVATE HSOLVE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    target_compile_definitions(${name} PRIVATE HSOLVE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
+                                               HSOLVE_MUMPS_ROOT="${HSOLVE_MUMPS_ROOT}"
+                                               HSOLVE_MUMPS_BLOCKING_DEFAULT="${_hs_blocking}")
     target_link_libraries(${name} PRIVATE hsolve hsolve_test_support GTest::gtest_main LAPACK::LAPACK
                                           BLAS::BLAS MUMPS::MUMPS nlohmann_json::nlohmann_json)
     # Test names are "<executable>.<Suite>.<Name>", so `ctest -R test_factor` selects one file.

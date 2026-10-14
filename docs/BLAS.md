@@ -25,7 +25,8 @@ earlier 1/4/8-thread profile from gpu02 cores 16-23 (taken before the slot exist
 * Numeric factorization: BLAS is 33-54% of MUMPS' factorization wall time on the 3-D cases, almost
   all dgemm on medium fronts. Inside MUMPS' L0 subtrees dgemm runs at 47 GFlop/s per thread with 4
   threads and 24 with 16 (bandwidth- and frequency-bound); no drop-in BLAS and no route changes the
-  factorization time by more than a few percent.
+  factorization time by more than a few percent. At n = 1e6 BLAS is 65-69% of a factorization, and
+  MUMPS' rank-128 panel updates are its memory-bound part (section 9, P9).
 * Solves: BLAS is 83-87% of the 3-D solve time, narrow dgemm / dtrsm streaming the factors at an
   effective 16-22 GB/s. At 16 threads 61-64% of the solve time are calls made one at a time above
   MUMPS' L0 layer, where OpenBLAS uses a single core for narrow shapes - which is why solves stop
@@ -604,3 +605,31 @@ $G python3 $REPO_V/tools/bench/compare.py --tag e2e-int-V-rR --cores 16-31 --sol
 (one outer `$G` holds the slot for all calls of a block of repetitions; compare.py's nested guards
 share it). Section 5 takes per case and variant the median solver time (`time_total_s`, the scope
 of results/cmp-p16-best.md) over the five repetitions.
+
+## 9. P9: the numeric factorization at n = 1e6 (16 threads)
+
+The P9 "factspeed" profile (results/p9_factspeed.md §2) of the three factorizations of the 1e6 3-D
+cases in core (syn-mem27-100, yee-pec-box-1e6; main factorization and the certificate's two
+inertia-only counts; 22-26 s each at 292-316 GFlop/s, 40-43% of the slot's DGEMM peak, re-measured
+727.6 / 744.1 GFlop/s at n = 4096 / 8192), with the hook preloaded for its profiler:
+
+* BLAS is 65-69% of the factorization wall time, practically all dgemm (dtrsm, dgemv, level 1 and
+  dswap together below 0.1 s). Inside the L0 subtrees each thread calls dgemm on its own fronts at
+  22-23 GFlop/s per thread; above them the calls run one at a time, threaded by OpenBLAS, at 484-492
+  GFlop/s.
+* Above L0 by the rank k of the update (syn-mem27-100, main): k 32-63 (updates inside a panel)
+  0.39 s at 165 GFlop/s; **k 128-255 (the trailing update after each panel of KEEP(420) = 128
+  columns) 5.42 s at 349**; k >= 512 (contribution-block updates) 8.0 s at 583-600. The rank-128
+  update reads and writes its C once per 256 flops per entry: memory-bound on the socket's 36 GB/s.
+  With MUMPS' panel width 256 (`HS_MUMPS_BLOCKING=p9`, docs/DESIGN.md §3.4) the class becomes
+  k 256-511 at 488-511 GFlop/s (3.71 s), the dgemm above L0 538-548 GFlop/s, and every
+  factorization 1.05-1.06x faster - a MUMPS setting, not a BLAS change.
+* No route helps the factorization: MUMPS' dgemm shapes are already BLAS-3, and fewer, larger calls
+  (taller triangle stripes KEEP(7/8)) are 0.99x. MUMPS' -DGEMMT_AVAILABLE was not timed: OpenBLAS
+  0.3.34's dgemmt (interface/gemmt.c) computes the triangle with one dgemv per column - BLAS-2 where
+  MUMPS now has blocked dgemm; a recursive GEMMT route in the hook would only reshape calls whose
+  shape is not the limit. The hook's routes stay as in section 4 (they act on the solves).
+* The rest of a factorization (the panels' rank-1 updates, assembly, zeroing new fronts with
+  glibc 2.17's __memset_sse2, stack copies: 25-35% of the CPU time, two thirds of it in the L0
+  phase) is MUMPS Fortran; compiling it for the CPU (-O3, x86-64-v3 or skylake-avx512) changes
+  nothing (1.000-1.005x): it is bound by memory, not by instruction width.

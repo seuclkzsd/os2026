@@ -5,6 +5,7 @@
 #pragma once
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "factor/mumps_api.hpp"
@@ -56,6 +57,13 @@ class MumpsFactorization final : public SparseFactorization<T> {
   /// The analysed pencil (nullptr before a successful analyze()).
   const ShiftedPencil<T>* pencil() const { return pencil_; }
 
+  // ---- measurement hooks (bench/factspeed_*.cpp; not used by the library) ----
+
+  /// Controls written after hsolve's own before every later analyze() and factorize().
+  void set_control_overrides(MumpsControlOverrides o) { overrides_ = std::move(o); }
+  /// The MUMPS instance, for its INFOG / RINFOG / KEEP statistics after a job.
+  const Instance<U>& instance() const { return mumps_; }
+
  private:
   // Order of K and of the matrix MUMPS factorizes (2n for the embedding of a complex K).
   static constexpr int kEmbeddingFactor = is_complex_v<T> ? 2 : 1;
@@ -66,6 +74,7 @@ class MumpsFactorization final : public SparseFactorization<T> {
     return options_.ordering == kOrderingNestedDissection ? 1 : options_.ordering;
   }
   bool read_factorization_info(bool mumps_singular);
+  void apply_overrides();
 
   FactorOptions options_;
   Instance<U> mumps_;
@@ -83,6 +92,7 @@ class MumpsFactorization final : public SparseFactorization<T> {
   std::vector<int> pivot_order_in_;   ///< PERM_IN for the next analysis (empty: ICNTL(7) ordering)
   std::vector<int> pivot_order_out_;  ///< SYM_PERM of the current analysis
   std::vector<int> blkptr_, blkvar_;  ///< ICNTL(15) blocks of the current analysis (complex T)
+  MumpsControlOverrides overrides_;   ///< measurement hook (empty in the library)
 };
 
 }  // namespace hs::mumps

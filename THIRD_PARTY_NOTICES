@@ -178,6 +178,13 @@ these libraries must include the texts their licenses require.
   and except for the external and optional ordering PORD provided
   in a separate directory PORD (see PORD/README for License information).
 
+  Optional source build (P9, not the default): tools/dev/build_mumps.sh builds MUMPS 5.8.2 from
+  the official tarball (https://mumps-solver.org/MUMPS_5.8.2.tar.gz, not contained in this
+  repository; its doc/ holds the CeCILL-C texts), optionally with patches/mumps-5.8.2-l0-blocking.patch.
+  That patch is a modification of MUMPS and is distributed under the same CeCILL-C license; its
+  header states what it changes. A binary built with it must carry the notice above and the
+  information that MUMPS was modified by this patch.
+
 3.2 OpenBLAS 0.3.34 (OpenMP build, conda-forge libopenblas) - BLAS and LAPACK
 ---------------------------------------------------------------------------------------------------
   Copyright (c) 2011-2014, The OpenBLAS Project

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <type_traits>
@@ -16,6 +17,12 @@
 #include "hsolve/error.hpp"
 #include "hsolve/factor.hpp"
 #include "hsolve/util.hpp"
+
+// CMake (HSOLVE_MUMPS_BLOCKING): 1 when the build's default block sizes are P9 - by default when
+// hsolve links a MUMPS of tools/dev/build_mumps.sh (mumps_api.hpp, Blocking).
+#ifndef HSOLVE_MUMPS_BLOCKING_P9
+#define HSOLVE_MUMPS_BLOCKING_P9 0
+#endif
 
 namespace hs {
 
@@ -111,6 +118,16 @@ int grown_relaxation(int pct) {
 
 namespace mumps {
 
+Blocking default_blocking() { return HSOLVE_MUMPS_BLOCKING_P9 ? Blocking::P9 : Blocking::Mumps; }
+
+Blocking blocking_from_environment() {
+  const char* v = std::getenv("HS_MUMPS_BLOCKING");
+  if (v == nullptr || *v == '\0') return default_blocking();
+  if (std::strcmp(v, "mumps") == 0) return Blocking::Mumps;
+  if (std::strcmp(v, "p9") == 0) return Blocking::P9;
+  HS_THROW(InvalidInput, "HS_MUMPS_BLOCKING must be unset, \"mumps\" or \"p9\", got \"" << v << "\"");
+}
+
 template <class T, class U>
 MumpsFactorization<T, U>::MumpsFactorization(const FactorOptions& options)
     // options_ is declared (and validated) before the MUMPS instance is created.
@@ -134,6 +151,15 @@ void MumpsFactorization<T, U>::configure_static_controls() {
   // INFOG(12) counts the negative pivots of fronts MUMPS factorizes itself; keep the root front
   // out of ScaLAPACK (a no-op for the sequential library, but it keeps the inertia exact).
   mumps_.icntl(13) = 1;
+  // P9 block sizes (mumps_api.hpp, Blocking; the build's default or HS_MUMPS_BLOCKING): wider
+  // full-rank panels make the trailing updates of large fronts compute- instead of memory-bound.
+  if (blocking_from_environment() == Blocking::P9) {
+    mumps_.keep(420) = kFullRankPanelWidth;
+    mumps_.keep(58) = kCbUpdateBlock;
+    mumps_.keep(57) = 2 * kCbUpdateBlock;
+    mumps_.keep(498) = kL0PanelWidth;  // read only by the patched MUMPS (mumps_api.hpp)
+    mumps_.keep(499) = kL0Block;
+  }
   mumps_.icntl(16) = options_.threads;  // 0 is resolved at analyze()
   mumps_.icntl(18) = 0;                 // centralized matrix on the host
   mumps_.icntl(20) = 0;                 // dense right-hand sides
@@ -241,6 +267,7 @@ void MumpsFactorization<T, U>::analyze(const ShiftedPencil<T>& pencil, double al
   }
   stats_.block_analysis = blocks;
 
+  apply_overrides();
   const int info1 = mumps_.run(kAnalyze);
   s.perm_in = nullptr;
   stats_.analyze_s += timer.seconds();
@@ -293,6 +320,7 @@ bool MumpsFactorization<T, U>::factorize(double alpha, double beta) {
         retries == kMaxWorkspaceRetries ? cap : workspace_reservation_mb(cap, need, relax_pct_);
     mumps_.icntl(23) = icntl23(reserve);
     stats_.workspace_reserved_mb = reserve;
+    apply_overrides();
     info1 = mumps_.run(mumps::kFactorize);
     // INFO -19 below the cap means that the reservation was too small, not the cap: grow it.
     const bool too_small =
@@ -348,6 +376,13 @@ bool MumpsFactorization<T, U>::read_factorization_info(bool mumps_singular) {
   inertia_.pos = std::max<index_t>(0, n - inertia_.neg - inertia_.zero);
   inertia_.valid = !singular;
   return singular;
+}
+
+template <class T, class U>
+void MumpsFactorization<T, U>::apply_overrides() {
+  for (const auto& [i, v] : overrides_.icntl) mumps_.icntl(i) = v;
+  for (const auto& [i, v] : overrides_.keep) mumps_.keep(i) = v;
+  for (const auto& [i, v] : overrides_.cntl) mumps_.cntl(i) = static_cast<U>(v);
 }
 
 template <class T, class U>
