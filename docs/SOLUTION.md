@@ -1,10 +1,10 @@
 # hsolve 方案说明文档
 
 > 面向电磁谐振与微波器件仿真的大规模非正定厄密稀疏矩阵特征值求解方案
-> （交付物 a；版本：方法与求解边界按 P5c 集成（p5c-integration）的代码，§9 的评测数据仍为 P4 时的、
-> 随实验更新。实现细节契约见 `docs/DESIGN.md`，
-> 实测汇总见 `results/p3_measurements.md`、`results/p4_measurements.md`，SLEPc 调优与公平对比见
-> `results/baseline_tuning.md`）
+> （交付物 a；版本：方法、求解边界与 §6、§9.1 的实测按 P9 集成（分支 p9int：main a831d79 + P9 的自研嵌套剖分、
+> MUMPS 块参数与自编 MUMPS 作默认构建）的代码；§9.2 起为更早阶段的记录。实现细节契约见 `docs/DESIGN.md`，
+> 最终实测见 `results/p9_measurements.md`，各阶段实测见 `results/p*_*.md`，SLEPc 调优与公平对比见
+> `results/baseline_tuning.md`、`results/baseline_tuning_p16.md`、`results/cmp-p9-1e6-profiles.json`）
 
 ---
 
@@ -79,6 +79,18 @@ E = [[Re K, −Im K],[Im K, Re K]]（2n 阶）：求解 E[Re x; Im x] = [Re b; I
 一个分析服务所有分解：`ShiftedPencil` 只存 A ∪ B 的上三角并模式索引（另加每行 1 字节），αA+βB 的值
 逐行归并、直接写入 MUMPS 数组，任意位移 K(σ)、B 本身、A 本身、证书端点与切片计数都复用同一次符号
 分析，完整 K 从不物化（n = 1e6 波导：铅笔 33 MB，P2 带散射映射时 112 MB）。
+
+**数值分解的吞吐**（P9，`results/p9_factspeed.md`）：1e6 三维测例在 16 核内存内时，整次运行是同一主元顺序上的
+三次数值 LDLᵀ（σ 处的主分解与证书的两次只计惯性分解）。剖析表明一次分解只达到槽内 DGEMM 峰值的 40–43%，受
+socket 的内存带宽限制（4 → 16 线程只快 1.84 倍）：L0 子树层占 27–29% 时间而只有 13–14% flops，其上完全求和部分
+的尾随更新是秩 128 的 dgemm（350 GFlop/s，对秩 ≥ 512 的 585–620）。因此 hsolve 给 MUMPS 更宽的块参数——满秩面板宽
+KEEP(420) = 256、贡献块更新的行块 KEEP(58/57) = 2000/4000，以及我们给 MUMPS 打的补丁
+（`patches/mumps-5.8.2-l0-blocking.patch`）在 L0 层下另用的面板宽与条带 KEEP(498/499) = 128/64——只改分块、不改
+选主元与运算，惯性计数与默认参数下逐个相同（单元测试按已知装配树断言各条路径）。每次分解快 5–6%，加补丁后一次
+计数 1.073–1.079 倍。P9 集成起**默认构建**由仓库内的 MUMPS 5.8.2 官方源码包（`third_party/mumps/`，CeCILL-C）打上
+该补丁编译（可移植编译选项，构建一次后缓存复用），命令行与 Python 模块都链接它；`HS_MUMPS=env` 改用环境的
+conda-forge MUMPS，运行时 `HS_MUMPS_BLOCKING=mumps` 恢复 MUMPS 自己的块参数。实测为负、未采用：线程绑定与等待策略、
+关透明大页、移动或关掉 L0 层、更多合并、-O3 / AVX2 / AVX-512 重编 MUMPS（1.000–1.005 倍且不可移植）、GEMMT。
 
 ### 2.3 完备性证书（「不漏根」）
 B 正定时，Sylvester 惯性定理给出 ν₋(A − sB) = 小于 s 的特征值个数（LDLᵀ 负主元数）。对目标窗口 [a, b]
@@ -221,18 +233,26 @@ T_solve 部分线性增长，T_factor 与 k 无关。
    并直接放进 CSR 槽位，MatrixMarket 读两遍；峰值为结果的 1.0×（csr）到 1.8×（结构不对称输入取厄密部分），
    P2 为 2.0–3.0×。
 2. **铅笔并模式**：一次计算 A ∪ B 上三角并模式（只存索引），所有位移共用，赋值时逐行归并（§2.2）。
-3. **自适应排序**（`ordering=-1`）：先做极快的 AMD 分析探测，再按代价模型把每个候选排序——AMD、SCOTCH、
-   自研并行嵌套剖分、METIS、PORD——在本次运行计划的工作（分解、证书计数、块回代的次数，由配置与问题类型
-   推导）上定价，分析最有希望者、以其实际估计替换预测，直到最优者已分析（P5c）。模型的常数在评测配置
-   （16 线程）下对 40 个测例拟合，可由测量程序复算，重放 driver 的选择时相对最佳排序的平均超额为 4.3%（留一
-   测例 5.0%）。模型**完全确定**：不用实测耗时（同一输入实测相差 3 倍，P3 时曾使两次相同运行选了不同排序），
-   SCOTCH 因排序逐次不同而「按预测采纳」、不拿其估计比较——相同运行选相同排序。要求逐位复现时只在 AMD 与固定
-   种子的 METIS 之间选（P4 规则）。
-   **自研并行嵌套剖分**（P4 实现于 factor 层，P5c 起为排序候选，也可 `ordering = 10` 直接指定）：MUMPS 内的
-   排序是串行的，占三维测例分析的 90–97%；我们实现了 METIS 式的多级顶点分隔子排序，两半与试分作为 OpenMP
-   任务并行，随机数按子图播种，**排列与线程数无关**，以 PERM_IN 交给 MUMPS。2 线程下分析比 MUMPS 的 METIS 快
-   1.3–1.6 倍，填充在 METIS 的 −7..+12% 内；16 线程下其排序的串行比例约 0.38，高填充三维测例上 SCOTCH 的
-   因子 flops 少 5–20%，因此候选顺序中 SCOTCH 在前。
+3. **自适应排序**（`ordering=-1`）：先做极快的 AMD 分析探测，再按代价模型把每个候选排序——**AMD、自研并行
+   嵌套剖分、SCOTCH、METIS、PORD**（得分相近时按此顺序优先）——在本次运行计划的工作（分解、证书计数、块回代的
+   次数，由配置与问题类型推导）上定价，分析最有希望者、以其实际估计替换预测，直到最优者已分析（P5c）。模型的
+   常数在评测配置（16 线程）下对 40 个 n ≤ 1e5 数据测例与两个 1e6 三维测例拟合（P9 按新的嵌套剖分重拟合），可由
+   测量程序复算；用 driver 自己的代码重放选择时相对最佳排序的平均超额为 **1.1%**（样本内与留一测例都是；P5c 的
+   模型 4.3% / 5.0%），38 个测例合计 205.35 s 对最佳的 205.31 s：三维测例上最好的都是自研嵌套剖分、二维的是 AMD。
+   模型**完全确定**：不用实测耗时（同一输入实测相差 3 倍，P3 时曾使两次相同运行选了不同排序），SCOTCH 因排序逐次
+   不同（1e6 时 flops 相差 1.3–1.6 倍）而「按预测采纳」、不拿其估计比较——相同运行选相同排序。要求逐位复现时只在
+   AMD 与固定种子的 METIS 之间选（P4 规则）。
+   **自研并行嵌套剖分**（P4 实现于 factor 层，P5c 起为排序候选，P9 起为三维问题的首选，也可 `ordering = 10`
+   直接指定）：MUMPS 内的排序是串行的，占三维测例分析的 90–97%；我们实现了 METIS 式的多级顶点分隔子排序，两半与
+   试分作为 OpenMP 任务并行（P9 修正了关键路径上连带等待兄弟子树的 taskwait：1e6 图 16 线程 7.4 → 2.4 s），大图的
+   收缩与切分用 taskloop 并发，随机数按子图播种，**排列与线程数无关**，以 PERM_IN 交给 MUMPS。P9 的两项改进
+   （`results/p9_ordering.md`）：**图压缩**——闭邻域相同的顶点合成带权顶点（叶子按权判定），ss-tem152078 排序
+   0.70 → 0.26 s；**分隔子的流精修**——FM 在网格上停在局部极小，在分隔子两侧各 2 层的带内求最小顶点割（拆点网络上
+   的 Dinic 最大流）找到平面分隔子：yee-pec-box-1e6 的 MUMPS flops 7.39e12 → 5.43e12（SCOTCH 6.75–7.09e12，坐标
+   几何剖分 5.29e12），19 个测例几何平均 −10%。**流精修的规则**：小问题上 flops 的下降不带来时间的下降
+   （yee-pec-cube-16：flops −17% 而整次运行 +9%），所以 driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时做流精修，
+   ≥ 30 倍时顶 2 级再多做试分（ss-ge87h76 flops −12%）。16 线程 1e6 时排序 2.0–2.4 s（SCOTCH 整个分析 4.3–6.3 s、
+   METIS 13–14 s，都是串行），因子 flops 为 SCOTCH 中位运行的 0.76 / 0.77 倍，三次分解省 18.5 s / 14.4 s。
 4. **缩放**：MUMPS ICNTL(8)=7，每次分解按当前数值重算，使同一分析适用于不同位移。
 5. **谱变换**：位移反演（§2.1）；B 正定性判定（§1.2：对角 B、对角占优或有非正对角元、范数估计 Lanczos 的
    负 Ritz 值都免分解；其余先试严格的不完全 Cholesky 证明，最后才分解 B）。
@@ -264,8 +284,8 @@ T_solve 部分线性增长，T_factor 与 k 无关。
 
 | 组件 | 并行方式 |
 |---|---|
-| MUMPS 分解 / 回代 | OpenMP + L0-OpenMP 子树并行（ICNTL(48)=1；比确定性模式回代快 1.75 倍）；块 Krylov 的多右端回代一次扫过因子服务 p 列；顺序版 MUMPS 实例间非线程安全，进程内所有 MUMPS 调用串行 |
-| 填充约简排序 | MUMPS 内串行；自研嵌套剖分以 OpenMP 任务并行（2 线程加速 1.7–1.85 倍，排列与线程数无关；P5c 起为自适应排序的候选） |
+| MUMPS 分解 / 回代 | OpenMP + L0-OpenMP 子树并行（ICNTL(48)=1；比确定性模式回代快 1.75 倍）：L0 层以下每棵子树一个线程，其上的大前沿由多线程 BLAS 处理；P9 的块参数与补丁让大前沿的尾随更新用更宽的面板（§2.2）；块 Krylov 的多右端回代一次扫过因子服务 p 列；顺序版 MUMPS 实例间非线程安全，进程内所有 MUMPS 调用串行 |
+| 填充约简排序 | MUMPS 内串行；自研嵌套剖分以 OpenMP 任务并行（分隔子的两半与试分为任务、taskgroup 等待，大图的收缩与切分用 taskloop；排列与线程数无关）：1e6 图 16 线程排序 2.0–2.4 s，SCOTCH 串行分析 4.3–6.3 s（§4） |
 | 正交化、内积 | 手写 CGS2 核（融合扫描、DGKS），OpenMP 固定行块归约，任意线程数逐位相同 |
 | 稠密核（Rayleigh–Ritz、重启旋转、块 CGS2） | OpenBLAS（OpenMP 版）BLAS3 |
 | MUMPS 回代中的窄 BLAS（P5） | BLAS hook（默认链入 hsolve）：L0 层之上的大调用按固定块并行切分、长 Gram 积按 K 切分、窄 dgemm 用 AVX-512 / AVX2 窄核（运行时按 CPUID 选择），其余原样交给 OpenBLAS；固定线程数时结果确定，在 MUMPS 的并行区内串行、不超订（`docs/BLAS.md`） |
@@ -285,6 +305,17 @@ T_solve 部分线性增长，T_factor 与 k 无关。
 多右端回代绕开它：每列代价 p = 4 约为单列的 1/3，p = 16 为 1/4–1/9，这就是 P4 把块 Krylov 设为默认的原因
 （§2.1、§2.8）。正交化在配置的 k 下只占迭代时间的 8–11%（P3）。16 线程测量槽中的回代剖析见
 `docs/BLAS.md` §2：L0 层之上的窄调用 OpenBLAS 只用一个核，这正是 BLAS hook 并行切分的对象。
+
+**多进程（MPI MUMPS，P9 实测为负结果，`results/p9_mpi.md` §3）**：在一个 16 核 socket（评测机的单次运行规格）上，
+同一矩阵、同一主元顺序（hsolve 的排列经 PERM_IN）、同一 MUMPS 5.8.2 与控制参数，MPI 版 MUMPS 保留因子的数值分解
+为 hsolve 顺序版 1 × 16 路径的 0.84–0.85 倍（2 rank × 8 线程）、0.72–0.73（4 × 4）、0.60–0.63（8 × 2）、0.59
+（16 × 1），只计惯性的计数相同（0.83 / 0.71–0.72 / 0.57–0.61 / 0.56–0.57），16 列块回代 0.79–0.94 倍，进程树峰值
+内存随 rank 数增长（syn-mem27-100：14.0 → 28.8 GiB）。1 个 rank 的 MPI 版与顺序版相同（1.00–1.01），损失来自 MPI
+并行本身；MUMPS 自己的 METIS、ParMETIS 并行分析、分布式输入都不改变结论，flops 在 2 × 8、4 × 4 时均衡到 2–8% 内。
+上限在于 socket 的内存带宽：8 → 16 线程一次分解只快 1.24 倍，证书的两次计数即使作为两个同时运行、毫无通信的
+8 线程进程也只有顺序对的 0.92–0.93 倍。另外 ScaLAPACK 根节点（MUMPS 并行的默认）报告的 INFOG(12) 漏掉根前沿的
+负主元，不能用于证书（hsolve 设 ICNTL(13) = 1）。因此单次 16 核运行内 hsolve 用顺序版 MUMPS + OpenMP；多进程只可能
+在跨 socket / 跨节点（更多内存带宽）时有收益。
 GPU：赛题允许但非必需；当前为纯 CPU 实现，无 GPU 时即为完整功能（降级模式无需特殊处理）。
 
 ---
@@ -438,7 +469,9 @@ SLEPc 在多个测例上给出错误或不完整的结果；关掉证书时 hsol
 
 ```bash
 conda env create -f env/environment.yml && source env/activate.sh
-tools/dev/build.sh release && tools/dev/test.sh release
+tools/dev/build.sh release && tools/dev/test.sh release      # 先由 third_party/mumps 编译打补丁的 MUMPS（缓存），再编译 hsolve
+HS_MUMPS=env tools/dev/build.sh release                       # 回退：链接环境的 conda-forge MUMPS（P9 之前的构建）
+./build/release/hsolve --A x --version                        # 构建信息：mumps=<所用 MUMPS> mumps_blocking=p9|mumps
 ./build/release/hsolve --A A.npz [--B B.npz] --config config.json --out out/
 ./build/release/hsolve --A A.npz --B B.npz --interval 1000 2000 --slice-size 0 --out out/   # 谱切片
 PYTHONPATH=build/release/python python -c "import hsolve; print(hsolve.version())"        # Python 接口
