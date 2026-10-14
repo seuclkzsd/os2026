@@ -84,8 +84,9 @@ void print_summary(const hs::Solution<T>& sol) {
                 c.failure_probability, c.rigorous ? "" : " (screening only: kappa of B assumed)");
   const auto& p = r.parallel;
   if (p.processes > 1)
-    std::printf("processes: %d (leader %d threads)  helper counts=%lld slices=%lld fallbacks=%lld  wait=%.3fs\n",
-                p.processes, p.threads, static_cast<long long>(p.helper_counts),
+    std::printf("processes: %d (leader %d threads, helpers %d)  helper counts=%lld slices=%lld fallbacks=%lld  "
+                "wait=%.3fs\n",
+                p.processes, p.threads, p.helper_threads, static_cast<long long>(p.helper_counts),
                 static_cast<long long>(p.helper_slices), static_cast<long long>(p.fallbacks), p.wait_s);
   for (const auto& w : r.warnings) std::printf("warning: %s\n", w.c_str());
 }

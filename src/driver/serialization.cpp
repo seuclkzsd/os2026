@@ -333,6 +333,7 @@ std::string SolveReport::to_json(int indent) const {
             {"parallel",
              {{"processes", parallel.processes},
               {"threads", parallel.threads},
+              {"helper_threads", parallel.helper_threads},
               {"helper_counts", parallel.helper_counts},
               {"helper_slices", parallel.helper_slices},
               {"fallbacks", parallel.fallbacks},

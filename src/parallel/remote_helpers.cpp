@@ -175,6 +175,7 @@ void RemoteHelpers<T>::prepare(driver::Ctx& c) {
     waited = waited || helpers_[static_cast<std::size_t>(h)].owes_ready;
     await_ready(h);
   }
+  c.rep.parallel.helper_threads = helper_threads();
   if (waited) {
     c.rep.parallel.wait_s += wait.seconds();
     driver::event(c, "helpers_ready", {{"seconds", wait.seconds()}, {"count_mb", count_estimate_mb()}});

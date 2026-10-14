@@ -361,6 +361,7 @@ struct SliceReport {
 struct ParallelReport {
   int processes = 1;             ///< leader + helpers of the session
   int threads = 0;               ///< OpenMP threads of the leader's factorizations (0: single process)
+  int helper_threads = 0;        ///< OpenMP threads of each helper (as they reported; 0: none got work)
   index_t helper_counts = 0;     ///< certificate counts a helper made (concurrently with the leader's)
   index_t helper_slices = 0;     ///< spectrum slices a helper solved
   index_t fallbacks = 0;         ///< helper tasks that failed and that the leader did itself

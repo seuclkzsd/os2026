@@ -187,6 +187,7 @@ TYPED_TEST(ParallelSessionTyped, TwoHelpersMakeTheCertificateCounts) {
     EXPECT_EQ(p.processes, 3);
     EXPECT_EQ(p.helper_counts, 2) << warnings(sol.report);
     EXPECT_EQ(p.fallbacks, 0);
+    EXPECT_GT(p.helper_threads, 0);
     EXPECT_GT(p.share_s, 0.0);
     EXPECT_GT(p.helper_busy_s, 0.0);
     EXPECT_EQ(sol.report.certificate.count_inertia, ref.report.certificate.count_inertia);
