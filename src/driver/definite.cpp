@@ -35,6 +35,7 @@
 // are returned with the certificate "not completed".
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <new>
@@ -43,6 +44,7 @@
 #include <vector>
 
 #include "driver/certificate.hpp"
+#include "driver/helpers.hpp"
 #include "driver/internal.hpp"
 #include "driver/projection.hpp"
 #include "hsolve/eigen.hpp"
@@ -508,6 +510,7 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       // second analysis; a window it counted to check single counts is not counted again).
       index_t nu_a = 0, nu_b = 0;
       bool on_certifier = false;
+      const index_t helper_counts = c.rep.parallel.helper_counts;
       try {
         on_certifier = fast.exact_counts(a_end, b_end, nu_a, nu_b);
         if (!on_certifier) {
@@ -516,8 +519,12 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
             counts.avoid_counter(c, "the certifier's InertiaCounter on the same pivot order failed (" +
                                         fast.counter_failure() + ")");
           const double step = 1e-9 * std::max(scale, std::abs(t.sigma));
-          nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
-          nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+          // Multi-process solves: nu(a) and nu(b) on two helper processes at once (DESIGN §3.9);
+          // otherwise both here, one after the other.
+          if (!concurrent_counts(c, counts, a_end, b_end, step, nu_a, nu_b)) {
+            nu_a = count_below(c, counts, a_end, -1.0, step, nullptr, /*s_is_gap=*/true);
+            nu_b = count_below(c, counts, b_end, +1.0, step, nullptr, /*s_is_gap=*/true);
+          }
         }
       } catch (const CountFailure& e) {
         const index_t found = found_in(a_end, b_end);
@@ -538,7 +545,11 @@ Solution<T> solve_nearest(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactoriz
       const index_t found = found_in(a_end, b_end);
       cert.count_found = found;
       cert.passed = cert.count_inertia == cert.count_found;  // the window stays clear of the zero band
-      fast.record_exact(on_certifier || counts.uses_counter());
+      const index_t by_helpers = c.rep.parallel.helper_counts - helper_counts;
+      fast.record_exact(on_certifier || counts.uses_counter() || by_helpers > 0);
+      if (by_helpers > 0)
+        cert.statement += "; " + std::to_string(by_helpers) + " of the 2 counts made by helper processes (their "
+                          "InertiaCounters on the leader's pivot order)";
       event(c, "certificate", {{"round", static_cast<std::int64_t>(round)}, {"lower", a_end}, {"upper", b_end},
                                {"count_inertia", static_cast<std::int64_t>(cert.count_inertia)},
                                {"count_found", static_cast<std::int64_t>(found)}, {"passed", cert.passed},
@@ -716,6 +727,9 @@ class WindowSolver {
   /// Nearest target with a zero band: the k nearest sigma outside the band, from windows
   /// [sigma - r, sigma + r] minus the band; r0 (> 0) is the first radius tried.
   void set_nearest_radius(double r0) { nearest_r0_ = r0; }
+  /// Helper process side (slice_on_helper, DESIGN §3.9): one slice the leader planned, solved on
+  /// this object's factorization by run_slice; its pairs, report and warnings.
+  SliceReply<T> run_remote(const SliceTask& t);
 
  private:
 
@@ -735,6 +749,14 @@ class WindowSolver {
   Anchor anchor_of(const Slice& s) const;
   // ---- runs
   bool run_slice(const Slice& s, index_t id);
+  /// Every slice of slices_: by solve_here(i, full) on the leader, and - in a multi-process solve
+  /// - by the helpers that the memory budget leaves room for (DESIGN §3.9).
+  template <class Here>
+  void solve_slices(Here& solve_here);
+  /// Helpers that may take slices now (0: none), and the memory one helper's slice may take.
+  int slice_helpers(double& need_bytes);
+  SliceTask task_of(std::size_t i, double need_bytes) const;
+  void merge_remote(std::size_t i, int h, SliceReply<T>& r);
   double multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const;
   double multiplet_rerun_shift(double mean, const Block<T>& sel, const Slice& s) const;
   bool cluster_verified(const Slice& s, const std::vector<double>& lambda, double& mean, double& delta);
@@ -1333,6 +1355,183 @@ index_t WindowSolver<T>::deduplicate() {
   return removed;
 }
 
+// ---- multi-process solves (DESIGN §3.9): slices on helper processes
+
+// Helpers that take slices, and the memory one helper's slice may take: its factorization (the main
+// analysis' in-core estimate - a helper analyses the same pivot order), MUMPS' analysis data (~15%
+// of it) and its Krylov work of up to c_max_ pairs (7 n-vectors per pair, as the leader's own slice
+// plan, solve() step 2). The leader's main factors are released first (it computes nothing while
+// helpers work, and refactorizes if it must solve a slice itself). As many helpers as such slices
+// fit in what the budget leaves (memory_in_use counts the helpers already) - at least two: one
+// helper alone, on its socket's cores, would be slower than the leader on all of them.
+template <class T>
+int WindowSolver<T>::slice_helpers(double& need_bytes) {
+  need_bytes = 0.0;
+  if (!c_.helpers || !c_.helpers->shared() || slices_.size() < 2) return 0;
+  Helpers& hp = *c_.helpers;
+  int usable = 0;
+  for (int h = 1; h <= hp.size(); ++h) usable += hp.usable(h) ? 1 : 0;
+  if (usable < 2) return 0;
+  if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
+  const double vec = static_cast<double>(n_) * sizeof(T);
+  need_bytes = 1.15 * fac_.estimate().incore_mb * 1e6 + 7.0 * vec * static_cast<double>(c_max_);
+  const double avail = 0.9 * budget_left(c_);
+  const int fit = need_bytes > 0 ? static_cast<int>(std::min(avail / need_bytes, 1e6)) : usable;
+  int take = std::max(0, std::min(usable, fit));
+  if (take < usable) {
+    const std::string why = "spectrum slices: " + std::to_string(take < 2 ? 0 : take) + " of " +
+                            std::to_string(usable) + " helper(s) used - a helper's slice needs " +
+                            fmt(need_bytes / 1e6) + " MB, the budget leaves " + fmt(std::max(avail, 0.0) / 1e6) +
+                            " MB";
+    auto& notes = c_.rep.parallel.notes;
+    if (std::find(notes.begin(), notes.end(), why) == notes.end()) notes.push_back(why);
+  }
+  if (take < 2) take = 0;
+  return take;
+}
+
+template <class T>
+SliceTask WindowSolver<T>::task_of(std::size_t i, double need_bytes) const {
+  const Slice& s = slices_[i];
+  SliceTask t;
+  t.id = static_cast<index_t>(i);
+  t.lo_s = s.lo.s;
+  t.lo_nu = s.lo.nu;
+  t.lo_off = s.lo.detection_off;
+  t.lo_near = s.lo.near;
+  t.hi_s = s.hi.s;
+  t.hi_nu = s.hi.nu;
+  t.hi_off = s.hi.detection_off;
+  t.hi_near = s.hi.near;
+  t.want = s.want;
+  t.focus = s.focus;
+  t.band = band_;
+  t.band_lo = band_lo_;
+  t.band_hi = band_hi_;
+  t.cap_mb = need_bytes / 1e6;
+  const double cap = fac_.options().max_memory_mb;
+  if (cap > 0) t.cap_mb = std::min(t.cap_mb, cap);
+  t.budget_gb = need_bytes / 1073741824.0;  // beside what the helper holds (it adds its own RSS)
+  return t;
+}
+
+template <class T>
+void WindowSolver<T>::merge_remote(std::size_t i, int h, SliceReply<T>& r) {
+  if (reports_.size() <= i) reports_.resize(i + 1);
+  reports_[i] = r.report;
+  Block<T> blk;
+  blk.lambda = r.lambda;
+  blk.x = std::move(r.x);
+  append_to_pool(blk, r.metrics, static_cast<index_t>(i));
+  restarts_ += r.restarts;
+  applies_ += r.applies;
+  if (i == 0 && r.block_size > 0) c_.rep.block_size = r.block_size;
+  for (const std::string& w : r.warnings) warn(c_, "helper " + std::to_string(h) + ": " + w);
+  ++c_.rep.parallel.helper_slices;
+  event(c_, "helper_slice", {{"helper", static_cast<std::int64_t>(h)}, {"slice", static_cast<std::int64_t>(i)},
+                             {"found", static_cast<std::int64_t>(r.report.count_found)}, {"passed", r.report.passed},
+                             {"seconds", r.seconds}, {"helper_rss_mb", r.rss_bytes / 1e6}});
+}
+
+// The helpers - one per socket, each on its socket's cores - solve the slices, as many at once as
+// slice_helpers() allows, each getting the next slice when it is done; the leader, whose threads
+// span every socket, only waits meanwhile (charged to Iterate): nothing runs on oversubscribed cores.
+// A helper that fails is not used again and its slice, like a helper's partial cluster that is not
+// numerically equal (solved in full, as the single-process path would), is solved by the leader
+// once the helpers are done. Without two helpers for it the leader solves every slice itself. The
+// pool keeps every pair with its slice id, so deduplicate() and the certificate see what the
+// single-process path sees.
+template <class T>
+template <class Here>
+void WindowSolver<T>::solve_slices(Here& solve_here) {
+  double need = 0.0;
+  const int take = slice_helpers(need);
+  auto* hp = dynamic_cast<HelpersOf<T>*>(c_.helpers);
+  if (take == 0 || hp == nullptr) {
+    for (std::size_t i = 0; i < slices_.size(); ++i) solve_here(i, false);
+    return;
+  }
+  std::deque<std::size_t> queue;
+  for (std::size_t i = 0; i < slices_.size(); ++i) queue.push_back(i);
+  std::vector<std::ptrdiff_t> on_helper(static_cast<std::size_t>(hp->size()) + 1, -1);
+  std::vector<std::pair<std::size_t, bool>> leader;  // (slice, in full) left to the leader
+  int handed = 0;
+  auto active = [&]() {
+    int k = 0;
+    for (std::ptrdiff_t v : on_helper) k += v >= 0 ? 1 : 0;
+    return k;
+  };
+  auto hand_out = [&]() {
+    for (int h = 1; h <= hp->size() && !queue.empty() && active() < take; ++h) {
+      if (!hp->usable(h) || on_helper[static_cast<std::size_t>(h)] >= 0) continue;
+      const std::size_t i = queue.front();
+      queue.pop_front();
+      hp->post_slice(c_, h, task_of(i, need));
+      on_helper[static_cast<std::size_t>(h)] = static_cast<std::ptrdiff_t>(i);
+      ++handed;
+    }
+  };
+  hand_out();
+  while (active() > 0) {
+    SliceReply<T> r;
+    int h = 0;
+    {
+      PhaseScope phase(c_.clock, Phase::Iterate);
+      h = hp->wait_slice(c_, r);
+    }
+    const auto i = static_cast<std::size_t>(on_helper[static_cast<std::size_t>(h)]);
+    on_helper[static_cast<std::size_t>(h)] = -1;
+    if (!r.error.ok) {
+      const std::string why = std::string(to_string(r.error.code)) + ": " + r.error.what;
+      hp->abandon(h, "slice failed: " + why);
+      ++c_.rep.parallel.fallbacks;
+      warn(c_, "multi-process solve: helper " + std::to_string(h) + " could not solve slice [" + fmt(slices_[i].lo.s) +
+                   ", " + fmt(slices_[i].hi.s) + "] (" + why + "); the leader solves it");
+      leader.push_back({i, false});
+    } else if (!r.completed) {
+      leader.push_back({i, true});  // a partial cluster that is not numerically equal: all of it
+    } else {
+      merge_remote(i, h, r);
+    }
+    hand_out();
+  }
+  // Slices no helper could take (all failed) and those handed back.
+  for (std::size_t i : queue) leader.push_back({i, false});
+  for (const auto& [i, full] : leader) solve_here(i, full);
+  event(c_, "slices_parallel", {{"slices", static_cast<std::int64_t>(slices_.size())},
+                                {"on_helpers", static_cast<std::int64_t>(handed)},
+                                {"on_leader", static_cast<std::int64_t>(leader.size())},
+                                {"helpers", static_cast<std::int64_t>(take)}, {"need_mb", need / 1e6}});
+}
+
+template <class T>
+SliceReply<T> WindowSolver<T>::run_remote(const SliceTask& t) {
+  band_ = t.band;
+  band_lo_ = t.band_lo;
+  band_hi_ = t.band_hi;
+  const Slice s{{t.lo_s, t.lo_nu, t.lo_off, t.lo_near}, {t.hi_s, t.hi_nu, t.hi_off, t.hi_near}, t.want, t.focus};
+  // The slice's ends are certified counts (the leader's): gap_point and the anchors use them.
+  if (std::isfinite(s.lo.s)) remember(s.lo);
+  if (std::isfinite(s.hi.s)) remember(s.hi);
+  c_max_ = std::max<index_t>(c_max_, s.count());
+  reserve_pool(s.count() + 12);
+  const std::size_t warned = c_.rep.warnings.size();
+  SliceReply<T> r;
+  r.completed = run_slice(s, t.id);
+  if (r.completed) {
+    r.report = reports_[static_cast<std::size_t>(t.id)];
+    r.lambda.assign(pool_.lambda.begin(), pool_.lambda.begin() + pool_.used);
+    r.metrics.assign(pool_.metrics.begin(), pool_.metrics.begin() + pool_.used);
+    pool_.x.resize_cols(pool_.used);
+    r.x = std::move(pool_.x);
+  }
+  r.restarts = restarts_;
+  r.applies = applies_;
+  r.block_size = c_.rep.block_size;
+  r.warnings.assign(c_.rep.warnings.begin() + static_cast<std::ptrdiff_t>(warned), c_.rep.warnings.end());
+  return r;
+}
+
 template <class T>
 Solution<T> WindowSolver<T>::solve() {
   const SolverConfig& cfg = c_.cfg;
@@ -1568,9 +1767,11 @@ Solution<T> WindowSolver<T>::solve() {
   // anchor, the verification of a partial cluster) ends only the slice that needs it: the other
   // slices are solved, the report says which were not completed (DESIGN §3.6-8).
   std::string not_completed, count_failure;
-  for (std::size_t i = 0; i < slices_.size(); ++i) {
+  // One slice on the leader. full: the slice is a partial cluster that a run (here or on a helper)
+  // found not numerically equal - solve all of its eigenvalues.
+  auto solve_here = [&](std::size_t i, bool full) {
     try {
-      if (run_slice(slices_[i], static_cast<index_t>(i))) continue;
+      if (!full && run_slice(slices_[i], static_cast<index_t>(i))) return;
       // A partial cluster that is not numerically equal: all of its eigenvalues are needed - one
       // slice (counts cannot split it), whose output and working set must fit the budget.
       Slice& s = slices_[i];
@@ -1607,7 +1808,8 @@ Solution<T> WindowSolver<T>::solve() {
       warn(c_, "slice " + range + " not completed: no inertia count possible (" + count_failure + "); its " +
                    std::to_string(s.required()) + " eigenvalue(s) are not returned");
     }
-  }
+  };
+  solve_slices(solve_here);
   const index_t removed = deduplicate();
   if (removed > 0) event(c_, "deduplicate", {{"removed", static_cast<std::int64_t>(removed)}});
   rep.slices = reports_;
@@ -1759,9 +1961,29 @@ Solution<T> solve_definite(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactori
   return finish(ws.solve());
 }
 
+// A helper process's slice (DESIGN §3.9): the leader's planned slice solved by the same run_slice,
+// on the helper's main object (analysed on the leader's pivot order) and its own counts (gap points
+// of one-sided anchors, partial-cluster checks). Phases as on the leader; its time is the helper's.
+template <class T>
+SliceReply<T> slice_on_helper(Ctx& c, const ShiftedPencil<T>& pencil, SparseFactorization<T>& fac,
+                              const ProblemInfo& info, const SliceTask& t) {
+  Timer timer;
+  if (fault(c.cfg, kFaultHelperTasks)) throw_injected_fault(c.cfg, kFaultHelperTasks, "slice on a helper process");
+  if (t.cap_mb > 0) fac.set_max_memory_mb(t.cap_mb);
+  const SpectrumEstimate est{info.lo1, info.lo2, info.hi1, info.hi2, info.spectrum_valid};
+  PhaseScope phase(c.clock, Phase::Verify);
+  WindowSolver<T> ws(c, pencil, fac, info.n2a, info.n2b, info.scale, est);
+  SliceReply<T> r = ws.run_remote(t);
+  r.seconds = timer.seconds();
+  r.rss_bytes = static_cast<double>(current_rss_bytes());
+  return r;
+}
+
 #define HS_INSTANTIATE_SOLVE_DEFINITE(T)                                                                  \
   template Solution<T> solve_definite<T>(Ctx&, const ShiftedPencil<T>&, SparseFactorization<T>&, double, \
-                                         double, double, double, const SpectrumEstimate&);
+                                         double, double, double, const SpectrumEstimate&);               \
+  template SliceReply<T> slice_on_helper<T>(Ctx&, const ShiftedPencil<T>&, SparseFactorization<T>&,      \
+                                            const ProblemInfo&, const SliceTask&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_SOLVE_DEFINITE)
 #undef HS_INSTANTIATE_SOLVE_DEFINITE
 

@@ -84,12 +84,17 @@ struct FactorHeld {
   bool detection_off = false;  ///< factorized without null-pivot detection (dense cluster)
 };
 
+class Helpers;
+
 struct Ctx {
   const SolverConfig& cfg;
   Logger* log;
   SolveReport& rep;
   PhaseClock& clock;
   FactorHeld held{};
+  /// Helper processes of a multi-process solve (driver/helpers.hpp; DESIGN §3.9), a HelpersOf<T>
+  /// of the solve's scalar type; nullptr: a single-process solve (hs::solve).
+  Helpers* helpers = nullptr;
 };
 
 void warn(Ctx& c, const std::string& msg);
@@ -98,7 +103,9 @@ std::string fmt(double x);
 
 /// The memory of this process the budget is charged with (DESIGN §3.6-3): resident memory, or the
 /// address space / VmData when the budget derives from RLIMIT_AS / RLIMIT_DATA
-/// (report.memory.measure). Bytes; 0 when unreadable.
+/// (report.memory.measure), plus what the helper processes of a multi-process solve hold or were
+/// granted (Helpers::memory_bytes: the budget covers the whole process tree). Bytes; 0 when
+/// unreadable.
 double memory_in_use(const Ctx& c);
 /// What the budget leaves now: memory_budget_gb - memory_in_use(c), bytes (< 0: exceeded).
 double budget_left(const Ctx& c);
@@ -288,7 +295,10 @@ constexpr index_t kFaultBadAlloc = 32;
 /// nearest target handed to the windows) starts its first slice - its window ends and cuts are
 /// counted before - and never on the nearest target's own certificate.
 constexpr index_t kFaultLate = 64;
-constexpr index_t kFaultCountMask = 127;
+/// Multi-process solves (DESIGN §3.9): every task a helper process gets fails there (with the kind
+/// of failure above), so that the leader must do the work itself.
+constexpr index_t kFaultHelperTasks = 128;
+constexpr index_t kFaultCountMask = 255;
 inline bool fault(const SolverConfig& cfg, index_t bit) { return (cfg.certificate_fault_count & bit) != 0; }
 /// Throws the failure of the injected kind (OutOfMemoryBudget, FactorizationFailed or
 /// std::bad_alloc); `what`: the injection point, for the message.
@@ -430,6 +440,11 @@ bool counter_pays(const SolverConfig& cfg, const FactorEstimate& e, const MumpsI
 template <class T>
 index_t count_below(Ctx& c, CountSource<T>& src, double& s, double outward, double step,
                     bool* detection_off = nullptr, bool s_is_gap = false, bool* near_eigenvalue = nullptr);
+/// The same rules on any source of counts: count(s, detection) is the inertia of K(s) (a helper
+/// process counts on its own inertia-only instance this way, driver/helpers.hpp).
+index_t count_below(Ctx& c, const std::function<Inertia(double, bool)>& count, double& s, double outward,
+                    double step, bool* detection_off = nullptr, bool s_is_gap = false,
+                    bool* near_eigenvalue = nullptr);
 
 /// Symbolic analysis at sigma0 and the memory-budget decision (DESIGN §3.6-3).
 template <class T>
