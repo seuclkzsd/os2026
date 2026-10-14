@@ -1,0 +1,43 @@
+{
+ "schema_version": 1,
+ "note": "P9 'mpi': the SLEPc profiles of the 1e6 head-to-head (results/cmp-p9-1e6.md): the best of five layout / ordering / BLR variants screened per case (results/p9_mpi.md section 2.1), starting from the 16-core 1e5 winners, then the Krylov group (eps_ncv, eps_krylovschur_restart) screened at 1e6 with tools/bench/tune_slepc.py --groups ncv,restart (section 2.1, results/cmp-p9-1e6-krylov.md); for tools/bench/compare.py --slepc-profile best --slepc-profile-file results/cmp-p9-1e6-profiles.json",
+ "profiles": [
+  {
+   "scope": "case",
+   "name": "syn-mem27-100",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 1,
+    "threads": 16,
+    "bind": "none",
+    "options": {
+     "eps_ncv": "3k"
+    }
+   },
+   "note": "P9 screening (1x16 = the 1e5 winner) + tune_slepc.py --groups ncv,restart at 1e6: eps_ncv=3k 115.63 s vs 124.83 s with SLEPc's default ncv (medians of 2 interleaved confirmation runs)"
+  },
+  {
+   "scope": "case",
+   "name": "yee-pec-box-1e6",
+   "mode": "nearest",
+   "cores": 16,
+   "target": null,
+   "config": {
+    "ranks": 4,
+    "threads": 4,
+    "bind": "core",
+    "options": {
+     "eps_ncv": "3k",
+     "eps_nev": "k+2",
+     "st_mat_mumps_cntl_7": "1e-10",
+     "st_mat_mumps_icntl_28": "2",
+     "st_mat_mumps_icntl_29": "2",
+     "st_mat_mumps_icntl_35": "2"
+    }
+   },
+   "note": "P9 screening (4x4/core eps_nev=k+2 BLR ParMETIS = the 1e5 winner) + tune_slepc.py --groups ncv,restart at 1e6 (--from-profile): eps_ncv=3k 59.53 s (57-59 solves) vs 68.82 s (78 solves) with SLEPc's default ncv (medians of 2 interleaved confirmation runs)"
+  }
+ ]
+}
