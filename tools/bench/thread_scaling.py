@@ -17,11 +17,23 @@ speedup / parallel-efficiency table with the phase split (P9 integration, result
          Runs whose guard summary exists are skipped (resume); none starts after --deadline s.
   table  per (case, T): median report time_total_s over the valid runs, speedup t(1) / t(T) (the
          smallest measured T when 1 is missing) and parallel efficiency speedup x T_min / T, with the
-         medians of the phases: analysis (factor_stats.analyze_s: orderings and symbolic analyses of
-         the main factorization object), numeric factorizations (factor_stats.factorize_s), solves
-         (factor_stats.solve_s: the block triangular solves of the Krylov iteration and of the
-         refinement), iteration without the solves (time_iterate_s - solves), certificate
-         (time_certificate_s: the inertia counts) and the rest (setup, verify, other analyses).
+         medians of an exclusive phase split of the report's five exclusive phases
+         (docs/FORMATS.md §3; the columns add up to time_total_s):
+           analysis       factor_stats.analyze_s (ordering and symbolic analysis of the main
+                          factorization object; at most time_factor_s)
+           factorization  the rest of time_factor_s: the numeric factorizations of the factor phase
+                          (at sigma; B or A where the problem type needs them) and the other
+                          candidate analyses of the adaptive ordering
+           solves         factor_stats.solve_s, at most time_iterate_s: the block solves of the
+                          Krylov iteration
+           iteration      the rest of time_iterate_s (orthogonalization, restarts, products)
+           certificate    time_certificate_s: the inertia counts (on the InertiaCounter, or
+                          refactorizations of the main object - which factor_stats.factorize_s also
+                          counts, so it is not used)
+           rest           time_setup_s + time_verify_s
+         and the adaptive ordering's choice (factor_options.ordering: 0 AMD, 3 SCOTCH, 4 PORD,
+         5 METIS, 10 own nested dissection; its cost model depends on the thread count). The table
+         reads every run's report.json again, so it applies this split to older raw runs too.
          A run is valid as in ab_cases.py (exit 0, not killed, success claimed, tools/eval pass); a
          speedup is given only when every run of both thread counts was valid.
 
@@ -51,19 +63,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.bench.ab_cases import GUARD, PROBLEM, collect, hsolve_command, report_fields  # noqa: E402
 
 PHASES = ("analysis", "numeric", "solves", "iterate_other", "certificate", "rest")
+ORDERINGS = {0: "AMD", 2: "AMF", 3: "SCOTCH", 4: "PORD", 5: "METIS", 6: "QAMD", 7: "auto", 10: "ND"}
 
 
 def phases(out: Path) -> dict[str, float]:
-    """The phase split of one report (see the module docstring)."""
+    """The exclusive phase split of one report (see the module docstring); sums to time_total_s."""
     rep = json.loads((out / "report.json").read_text())
     fs = rep.get("factor_stats") or {}
-    total = rep["time_total_s"]
-    analysis, numeric, solves = fs.get("analyze_s", 0.0), fs.get("factorize_s", 0.0), fs.get("solve_s", 0.0)
-    iterate_other = max(0.0, rep.get("time_iterate_s", 0.0) - solves)
-    cert = rep.get("time_certificate_s", 0.0)
-    rest = max(0.0, total - analysis - numeric - solves - iterate_other - cert)
-    return {"analysis": analysis, "numeric": numeric, "solves": solves, "iterate_other": iterate_other,
-            "certificate": cert, "rest": rest}
+    factor, iterate = rep.get("time_factor_s", 0.0), rep.get("time_iterate_s", 0.0)
+    analysis = min(fs.get("analyze_s", 0.0), factor)
+    solves = min(fs.get("solve_s", 0.0), iterate)
+    return {"analysis": analysis, "numeric": factor - analysis, "solves": solves,
+            "iterate_other": iterate - solves, "certificate": rep.get("time_certificate_s", 0.0),
+            "rest": rep.get("time_setup_s", 0.0) + rep.get("time_verify_s", 0.0)}
+
+
+def ordering(out: Path) -> str:
+    """The ordering the run factorized with (report factor_options.ordering)."""
+    o = (json.loads((out / "report.json").read_text()).get("factor_options") or {}).get("ordering")
+    return ORDERINGS.get(o, str(o))
 
 
 def cmd_run(a: argparse.Namespace) -> int:
@@ -131,8 +149,18 @@ def _median(xs: list[float]) -> float | None:
     return float(statistics.median(xs)) if xs else None
 
 
+def _reread(run_dirs: list[Path], r: dict[str, Any]) -> None:
+    """Phases and ordering of run r from its report.json (the current split), when it is there."""
+    for rd in run_dirs:
+        out = rd / r["case"] / f"{r['label']}-r{r['rep']}"
+        if (out / "report.json").is_file():
+            r["phases"], r["ordering"] = phases(out), ordering(out)
+            return
+
+
 def cmd_table(a: argparse.Namespace) -> int:
-    data = collect([Path(p) for p in a.run_dirs])
+    run_dirs = [Path(p) for p in a.run_dirs]
+    data = collect(run_dirs)
     doc: dict[str, Any] = {"cases": []}
     f = lambda x, p=2: "-" if x is None else f"{x:.{p}f}"  # noqa: E731
     lines = []
@@ -142,6 +170,8 @@ def cmd_table(a: argparse.Namespace) -> int:
         rows = []
         for t in sorted(by_t):
             runs = by_t[t]
+            for r in runs:
+                _reread(run_dirs, r)
             valid = [r for r in runs if r["valid"]]
             times = [r["time_total_s"] for r in valid]
             ph = {k: _median([r["phases"][k] for r in valid if "phases" in r]) for k in PHASES}
@@ -151,6 +181,7 @@ def cmd_table(a: argparse.Namespace) -> int:
                          "peak_rss_gib": max((r["peak_rss_gib"] for r in runs if r.get("peak_rss_gib")),
                                              default=None),
                          "block_size": "/".join(sorted({str(r.get("block_size")) for r in runs})),
+                         "ordering": "/".join(sorted({str(r.get("ordering", "-")) for r in runs})),
                          "certificate_method": "/".join(sorted({str(r.get("certificate_method")) for r in runs}))})
         base = rows[0]
         for r in rows:
@@ -165,15 +196,15 @@ def cmd_table(a: argparse.Namespace) -> int:
         lines += [f"**{name}** (n = {any_run.get('n')}, "
                   f"{PROBLEM.get(any_run.get('problem'), any_run.get('problem'))}, certificate "
                   f"{rows[-1]['certificate_method']}, block p {rows[-1]['block_size']})", "",
-                  f"| threads | total s [min-max] | speedup | efficiency | analysis | numeric fact. | solves | "
-                  f"iteration (other) | certificate | rest | valid | peak GiB |", "|" + "---|" * 12]
+                  f"| threads | total s [min-max] | speedup | efficiency | analysis | factorization | solves | "
+                  f"iteration | certificate | rest | ordering | valid | peak GiB |", "|" + "---|" * 13]
         for r in rows:
             p = r["phases"]
             lines.append(f"| {r['threads']} | {f(r['time_s'], 3)} [{f(r['time_min'], 3)}-{f(r['time_max'], 3)}] | "
                          f"{f(r['speedup'])}x | {f(r['efficiency'])} | {f(p['analysis'], 3)} | "
                          f"{f(p['numeric'], 3)} | {f(p['solves'], 3)} | {f(p['iterate_other'], 3)} | "
-                         f"{f(p['certificate'], 3)} | {f(p['rest'], 3)} | {r['valid']}/{r['reps']} | "
-                         f"{f(r['peak_rss_gib'])} |")
+                         f"{f(p['certificate'], 3)} | {f(p['rest'], 3)} | {r['ordering']} | "
+                         f"{r['valid']}/{r['reps']} | {f(r['peak_rss_gib'])} |")
         last = rows[-1]
         if last["speedup"]:
             lines.append("")
