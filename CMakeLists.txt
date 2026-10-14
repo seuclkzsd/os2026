@@ -172,7 +172,8 @@ set_property(CACHE HSOLVE_GPU_DEFAULT PROPERTY STRINGS off auto on)
 if(NOT HSOLVE_GPU_DEFAULT MATCHES "^(off|auto|on)$")
   message(FATAL_ERROR "HSOLVE_GPU_DEFAULT must be off, auto or on, got '${HSOLVE_GPU_DEFAULT}'")
 endif()
-add_library(hsolve_gpu STATIC src/gpu/cuda_lib.cpp src/gpu/gemm_engine.cpp src/gpu/offload.cpp)
+add_library(hsolve_gpu STATIC src/gpu/affinity.cpp src/gpu/cuda_lib.cpp src/gpu/gemm_engine.cpp
+            src/gpu/offload.cpp)
 target_include_directories(hsolve_gpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_options(hsolve_gpu PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
 target_compile_definitions(hsolve_gpu PRIVATE HSOLVE_GPU_DEFAULT="${HSOLVE_GPU_DEFAULT}")
@@ -255,6 +256,11 @@ foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
     target_link_libraries(bench_${name} PRIVATE hsolve_blas)
   elseif(name STREQUAL "test_gpu" AND TARGET ${name})
     target_link_libraries(${name} PRIVATE hsolve_gpu)
+    # The engine's threads under OpenMP binding (src/gpu/affinity.hpp): a process of its own, since
+    # the OpenMP runtime reads OMP_PROC_BIND / OMP_PLACES when it starts.
+    add_test(NAME test_gpu.AffinityUnderOmpProcBind COMMAND ${name} --gtest_filter=GpuAffinityBound.*)
+    set_tests_properties(test_gpu.AffinityUnderOmpProcBind PROPERTIES ENVIRONMENT
+      "OMP_PROC_BIND=close;OMP_PLACES=cores;OMP_NUM_THREADS=2;OPENBLAS_NUM_THREADS=1;HSOLVE_TEST_OMP_BOUND=1")
   elseif(name STREQUAL "test_gpu_hook" AND TARGET ${name})
     # MUMPS' calls in this process go through the hook (and its GPU offload); with
     # HSOLVE_BLAS_HOOK=ON also runs of the hsolve executable with --gpu.

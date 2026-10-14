@@ -132,7 +132,9 @@ json info_json(const hs::gpu::EngineInfo& i) {
               {"cudart", i.cudart_path},
               {"cublas_path", i.cublas_path},
               {"init_s", i.init_seconds},
-              {"chunk_bytes", i.options.chunk_bytes}};
+              {"chunk_bytes", i.options.chunk_bytes},
+              {"pipeline_cpus", i.pipeline_cpus},
+              {"pipeline_affinity_widened", i.pipeline_affinity_widened}};
 }
 
 int cmd_info() {

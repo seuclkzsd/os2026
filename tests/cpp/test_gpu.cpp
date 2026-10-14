@@ -1,19 +1,25 @@
-// GPU module (src/gpu, P10 "gpu"; docs/BLAS.md §10): options, run-time loading, the dgemm engine
-// and the process-level offload controller.
+// GPU module (src/gpu, P10 "gpu"; docs/BLAS.md §10): options, run-time loading, the dgemm engine,
+// the CPU affinity of its threads and the process-level offload controller.
 //
 // GPU use is opt-in for tests: the GPU tests run only when HSOLVE_TEST_GPU_DEVICE names a device
 // (e.g. HSOLVE_TEST_GPU_DEVICE=7 on gpu02 - the one GPU this project may use; run them through
 // tools/bench/gpu_slot.sh). Otherwise this process sees no GPU at all (CUDA_VISIBLE_DEVICES is set
 // to the empty list before main), so a plain ctest run on a shared GPU node never touches a GPU,
 // and the fallback tests below check the CPU-only behaviour ("degrade mode").
+// GpuAffinityBound.* runs a second time as test_gpu.AffinityUnderOmpProcBind, under
+// OMP_PROC_BIND=close OMP_PLACES=cores (CMakeLists.txt; the variables are read when the OpenMP
+// runtime starts, so they need a process of their own).
+#include <dirent.h>
 #include <gtest/gtest.h>
 #include <omp.h>
+#include <sched.h>
 #include <stdlib.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -24,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include "gpu/affinity.hpp"
 #include "gpu/cuda_lib.hpp"
 #include "gpu/gemm_engine.hpp"
 #include "gpu/offload.hpp"
@@ -182,6 +189,92 @@ TEST(GpuOptions, NormalizedCapsTheChunkAtOneSlot) {
   const hs::gpu::OffloadOptions p = hs::gpu::parse_offload_options("chunk_kb=65536,slot_mb=16", &unknown);
   EXPECT_EQ(unknown, "");
   EXPECT_EQ(hs::gpu::normalized(p.engine).chunk_bytes, std::size_t{16} << 20);
+}
+
+// CPUs of a thread (sched_getaffinity on a thread id).
+int task_cpu_count(int tid) {
+  cpu_set_t s;
+  CPU_ZERO(&s);
+  if (sched_getaffinity(tid, sizeof s, &s) != 0) return -1;
+  return CPU_COUNT(&s);
+}
+
+// Thread ids and names of this process' threads whose name starts with `prefix`.
+std::vector<std::pair<int, std::string>> threads_named(const std::string& prefix) {
+  std::vector<std::pair<int, std::string>> out;
+  DIR* d = opendir("/proc/self/task");
+  if (d == nullptr) return out;
+  while (const dirent* e = readdir(d)) {
+    if (e->d_name[0] == '.') continue;
+    std::FILE* f = std::fopen(("/proc/self/task/" + std::string(e->d_name) + "/comm").c_str(), "r");
+    if (f == nullptr) continue;
+    char buf[64] = {0};
+    const bool ok = std::fgets(buf, sizeof buf, f) != nullptr;
+    std::fclose(f);
+    std::string name = ok ? buf : "";
+    while (!name.empty() && name.back() == '\n') name.pop_back();
+    if (name.compare(0, prefix.size(), prefix) == 0) out.emplace_back(std::atoi(e->d_name), name);
+  }
+  closedir(d);
+  return out;
+}
+
+// Without OpenMP binding (the default) nothing changes: this thread is not bound, its mask already
+// holds every place (libgomp lists places - the process' CPUs - even with OMP_PROC_BIND=false).
+TEST(GpuAffinity, NoEffectWithoutOpenMpBinding) {
+  if (omp_get_proc_bind() != omp_proc_bind_false) GTEST_SKIP() << "OpenMP binding is on in this environment";
+  const int before = hs::gpu::thread_cpu_count();
+  EXPECT_GT(before, 0);
+  const hs::gpu::ScopedPlacesAffinity wide;
+  EXPECT_FALSE(wide.widened());
+  EXPECT_EQ(hs::gpu::thread_cpu_count(), before);
+}
+
+// Under OMP_PROC_BIND=close OMP_PLACES=cores the OpenMP runtime binds this (initial) thread to one
+// core. Threads started inside a ScopedPlacesAffinity - and the engine's pipeline threads, named
+// hs-gpu-* - may run on every place; this thread's binding is restored. (P10 review finding: the
+// engine's threads inherited the one core and offloaded calls took 1.3-1.4x as long.)
+TEST(GpuAffinityBound, EngineThreadsMayUseEveryPlace) {
+  if (std::getenv("HSOLVE_TEST_OMP_BOUND") == nullptr)
+    GTEST_SKIP() << "runs as test_gpu.AffinityUnderOmpProcBind (OMP_PROC_BIND=close OMP_PLACES=cores)";
+  int team = 0;
+#pragma omp parallel
+  {
+#pragma omp atomic
+    ++team;  // the team is bound (libgomp binds the initial thread at start-up already)
+  }
+  EXPECT_GE(team, 1);
+  cpu_set_t places;
+  ASSERT_TRUE(hs::gpu::openmp_places_cpuset(&places)) << "no OpenMP places: OMP_PLACES not applied";
+  const int n = CPU_COUNT(&places);
+  if (n < 2) GTEST_SKIP() << "a single CPU in the OpenMP places";
+  ASSERT_EQ(hs::gpu::thread_cpu_count(), 1) << "the initial thread is not bound to one core";
+  {
+    const hs::gpu::ScopedPlacesAffinity wide;
+    EXPECT_TRUE(wide.widened());
+    EXPECT_EQ(hs::gpu::thread_cpu_count(), n);
+    int started = 0;
+    std::thread([&] { started = hs::gpu::thread_cpu_count(); }).join();
+    EXPECT_EQ(started, n);
+  }
+  EXPECT_EQ(hs::gpu::thread_cpu_count(), 1);  // restored
+  if (!gpu_requested()) return;
+  std::string why;
+  auto e = hs::gpu::GemmEngine::create(small_engine(), &why);
+  ASSERT_NE(e, nullptr) << why;
+  EXPECT_TRUE(e->info().pipeline_affinity_widened);
+  EXPECT_EQ(e->info().pipeline_cpus, n);
+  EXPECT_EQ(hs::gpu::thread_cpu_count(), 1);  // the creating thread keeps its binding
+  const auto threads = threads_named("hs-gpu-");
+  EXPECT_EQ(threads.size(), 3u);  // 2 issuing threads + the completing thread
+  for (const auto& [tid, name] : threads) EXPECT_EQ(task_cpu_count(tid), n) << name;
+  Problem p = make_problem('N', 'N', 300, 900, 260, 0, -1.0, 1.0, 21);
+  const std::vector<double> cref = reference(p);
+  std::vector<double> c = p.c;
+  ASSERT_TRUE(e->dgemm('N', 'N', p.m, p.n, p.k, p.alpha, p.a.data(), p.lda, p.b.data(), p.ldb, p.beta,
+                       c.data(), p.ldc, dgemm_));
+  bool padding_ok = false;
+  EXPECT_LE(rel_error(p, c, cref, &padding_ok), 1e-15 * 8);
 }
 
 TEST(GpuLoader, LoadsOrSaysWhy) {

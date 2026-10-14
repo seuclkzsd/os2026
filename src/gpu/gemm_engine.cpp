@@ -3,6 +3,7 @@
 
 #include <dlfcn.h>
 #include <omp.h>
+#include <pthread.h>
 #include <time.h>
 
 #if defined(__x86_64__) || defined(__SSE2__)
@@ -23,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "gpu/affinity.hpp"
 #include "gpu/cuda_lib.hpp"
 
 namespace hs::gpu {
@@ -259,6 +261,10 @@ GemmEngine::Impl::~Impl() {
 // ---- pipeline threads ----
 
 void GemmEngine::Impl::thread_loop(int role) {
+  // Named for /proc/<pid>/task/*/comm (tests, profiling): "hs-gpu-issue<i>" or "hs-gpu-add".
+  const std::string name =
+      role < opt.pack_threads ? "hs-gpu-issue" + std::to_string(role) : std::string("hs-gpu-add");
+  pthread_setname_np(pthread_self(), name.c_str());
   L->SetDevice(opt.device);
   std::uint64_t seen = 0;
   for (;;) {
@@ -530,6 +536,9 @@ GemmEngine::~GemmEngine() = default;
 
 std::unique_ptr<GemmEngine> GemmEngine::create(const EngineOptions& opt_in, std::string* why) {
   const double t0 = now_s();
+  // Every thread started below - the CUDA runtime's (with the context) and the pipeline's -
+  // inherits this thread's affinity: under OpenMP binding this is one core (affinity.hpp).
+  const ScopedPlacesAffinity wide;
   auto impl = std::make_unique<Impl>();
   const EngineOptions opt = normalized(opt_in);
   impl->opt = opt;
@@ -637,6 +646,8 @@ std::unique_ptr<GemmEngine> GemmEngine::create(const EngineOptions& opt_in, std:
     return failed("CUDA set-up: " + error_text(L, e));
   inf.pinned_bytes = (2 * static_cast<std::size_t>(slots) + 2) * opt.slot_bytes;
   I.slot_free.assign(slots, true);
+  inf.pipeline_cpus = thread_cpu_count();
+  inf.pipeline_affinity_widened = wide.widened();
   for (int role = 0; role <= opt.pack_threads; ++role)
     I.threads.emplace_back([p = &I, role] { p->thread_loop(role); });
   inf.init_seconds = now_s() - t0;

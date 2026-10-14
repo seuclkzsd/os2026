@@ -120,6 +120,10 @@ struct EngineInfo {
   int driver_version = 0, runtime_version = 0, cublas_version = 0;
   std::size_t device_total_bytes = 0, device_free_bytes = 0;  ///< at init, before allocating
   std::size_t pinned_bytes = 0;                              ///< page-locked host staging
+  /// CPUs the pipeline threads may run on (their affinity at the start, affinity.hpp), and whether
+  /// that is wider than the creating thread's own binding (an OpenMP thread bound to its place).
+  int pipeline_cpus = 0;
+  bool pipeline_affinity_widened = false;
   std::string cudart_path, cublas_path;
   double init_seconds = 0.0;  ///< library load + context + cuBLAS + buffers + threads
   EngineOptions options;      ///< as used (clamped)
@@ -136,6 +140,9 @@ class GemmEngine {
   /// visible device, too little free device memory, a CUDA error); the engine's buffers are freed
   /// then, but a CUDA primary context created on the way stays until the process exits (resetting
   /// it could break another user of the device in this process). The options are normalized().
+  /// The threads started here (the pipeline's and the CUDA runtime's) may run on every CPU of the
+  /// OpenMP places when the calling thread is bound to one of them (ScopedPlacesAffinity,
+  /// affinity.hpp); the calling thread's own affinity is unchanged on return.
   static std::unique_ptr<GemmEngine> create(const EngineOptions& opt, std::string* why);
   ~GemmEngine();
   GemmEngine(const GemmEngine&) = delete;

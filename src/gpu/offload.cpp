@@ -303,6 +303,7 @@ std::string report_json() {
     j += ", \"init_s\": " + num(s.init_s);
     j += ", \"device_mem_mb\": " + std::to_string(inf.options.mem_bytes >> 20);
     j += ", \"pinned_mb\": " + std::to_string(inf.pinned_bytes >> 20);
+    j += ", \"pipeline_cpus\": " + std::to_string(inf.pipeline_cpus);
     j += ", \"window_s\": " + num(s.window_s);
     j += ", \"calls\": " + std::to_string(st.calls);
     j += ", \"tiles\": " + std::to_string(st.tiles);
