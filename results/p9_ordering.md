@@ -460,7 +460,8 @@ table`:
 * the P9 draft, new = v16 (10be12a): G6 (1e6), G5 (1e5), G5s (10-rep re-check);
 * **the final code, new = fix1 (0b2da5a: the flow rule of section 8.3)**: G8 (1e6), G7 (1e5), G7s
   and G7r (10-rep re-checks), G7n (fix1 against v16 on the four cases the rule changes). Later
-  commits change comments, tests and documents only.
+  commits change comments, tests and documents only: the clean release build of fa445a4 (0
+  warnings; ctest 992/992, pytest 357 passed) gives `hsolve` with fix1's md5.
 
 Machine-readable: `results/p9_gate_1e6.json`, `results/p9_gate_1e5.json`,
 `results/p9_gate_1e4_recheck.json` (the draft) and `results/p9_gate_fix_1e6.json`,
