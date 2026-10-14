@@ -6126,5 +6126,730 @@
     "comparable": true
    }
   ]
+ },
+ "gate1e6l0p_review": {
+  "base": "main",
+  "new": "new",
+  "threshold": 0.03,
+  "geomean_ratio": 0.937287136478352,
+  "cases": 2,
+  "comparable": 2,
+  "slower": [],
+  "faster": [
+   "syn-mem27-100",
+   "yee-pec-box-1e6"
+  ],
+  "rows": [
+   {
+    "case": "syn-mem27-100",
+    "n": 1000000,
+    "problem": "HEP",
+    "hosts": [
+     "gpu01"
+    ],
+    "main": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 112.818337921,
+     "time_min": 110.030819683,
+     "time_max": 120.515275103,
+     "times": [
+      112.818337921,
+      110.030819683,
+      117.943036322,
+      110.539859605,
+      120.515275103
+     ],
+     "wall_s": 113.506,
+     "peak_rss_gib": 16.168,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed-review/bin/hsolve_main"
+     ],
+     "invalid": []
+    },
+    "new": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 103.563564733,
+     "time_min": 95.288855633,
+     "time_max": 110.553166984,
+     "times": [
+      103.563564733,
+      109.331574903,
+      103.293538002,
+      110.553166984,
+      95.288855633
+     ],
+     "wall_s": 104.251,
+     "peak_rss_gib": 16.148,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed-review/bin/hsolve_l0p"
+     ],
+     "invalid": []
+    },
+    "ratio": 0.9179674744501151,
+    "comparable": true
+   },
+   {
+    "case": "yee-pec-box-1e6",
+    "n": 1027733,
+    "problem": "GHEP",
+    "hosts": [
+     "gpu01"
+    ],
+    "main": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 89.181129158,
+     "time_min": 88.552456191,
+     "time_max": 90.006499007,
+     "times": [
+      89.079465149,
+      88.552456191,
+      90.006499007,
+      89.181129158,
+      89.839752505
+     ],
+     "wall_s": 89.859,
+     "peak_rss_gib": 13.071,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed-review/bin/hsolve_main"
+     ],
+     "invalid": []
+    },
+    "new": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 85.347535864,
+     "time_min": 81.810584302,
+     "time_max": 86.449329646,
+     "times": [
+      86.449329646,
+      83.96572703,
+      85.581334452,
+      85.347535864,
+      81.810584302
+     ],
+     "wall_s": 86.212,
+     "peak_rss_gib": 13.084,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed-review/bin/hsolve_l0p"
+     ],
+     "invalid": []
+    },
+    "ratio": 0.9570134026088846,
+    "comparable": true
+   }
+  ]
+ },
+ "gate1e6l0p_yee10": {
+  "base": "main",
+  "new": "new",
+  "threshold": 0.03,
+  "geomean_ratio": 0.9422647201427038,
+  "cases": 1,
+  "comparable": 1,
+  "slower": [],
+  "faster": [
+   "yee-pec-box-1e6"
+  ],
+  "rows": [
+   {
+    "case": "yee-pec-box-1e6",
+    "n": 1027733,
+    "problem": "GHEP",
+    "hosts": [
+     "gpu01"
+    ],
+    "main": {
+     "reps": 10,
+     "valid": 10,
+     "ok": true,
+     "time_s": 90.1942779765,
+     "time_min": 87.588033222,
+     "time_max": 93.498713046,
+     "times": [
+      89.508522712,
+      91.890405201,
+      90.631664885,
+      88.068854002,
+      93.498713046,
+      92.485201802,
+      89.756891068,
+      87.588033222,
+      88.055837998,
+      90.89625923
+     ],
+     "wall_s": 90.81450000000001,
+     "peak_rss_gib": 13.068,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed/bin/hsolve_main"
+     ],
+     "invalid": []
+    },
+    "new": {
+     "reps": 10,
+     "valid": 10,
+     "ok": true,
+     "time_s": 84.986886096,
+     "time_min": 82.357862498,
+     "time_max": 87.309735963,
+     "times": [
+      85.989324226,
+      84.288470758,
+      85.694164336,
+      84.19396156800002,
+      84.32172072700001,
+      86.690215652,
+      87.309735963,
+      85.652051465,
+      82.357862498,
+      84.127699756
+     ],
+     "wall_s": 85.547,
+     "peak_rss_gib": 13.129,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed/fix/bin/hsolve_l0p"
+     ],
+     "invalid": []
+    },
+    "ratio": 0.9422647201427038,
+    "comparable": true
+   }
+  ]
+ },
+ "gate1e6l0pm": {
+  "base": "main",
+  "new": "new",
+  "threshold": 0.03,
+  "geomean_ratio": 0.9520719735678055,
+  "cases": 2,
+  "comparable": 2,
+  "slower": [],
+  "faster": [
+   "syn-mem27-100",
+   "yee-pec-box-1e6"
+  ],
+  "rows": [
+   {
+    "case": "syn-mem27-100",
+    "n": 1000000,
+    "problem": "HEP",
+    "hosts": [
+     "gpu01"
+    ],
+    "main": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 98.856031511,
+     "time_min": 98.217137008,
+     "time_max": 99.247281502,
+     "times": [
+      99.247281502,
+      98.856031511,
+      98.217137008,
+      99.085750561,
+      98.772669834
+     ],
+     "wall_s": 99.517,
+     "peak_rss_gib": 12.86,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed/bin/hsolve_main"
+     ],
+     "invalid": []
+    },
+    "new": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 93.210606595,
+     "time_min": 92.976257388,
+     "time_max": 94.024019543,
+     "times": [
+      93.052034772,
+      93.210606595,
+      93.983502263,
+      94.024019543,
+      92.976257388
+     ],
+     "wall_s": 93.915,
+     "peak_rss_gib": 12.856,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed/fix/bin/hsolve_l0p"
+     ],
+     "invalid": []
+    },
+    "ratio": 0.9428924585610964,
+    "comparable": true
+   },
+   {
+    "case": "yee-pec-box-1e6",
+    "n": 1027733,
+    "problem": "GHEP",
+    "hosts": [
+     "gpu01"
+    ],
+    "main": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 98.767191318,
+     "time_min": 98.561865544,
+     "time_max": 98.906507244,
+     "times": [
+      98.767191318,
+      98.561865544,
+      98.906507244,
+      98.893475596,
+      98.56903592199998
+     ],
+     "wall_s": 99.377,
+     "peak_rss_gib": 12.18,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed/bin/hsolve_main"
+     ],
+     "invalid": []
+    },
+    "new": {
+     "reps": 5,
+     "valid": 5,
+     "ok": true,
+     "time_s": 94.948936207,
+     "time_min": 94.671289758,
+     "time_max": 95.251620394,
+     "times": [
+      94.948936207,
+      94.757256494,
+      94.671289758,
+      94.949517666,
+      95.251620394
+     ],
+     "wall_s": 95.428,
+     "peak_rss_gib": 12.195,
+     "factorizations": "1",
+     "block_size": "8",
+     "certificate_method": "exact",
+     "completeness": "complete",
+     "hosts": [
+      "gpu01"
+     ],
+     "binaries": [
+      "~/p9_p9-factspeed/fix/bin/hsolve_l0p"
+     ],
+     "invalid": []
+    },
+    "ratio": 0.961340855601468,
+    "comparable": true
+   }
+  ]
+ },
+ "flops_l0p": {
+  "base": "main",
+  "new": "new",
+  "run_dirs": [
+   "/share/home/linzihan/p9_p9-factspeed/gate1e6l0p",
+   "/share/home/linzihan/p9_p9-factspeed-review/gate1e6l0p",
+   "/share/home/linzihan/p9_p9-factspeed/fix/gate_yee10"
+  ],
+  "gate_reps": 5,
+  "bar": 1.05,
+  "cases": {
+   "syn-mem27-100": {
+    "flops_ref": 8947277375671.0,
+    "samples": {
+     "/share/home/linzihan/p9_p9-factspeed/gate1e6l0p": {
+      "base": {
+       "runs": 5,
+       "time": 112.017529588,
+       "min": 104.97296513,
+       "max": 113.117635402,
+       "flops": 8896898976447.0,
+       "rate": 9.578593272594825,
+       "rest": 24.899720005000006
+      },
+      "new": {
+       "runs": 5,
+       "time": 99.53022607899999,
+       "min": 95.991254516,
+       "max": 107.236318007,
+       "flops": 8310925729000.0,
+       "rate": 8.941347751927227,
+       "rest": 24.927048654999993
+      },
+      "speedup": 1.1254624248425646,
+      "rate_speedup": 1.0712695153289666,
+      "equal_flops_speedup": 1.054077999908282
+     },
+     "/share/home/linzihan/p9_p9-factspeed-review/gate1e6l0p": {
+      "base": {
+       "runs": 5,
+       "time": 112.818337921,
+       "min": 110.030819683,
+       "max": 120.515275103,
+       "flops": 9059507413711.0,
+       "rate": 9.565101921928278,
+       "rest": 25.361812861000004
+      },
+      "new": {
+       "runs": 5,
+       "time": 103.563564733,
+       "min": 95.288855633,
+       "max": 110.553166984,
+       "flops": 8889374754479.0,
+       "rate": 8.765582546410137,
+       "rest": 25.538351776
+      },
+      "speedup": 1.0893632158361868,
+      "rate_speedup": 1.0912112083007623,
+      "equal_flops_speedup": 1.0671080208378185
+     }
+    },
+    "pooled": {
+     "base": {
+      "runs": 10,
+      "time": 112.111540093,
+      "min": 104.97296513,
+      "max": 120.515275103,
+      "flops": 9009788197425.5,
+      "rate": 9.571847597261552,
+      "rest": 24.92136572150001
+     },
+     "new": {
+      "runs": 10,
+      "time": 103.4285513675,
+      "min": 95.288855633,
+      "max": 110.553166984,
+      "flops": 8861861171540.0,
+      "rate": 8.825202173790327,
+      "rest": 25.22796682300001
+     },
+     "speedup": 1.0839515647342657,
+     "rate_speedup": 1.084603775502012,
+     "equal_flops_speedup": 1.0611754801698707,
+     "bootstrap": {
+      "speedup": [
+       1.0365314774371799,
+       1.148580258941871
+      ],
+      "equal_flops_speedup": [
+       1.0491043678900784,
+       1.069143512638225
+      ]
+     },
+     "gate_pass_probability": 0.8497
+    }
+   },
+   "yee-pec-box-1e6": {
+    "flops_ref": 6962084958398.5,
+    "samples": {
+     "/share/home/linzihan/p9_p9-factspeed/gate1e6l0p": {
+      "base": {
+       "runs": 5,
+       "time": 89.699764395,
+       "min": 86.634091508,
+       "max": 91.196174037,
+       "flops": 6953718574789.0,
+       "rate": 9.92086214576082,
+       "rest": 20.190193512000008
+      },
+      "new": {
+       "runs": 5,
+       "time": 84.144750004,
+       "min": 81.41257713,
+       "max": 85.46064744899999,
+       "flops": 6803961801582.0,
+       "rate": 9.263292217283617,
+       "rest": 20.209672839000007
+      },
+      "speedup": 1.0660173616385566,
+      "rate_speedup": 1.070986633375367,
+      "equal_flops_speedup": 1.0538193345770819
+     },
+     "/share/home/linzihan/p9_p9-factspeed-review/gate1e6l0p": {
+      "base": {
+       "runs": 5,
+       "time": 89.181129158,
+       "min": 88.552456191,
+       "max": 90.006499007,
+       "flops": 6958935549652.0,
+       "rate": 9.892742578668278,
+       "rest": 20.160963436000003
+      },
+      "new": {
+       "runs": 5,
+       "time": 85.347535864,
+       "min": 81.810584302,
+       "max": 86.449329646,
+       "flops": 6897220587480.0,
+       "rate": 9.314478814439761,
+       "rest": 19.995260051999992
+      },
+      "speedup": 1.0449174455383081,
+      "rate_speedup": 1.062082245904308,
+      "equal_flops_speedup": 1.0494042226663836
+     },
+     "/share/home/linzihan/p9_p9-factspeed/fix/gate_yee10": {
+      "base": {
+       "runs": 10,
+       "time": 90.1942779765,
+       "min": 87.588033222,
+       "max": 93.498713046,
+       "flops": 6940512390798.5,
+       "rate": 9.931526923259085,
+       "rest": 20.216439480500007
+      },
+      "new": {
+       "runs": 10,
+       "time": 84.986886096,
+       "min": 82.357862498,
+       "max": 87.309735963,
+       "flops": 7006268903428.0,
+       "rate": 9.19677774585156,
+       "rest": 20.247727921500008
+      },
+      "speedup": 1.061272887144233,
+      "rate_speedup": 1.0798920228053737,
+      "equal_flops_speedup": 1.0603264161086812
+     }
+    },
+    "pooled": {
+     "base": {
+      "runs": 20,
+      "time": 89.7283277315,
+      "min": 86.634091508,
+      "max": 93.498713046,
+      "flops": 6956327062220.5,
+      "rate": 9.904100837871356,
+      "rest": 20.19044284950001
+     },
+     "new": {
+      "runs": 20,
+      "time": 84.75343699550001,
+      "min": 81.41257713,
+      "max": 87.309735963,
+      "flops": 6966463014711.0,
+      "rate": 9.235171808242086,
+      "rest": 20.228613421000013
+     },
+     "speedup": 1.0586983951608255,
+     "rate_speedup": 1.0724327650333774,
+     "equal_flops_speedup": 1.0546464184161282,
+     "bootstrap": {
+      "speedup": [
+       1.0422986472012228,
+       1.0730637190052355
+      ],
+      "equal_flops_speedup": [
+       1.0496463817567674,
+       1.063872950786151
+      ]
+     },
+     "gate_pass_probability": 0.6857
+    }
+   }
+  }
+ },
+ "flops_l0pm": {
+  "base": "main",
+  "new": "new",
+  "run_dirs": [
+   "/share/home/linzihan/p9_p9-factspeed/fix/gate_metis"
+  ],
+  "gate_reps": 5,
+  "bar": 1.05,
+  "cases": {
+   "syn-mem27-100": {
+    "flops_ref": 6763255839773.0,
+    "samples": {
+     "/share/home/linzihan/p9_p9-factspeed/fix/gate_metis": {
+      "base": {
+       "runs": 5,
+       "time": 98.856031511,
+       "min": 98.217137008,
+       "max": 99.247281502,
+       "flops": 6763255839773.0,
+       "rate": 10.06677634899069,
+       "rest": 30.947558201999996
+      },
+      "new": {
+       "runs": 5,
+       "time": 93.210606595,
+       "min": 92.976257388,
+       "max": 94.024019543,
+       "flops": 6763255839773.0,
+       "rate": 9.315896709463338,
+       "rest": 30.20481377200001
+      },
+      "speedup": 1.0605663359807256,
+      "rate_speedup": 1.0806019713340733,
+      "equal_flops_speedup": 1.0624514285406683
+     }
+    },
+    "pooled": {
+     "base": {
+      "runs": 5,
+      "time": 98.856031511,
+      "min": 98.217137008,
+      "max": 99.247281502,
+      "flops": 6763255839773.0,
+      "rate": 10.06677634899069,
+      "rest": 30.947558201999996
+     },
+     "new": {
+      "runs": 5,
+      "time": 93.210606595,
+      "min": 92.976257388,
+      "max": 94.024019543,
+      "flops": 6763255839773.0,
+      "rate": 9.315896709463338,
+      "rest": 30.20481377200001
+     },
+     "speedup": 1.0605663359807256,
+     "rate_speedup": 1.0806019713340733,
+     "equal_flops_speedup": 1.0624514285406683,
+     "bootstrap": {
+      "speedup": [
+       1.050504650982596,
+       1.0657102506019835
+      ],
+      "equal_flops_speedup": [
+       1.0509575346277071,
+       1.0657945615994382
+      ]
+     },
+     "gate_pass_probability": 0.9825
+    }
+   },
+   "yee-pec-box-1e6": {
+    "flops_ref": 7052199360683.0,
+    "samples": {
+     "/share/home/linzihan/p9_p9-factspeed/fix/gate_metis": {
+      "base": {
+       "runs": 5,
+       "time": 98.767191318,
+       "min": 98.561865544,
+       "max": 98.906507244,
+       "flops": 7052199360683.0,
+       "rate": 9.99189806301442,
+       "rest": 28.293156736
+      },
+      "new": {
+       "runs": 5,
+       "time": 94.948936207,
+       "min": 94.671289758,
+       "max": 95.251620394,
+       "flops": 7052199360683.0,
+       "rate": 9.45143983898162,
+       "rest": 28.258069421000002
+      },
+      "speedup": 1.0402137745142899,
+      "rate_speedup": 1.0571826338886194,
+      "equal_flops_speedup": 1.0405272928639018
+     }
+    },
+    "pooled": {
+     "base": {
+      "runs": 5,
+      "time": 98.767191318,
+      "min": 98.561865544,
+      "max": 98.906507244,
+      "flops": 7052199360683.0,
+      "rate": 9.99189806301442,
+      "rest": 28.293156736
+     },
+     "new": {
+      "runs": 5,
+      "time": 94.948936207,
+      "min": 94.671289758,
+      "max": 95.251620394,
+      "flops": 7052199360683.0,
+      "rate": 9.45143983898162,
+      "rest": 28.258069421000002
+     },
+     "speedup": 1.0402137745142899,
+     "rate_speedup": 1.0571826338886194,
+     "equal_flops_speedup": 1.0405272928639018,
+     "bootstrap": {
+      "speedup": [
+       1.0369082532082725,
+       1.043788211093498
+      ],
+      "equal_flops_speedup": [
+       1.0366295814556006,
+       1.04370441760747
+      ]
+     },
+     "gate_pass_probability": 0.0
+    }
+   }
+  }
  }
 }

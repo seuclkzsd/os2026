@@ -45,10 +45,15 @@ loops or BLAS routes?
   SCOTCH's run-to-run scatter (8.5e12-1.34e13 flops on syn-mem27-100) dwarfs the effect - and
   1.038x / 1.027x with the ordering fixed (METIS); no regression at 1e5 (41 cases, geometric mean
   1.003x). The block sizes are therefore opt-in (`HS_MUMPS_BLOCKING=p9`), MUMPS' own stay the default.
-  **With the patched MUMPS as well the bar is met: 1.125x / 1.066x end to end** (§4.4; ~1.05x on
-  yee-pec-box-1e6 normalised for its runs' luckier SCOTCH orders) - but building MUMPS from source is
-  not the default build; a build with `-DHSOLVE_MUMPS_ROOT=<that install>` takes the P9 block sizes
-  by default.
+  **With the patched MUMPS as well, yee-pec-box-1e6 is at the bar, not clearly past it** (§4.4-4.5,
+  corrected after the review: the first sample's "1.125x / 1.066x, gate passed" was a lucky draw).
+  syn-mem27-100 passes (5-run samples 1.125x and 1.089x; 1.061x at equal flops). On
+  yee-pec-box-1e6 four 5-run gates gave 1.066x, 1.045x, 1.075x and 1.048x - two pass, two fail;
+  pooled over 20 runs per binary 1.059x [bootstrap 1.042-1.073], at equal pivot-order flops 1.055x
+  [1.050-1.064], and on one fixed (METIS) pivot order, without SCOTCH's scatter, 1.040x - below the
+  bar (syn-mem27-100 1.061x). So the patched build is not recommended as the default
+  build on this evidence; it stays an opt-in build path (`-DHSOLVE_MUMPS_ROOT=<install of
+  tools/dev/build_mumps.sh>`, which then takes the P9 block sizes by default).
 
 ## 1. Setup
 
@@ -296,7 +301,10 @@ environment's gfortran / gcc 13.4 against its METIS, SCOTCH and OpenBLAS: static
 then shared libraries with conda-forge's names and sonames (RPATH $ORIGIN first); gfortran's libmvec
 pre-include is disabled and libm calls are wrapped so that nothing needs glibc > 2.17 (checked).
 ~90 s per build in the lane. Variants: nocona -O2 (conda-forge's flags: the control), x86-64-v3 -O3
-(AVX2 + FMA, any x86-64 CPU since ~2015), skylake-avx512 -O3; swapped in by LD_PRELOAD of all seven:
+(AVX2, FMA, BMI1/2: Intel from Haswell, AMD from Excavator / Zen - not Sandy / Ivy Bridge Xeons nor
+the many Atom / Celeron / Pentium parts without AVX2, where it dies with SIGILL; its libdmumps_seq.so
+holds 3725 FMA / ymm instructions, the nocona builds none), skylake-avx512 -O3; swapped in by
+LD_PRELOAD of all seven:
 
 | variant | syn count a s | vs base | yee count a s | vs base |
 |---|---|---|---|---|
@@ -311,7 +319,9 @@ pre-include is disabled and libm calls are wrapped so that nothing needs glibc >
 * Vectorising MUMPS' own loops for the CPU gains nothing alone and 0.3-0.4% with the wider panels:
   the panel updates, assembly and copies of §2.3 are bound by memory (and, in the panels, by the
   latency of short rows in L2), not by instruction width. Not worth replacing the environment's
-  library: the build path stays **opt-in**. `cmake -DHSOLVE_MUMPS_ROOT=$HOME/deps/mumps-5.8.2-NAME`
+  library: the build path stays **opt-in**, and the script's defaults are the portable nocona -O2
+  (since the review; x86-64-v3, skylake-avx512 and -O3 are explicit opt-ins - none of them went
+  through a gate). `cmake -DHSOLVE_MUMPS_ROOT=$HOME/deps/mumps-5.8.2-NAME`
   links hsolve against such an install with its lib/ first in the RPATH (`test_factor_mumps_build`
   checks that the mapped MUMPS is the configured one; checked with the x86-64-v3 build).
 * GEMMT (`--gemmt`, MUMPS' -DGEMMT_AVAILABLE, recommended by MUMPS' INSTALL file) was built but not
@@ -335,7 +345,13 @@ shrinks to KEEP(499) - 1 accordingly, so it still covers every block a dgemm rea
 Unset (0, MUMPS' value after JOB = -1) they leave MUMPS' behaviour unchanged; hsolve sets KEEP(498) =
 128 and KEEP(499) = 64 (`kL0PanelWidth`, `kL0Block`), which the environment's unpatched library
 ignores. The same counts in every run (and `test_factor_panel`, `test_factor`, `test_factor_counter`
-pass against the patched build).
+pass against the patched build). Since the review `test_factor_panel` also has a matrix whose
+assembly tree is known and asserted (two leaf fronts of 200 fully summed columns and 1100-row
+contribution blocks under a 2100-column root; MUMPS' flops under L0, DKEEP(16), show the leaves form
+the L0 layer of 2 threads): there the patched L0 panels and stripes and the contribution-block row
+blocks KEEP(57/58) differ from MUMPS' own, and the counts still equal MUMPS' defaults and the dense
+eigenvalues' (the 2-D grids of the other tests have contribution blocks of at most ~600 rows, which
+KEEP(57/58) leave alone, and fronts under L0 of unknown width).
 
 On top of KEEP(420) = 256 / KEEP(58) = 2000 (count a, conda-forge's library = the reference):
 
@@ -358,7 +374,9 @@ The candidate for a default: the block sizes of §3.2 (KEEP(420) = 256, KEEP(58)
 against main a831d79 (`hsolve_main`), `tools/bench/ab_cases.py` (ABBA, each run the case's default
 configuration under its own nested guard, 16 threads, 32 GiB: in core), solver time
 `time_total_s`, every run evaluated by tools/eval. The ab_cases tables of every gate run are in
-`results/p9_factspeed_gates.json`, those of the screens of §3 in `results/p9_factspeed_screens.json`.
+`results/p9_factspeed_gates.json` (since the review also the review's rerun of §4.4, the runs of
+§4.5 and their pooled flop analysis: keys `gate1e6l0p_review`, `gate1e6l0p_yee10`, `gate1e6l0pm`,
+`flops_l0p`, `flops_l0pm`), those of the screens of §3 in `results/p9_factspeed_screens.json`.
 
 ### 4.1 End to end at 1e6, default configuration (5 interleaved repetitions)
 
@@ -414,25 +432,82 @@ repetitions against main:
 Every run passes tools/eval (complete, certificate exact passed). Per flop the main factorization
 is 1.08-1.10x faster. The SCOTCH orders again differ between the runs: on yee-pec-box-1e6 the new
 binary's runs drew 2% fewer flops in the median (6.80e12 vs 6.95e12); normalised to equal flops its
-end-to-end gain is ~1.05x. **1e5 regression of this build** (the 41 cases, ABBA, 3 repetitions): all
-246 runs valid, geometric mean new/main 0.998 (1.002x), 6 cases faster by more than 3% (ss-ge87h76
+end-to-end gain is ~1.05x - this 5-run sample was a lucky one on yee-pec-box-1e6 (§4.5: of four
+5-run gates two pass, two fail). **1e5 regression of this build** (the 41 cases, ABBA, 3
+repetitions): all 246 runs valid, geometric mean new/main 0.998 (1.002x), 6 cases faster by more than 3% (ss-ge87h76
 0.927, ss-si34h36 0.933, syn-multiplicity-real-1e4 0.945, wg-halfslab-1e5 0.954, cav2d-square-1e4
 0.966, syn-wide-range-real-1e4 0.968), 5 slower by more than 3% - all 15-200 ms runs with overlapping
 ranges, and with 5 more ABBA repetitions: syn-lap2d-100 1.025, syn-multiplicity-complex-1e4 1.003,
 wg-square-1e3 0.978, wg-square-n289 0.918, wg-square-pert-1e4 0.898 (noise).
 
-**Verdict.** The P9 block sizes with the environment's MUMPS pass the 1e5 regression check but not
-the 1e6 end-to-end bar (1.032x on yee-pec-box-1e6 with SCOTCH, 1.027x with METIS): with the default
-build MUMPS' own block sizes stay the default and `HS_MUMPS_BLOCKING=p9` (environment of the CLI or
-of Python) opts in. With the patched MUMPS the whole gate is met (1.125x / 1.066x at 1e6, no
-regression at 1e5), but that build is not the default build: it needs the MUMPS tarball (4.5 MB,
-CeCILL-C: shippable in the repository) and a MUMPS build step (~90 s) before hsolve's in
-tools/dev/build.sh and the deployment scripts - the lead's files, and a change to every build that
-should be reviewed as such. **Recommendation: make the patched build the default build.** A build
-configured with `-DHSOLVE_MUMPS_ROOT=<install of build_mumps.sh>` uses the P9 block sizes by default
-(CMake `HSOLVE_MUMPS_BLOCKING`, overridable by HS_MUMPS_BLOCKING at run time), so today the whole
-configuration is two commands: `env/run.sh tools/dev/build_mumps.sh l0p --isa nocona --opt O2 --patch
-patches/mumps-5.8.2-l0-blocking.patch` and `cmake ... -DHSOLVE_MUMPS_ROOT=$HOME/deps/mumps-5.8.2-l0p`.
+### 4.5 The patched build again, after the review
+
+The review reran §4.4 with its own builds (main a831d79; f4d404d linked to its own build_mumps.sh
+install, nocona -O2 + patch): yee-pec-box-1e6 **1.045x** (89.18 -> 85.35 s), syn-mem27-100 1.089x,
+all 20 runs valid - one 5-run sample passes the bar on yee-pec-box-1e6, another fails. To settle it,
+a third build (this branch, linked to `tools/dev/build_mumps.sh fix-l0p --patch ...` with the
+script's new defaults, i.e. nocona -O2, 84 s in the lane; `hsolve_main` of §4) ran yee-pec-box-1e6
+in its default configuration for 10 more interleaved repetitions, and both cases on a fixed pivot
+order (METIS, as §4.2) for 5. Every run passes tools/eval (complete against the discrete-exact
+references, certificate exact passed).
+
+**Default configuration (SCOTCH), the three samples and pooled** (`tools/bench/factspeed_gate_flops.py`:
+medians per binary; "per flop" = (numeric + certificate s) per Tflop of the run's pivot order, the
+main factorization and both counts eliminating on it; "equal flops" = the rest of the run
+(analysis, iteration) plus that rate times the case's median flops of all runs; pooled: bootstrap
+2.5-97.5% interval over each binary's runs):
+
+| case | sample | runs | main s | patched + P9 s | speedup | per-flop speedup | speedup at equal flops |
+|---|---|---|---|---|---|---|---|
+| syn-mem27-100 | P9 (§4.4) | 5 / 5 | 112.02 [104.97-113.12] | 99.53 [95.99-107.24] | 1.125 | 1.071 | 1.054 |
+| syn-mem27-100 | review | 5 / 5 | 112.82 [110.03-120.52] | 103.56 [95.29-110.55] | 1.089 | 1.091 | 1.067 |
+| syn-mem27-100 | **pooled** | 10 / 10 | 112.11 | 103.43 | **1.084** [1.037-1.149] | 1.085 | **1.061** [1.049-1.069] |
+| yee-pec-box-1e6 | P9 (§4.4) | 5 / 5 | 89.70 [86.63-91.20] | 84.14 [81.41-85.46] | 1.066 | 1.071 | 1.054 |
+| yee-pec-box-1e6 | review | 5 / 5 | 89.18 [88.55-90.01] | 85.35 [81.81-86.45] | 1.045 | 1.062 | 1.049 |
+| yee-pec-box-1e6 | fix (10 reps) | 10 / 10 | 90.19 [87.59-93.50] | 84.99 [82.36-87.31] | 1.061 | 1.080 | 1.060 |
+| yee-pec-box-1e6 | **pooled** | 20 / 20 | 89.73 | 84.75 | **1.059** [1.042-1.073] | 1.072 | **1.055** [1.050-1.064] |
+
+(Rest of a run: 24.9-25.5 s on syn-mem27-100, 20.0-20.2 s on yee-pec-box-1e6, the same for both
+binaries; median flops of the runs 8.3e12-9.1e12 and 6.8e12-7.0e12.) The fix sample's two halves
+(repetitions 0-4 and 5-9) are 1.075x and 1.048x, so the four 5-run gates on yee-pec-box-1e6 read
+**1.066, 1.045, 1.075, 1.048: two pass, two fail**; drawn from the pooled runs, a 5-run gate
+reaches 1.05x with probability 0.69 on yee-pec-box-1e6 and 0.85 on syn-mem27-100.
+
+**Fixed pivot order (METIS, `"ordering": 5`, 5 interleaved repetitions)** - no SCOTCH scatter, both
+binaries factorize the same order:
+
+| case | main s | patched + P9 s | speedup | numeric s (main / new) | certificate s (main / new) | analysis s | per-flop speedup |
+|---|---|---|---|---|---|---|---|
+| syn-mem27-100 | 98.86 [98.22-99.25] | 93.21 [92.98-94.02] | **1.061** [1.051-1.066] | 23.45 / 21.73 (1.079) | 44.56 / 41.25 (1.080) | 14.1 | 1.081 |
+| yee-pec-box-1e6 | 98.77 [98.56-98.91] | 94.95 [94.67-95.25] | **1.040** [1.037-1.044] | 24.27 / 22.89 (1.060) | 46.21 / 43.65 (1.059) | 13.4 | 1.057 |
+
+All 20 runs valid; 6.76e12 / 7.05e12 flops in every run. On this order the yee-pec-box-1e6
+factorizations gain 1.06x - less than the 1.07x of §3.4's screens on its saved SCOTCH order: the gain
+depends on the tree - and the rest of a run (METIS' serial analysis 13.4-14.1 s, the iteration)
+none: **1.040x end to end, below the bar** (none of the bootstrap's 5-run gates reaches 1.05x);
+syn-mem27-100 1.061x. The block sizes alone gave 1.027x / 1.038x on these orders (§4.2): the patch
+adds 1.3-2.2% end to end.
+
+**Verdict (corrected after the review).** The P9 block sizes with the environment's MUMPS pass the
+1e5 regression check but not the 1e6 end-to-end bar (1.032x on yee-pec-box-1e6 with SCOTCH, 1.027x
+with METIS): with the default build MUMPS' own block sizes stay the default and
+`HS_MUMPS_BLOCKING=p9` (environment of the CLI or of Python) opts in. The patched MUMPS with the P9
+block sizes passes on syn-mem27-100 and at 1e5 (no regression), but on yee-pec-box-1e6 it is **at the
+1.05x bar, not clearly past it**: the best estimate is 1.055-1.059x (pooled, raw and at equal flops),
+the 95% intervals reach down to 1.042 / 1.050, on a fixed pivot order (METIS) it is 1.040x
+[1.037-1.044] - below - and a single 5-run gate in the default configuration passes or
+fails by the luck of SCOTCH's draws (two of four failed). The §4.4 claim that this build "passes the
+whole gate" rested on one lucky sample and is withdrawn, and so is the recommendation to make it the
+default build: on this evidence it is not. It stays an opt-in build path - a build configured with
+`-DHSOLVE_MUMPS_ROOT=<install of build_mumps.sh>` uses the P9 block sizes by default (CMake
+`HSOLVE_MUMPS_BLOCKING`, overridable by HS_MUMPS_BLOCKING at run time): `env/run.sh
+tools/dev/build_mumps.sh l0p --patch patches/mumps-5.8.2-l0-blocking.patch` (portable nocona -O2 by
+default) and `cmake ... -DHSOLVE_MUMPS_ROOT=$HOME/deps/mumps-5.8.2-l0p`. Making it the default would
+also need the MUMPS tarball (4.5 MB, CeCILL-C: shippable in the repository) and a MUMPS build step
+(~90 s) before hsolve's in tools/dev/build.sh and the deployment scripts - the lead's files. A future
+gate of such a change should remove SCOTCH's scatter rather than rely on one 5-run median: the same
+pivot order for both binaries (METIS, or a saved order), or 20 runs per binary with the flop
+normalisation of `factspeed_gate_flops.py`.
 
 ## 5. Conclusion
 
@@ -447,11 +522,16 @@ patches/mumps-5.8.2-l0-blocking.patch` and `cmake ... -DHSOLVE_MUMPS_ROOT=$HOME/
   default configuration), no regression at 1e5. Below the 1.05x end-to-end bar, so not the default.
   A reproducible MUMPS source build (`tools/dev/build_mumps.sh`, CMake `HSOLVE_MUMPS_ROOT`, glibc 2.17
   safe, conda-forge sonames) and a reviewable patch (`patches/mumps-5.8.2-l0-blocking.patch`: L0-layer
-  blocks KEEP(498/499), read only when set) add 1.8-2.1% per factorization (§3.4); together **1.125x
-  and 1.066x end to end** (§4.4), past the bar - the recommendation for the lead is to make the
-  patched build the default build (ship or fetch the tarball, build MUMPS before hsolve). Measurement
-  tools: `bench/factspeed_factor.cpp` (the driver's factorizations, MUMPS statistics, a SIGPROF
-  sampler), `tools/bench/factspeed_symbolize.py`, `tools/bench/factspeed_screen.py`, the
+  blocks KEEP(498/499), read only when set) add 1.8-2.1% per factorization (§3.4); together a count
+  is 1.073-1.079x faster, and end to end syn-mem27-100 passes the bar (pooled 1.084x, 1.061x at equal
+  flops) while yee-pec-box-1e6 is only at it (pooled 1.059x, 1.055x at equal flops; 5-run gates 1.066,
+  1.045, 1.075, 1.048; 1.040x on a fixed METIS order - §4.5). Not a clear pass, so the patched build
+  is not recommended as the default build on this evidence (corrected after the review; the first
+  sample's "1.125x / 1.066x, gate passed" was a lucky draw); `tools/dev/build_mumps.sh` now defaults
+  to the portable, gated nocona -O2. Measurement tools: `bench/factspeed_factor.cpp` (the driver's
+  factorizations, MUMPS statistics, a SIGPROF sampler), `tools/bench/factspeed_symbolize.py`,
+  `tools/bench/factspeed_screen.py`, `tools/bench/factspeed_gate_flops.py` (pooled gate samples, the
+  speedup at equal pivot-order flops, the chance that a 5-run gate passes), the
   `MumpsControlOverrides` / `instance()` hooks.
 * **Negative results.** Runtime settings (binding 1.00x, active waiting 1.00x, passive 0.93x, THP off
   0.96x); MUMPS' L0 layer moved or off (0.91-1.00x); more amalgamation (0.99x); taller triangle
@@ -467,9 +547,11 @@ patches/mumps-5.8.2-l0-blocking.patch` and `cmake ... -DHSOLVE_MUMPS_ROOT=$HOME/
   reachable by settings. (2) The L0 phase: a quarter of its time is the panels' BLAS-2 rank-1
   updates over all rows of each front (MUMPS' PIVOT_OPTION 3, required by its threshold test on full
   columns), a tenth zeroing fronts; a left-looking panel with the CB rows updated by BLAS-3 would need
-  a different pivoting scheme. (3) The patched build as the default needs the MUMPS tarball shipped
+  a different pivoting scheme. (3) Whether the patched build becomes the default is the lead's call
+  on §4.5's evidence (yee-pec-box-1e6 at the 1.05x bar); it would also need the MUMPS tarball shipped
   or fetched by the deployment and a build step before hsolve's (tools/dev/build.sh, the deployment
-  scripts: lead's files).
+  scripts: lead's files). A clear margin needs more from the factorization than block sizes - (2)
+  is the largest remaining item.
 
 ## 6. Commands
 
@@ -534,4 +616,19 @@ $G python3 tools/bench/ab_cases.py run --bin main=$B/hsolve_main --bin new=$B/hs
 python3 tools/run/guard.py --skip-busy-check --mem-gb 12 --timeout 3600 -- python3 -m tools.eval.sweep $S/gate1e6 \
   --root $HOME/p7_p7-membudget/data --out $S/gate1e6/eval.md          # gate1e5: default root
 python3 tools/bench/ab_cases.py table --base main --new new --md table.md --json table.json $S/gate1e5
+
+# 4.5 after the review (branch p9-factspeed-fix; F=$S/fix, R=$HOME/p9_p9-factspeed-review = the
+# review's own builds and gate1e6l0p): MUMPS with the script's defaults (nocona -O2) + patch, this
+# branch linked to it, yee-pec-box-1e6 10 more repetitions, both cases on the METIS order
+$L tools/dev/build_mumps.sh fix-l0p --patch patches/mumps-5.8.2-l0-blocking.patch
+cmake -S . -B build-l0p -G Ninja -DCMAKE_PREFIX_PATH=$CONDA_PREFIX -DCMAKE_BUILD_TYPE=Release \
+  -DHSOLVE_MUMPS_ROOT=$HOME/deps/mumps-5.8.2-fix-l0p -DHSOLVE_BUILD_PYTHON=OFF -DHSOLVE_BUILD_BENCH=OFF
+cmake --build build-l0p --target hsolve_cli && cp build-l0p/hsolve $F/bin/hsolve_l0p
+AB="python3 tools/bench/ab_cases.py run --bin main=$B/hsolve_main --bin new=$F/bin/hsolve_l0p --timeout 600 --deadline 2450"
+$G env HS_DATA_ROOT=$HOME/p7_p7-membudget/data $AB --reps 0,1,2,3,4,5,6,7,8,9 --run-dir $F/gate_yee10 yee-pec-box-1e6
+$G env HS_DATA_ROOT=$S/data_metis $AB --reps 0,1,2,3,4 --run-dir $F/gate_metis syn-mem27-100 yee-pec-box-1e6
+#   evaluated as above (--root $S/data_metis for gate_metis); pooled with the flop normalisation:
+python3 tools/bench/factspeed_gate_flops.py $S/gate1e6l0p $R/gate1e6l0p $F/gate_yee10 --md flops.md --json flops.json
+python3 tools/bench/factspeed_gate_flops.py $F/gate_metis --md flops_metis.md --json flops_metis.json
+objdump -d --no-show-raw-insn $HOME/deps/mumps-5.8.2-v3-O3/lib/libdmumps_seq.so | grep -cE '\bvfn?madd|%ymm'  # 3725; nocona: 0
 ```
