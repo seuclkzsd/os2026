@@ -35,13 +35,13 @@
 // build/release/libhsolve_blashook.so. The P9 tables (results/p9_ordering.md sections 2, 3, 5) come
 // from, per measurement (one nested guard inside one outer slot guard per campaign part;
 // orderings / variants rotated per repetition):
-//   python3 tools/run/guard.py --exclusive --timeout 900 --mem-gb 32 -- \
-//     env LD_PRELOAD=build/release/libhsolve_blashook.so build/release/bench_ordering_cost \
-//     --case $CASE --threads 16 --ordering $O --counts 1 [--max-mb 20000] \
+//   python3 tools/run/guard.py --exclusive --timeout 900 --mem-gb 32 --
+//     env LD_PRELOAD=build/release/libhsolve_blashook.so build/release/bench_ordering_cost
+//     --case $CASE --threads 16 --ordering $O --counts 1 [--max-mb 20000]
 //     [--nd-top-depth 2 --nd-top-runs 16 --nd-top-finalists 16]
 // and, analysis only (no timing: build lane, 8 threads), the ND variants of section 5:
-//   python3 tools/run/guard.py --skip-busy-check --mem-gb 11 --timeout 600 -- \
-//     build/release/bench_ordering_cost --case $CASE --threads 8 --numeric 0 --ordering 11 \
+//   python3 tools/run/guard.py --skip-busy-check --mem-gb 11 --timeout 600 --
+//     build/release/bench_ordering_cost --case $CASE --threads 8 --numeric 0 --ordering 11
 //     [--nd-flow D --nd-flow-trials 0|1 --nd-flow-finest 0|1 --nd-flow-min N] [--nd-runs R ...]
 // External orders (geometric references): --ordering -1 --perm-in geo.npy.
 #include <omp.h>
