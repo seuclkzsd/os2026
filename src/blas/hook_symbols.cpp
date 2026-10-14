@@ -7,16 +7,27 @@
 // dgemm_ / dtrsm_ / dgemv_ go through the router with the process configuration
 // (HS_BLAS_ROUTE); the level-1 routines MUMPS uses are forwarded unchanged and only timed.
 // dmumps_c / smumps_c set the profiler phase around the real call (next_definition); MUMPS calls
-// are serialized by hsolve's MUMPS call lock, so one process-wide phase is enough.
+// are serialized by hsolve's MUMPS call lock, so one process-wide phase is enough. dmumps_c also
+// opens the GPU offload window around factorizations (JOB 2, or 4 / 5 / 6 which include one) when
+// the GPU module is built in (src/gpu/offload.hpp; the mode decides, default off).
+// C entry points for applications (found with dlsym(RTLD_DEFAULT), include/hsolve/gpu.hpp):
+// hsolve_gpu_set_mode, hsolve_gpu_report_json.
 #include <dmumps_c.h>
 #include <smumps_c.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "blas/blas_hook.hpp"
 #include "blas/blas_profile.hpp"
+
+#if HSOLVE_WITH_GPU
+#include "gpu/offload.hpp"
+#endif
 
 namespace {
 
@@ -74,16 +85,42 @@ prof::Phase mumps_phase(const Struc* id) {
   }
 }
 
+// `gpu`: the call may offload a factorization's dgemm calls (double precision only: single
+// precision MUMPS calls sgemm, which the hook does not route).
 template <class Struc, class Fn>
-void mumps_call(Fn real, Struc* id) {
+void mumps_call(Fn real, Struc* id, bool gpu) {
   const prof::Phase ph = mumps_phase(id);
   const long long nrhs = id->job == 3 ? (id->nrhs > 0 ? id->nrhs : 1) : 0;
+#if HSOLVE_WITH_GPU
+  const bool fact = gpu && (id->job == 2 || id->job == 4 || id->job == 5 || id->job == 6);
+  // RINFOG(1): the analysis' flop estimate of the elimination (unknown before JOB 4 / 6 analyse).
+  if (fact) hs::gpu::factorization_begin(id->job == 2 || id->job == 5 ? id->rinfog[0] : -1.0);
+#else
+  (void)gpu;
+#endif
   prof::set_phase(ph);
   const Timer t;
   real(id);
   if (prof::enabled()) prof::record_mumps(ph, t.seconds(), nrhs);
   prof::set_phase(prof::Phase::None);
+#if HSOLVE_WITH_GPU
+  if (fact) hs::gpu::factorization_end();
+#endif
 }
+
+#if !HSOLVE_WITH_GPU
+// Without the GPU module the mode a program asks for (hsolve_gpu_set_mode, else HS_GPU) is still
+// reported, with the reason the CPU path runs: the degrade-mode report of `hsolve --gpu on|auto`.
+constexpr const char* kGpuModes[] = {"off", "auto", "on"};
+std::atomic<int> g_gpu_asked{-1};  // index into kGpuModes; -1: not set
+
+int gpu_mode_index(const char* s) noexcept {
+  if (s == nullptr) return -1;
+  for (int i = 0; i < 3; ++i)
+    if (std::strcmp(s, kGpuModes[i]) == 0) return i;
+  return -1;
+}
+#endif
 
 }  // namespace
 
@@ -91,12 +128,12 @@ extern "C" {
 
 void dmumps_c(DMUMPS_STRUC_C* id) {
   static const DmumpsFn real = next_symbol<DmumpsFn>("dmumps_c");
-  mumps_call(real, id);
+  mumps_call(real, id, true);
 }
 
 void smumps_c(SMUMPS_STRUC_C* id) {
   static const SmumpsFn real = next_symbol<SmumpsFn>("smumps_c");
-  mumps_call(real, id);
+  mumps_call(real, id, false);
 }
 
 void dgemm_(const char* ta, const char* tb, const fint* m, const fint* n, const fint* k,
@@ -180,6 +217,35 @@ double dnrm2_(const fint* n, const double* x, const fint* incx) {
   if (prof::enabled())
     prof::record(prof::Op::Dnrm2, 0, *n, 0, 0, 2.0 * dd(*n), 8.0 * dd(*n), t.seconds(), 0);
   return r;
+}
+
+// GPU offload control (include/hsolve/gpu.hpp). 0 = set; -1 = invalid name; -2 = this hook was
+// built without the GPU module (HSOLVE_GPU=OFF): the mode is only recorded for the report.
+int hsolve_gpu_set_mode(const char* mode) {
+#if HSOLVE_WITH_GPU
+  return mode != nullptr && hs::gpu::set_mode(mode) ? 0 : -1;
+#else
+  const int m = gpu_mode_index(mode);
+  if (m < 0) return -1;
+  g_gpu_asked.store(m);
+  return -2;
+#endif
+}
+
+// The offload's state and totals as a JSON object; the pointer stays valid until the calling
+// thread's next call.
+const char* hsolve_gpu_report_json() {
+  static thread_local std::string buf;
+#if HSOLVE_WITH_GPU
+  buf = hs::gpu::report_json();
+#else
+  // The mode asked for (set_mode, else a valid HS_GPU; the GPU build aborts on an invalid one).
+  int m = g_gpu_asked.load();
+  if (m < 0) m = std::max(0, gpu_mode_index(std::getenv("HS_GPU")));
+  buf = std::string("{\"mode\": \"") + kGpuModes[m] +
+        "\", \"available\": false, \"reason\": \"built without the GPU module (HSOLVE_GPU=OFF)\"}";
+#endif
+  return buf.c_str();
 }
 
 fint idamax_(const fint* n, const double* x, const fint* incx) {

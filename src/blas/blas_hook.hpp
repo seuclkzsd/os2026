@@ -23,7 +23,10 @@
 //
 // Configuration: environment variable HS_BLAS_ROUTE (parse_route_config), read once per process;
 // unset: the build's default (CMake HSOLVE_BLAS_ROUTE_DEFAULT, "all" unless configured otherwise);
-// "off": every call is forwarded unchanged.
+// "off": every call is forwarded unchanged. Independently of the routes, a build with the GPU
+// module (CMake HSOLVE_GPU, compile definition HSOLVE_WITH_GPU) sends large dgemm calls made
+// inside MUMPS factorizations to the GPU when the GPU mode (HS_GPU / hsolve --gpu, default off)
+// asks for it (src/gpu/offload.hpp; route Gpu).
 //
 // Thread safety: every function here may be called concurrently from any number of threads
 // (MUMPS' L0-OpenMP subtrees call BLAS from inside parallel regions). Process-level state: the
@@ -191,7 +194,8 @@ enum class Route : std::uint8_t {
   Narrow = 3,
   Parallel = 4,
   SplitK = 5,
-  SmallTrsm = 6
+  SmallTrsm = 6,
+  Gpu = 7  ///< offloaded by the GPU module (src/gpu/offload.hpp) inside a MUMPS factorization
 };
 const char* route_name(Route r) noexcept;
 

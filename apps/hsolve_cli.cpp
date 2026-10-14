@@ -1,6 +1,11 @@
 // hsolve command-line front end: read matrices (+ config), solve, write results (docs/FORMATS.md).
 //
-//   hsolve --A A.npz [--B B.npz] [--config config.json] --out DIR [overrides...]
+//   hsolve --A A.npz [--B B.npz] [--config config.json] --out DIR [overrides...] [--gpu MODE]
+//
+// --gpu off|auto|on (or HS_GPU): GPU offload of the factorizations' large dense updates by the BLAS
+// hook linked into this executable (include/hsolve/gpu.hpp, docs/BLAS.md §10); default off. When
+// the mode is not off, report.json gets a "gpu" object (device, what was offloaded, or why the CPU
+// path ran - also when this hsolve was built without the GPU module or without the hook).
 //
 // Exit status: 0 = all pairs accepted (and certificate passed), 1 = finished but not successful,
 // 2 = error (message on stderr).
@@ -15,8 +20,10 @@
 #include <vector>
 
 #include <CLI/CLI.hpp>
+#include <nlohmann/json.hpp>
 
 #include "hsolve/error.hpp"
+#include "hsolve/gpu.hpp"
 #include "hsolve/io.hpp"
 #include "hsolve/log.hpp"
 #include "hsolve/solver.hpp"
@@ -34,8 +41,28 @@ std::string read_text(const fs::path& p) {
   return os.str();
 }
 
+// The GPU offload's report when its mode (or the --gpu value) is not off (empty otherwise): the
+// hook's, or - when the hook cannot offload - the mode asked for and why the CPU path ran.
+// `asked`: the --gpu value ("" when not given).
+nlohmann::json gpu_report(const std::string& asked) {
+  const bool wanted = !asked.empty() && asked != "off";
+  const std::string text = hs::gpu_offload_report_json();
+  if (text.empty()) {
+    if (!wanted) return {};
+    return {{"mode", asked}, {"available", false}, {"reason", "no BLAS hook in this executable"}};
+  }
+  nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+  if (j.is_discarded()) return {};
+  if (j.value("mode", "off") != "off") return j;
+  if (!wanted) return {};
+  // A hook that ignored the request (built without the GPU module): say so in the report.
+  return {{"mode", asked},
+          {"available", false},
+          {"reason", j.value("reason", std::string("the BLAS hook did not take the GPU mode"))}};
+}
+
 template <class T>
-void write_outputs(const fs::path& out, const hs::Solution<T>& sol) {
+void write_outputs(const fs::path& out, const hs::Solution<T>& sol, const nlohmann::json& gpu) {
   fs::create_directories(out);
   hs::write_npy_vector(out / "eigenvalues.npy", sol.eigenvalues);
   hs::write_npy_matrix(out / "eigenvectors.npy", sol.eigenvectors);
@@ -48,8 +75,28 @@ void write_outputs(const fs::path& out, const hs::Solution<T>& sol) {
     fs::remove(cvec);
   }
   std::ofstream rep(out / "report.json");
-  rep << sol.report.to_json(2) << '\n';
+  if (gpu.is_null()) {
+    rep << sol.report.to_json(2) << '\n';
+  } else {
+    nlohmann::json r = nlohmann::json::parse(sol.report.to_json(2));
+    r["gpu"] = gpu;
+    rep << r.dump(2) << '\n';
+  }
   if (!rep) HS_THROW(Io, "cannot write " << (out / "report.json").string());
+}
+
+void print_gpu(const nlohmann::json& g) {
+  if (g.is_null()) return;
+  if (g.value("factorizations_offloaded", 0) > 0)
+    std::printf("gpu (%s): %s, %d of %d factorizations offloaded, %.0f GFlop on the GPU (%.0f%% of their "
+                "estimate), set-up %.2fs\n",
+                g.value("mode", "").c_str(), g.value("device", "").c_str(), g.value("factorizations_offloaded", 0),
+                g.value("factorizations", 0), g.value("gpu_gflop", 0.0), 100.0 * g.value("gpu_share", 0.0),
+                g.value("init_s", 0.0));
+  else if (g.contains("reason"))
+    std::printf("gpu (%s): CPU path - %s\n", g.value("mode", "").c_str(), g.value("reason", "").c_str());
+  else
+    std::printf("gpu (%s): CPU path - no factorization large enough\n", g.value("mode", "").c_str());
 }
 
 template <class T>
@@ -83,11 +130,15 @@ void print_summary(const hs::Solution<T>& sol) {
 
 template <class T>
 int run(const hs::CsrMatrix<T>& a, const hs::CsrMatrix<T>* b, const hs::SolverConfig& cfg, hs::Logger& log,
-        const fs::path& out, const std::vector<std::string>& load_notes, bool quiet) {
+        const fs::path& out, const std::vector<std::string>& load_notes, bool quiet, const std::string& gpu_asked) {
   hs::Solution<T> sol = hs::solve(a, b, cfg, &log);
   for (const auto& note : load_notes) sol.report.warnings.push_back("input: " + note);
-  write_outputs(out, sol);
-  if (!quiet) print_summary(sol);
+  const nlohmann::json gpu = gpu_report(gpu_asked);
+  write_outputs(out, sol, gpu);
+  if (!quiet) {
+    print_summary(sol);
+    print_gpu(gpu);
+  }
   return sol.report.success ? 0 : 1;
 }
 
@@ -100,7 +151,7 @@ int main(int argc, char** argv) {
   long long k = 0, smallest = 0, largest = 0, slice_size = 0, block_size = 0;
   std::vector<double> interval;
   int threads = -1;
-  std::string precision, certificate, budget;
+  std::string precision, certificate, budget, gpu_mode;
   bool verbose = false, quiet = false, version = false;
 
   app.add_option("--A", a_path, "matrix A (.npz scipy sparse, .npy dense, .mtx)")->required();
@@ -132,6 +183,11 @@ int main(int argc, char** argv) {
                                 "B is not proven) | auto (the cheapest that certifies, predicted from measured "
                                 "times) | off")
                      ->check(CLI::IsMember({"exact", "randomized", "auto", "off"}));
+  auto* o_gpu = app.add_option("--gpu", gpu_mode,
+                               "GPU offload of the factorizations' large dense updates (BLAS hook, FP64 cuBLAS on the "
+                               "first visible GPU, loaded at run time): off (default; or HS_GPU) | auto (when the "
+                               "factorization is large enough) | on; without a usable GPU the CPU path runs")
+                    ->check(CLI::IsMember({"off", "auto", "on"}));
   app.add_option("--log", log_path, "JSON-lines event log file");
   app.add_flag("-v,--verbose", verbose, "debug output");
   app.add_flag("-q,--quiet", quiet, "no summary on stdout");
@@ -187,6 +243,14 @@ int main(int argc, char** argv) {
     if (*o_cert) cfg = hs::parse_config("{\"certificate\": \"" + certificate + "\"}", cfg);
     // Re-validate the merged configuration (overrides bypass parse_config's checks otherwise).
     cfg = hs::parse_config(hs::config_to_json(cfg));
+    if (*o_gpu) {
+      const hs::GpuControl rc = hs::gpu_offload_set_mode(gpu_mode);
+      if (rc != hs::GpuControl::Ok && gpu_mode != "off")
+        std::fprintf(stderr, "hsolve: --gpu %s: %s; running on the CPU\n", gpu_mode.c_str(),
+                     rc == hs::GpuControl::NotBuilt ? "this hsolve was built without the GPU module"
+                                                    : "no BLAS hook in this executable");
+    }
+    const std::string gpu_asked = *o_gpu ? gpu_mode : std::string();
 
     // Create the output directory (and the log's directory) before anything writes into them.
     fs::create_directories(out_dir);
@@ -214,11 +278,11 @@ int main(int argc, char** argv) {
       hs::CsrMatrix<hs::cplx> b;
       if (lb)
         b = lb->is_complex() ? std::get<1>(std::move(lb->matrix)) : hs::to_complex(std::get<0>(std::move(lb->matrix)));
-      return run<hs::cplx>(a, lb ? &b : nullptr, cfg, log, out_dir, notes, quiet);
+      return run<hs::cplx>(a, lb ? &b : nullptr, cfg, log, out_dir, notes, quiet, gpu_asked);
     }
     const auto& a = std::get<0>(la.matrix);
     const hs::CsrMatrix<double>* b = lb ? &std::get<0>(lb->matrix) : nullptr;
-    return run<double>(a, b, cfg, log, out_dir, notes, quiet);
+    return run<double>(a, b, cfg, log, out_dir, notes, quiet, gpu_asked);
   } catch (const hs::Error& e) {
     std::fprintf(stderr, "hsolve: error [%s]: %s\n", hs::to_string(e.code()), e.what());
     return 2;

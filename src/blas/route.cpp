@@ -13,6 +13,10 @@
 
 #include "blas/blas_hook.hpp"
 
+#if HSOLVE_WITH_GPU
+#include "gpu/offload.hpp"
+#endif
+
 // Route specification used when HS_BLAS_ROUTE is unset (CMake cache HSOLVE_BLAS_ROUTE_DEFAULT).
 #ifndef HSOLVE_BLAS_ROUTE_DEFAULT
 #define HSOLVE_BLAS_ROUTE_DEFAULT ""
@@ -351,6 +355,8 @@ const char* route_name(Route r) noexcept {
       return "splitk";
     case Route::SmallTrsm:
       return "strsm";
+    case Route::Gpu:
+      return "gpu";
   }
   return "?";
 }
@@ -385,6 +391,12 @@ Route dgemm(const RouteConfig& cfg, char ta_c, char tb_c, fint m, fint n, fint k
     return Route::Real;
   };
   if (!ok || m == 0 || n == 0 || k == 0 || alpha == 0.0) return forward();
+#if HSOLVE_WITH_GPU
+  // Inside an offloading MUMPS factorization, outside parallel regions: large calls to the GPU.
+  if (gpu::window_open() && gpu::offload_dgemm(ta_c, tb_c, m, n, k, alpha, a, lda, b, ldb, beta,
+                                               c, ldc, rb.dgemm))
+    return Route::Gpu;
+#endif
   const double a_bytes = 8.0 * static_cast<double>(m) * static_cast<double>(k);
   const int threads = cfg.parallel ? parallel_threads(cfg, a_bytes) : 1;
 

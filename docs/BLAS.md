@@ -43,6 +43,10 @@ earlier 1/4/8-thread profile from gpu02 cores 16-23 (taken before the slot exist
 * Recommendation (section 6): the hook linked into hsolve with route `all` is the default now
   (`HSOLVE_BLAS_HOOK=ON`, `HSOLVE_BLAS_ROUTE_DEFAULT=all`); keep the environment's OpenBLAS;
   runtime CPU dispatch makes the same build right for an unknown judging CPU.
+* GPU (section 10, P10): the hook can send the large dgemm calls of MUMPS' factorizations to one
+  GPU (FP64 cuBLAS, loaded at run time; mode `HS_GPU` / `hsolve --gpu off|auto|on`, default off).
+  Bound by the host's memory bandwidth (staging), not by PCIe; it pays only for the contribution-
+  block updates of the 1e6-unknown 3-D cases (results/p10_gpu.md).
 
 ## 1. Machine reference (gpu01 slot)
 
@@ -633,3 +637,87 @@ inertia-only counts; 22-26 s each at 292-316 GFlop/s, 40-43% of the slot's DGEMM
   glibc 2.17's __memset_sse2, stack copies: 25-35% of the CPU time, two thirds of it in the L0
   phase) is MUMPS Fortran; compiling it for the CPU (-O3, x86-64-v3 or skylake-avx512) changes
   nothing (1.000-1.005x): it is bound by memory, not by instruction width.
+
+## 10. P10: the GPU route (`src/gpu`)
+
+The statement asks for GPU acceleration with a reproducible CPU-only degrade mode (the judging
+machine has no GPU). The only work worth moving is the dense part of the numeric factorizations
+(section 9: at n = 1e6 the three factorizations of a nearest run - main and the certificate's two
+exact counts - are ~75% of it, BLAS is 65-69% of a factorization); the solves stream the factors
+from host memory, which PCIe 3 (12.8 GB/s) cannot do faster than the socket (36 GB/s). Measurements,
+tables and commands: `results/p10_gpu.md`; design and modes: docs/DESIGN.md §3.9.
+
+**What it does.** With the GPU module built in (CMake `HSOLVE_GPU`, default ON; nothing CUDA is
+needed to build: `libcudart.so.12` / `libcublas.so.12` are opened with dlopen at the first
+factorization that wants them), the hook's `dmumps_c` wrapper opens an offload window around each
+factorization (JOB 2, also the inertia-only counts) when the mode asks for it, and inside it the
+router sends dgemm calls made outside OpenMP parallel regions (MUMPS' fronts above its L0 layer) to
+the engine when the engine's model accepts the shape (route `Gpu`, profiler label `gpu`). The
+engine splits C into column (or row) tiles: pack the tile's operand into pinned staging memory
+(non-temporal stores), copy it to the device, cublasDgemm (FP64, beta = 0), copy T back, add
+C = beta C + T on the host; 2 packing threads, 6 slots of 16 MB, guided tile sizes, 1 GiB of device
+memory, 224 MB pinned. The calling thread waits (GPU only); a hybrid mode in which the CPU computes a
+share is a measurement option - it is slower, because both sides need the same host memory
+bandwidth. The engine's threads (`hs-gpu-issue0/1`, `hs-gpu-add`) may run on every OpenMP place:
+threads inherit their creator's CPU affinity, and under `OMP_PROC_BIND` / `OMP_PLACES` the thread
+that creates the engine (at the first offloaded factorization) is bound to one core, so `create()`
+widens it to the union of the places while it starts them and then restores its binding
+(`src/gpu/affinity.hpp`; unbound runs are unchanged). Without that, the pipeline and the CUDA
+runtime's threads shared one core under `OMP_PROC_BIND=close OMP_PLACES=cores` and offloaded calls
+took 1.3-1.4x as long. With the fix, bound calls are as fast as unbound ones, and yee-pec-box-1e6's
+three factorizations gain 1.100x bound (1.072x unbound; 1.055x bound before the fix;
+results/p10_gpu.md §10).
+
+**Configuration.** `HS_GPU` = off (default: no CUDA library is loaded, the CPU path is unchanged) |
+auto (factorizations whose MUMPS estimate RINFOG(1) >= 3e12 flops) | on (every factorization); the
+hsolve CLI sets the same with `--gpu` (include/hsolve/gpu.hpp: `hsolve_gpu_set_mode` found with
+dlsym) and adds a `gpu` object to report.json when the mode is not off. `HS_GPU_OPTS` tunes the
+engine and the model (`device`, `mem_mb`, `slot_mb`, `chunk_kb` (at most `slot_mb`), `nt`, `pack`,
+`slots`, `hybrid`, `cpu_threads`, `min_gflop`, `cpu_gflops`, `host_gbs`, `min_speedup`,
+`auto_min_tflop`); `HS_GPU_REPORT=<file>` writes the report at exit (for programs with the hook
+preloaded); `HS_CUDA_LIBDIR` names the CUDA library directory. The GPU is device 0 of
+`CUDA_VISIBLE_DEVICES`. No GPU, no library or too little free device memory: the reason goes into
+the report and the process runs the CPU path. A build without the GPU module (`-DHSOLVE_GPU=OFF`)
+still reports the mode asked for (`--gpu`, `hsolve_gpu_set_mode` or `HS_GPU`) with
+`"available": false` and the reason, so `hsolve --gpu on` writes the same degrade-mode `gpu`
+object there.
+Under Python, preload `libhsolve_blashook.so` (section 4.2) and set `HS_GPU`.
+
+**Which calls.** The engine's time for a call is close to
+t_gpu = (24 (m + n) k + 32 m n) bytes / 30 GB/s + 1 ms - the host's memory traffic of staging (read
+the source, write the pinned buffer, the copy engine reads it) and of the additions (read T and C,
+write C), at the socket's bandwidth; PCIe (12.8 GB/s each way) and the V100's 5.3-7.0 TFlop/s
+FP64 are not the limits. A call is offloaded when 2 m n k >= 1 GFlop and 2 m n k / (40 GFlop/s x
+threads) >= 1.25 t_gpu. In MUMPS' factorizations that selects the contribution-block updates
+(FAC_T_LDLT: m = the row block KEEP(58), n = the columns right of it, k = the front's pivots
+>= ~1000) and leaves the rank-128/256 panel updates, the 250-row triangle stripes and everything in
+the L0 subtrees on the CPU. Per call the engine is 1.7-5.0x the 16-core CPU BLAS on such shapes;
+in a 1e6 factorization the GPU computes 43-47% of the flops and the factorization becomes
+1.06-1.12x faster (16 threads; the three factorizations of a run 1.07-1.11x, with 8 threads 1.15x),
+whole runs (`--gpu auto`) 1.069x / 1.058x on syn-mem27-100 / yee-pec-box-1e6 (results/p10_gpu.md
+§4-5).
+
+**Accuracy.** IEEE double on both sides; each element of C is one cuBLAS product over the full K
+plus one double addition on the host - rounding-level differences against the CPU BLAS (<= 7e-15
+relative in `bench_gpu_dgemm`; cuBLAS FP64 meets the same backward error bound as the CPU BLAS).
+Those differences reach the values MUMPS' threshold pivoting reads, so delayed and 2x2 pivot choices
+and individual pivot signs can differ from the CPU path's: the counts are not guaranteed to be the
+CPU path's. What carries over is the certificate's argument: each count is the exact Sylvester
+inertia of an IEEE-double LDL^T, equal to the inertia of K - s B when the factorization's backward
+error is below the distance from s to the nearest eigenvalue (s in a spectral gap, docs/DESIGN.md
+§3.4, §3.6-8) - the same condition and guarantee as on the CPU path. Measured: the same inertia in
+every factorization run (both 1e6 cases, 5 + 5 runs of each factorization), the same certificate
+counts and eigenvalues within 3e-15 relative in whole runs. GPU-only calls are bitwise reproducible
+(tile sizes depend on the shape only); the threaded CPU path itself is not.
+
+**Tests.** `test_gpu`, `test_gpu_hook` (docs/DESIGN.md §3.9): without `HSOLVE_TEST_GPU_DEVICE`
+the processes see no GPU and check the fallback; with it (gpu02: 7, through
+`tools/bench/gpu_slot.sh`) the engine against the CPU BLAS and the hooked factorization / CLI
+against the CPU path. `test_gpu.AffinityUnderOmpProcBind` runs the affinity test under
+`OMP_PROC_BIND=close OMP_PLACES=cores`; `GpuHook.WithoutTheGpuModuleTheReportSaysWhy` runs in an
+`-DHSOLVE_GPU=OFF` build.
+
+**Provenance.** The CUDA runtime and cuBLAS (NVIDIA, CUDA 12.2 on the cluster nodes, proprietary
+license) are not part of hsolve and are not distributed with it: `src/gpu/cuda_lib.hpp` declares the
+few entry points and enum values it calls (the CUDA 11/12 ABI) and opens the libraries installed on
+the machine. No NVIDIA header or code is included.

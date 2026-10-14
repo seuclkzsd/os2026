@@ -60,6 +60,11 @@ KEEP(498/499)）与 `patches/mumps-5.8.2-l0-blocking.patch`；**默认构建由�
 CPU（§6）。MPI MUMPS 在一个 16 核 socket 上慢于顺序版 + OpenMP（0.59–0.85 倍，负结果，`results/p9_mpi.md`）。最终测量
 （对 main a831d79、对调优 SLEPc、1–16 线程）见 `results/p9_measurements.md`。
 
+v9（P10「gpu」，分支 p10gpu）——新模块 src/gpu（不属于 libhsolve，由 BLAS hook 使用）：运行时 dlopen 的 CUDA runtime 与
+cuBLAS，把 MUMPS 分解（含证书计数）中被主机流量模型判为划算的大 dgemm 以 FP64 卸载到一张 GPU（暂存打包、cuBLAS、主机
+加回；默认只用 GPU，混合模式为测量选项）；模式 `HS_GPU` / `hsolve --gpu off|auto|on`，默认 off（与今天的 CPU 路径完全
+相同），无 GPU 或无 CUDA 库时自动回到 CPU（降级模式）；报告的 `gpu` 对象（§3.8、§3.9）。实测见 `results/p10_gpu.md`。
+
 ---
 
 ## 1. 问题范围
@@ -103,6 +108,8 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出的稠密 BLAS 调用按形状改道到窄核 /
              并行切分，其余原样转发真实 BLAS；默认链入 hsolve 可执行文件，或以 libhsolve_blashook.so
              预加载（§3.8，docs/BLAS.md）
+src/gpu      （P10，不属于 libhsolve，由 hook 使用）运行时加载的 CUDA runtime / cuBLAS，把 MUMPS 分解中的大 dgemm
+             卸载到 GPU（FP64），模式 off | auto | on，默认 off；无 GPU 时为 CPU 路径（§3.9）
 ```
 
 - 下层模块（io / sparse / linalg / factor / ops / eigen / verify）**不打印、不依赖日志**；统计信息
@@ -1212,6 +1219,80 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   更高的三角条带（更少更大的调用）0.99 倍；GEMMT 未走（OpenBLAS 0.3.34 的 dgemmt 是逐列 dgemv）。
 - 许可：窄核改编自 OpenBLAS 0.3.34 的 SkylakeX 核（BSD-3-Clause），版权与许可声明见
   `src/blas/simd_kernels.hpp`、`docs/BLAS.md` §7 与根目录 `THIRD_PARTY_NOTICES`。
+- GPU 路由（P10，§3.9）：构建带 GPU 模块时（CMake `HSOLVE_GPU`，默认 ON），dmumps_c 的包装在分解（JOB 2，及含分解的
+  4/5/6）前后开关 GPU 卸载窗口；窗口内、并行区外、被 GPU 模块模型接受的 dgemm 走 GPU（路由 `Gpu`，剖析器标签 `gpu`）。
+  与 `HS_BLAS_ROUTE` 无关，由 GPU 模式决定（默认 off：路由与今天完全相同）。
+
+### 3.9 gpu（`src/gpu/`，P10「gpu」；不属于 libhsolve；实测见 `results/p10_gpu.md`、`docs/BLAS.md` §10）
+- 目的：赛题要求的 GPU 加速与无 GPU 的降级模式。可卸载的只有分解中的稠密更新：1e6 三维测例上分解占整次运行
+  约 75%（主分解 + 证书的两次精确计数），其中 L0 层之上逐个调用、按调用多线程的 dgemm 是大头；回代受内存带宽限制、
+  因子在主机内存（PCIe 3 只有 ~12.8 GB/s，低于主机的 ~36 GB/s），不卸载（§3.9 末）。
+- **运行时加载**（`cuda_lib`）：dlopen CUDA runtime 与 cuBLAS（`libcudart.so.12` + `libcublas.so.12`，否则 CUDA 11
+  的一对；依次查 `HS_CUDA_LIBDIR`、动态加载器的路径、`/usr/local/cuda*/lib64`，两者取自同一目录）。只声明用到的几个
+  入口点与枚举值（CUDA 11/12 的 ABI），构建不需要 CUDA、不含 NVIDIA 的头文件或代码；评测机（无 GPU）上二进制照常运行。
+  CUDA 库不随 hsolve 分发，用机器上已有的（NVIDIA 许可）。
+- **卸载引擎**（`gemm_engine`）：一次 dgemm C = α op(A) op(B) + βC 沿 C 的一维切块（m ≤ n 时按列，GPU 需要全部
+  op(A)——较小的「共享」操作数，每次调用上传一次——与 op(B) 的列块；否则按行）。每块：发射线程把块的操作数以非临时
+  存储打包进页锁定暂存区、H2D、`cublasDgemm`（FP64，β = 0，C 从不上传）、D2H 到页锁定区；完成线程在主机上做
+  C_块 = β C_块 + T（β = 0 不读 C）。2 个发射线程（各一个 cuBLAS 句柄）、6 个流水槽（暂存区、设备缓冲、各一个流）、
+  每槽 16 MB，设备内存一次分配 1 GiB（`mem_mb`），页锁定主机内存 224 MB；块按剩余量的 1/(槽数 + 1) 引导式认领（最后的块小、
+  流水线排空快，比等分块快 5–10%）。默认**只用 GPU**（调用线程等待：L0 层之上
+  MUMPS 一次只更新一个前沿，CPU 本也无事可做）；CPU 分担一部分的混合模式实测更慢（主机内存带宽之争），只作测量选项。
+- **为何受主机内存带宽而非 PCIe 限制**（`bench/gpu_dgemm.cpp`）：每个暂存的字节主机要读源、写暂存区、复制引擎再读一遍，
+  加法读 T 与 C、写 C——实测约 30–32 GB/s 的主机流量即槽的极限。一次调用的时间很贴近
+  t_gpu = (24 (m + n) k + 32 m n) 字节 / host_gbs + latency（host_gbs = 30 GB/s，latency = 1 ms）。
+  **卸载判据**：2mnk ≥ min_flops（1 GFlop）且 t_cpu = 2mnk / (40 GFlop/s × 线程数) ≥ 1.25 × t_gpu；于是 MUMPS 前沿的
+  贡献块更新（行块 KEEP(58) × 右侧列 × 主元数 k ≥ 1024）被卸载，秩 128/256 的面板更新、三角条带（250 行）与 L0 层内
+  的调用留在 CPU。
+- **结果与证书**：每个元素由一次覆盖全部 K 的 cuBLAS 调用算出，再在主机上以双精度加到 βC——与 CPU BLAS 只差舍入
+  （都是 IEEE 双精度；cuBLAS FP64 满足与 CPU BLAS 同样的 dgemm 后向误差界）。舍入不同就会改变 MUMPS 门限选主元读到的
+  数值，所以延迟主元、2×2 主元的选择乃至个别主元的符号**可能**与 CPU 路径不同，计数**不保证**与 CPU 路径逐一相等。
+  证书依赖的性质不变：每次计数仍是一个 IEEE 双精度 LDLᵀ 的精确 Sylvester 惯性，当该分解的后向误差小于端点到最近
+  特征值的距离（端点在谱隙中，§3.4 计数精度、§3.6-8）时它就是 K − s·B 的惯性——条件与保证都与 CPU 路径相同：条件
+  成立时两条路径都给出真实计数，不成立时任一条都可能数错。计数相同是**实测**：测过的每次计数（两个 1e6 测例
+  的每次分解 GPU 关 / 开各 5 次、整次运行各 10 次的证书）都与 CPU 路径相同（`results/p10_gpu.md`），单元测试
+  在不定三维 Laplacian（位移在宽谱隙中）上对比解析计数。只用 GPU 时块的大小只取决于形状，同一 GPU 与库下逐位
+  可复现（多线程的 CPU 路径本身也不逐位可复现）；混合模式不可复现（哪些列给 GPU 取决于时序）。
+- **线程亲和**（`affinity`）：线程继承创建者的 CPU 亲和。`OMP_PROC_BIND` / `OMP_PLACES` 下 OpenMP 把初始线程绑在一个
+  位置（`cores` 时一个核）上，而引擎正由它在第一次卸载的分解中创建：流水线的 3 个线程与 CUDA 运行时自己的线程会挤在
+  这一个核上（评审实测：每次卸载调用慢 1.3–1.4×，yee-pec-box-1e6 的分解收益少约 1/5）。所以 `create()` 在
+  `ScopedPlacesAffinity` 下运行：创建期间调用线程放宽到全部 OpenMP 位置的并集，之后恢复它自己的绑定；只放宽绑在
+  位置子集上的线程，未绑定（默认）时不变。流水线线程名为 `hs-gpu-issue<i>` / `hs-gpu-add`，报告给出 `pipeline_cpus`。
+  修正后（`results/p10_gpu.md` §10，5 次交错）绑定下每次调用与未绑定同速，yee-pec-box-1e6 三次分解绑定时 1.100×
+  （同批未绑定 1.072×，修正前绑定 1.055×）。
+- **实测**（gpu02 测量槽 + GPU 7 = V100-PCIE-16GB，16 线程，`results/p10_gpu.md`）：1e6 分解中被卸载的贡献块更新占
+  43–47% 的 flops、只占 CPU 时间的 22%；同一主元顺序、5 次交错：每次分解 1.06–1.10×（MUMPS 默认块参数），P9 块参数
+  （2000 行的 CB 行块，每字节两倍的功）下 1.07–1.12×，8 线程 1.15×；整次运行（`--gpu auto`，5 次交错、每次有效、
+  计数相同）syn-mem27-100 1.069×、yee-pec-box-1e6 1.058×，即分解的节省，回代不变；n ≤ 2.6e5
+  的三维测例上 `on` 为 0.72–0.97×（0.27–0.4 s 的初始化、没有值得卸载的调用），5.1e5 上持平。
+- **模式与进程级状态**（`offload`）：`off`（默认：不加载任何 CUDA 库，与今天的 CPU 路径完全相同）、`auto`（某次分解的
+  MUMPS 估计 RINFOG(1) ≥ `auto_min_flops` = 3e12 时才用 GPU：1e5 规模的测例永远不碰 CUDA）、`on`（每次分解都开窗口，
+  逐调用的模型仍把不划算的调用留在 CPU）。设置：环境变量 `HS_GPU`、`hsolve --gpu off|auto|on`（经
+  `include/hsolve/gpu.hpp` 的 dlsym 找到 hook 的 C 入口 `hsolve_gpu_set_mode`），调参 `HS_GPU_OPTS`（`device`、`mem_mb`、
+  `slot_mb`、`chunk_kb`（≤ `slot_mb`，更大的取 `slot_mb`）、`pack`、`slots`、`min_gflop`、`cpu_gflops`、`host_gbs`、
+  `min_speedup`、`auto_min_tflop` 等，未知键终止
+  进程），构建默认 `HSOLVE_GPU_DEFAULT`（off）。GPU 是 `CUDA_VISIBLE_DEVICES` 中的第一张卡。引擎在第一次需要卸载的分解时
+  创建（约 0.27 s：上下文、cuBLAS、缓冲、线程）；创建失败（无库、无设备、显存不足）时记下原因、整个进程留在 CPU
+  （**降级模式**）；之后的 CUDA 错误把该进程送回 CPU，出错的调用中尚未加回的块在 CPU 上重算，调用照常完成。
+- **报告**：`hsolve_gpu_report_json`（或 `HS_GPU_REPORT=<文件>` 在退出时写出）：模式、可用与否及原因、设备、初始化时间、
+  分解次数与卸载次数、调用数、GPU 上的 GFlop 与其占卸载分解估计 flops 的份额、调用时间与模型的 CPU 时间、H2D/D2H 字节、
+  流水线各段时间、错误。模式不为 off 时 CLI 把它写进 `report.json` 的 `gpu` 对象并打印一行摘要；off 时报告与今天相同。
+  不带 GPU 模块的构建（`HSOLVE_GPU=OFF`）里 hook 仍记下所要的模式（`hsolve_gpu_set_mode` 返回 NotBuilt，或 `HS_GPU`），
+  报告给出该模式、`"available": false` 与原因，所以 `--gpu on|auto` 照样写出说明降级的 `gpu` 对象。
+- **线程安全**：引擎一次只服务一个调用（try-lock，并发调用者得到 false 留在 CPU）；L0 子树（OpenMP 并行区内）的调用从不
+  卸载。模式与窗口是原子量，引擎在互斥锁下只创建一次、进程结束前不释放（MUMPS 可能在静态析构期间运行）。
+- **测试**（`test_gpu`、`test_gpu_hook`）：GPU 默认不用——测试进程在 main 之前把 `CUDA_VISIBLE_DEVICES` 设为空，于是在
+  共享 GPU 节点上的普通 ctest 不碰任何卡，并检验降级路径；`HSOLVE_TEST_GPU_DEVICE=7`（gpu02，经
+  `tools/bench/gpu_slot.sh`）时检验引擎对 CPU BLAS（所有转置、两种切分、α/β、填充、混合）、β = 0、可复现性、模型、
+  并发、注入的 CUDA 故障、超过暂存环的上传块（`chunk_kb` 封顶），以及 hook 链入的进程中三维 Laplacian 的惯性与解析
+  计数一致、`hsolve --gpu on` 的特征值与证书计数与 CPU 相同。`test_gpu.AffinityUnderOmpProcBind` 在
+  `OMP_PROC_BIND=close OMP_PLACES=cores` 下单独运行一次，检验放宽与恢复（有 GPU 时还检验每个 `hs-gpu-*` 线程可用
+  全部位置）；`GpuHook.WithoutTheGpuModuleTheReportSaysWhy` 在 `HSOLVE_GPU=OFF` 的构建中检验降级报告。
+- **未做 / 实测为负**（`results/p10_gpu.md`）：混合 CPU + GPU（主机带宽之争，GPU-only 更快）；小块暂存 + 普通存储
+  （让复制引擎从 LLC 读，0.89–1.03×）；`cudaHostRegister` MUMPS 的前沿（操作数在前沿中跨距为 NFRONT，按地址范围注册
+  4–30 倍于数据量，且跨调用缓存注册在 MUMPS 释放、重用内存时不安全）；跨调用缓存 B 块（同一原因）；L0 层内的调用
+  （单线程 35 GFlop/s 的调用可以卸载，但只有一个调用能用 GPU，收益估计 ≤ 2%）；回代（受带宽限制，因子不在 GPU 上）；
+  SPRAL SSIDS 整体上 GPU（G1，`exp-gpu-ssids`：1e5 上 0.9–1.85×、回代更慢、1e6 上显存满）。
 
 ## 4. 数值约定
 
@@ -1254,7 +1335,8 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 - **禁止**：稀疏矩阵稠密化（唯一例外：测试/评测代码中 n ≤ 4000 的参考解）；全局可变状态（例外：
   串行化 MUMPS 调用的进程级锁，§3.4；BLAS hook（§3.8，不属于 libhsolve）的剖析器——只在 `HS_BLAS_PROFILE`
   开启时记录——的每线程表与进程级 MUMPS 阶段标记；稀疏核分派的 CPU 检测与 `HS_KERNELS_NO_AVX512`、BLAS hook
-  解析出的真实例程与路由配置都在首次使用时写一次、之后只读，不算可变状态）；无种子随机数；库代码中
+  解析出的真实例程与路由配置都在首次使用时写一次、之后只读，不算可变状态；GPU 卸载（§3.9，hook 的一部分）的进程级
+  模式、分解窗口、只创建一次的引擎与其统计）；无种子随机数；库代码中
   `std::cout`/`printf`（BLAS hook 只在无法继续时——找不到真实例程、未知路由记号——向 stderr 写一条消息并终止）。
 - 测试：`tests/cpp/test_<module>*.cpp`（GoogleTest），**套件名以模块名开头**（`Sparse*`、`Io*`、
   `Linalg*`、`Factor*`、`Ops*`、`Lanczos*`、`KrylovSchurGeneral*`、`Lobpcg*`、`JacobiDavidson*`、
@@ -1314,6 +1396,10 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
   剖析，`HS_BLAS_NO_AVX512=1` / `HS_BLAS_NO_AVX2=1` 在 AVX-512 节点上模拟只有 AVX2 / 无 SIMD 的 CPU。命令与
   数据见 `docs/BLAS.md` §8。旧构建目录保留缓存的 `HSOLVE_BLAS_HOOK` / `HSOLVE_BLAS_ROUTE_DEFAULT`，须
   `-U` 后重新配置。
+- **GPU 实验**（P10，§3.9）：只用 gpu02 的 GPU 7（与测量槽同在 NUMA node 1；其余卡属于其他作业，不得触碰）。带 GPU 的
+  计时运行经 `tools/bench/gpu_slot.sh 7 TIMEOUT -- CMD`：先用 nvidia-smi 确认该卡空闲（无计算进程、显存占用 ≤ 64 MiB），
+  再以 `CUDA_VISIBLE_DEVICES=7` 和 `guard.py --exclusive` 占用测量槽。默认构建的 GPU 模式为 off，单元测试默认看不到任何
+  GPU（§3.9 测试），所以其它 agent 的测量与测试不受影响；GPU 测试用 `HSOLVE_TEST_GPU_DEVICE=7` 显式打开。
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的，`env/hosts/CISL-NF5468M6.sh`；
 集群节点见上；没有主机文件的机器——用户或评测机——`HS_CORES` 默认取该 shell 可用的全部 CPU，`env/activate.sh`，
@@ -1359,3 +1445,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |
 | P8 | **已完成**（p8-certcost-fix）：证书的计数失败不再结束求解——计数源（InertiaCounter / 主对象）失败时换另一个，计数前按计数余量检查估计（主对象代替计数器时按其上次分解的 INFOG(21)），SCOTCH 分析超上限时至多再分析两次；都不行时 nearest 交回已收敛的对、证书标为未完成（success = false），窗口目标只丢失败的切片；一般 HPD B 的 κ 与 λ_min 严格界（只用于 auto / randomized）；更便宜的精确计数全部实测为负（两进程并行、单次合并分解、省缩放/检测、换计数源），默认证书仍为 exact（`results/p8_certcost.md`）。 |
 | P9 | **已完成**（p9-merge 90e7483 = ordering + factspeed + mpi 的评审修正分支，集成分支 p9int）。**ordering**：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割；driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时采用）、顶层投入（代价模型决定）；代价模型按新剖分重拟合（重放超额 1.1%），候选顺序中它先于 SCOTCH（门槛：1e6 1.25× / 1.22×，26 个 1e5 测例几何平均 0.919，`results/p9_ordering.md`）。**factspeed**：1e6 分解的剖析（DGEMM 峰值的 40–43%，受内存带宽限制）、MUMPS 块参数 `Blocking`（KEEP(420) = 256、KEEP(57/58)）与补丁 `patches/mumps-5.8.2-l0-blocking.patch`（L0 层下的 KEEP(498/499)）、可复现的 MUMPS 源码构建 `tools/dev/build_mumps.sh`；运行设置、重编（-O3 / AVX2 / AVX-512）、GEMMT 等为负结果（`results/p9_factspeed.md`）。**mpi**：1e6 对调优 SLEPc（`eps_ncv = 3k` 更正后 main 1.04× / 0.67×）与 MPI MUMPS 的上界——一个 16 核 socket 上 2 × 8 … 16 × 1 为顺序版 1 × 16 的 0.85–0.59 倍，负结果、不改设计（`results/p9_mpi.md`）。**集成**：打补丁的自编 MUMPS 成为默认构建（用户决定；官方 tarball 入库 `third_party/mumps/`，`tools/dev/mumps_cache.sh` 按构建输入缓存，`HS_MUMPS=env` 回退到 conda 的 MUMPS，`HS_MUMPS_BLOCKING=mumps` 运行时恢复 MUMPS 的块参数，构建信息写出所用 MUMPS，`tests/py/test_mumps_build.py`），无主机文件的机器上 guard 绑本机的 CPU；`tools/bench/thread_scaling.py`。最终测量（gpu01 测量槽，849 次计时运行全部有效、证书 exact，`results/p9_measurements.md`）：对 main a831d79 1e6（8 次）syn-mem27-100 1.34×、yee-pec-box-1e6 1.28×（同一主元顺序上块参数与补丁 1.056× / 1.053×），41 个数据测例几何平均 0.910、无回归；对调优 SLEPc 8 个配置中 5 个更快（syn-mem27-46 1.77×、yee-pec-box-1e5 1.37×、wg-square-1e5 1.89×、区间 3.14×、syn-mem27-100 1.41×；ss-qa8fk-qa8fm 0.96×、cav2d-rect-pert-1e5 0.74×、yee-pec-box-1e6 0.86×）；16 线程对最快的 1 线程配置（默认及固定的五种排序）三维 1e5 测例 3.57–4.51×、同一主元顺序 4.26–5.09×（评审更正：初稿以默认配置自己的 1 线程运行为基线，其排序在 1 线程时与 16 线程不同，报 4.2–5.4×；`tools/bench/thread_scaling.py` 的 `--variant`）。**未做**：排序代价模型在低线程数的定价（只在 16 线程标定；1 线程时 syn-mem27-46、ss-qa8fk-qa8fm 选 SCOTCH，METIS / PORD 快 1.21 / 1.27 倍，`results/p9_measurements.md` §5）、三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分；L0 层面板的秩 1 更新（PIVOT_OPTION）；证书的两次计数在 1e6 时仍占运行的一半 |
+| P10 | **gpu 已完成**（分支 p10gpu；本行为 GPU 部分的文本建议，MPI 部分见 p10mpi）：src/gpu——运行时 dlopen 的 CUDA runtime / cuBLAS（构建不需要 CUDA），BLAS hook 在 MUMPS 分解（含证书计数）中把主机流量模型判为划算的大 dgemm 以 FP64 卸载到一张 GPU（暂存打包、cuBLAS、主机加回，默认只用 GPU）；`HS_GPU` / `hsolve --gpu off\|auto\|on`，默认 off（CPU 路径不变），auto 只在分解估计 ≥ 3e12 flops 时用 GPU，无 GPU / 无库时为 CPU 路径并在报告中说明（降级模式）；报告的 `gpu` 对象。实测（gpu02 槽 + GPU 7，16 线程，5 次交错，`results/p10_gpu.md`）：单次调用 1.7–5.0×（受主机内存带宽限制）；1e6 三维测例同一主元顺序下每次分解 1.06–1.10×（三次合计 syn-mem27-100 1.092×、yee-pec-box-1e6 1.068×），配 P9 块参数 1.07–1.12×（合计 1.110× / 1.082×），8 线程 1.15×；GPU 承担分解 43–47% 的 flops；整次运行（证书 exact，`--gpu auto`，每次有效）syn-mem27-100 88.9 → 83.1 s（1.069×）、yee-pec-box-1e6 73.8 → 69.7 s（1.058×），峰值内存 +0.47 GiB；1e5–2.6e5 上 `on` 为负（0.72–0.97×）故 auto 只在估计 ≥ 3e12 flops 时用 GPU；每次计数仍是双精度 LDLᵀ 的精确 Sylvester 惯性，证书的条件与保证同 CPU 路径（实测计数与 CPU 路径相同，但不保证逐一相等）；评审修正（p10gpu-fix）：OpenMP 绑定下引擎线程可用全部位置、`chunk_kb` 以槽大小封顶、无 GPU 模块的构建也写出降级报告。**未做**：混合 CPU + GPU、L0 层内调用、回代上 GPU（受主机内存带宽 / 因子在主机内存所限，见 §3.9） |

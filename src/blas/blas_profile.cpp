@@ -97,7 +97,7 @@ std::string flags_string(Op op, unsigned flags) {
 
 const char* route_label(unsigned r) {
   static const char* const names[] = {"real",     "gemv",   "trsv",  "narrow",
-                                      "parallel", "splitk", "strsm", "?"};
+                                      "parallel", "splitk", "strsm", "gpu"};
   return names[r & 7u];
 }
 
