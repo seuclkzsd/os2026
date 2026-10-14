@@ -8,8 +8,12 @@
 //                              options, pivot order, A and B (CSR)          -> Ready
 //                      Count   generation, CountTask                         -> CountDone
 //                      Slice   generation, SliceTask                         -> SliceDone
+//                      Drop    generation: drop the problem now              -> Dropped
 //                      End     generation: drop the problem (no reply)
 //                      Quit    leave serve() (no reply)
+// Ready, CountDone, SliceDone and Dropped carry the helper's resident memory; Ready and Dropped
+// also its idle level (its resident memory without a problem), so that the leader charges the
+// budget with what a helper holds for the solve (remote_helpers.hpp).
 // The generation numbers a solve's problem; a reply carries it, and the leader ignores replies of
 // an older generation (none are expected: it collects every reply before it moves on).
 #pragma once
@@ -25,7 +29,18 @@
 
 namespace hs::parallel {
 
-enum class Msg : std::uint8_t { Setup = 1, Ready = 2, Count = 3, CountDone = 4, Slice = 5, SliceDone = 6, End = 7, Quit = 8 };
+enum class Msg : std::uint8_t {
+  Setup = 1,
+  Ready = 2,
+  Count = 3,
+  CountDone = 4,
+  Slice = 5,
+  SliceDone = 6,
+  End = 7,
+  Quit = 8,
+  Drop = 9,
+  Dropped = 10,
+};
 
 class Writer {
  public:

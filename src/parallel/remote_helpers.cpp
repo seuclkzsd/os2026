@@ -27,7 +27,7 @@ RemoteHelpers<T>::~RemoteHelpers() {
     for (int h = 1; h <= size(); ++h) {
       Helper& x = helpers_[static_cast<std::size_t>(h)];
       // Collect what is still owed (a solve that threw while a helper worked) before End.
-      while (x.owes_ready || (x.task != 0 && x.reply.empty())) receive_one(h);
+      while (x.owes_ready || x.owes_dropped || (x.task != 0 && x.reply.empty())) receive_one(h);
       x.task = 0;
       x.reply.clear();
       if (sent_) {
@@ -49,12 +49,15 @@ void RemoteHelpers<T>::abandon(int h, const std::string& why) {
   if (ctx_) ctx_->rep.parallel.notes.push_back("helper " + std::to_string(h) + " not used further: " + why);
 }
 
+// What the helpers hold for this solve: their resident memory above their idle level (a helper's
+// own process - MPI, libraries - is not charged, as before it first got the problem), or the
+// memory granted with a task in flight if that is more.
 template <class T>
 double RemoteHelpers<T>::memory_bytes() const {
   double sum = 0.0;
   for (int h = 1; h <= size(); ++h) {
     const Helper& x = helpers_[static_cast<std::size_t>(h)];
-    sum += std::max(x.rss_bytes, x.task != 0 ? x.granted_bytes : 0.0);
+    sum += std::max(x.held(), x.task != 0 ? x.granted_bytes : 0.0);
   }
   return sum;
 }
@@ -97,14 +100,23 @@ int RemoteHelpers<T>::receive_one(int h) const {
     x.count_mb = r.pod<double>();
     x.rss_bytes = r.pod<double>();
     x.threads = r.pod<int>();
+    x.idle_bytes = r.pod<double>();
     x.owes_ready = false;
     x.ready = e.ok;
     if (!e.ok) {
+      x.holds = false;  // it dropped what it had built
       x.usable = false;
       if (ctx_)
         ctx_->rep.parallel.notes.push_back("helper " + std::to_string(from) + " could not take the problem: " +
                                            to_string(e.code) + ": " + e.what);
     }
+    return from;
+  }
+  if (type == Msg::Dropped) {
+    x.rss_bytes = x.idle_bytes = r.pod<double>();
+    x.owes_dropped = false;
+    x.holds = false;
+    x.ready = false;
     return from;
   }
   if (type != Msg::CountDone && type != Msg::SliceDone)
@@ -162,6 +174,7 @@ void RemoteHelpers<T>::prepare(driver::Ctx& c) {
       peers_.send(h, w.bytes());
       x.owes_ready = true;
       x.ready = false;
+      x.holds = true;
     }
     sent_ = true;
     c.rep.parallel.share_s += timer.seconds();
@@ -178,8 +191,39 @@ void RemoteHelpers<T>::prepare(driver::Ctx& c) {
   c.rep.parallel.helper_threads = helper_threads();
   if (waited) {
     c.rep.parallel.wait_s += wait.seconds();
-    driver::event(c, "helpers_ready", {{"seconds", wait.seconds()}, {"count_mb", count_estimate_mb()}});
+    driver::event(c, "helpers_ready", {{"seconds", wait.seconds()}, {"count_mb", count_estimate_mb()},
+                                       {"held_mb", memory_bytes() / 1e6}});
   }
+}
+
+// Every helper that holds the problem (also one abandoned after a failed task: its process holds
+// what it built) frees it; the leader waits for their confirmations (a sleeping poll, as for their
+// tasks), so that what they freed is no longer charged to the budget when the leader goes on - the
+// leader's own counts or slices that follow see the budget hs::solve would see.
+template <class T>
+void RemoteHelpers<T>::drop(driver::Ctx& c, const std::string& why) {
+  ctx_ = &c;
+  Timer timer;
+  const double before = memory_bytes();
+  int dropped = 0;
+  for (int h = 1; h <= size(); ++h) {
+    Helper& x = helpers_[static_cast<std::size_t>(h)];
+    while (x.owes_ready) receive_one(h);
+    HS_ASSERT(x.task == 0, "drop() while helper " << h << " works");
+    if (!x.holds) continue;
+    Writer w(Msg::Drop);
+    w.pod(generation_);
+    peers_.send(h, w.bytes());
+    x.owes_dropped = true;
+    ++dropped;
+  }
+  for (int h = 1; h <= size(); ++h)
+    while (helpers_[static_cast<std::size_t>(h)].owes_dropped) receive_one(h);
+  sent_ = false;  // a later task sends the problem again (prepare)
+  if (dropped == 0) return;
+  c.rep.parallel.wait_s += timer.seconds();
+  driver::event(c, "helpers_drop", {{"helpers", static_cast<std::int64_t>(dropped)}, {"why", why},
+                                    {"freed_mb", (before - memory_bytes()) / 1e6}, {"seconds", timer.seconds()}});
 }
 
 template <class T>
@@ -193,7 +237,7 @@ void RemoteHelpers<T>::post_count(driver::Ctx& c, int h, const driver::CountTask
   w.pod(t);
   peers_.send(h, w.bytes());
   x.task = static_cast<int>(Msg::Count);
-  x.granted_bytes = x.rss_bytes + t.cap_mb * 1e6;
+  x.granted_bytes = x.held() + t.cap_mb * 1e6;
 }
 
 template <class T>
@@ -225,7 +269,7 @@ void RemoteHelpers<T>::post_slice(driver::Ctx& c, int h, const driver::SliceTask
   w.pod(t);
   peers_.send(h, w.bytes());
   x.task = static_cast<int>(Msg::Slice);
-  x.granted_bytes = x.rss_bytes + t.budget_gb * 1073741824.0;
+  x.granted_bytes = x.held() + t.budget_gb * 1073741824.0;
 }
 
 template <class T>

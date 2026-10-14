@@ -9,10 +9,13 @@
 #include <cstdio>
 #include <string>
 
+#include "driver/helpers.hpp"
 #include "driver/internal.hpp"
+#include "hsolve/factor.hpp"
 #include "hsolve/parallel.hpp"
 #include "hsolve/solver.hpp"
 #include "mpi/mpi_transport.hpp"
+#include "parallel/remote_helpers.hpp"
 #include "support/parallel_problems.hpp"
 
 namespace {
@@ -73,6 +76,47 @@ TYPED_TEST(MpiSessionTyped, FailingHelpersAreReplacedByTheLeader) {
   expect_interval_certified(iv);
   EXPECT_EQ(iv.report.parallel.helper_slices, 0);
   EXPECT_EQ(iv.report.parallel.fallbacks, g_peers->size() >= 3 ? 2 : 0) << warnings(iv.report);
+}
+
+// The leader's memory accounting over real processes: what the helpers hold once they have the
+// problem is charged until they drop it (Drop / Dropped), then nothing; a later task sends the
+// problem again (review p10mpi, finding 1: helpers that kept the problem after their work was
+// declined took the leader's budget for its own counts).
+TEST(MpiSessionMemory, HelpersDropWhatTheyHold) {
+  if (g_peers->size() < 3) GTEST_SKIP() << "needs two helpers";
+  const auto a = laplacian3d<double>();
+  hs::ShiftedPencil<double> pencil(a, nullptr);
+  hs::FactorOptions fo;
+  fo.threads = 1;
+  auto fac = hs::make_mumps_factorization<double>(fo);
+  fac->analyze(pencil, 1.0, -kSigma);
+  hs::SolverConfig cfg = nearest_cfg();
+  hs::SolveReport rep;
+  hs::driver::PhaseClock clock;
+  hs::driver::Ctx c{cfg, nullptr, rep, clock};
+  hs::driver::ProblemInfo info;
+  info.sigma0 = kSigma;
+  info.prepare_count = true;
+  hs::parallel::RemoteHelpers<double> hp(*g_peers, 11u, kForce);
+  c.helpers = &hp;
+  hp.share(c, pencil, *fac, info);
+  EXPECT_EQ(hp.memory_bytes(), 0.0);
+  hp.prepare(c);
+  EXPECT_GT(hp.count_estimate_mb(), 0.0);
+  EXPECT_GT(hp.memory_bytes(), 0.0);  // copies of the matrix, the counter's analysis
+  hp.drop(c, "test");
+  EXPECT_EQ(hp.memory_bytes(), 0.0);
+  hp.prepare(c);
+  hs::driver::CountTask t;
+  t.s = 0.5 * (spectrum()[3] + spectrum()[4]);
+  t.budget_gb = 1.0;
+  hp.post_count(c, 2, t);
+  const auto r = hp.wait_count(c, 2);
+  EXPECT_TRUE(r.error.ok) << r.error.what;
+  EXPECT_EQ(r.nu, 4);
+  hp.drop(c, "done");
+  EXPECT_EQ(hp.memory_bytes(), 0.0);
+  c.helpers = nullptr;
 }
 
 }  // namespace

@@ -2,7 +2,9 @@
 // DESIGN §3.9): per solve the problem the leader shares (its matrices, configuration, pivot order),
 // an inertia-only MUMPS instance for certificate counts and a main object for slices, both on the
 // leader's pivot order and with this process's OpenMP threads; every task is answered, a failure
-// as an error reply (the leader then does the work itself).
+// as an error reply (the leader then does the work itself). Drop / End free the problem and all
+// built on it at once (the leader takes the work back or the solve ended), and return the freed
+// heap to the system, so that the resident memory the helper reports falls to its idle level.
 #include <memory>
 #include <new>
 #include <string>
@@ -17,6 +19,10 @@
 #include "hsolve/util.hpp"
 #include "parallel/protocol.hpp"
 #include "parallel/wire.hpp"
+
+#if defined(__GLIBC__)  // (defined by the C++ headers above)
+#include <malloc.h>
+#endif
 
 namespace hs {
 
@@ -140,13 +146,24 @@ class ProblemOf final : public Problem {
   driver::FactorHeld held_{};
 };
 
-void send_ready(Transport& peers, std::uint32_t gen, const driver::HelperError& e, double count_mb) {
+/// Frees `problem` and gives the freed heap back to the system (glibc keeps freed blocks below its
+/// mmap threshold resident otherwise); returns the resident memory then: the helper's idle level.
+double release(std::unique_ptr<Problem>& problem) {
+  problem.reset();
+#if defined(__GLIBC__)
+  malloc_trim(0);
+#endif
+  return static_cast<double>(current_rss_bytes());
+}
+
+void send_ready(Transport& peers, std::uint32_t gen, const driver::HelperError& e, double count_mb, double idle) {
   Writer w(Msg::Ready);
   w.pod(gen);
   parallel::put(w, e);
   w.pod(count_mb);
   w.pod(static_cast<double>(current_rss_bytes()));
   w.pod(max_threads());
+  w.pod(idle);
   peers.send(0, w.bytes());
 }
 
@@ -164,7 +181,7 @@ void serve(Transport& peers, Logger* log) {
     const auto gen = r.pod<std::uint32_t>();
     switch (type) {
       case Msg::Setup: {
-        problem.reset();  // the previous solve's state first: its memory is not needed any more
+        const double idle = release(problem);  // the previous problem first: it is not needed any more
         generation = gen;
         driver::HelperError err;
         double count_mb = 0.0;
@@ -186,7 +203,7 @@ void serve(Transport& peers, Logger* log) {
             err = error_of(e);
           }
         }
-        send_ready(peers, gen, err, count_mb);
+        send_ready(peers, gen, err, count_mb, idle);
         break;
       }
       case Msg::Count: {
@@ -225,8 +242,18 @@ void serve(Transport& peers, Logger* log) {
         peers.send(0, w.bytes());
         break;
       }
+      case Msg::Drop: {
+        // The leader takes the work back (or this batch of tasks is done): free everything now and
+        // say how much is left - its budget is charged with this helper's memory until then.
+        const double idle = release(problem);
+        Writer w(Msg::Dropped);
+        w.pod(gen);
+        w.pod(idle);
+        peers.send(0, w.bytes());
+        break;
+      }
       case Msg::End:
-        if (gen == generation) problem.reset();
+        if (gen == generation) release(problem);
         break;
       default:
         HS_THROW(Internal, "parallel session: unexpected message " << static_cast<int>(type) << " on a helper");

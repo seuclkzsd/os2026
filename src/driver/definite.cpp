@@ -758,6 +758,16 @@ class WindowSolver {
   void solve_slices(Here& solve_here);
   /// Helpers that may take slices now (0: none), and the memory one helper's slice may take.
   int slice_helpers(double& need_bytes, double& share_bytes);
+  /// Usable helpers when there are at least two and the options allow slices on them (else 0).
+  int slice_helpers_usable() const;
+  /// The cost rule of slices on helpers (Toggle::Auto): one slice of c pairs (the slicing cost
+  /// model) outweighs a helper's preparation; otherwise false and why.
+  bool helper_slices_pay(index_t c, std::string& why) const;
+  /// Memory one helper's slice of at most cmax pairs needs (bytes; slice_helpers()).
+  double helper_slice_bytes(index_t cmax) const;
+  /// Memory of the leader's main factors if it holds them (bytes; released before helpers work).
+  double main_factor_bytes() const;
+  void parallel_note(const std::string& why);
   SliceTask task_of(std::size_t i, double need_bytes, double share_bytes) const;
   void merge_remote(std::size_t i, int h, SliceReply<T>& r);
   double multiplet_shift(const Block<T>& sel, const Slice& s, std::vector<double>& tried) const;
@@ -1360,36 +1370,80 @@ index_t WindowSolver<T>::deduplicate() {
 
 // ---- multi-process solves (DESIGN §3.9): slices on helper processes
 
-// Helpers that take slices, and the memory one helper's slice may take: its factorization (the main
-// analysis' in-core estimate - a helper analyses the same pivot order), MUMPS' analysis data (~15%
-// of it) and its Krylov work of up to c_max_ pairs (7 n-vectors per pair, as the leader's own slice
-// plan, solve() step 2). The leader's main factors are released first (it computes nothing while
-// helpers work, and refactorizes if it must solve a slice itself). As many helpers as such slices
-// fit in what the budget leaves (memory_in_use counts the helpers already) - at least two: one
-// helper alone, on its socket's cores, would be slower than the leader on all of them. Each helper
-// then gets an equal share of what is left (share_bytes): its slices' Krylov bases need the room the
+template <class T>
+int WindowSolver<T>::slice_helpers_usable() const {
+  if (!c_.helpers || !c_.helpers->shared() || c_.helpers->options().helper_slices == Toggle::Off) return 0;
+  int usable = 0;
+  for (int h = 1; h <= c_.helpers->size(); ++h) usable += c_.helpers->usable(h) ? 1 : 0;
+  return usable >= 2 ? usable : 0;
+}
+
+// One slice's predicted work (the slicing cost model: its factorization and pairs) must outweigh
+// what a helper needs before it can start (its analysis and the messages).
+template <class T>
+bool WindowSolver<T>::helper_slices_pay(index_t c, std::string& why) const {
+  if (c_.helpers->options().helper_slices != Toggle::Auto) return true;
+  const index_t cc = std::max<index_t>(1, c);
+  const double work = cost_.t_factor + static_cast<double>(cc) * cost_.per_pair(cc);
+  const double prep = helper_preparation_s(mumps_input_size(pencil_), fac_.estimate(), 1);
+  if (work >= prep) return true;
+  why = "spectrum slices on the leader: too small for the helpers (a slice ~" + fmt(work) + " s, their preparation ~" +
+        fmt(prep) + " s)";
+  return false;
+}
+
+// A helper's slice: its factorization (the main analysis' in-core estimate - a helper analyses the
+// same pivot order), MUMPS' analysis data (~15% of it) and its Krylov work of up to cmax pairs (7
+// n-vectors per pair, as the leader's own slice plan, solve() step 2).
+template <class T>
+double WindowSolver<T>::helper_slice_bytes(index_t cmax) const {
+  return 1.15 * fac_.estimate().incore_mb * 1e6 + 7.0 * static_cast<double>(n_) * sizeof(T) * static_cast<double>(cmax);
+}
+
+template <class T>
+double WindowSolver<T>::main_factor_bytes() const {
+  return fac_.inertia().valid ? fac_.stats().factor_mb_used * 1e6 : 0.0;
+}
+
+template <class T>
+void WindowSolver<T>::parallel_note(const std::string& why) {
+  auto& notes = c_.rep.parallel.notes;
+  if (std::find(notes.begin(), notes.end(), why) == notes.end()) notes.push_back(why);
+}
+
+// Helpers that take slices, and the memory one helper's slice may take (helper_slice_bytes). As many
+// helpers as such slices fit in what the budget leaves once the leader's main factors are released
+// (it computes nothing while helpers work, and refactorizes if it must solve a slice itself) - at
+// least two: one helper alone, on its socket's cores, would be slower than the leader on all of them.
+// The fit is predicted before anything is sent (the helpers' copies of the problem:
+// helper_footprint_bytes), and checked again once they have the problem (memory_in_use counts what
+// they then hold); declined then, the helpers drop it and the leader keeps its factors. Each helper
+// gets an equal share of what is left (share_bytes): its slices' Krylov bases need the room the
 // leader's would have had (yee-pec-cube-32 [40, 400], slices of 104 and 167 pairs: with just
 // need_bytes the helper halved its block width to 1 and missed 4 pairs).
 template <class T>
 int WindowSolver<T>::slice_helpers(double& need_bytes, double& share_bytes) {
   need_bytes = share_bytes = 0.0;
-  if (!c_.helpers || !c_.helpers->shared() || slices_.size() < 2) return 0;
+  if (slices_.size() < 2) return 0;
+  int usable = slice_helpers_usable();
+  if (usable == 0) return 0;
+  std::string why;
+  if (!helper_slices_pay(c_target_, why)) {
+    parallel_note(why);
+    return 0;
+  }
   Helpers& hp = *c_.helpers;
-  if (hp.options().helper_slices == Toggle::Off) return 0;
-  int usable = 0;
-  for (int h = 1; h <= hp.size(); ++h) usable += hp.usable(h) ? 1 : 0;
-  if (usable < 2) return 0;
-  if (hp.options().helper_slices == Toggle::Auto) {
-    // One slice's predicted work (the slicing cost model: its factorization and pairs) must outweigh
-    // what a helper needs before it can start (its analysis and the messages).
-    const index_t cc = std::max<index_t>(1, c_target_);
-    const double work = cost_.t_factor + static_cast<double>(cc) * cost_.per_pair(cc);
-    const double prep = helper_preparation_s(mumps_input_size(pencil_), fac_.estimate(), 1);
-    if (work < prep) {
-      const std::string why = "spectrum slices on the leader: too small for the helpers (a slice ~" + fmt(work) +
-                              " s, their preparation ~" + fmt(prep) + " s)";
-      auto& notes = c_.rep.parallel.notes;
-      if (std::find(notes.begin(), notes.end(), why) == notes.end()) notes.push_back(why);
+  const double need = helper_slice_bytes(c_max_);
+  const double main = main_factor_bytes();
+  auto fit_note = [&](int take, int of, double avail, const char* how) {
+    parallel_note("spectrum slices: " + std::to_string(take) + " of " + std::to_string(of) +
+                  " helper(s) used - a helper's slice needs " + fmt(need / 1e6) + " MB, the budget leaves " +
+                  fmt(std::max(avail, 0.0) / 1e6) + " MB" + how);
+  };
+  {
+    const double avail = 0.9 * (budget_left(c_) + main - usable * helper_footprint_bytes(pencil_));
+    if (slice_helpers_fitting(avail, need, usable) == 0) {
+      fit_note(0, usable, avail, " (predicted; nothing sent)");
       return 0;
     }
   }
@@ -1397,25 +1451,22 @@ int WindowSolver<T>::slice_helpers(double& need_bytes, double& share_bytes) {
     PhaseScope phase(c_.clock, Phase::Iterate);
     hp.prepare(c_);  // the helpers get the problem now (the leader waits)
   }
-  usable = 0;
-  for (int h = 1; h <= hp.size(); ++h) usable += hp.usable(h) ? 1 : 0;
-  if (usable < 2) return 0;
-  if (fac_.inertia().valid && fac_.release_factors()) c_.held = FactorHeld{};
-  const double vec = static_cast<double>(n_) * sizeof(T);
-  need_bytes = 1.15 * fac_.estimate().incore_mb * 1e6 + 7.0 * vec * static_cast<double>(c_max_);
-  const double avail = 0.9 * budget_left(c_);
-  const int fit = need_bytes > 0 ? static_cast<int>(std::min(avail / need_bytes, 1e6)) : usable;
-  int take = std::max(0, std::min(usable, fit));
-  if (take < usable) {
-    const std::string why = "spectrum slices: " + std::to_string(take < 2 ? 0 : take) + " of " +
-                            std::to_string(usable) + " helper(s) used - a helper's slice needs " +
-                            fmt(need_bytes / 1e6) + " MB, the budget leaves " + fmt(std::max(avail, 0.0) / 1e6) +
-                            " MB";
-    auto& notes = c_.rep.parallel.notes;
-    if (std::find(notes.begin(), notes.end(), why) == notes.end()) notes.push_back(why);
+  usable = slice_helpers_usable();
+  double avail = 0.9 * (budget_left(c_) + main);  // charged with what the helpers now hold
+  int take = slice_helpers_fitting(avail, need, usable);
+  if (take > 0 && fac_.inertia().valid && fac_.release_factors()) {
+    c_.held = FactorHeld{};
+    avail = 0.9 * budget_left(c_);
+    take = slice_helpers_fitting(avail, need, take);
   }
-  if (take < 2) take = 0;
-  if (take > 0) share_bytes = avail / take;
+  if (take < usable) fit_note(take, usable, avail, "");
+  if (take == 0) {
+    PhaseScope phase(c_.clock, Phase::Iterate);
+    hp.drop(c_, "slices on the leader");
+    return 0;
+  }
+  need_bytes = need;
+  share_bytes = avail / take;
   return take;
 }
 
@@ -1525,6 +1576,12 @@ void WindowSolver<T>::solve_slices(Here& solve_here) {
       merge_remote(i, h, r);
     }
     hand_out();
+  }
+  // The helpers' batch is done: they drop the problem and their last factors before the leader
+  // solves what is left (or goes on), which then has the budget hs::solve would have.
+  {
+    PhaseScope phase(c_.clock, Phase::Iterate);
+    hp->drop(c_, "helper slices done");
   }
   // Slices no helper could take (all failed) and those handed back.
   for (std::size_t i : queue) leader.push_back({i, false});
@@ -1764,12 +1821,11 @@ Solution<T> WindowSolver<T>::solve() {
   }
 
   // ---- 2. Memory: the n x required output plus one slice's working set must fit the budget.
+  const double vec = static_cast<double>(n_) * sizeof(T);
+  // + up to 4 pairs per slice found just outside it (see step 3)
+  const double out_bytes = vec * static_cast<double>(required + 4 * (total / std::max<index_t>(c_target_, 1) + 2) + 8);
   {
-    const double vec = static_cast<double>(n_) * sizeof(T);
     const double avail = budget_left(c_);
-    // + up to 4 pairs per slice found just outside it (see step 3)
-    const double out_bytes =
-        vec * static_cast<double>(required + 4 * (total / std::max<index_t>(c_target_, 1) + 2) + 8);
     if (out_bytes > 0.9 * avail)
       HS_THROW(OutOfMemoryBudget, "the target holds " << required << " eigenvalues: their eigenvectors need "
                                                       << out_bytes / 1073741824.0 << " GiB, "
@@ -1789,18 +1845,37 @@ Solution<T> WindowSolver<T>::solve() {
   // Multi-process solves (DESIGN §3.9): with two or more helpers to solve slices at once, a window
   // of at least two minimum slices is cut into at least as many slices as there are helpers - the
   // sequential cost model's optimum would leave helpers idle (yee-pec-box-1e5 [40, 400], 108
-  // eigenvalues: one slice).
-  if (cfg.slice_size == 0 && c_.helpers && c_.helpers->shared() && c_.helpers->options().helper_slices != Toggle::Off) {
-    int usable = 0;
-    for (int h = 1; h <= c_.helpers->size(); ++h) usable += c_.helpers->usable(h) ? 1 : 0;
+  // eigenvalues: one slice). Only when the helpers will take those slices, as slice_helpers()
+  // decides it later - the cost rule, and two of them at once in what the budget leaves, predicted
+  // here: less the output pool reserved below and the helpers' copies of the problem, plus the
+  // leader's main factors -; otherwise the sequential model's slices stay, and the leader solves
+  // them as hs::solve would (no extra cut, no extra slice).
+  if (cfg.slice_size == 0) {
+    const int usable = slice_helpers_usable();
     if (usable >= 2 && total >= 2 * kHelperMinSlice) {
       const index_t per = std::max<index_t>(kHelperMinSlice, (total + usable - 1) / usable);
       if (per < c_target_) {
-        event(c_, "slice_size_helpers", {{"helpers", static_cast<std::int64_t>(usable)},
-                                         {"model_target", static_cast<std::int64_t>(c_target_)},
-                                         {"target", static_cast<std::int64_t>(per)}});
-        c_target_ = per;
-        c_max_ = std::min(c_max_, c_target_ + c_target_ / 4);
+        const index_t per_max = std::min(c_max_, per + per / 4);
+        const double need = helper_slice_bytes(per_max);
+        const double avail =
+            0.9 * (budget_left(c_) - out_bytes + main_factor_bytes() - usable * helper_footprint_bytes(pencil_));
+        std::string why;
+        if (!helper_slices_pay(per, why)) {
+          parallel_note(why);
+        } else if (slice_helpers_fitting(avail, need, usable) == 0) {
+          parallel_note("spectrum slices on the leader, as for one process: two helpers' slices of " +
+                        std::to_string(per_max) + " pairs (" + fmt(need / 1e6) + " MB each) would exceed the " +
+                        fmt(std::max(avail, 0.0) / 1e6) + " MB the budget leaves (predicted)");
+          event(c_, "slice_size_helpers_skipped",
+                {{"helpers", static_cast<std::int64_t>(usable)}, {"target", static_cast<std::int64_t>(per)},
+                 {"need_mb", need / 1e6}, {"avail_mb", avail / 1e6}});
+        } else {
+          event(c_, "slice_size_helpers", {{"helpers", static_cast<std::int64_t>(usable)},
+                                           {"model_target", static_cast<std::int64_t>(c_target_)},
+                                           {"target", static_cast<std::int64_t>(per)}});
+          c_target_ = per;
+          c_max_ = per_max;
+        }
       }
     }
   }

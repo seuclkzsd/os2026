@@ -34,6 +34,39 @@ double helper_preparation_s(const MumpsInputSize& in, const FactorEstimate& e, i
   return analyses * model_analysis_s(in.order, in.entries, static_cast<double>(e.factor_entries)) + kHelperMessageS;
 }
 
+namespace {
+template <class T>
+double csr_bytes(const CsrMatrix<T>& m) {
+  return static_cast<double>(m.rowptr.size() * sizeof(m.rowptr[0]) + m.colind.size() * sizeof(m.colind[0]) +
+                             m.values.size() * sizeof(T));
+}
+}  // namespace
+
+template <class T>
+double helper_problem_bytes(const ShiftedPencil<T>& pencil) {
+  return csr_bytes(pencil.a()) + (pencil.b() ? csr_bytes(*pencil.b()) : 0.0);
+}
+
+template <class T>
+double helper_footprint_bytes(const ShiftedPencil<T>& pencil) {
+  return kHelperProblemCopies * helper_problem_bytes(pencil);
+}
+
+double helper_count_estimate_mb(const FactorEstimate& main) { return kHelperCountShare * main.incore_mb; }
+
+int slice_helpers_fitting(double avail, double need, int usable) {
+  const int fit = need > 0 ? static_cast<int>(std::min(std::max(avail, 0.0) / need, 1e6)) : usable;
+  const int take = std::min(usable, fit);
+  return take >= 2 ? take : 0;
+}
+
+// Order of the decisions (DESIGN §3.9): the cost rule; the leader's main factors released (as its
+// own counter counts would); the memory rule PREDICTED - two counts at once plus the helpers' copies
+// of the problem must fit what the budget leaves - before anything is sent; the helpers get the
+// problem (prepare) and report their count estimate and memory; the memory rule again with those.
+// Whenever the counts stay with the leader after the helpers got the problem, and after their two
+// counts, the helpers drop it (Helpers::drop): the leader's own counts (all of them, or the one a
+// failed helper could not make) then see the budget hs::solve would see.
 template <class T>
 bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, double step, index_t& nu_a,
                        index_t& nu_b, double factorize_s) {
@@ -58,6 +91,27 @@ bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, dou
                 " s, their preparation ~" + fmt(prep) + " s)");
     return false;
   }
+  if (fac.inertia().valid) {
+    const double main_mb = fac.stats().factor_mb_used;
+    if (fac.release_factors()) {
+      event(c, "main_factors_released",
+            {{"main_mb", main_mb}, {"counter_mb", helper_count_estimate_mb(fac.estimate())},
+             {"cap_mb", fac.options().max_memory_mb}, {"over_cap", false}, {"why", std::string("helper counts")}});
+      c.held = FactorHeld{};
+    }
+  }
+  // Predicted before anything is sent: two counts at once and what the helpers will hold.
+  {
+    const double need =
+        2.0 * (helper_count_estimate_mb(fac.estimate()) + helper_footprint_bytes(counts.pencil()) / 1e6);
+    const double allowance = count_allowance_mb(c, 0.0);
+    if (need > allowance) {
+      note(c, "certificate counts on the leader: two counts at once and the helpers' copies of the problem (~" +
+                  fmt(need) + " MB predicted) exceed the " + fmt(allowance) + " MB the budget leaves");
+      event(c, "helper_count_skipped", {{"need_mb", need}, {"allowance_mb", allowance}, {"predicted", true}});
+      return false;
+    }
+  }
   {
     PhaseScope phase(c.clock, Phase::Certificate);
     hp.prepare(c);  // the helpers get the problem now and analyse their counters (the leader waits)
@@ -65,23 +119,18 @@ bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, dou
   const double est = hp.count_estimate_mb();
   if (!(est > 0) || !hp.usable(h[0]) || !hp.usable(h[1])) {
     note(c, "certificate counts on the leader: the helpers could not prepare their counters");
+    PhaseScope phase(c.clock, Phase::Certificate);
+    hp.drop(c, "counts on the leader: helpers not prepared");
     return false;
   }
-  if (fac.inertia().valid) {
-    const double main_mb = fac.stats().factor_mb_used;
-    if (fac.release_factors()) {
-      event(c, "main_factors_released", {{"main_mb", main_mb}, {"counter_mb", est},
-                                         {"cap_mb", fac.options().max_memory_mb}, {"over_cap", false},
-                                         {"why", std::string("helper counts")}});
-      c.held = FactorHeld{};
-    }
-  }
   const double cap = fac.options().max_memory_mb;
-  const double allowance = count_allowance_mb(c, 0.0);
+  const double allowance = count_allowance_mb(c, 0.0);  // charged with what the helpers now hold
   if (2.0 * est > allowance) {
     note(c, "certificate counts on the leader: two counts at once (" + fmt(2.0 * est) + " MB) exceed the " +
                 fmt(allowance) + " MB the budget leaves");
-    event(c, "helper_count_skipped", {{"need_mb", 2.0 * est}, {"allowance_mb", allowance}});
+    event(c, "helper_count_skipped", {{"need_mb", 2.0 * est}, {"allowance_mb", allowance}, {"predicted", false}});
+    PhaseScope phase(c.clock, Phase::Certificate);
+    hp.drop(c, "counts on the leader: memory");
     return false;
   }
   CountTask task[2];
@@ -101,6 +150,7 @@ bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, dou
     PhaseScope phase(c.clock, Phase::Certificate);
     reply[0] = hp.wait_count(c, h[0]);
     reply[1] = hp.wait_count(c, h[1]);
+    hp.drop(c, "helper counts done");  // before a count of the leader's below, and before a rerun
   }
   index_t* nu[2] = {&nu_a, &nu_b};
   for (int k = 0; k < 2; ++k) {
@@ -118,8 +168,8 @@ bool concurrent_counts(Ctx& c, CountSource<T>& counts, double& a, double& b, dou
       continue;
     }
     // The helper could not count (memory, a MUMPS error, an exception): the leader counts as the
-    // sequential path does (after both replies: no oversubscribed cores), and does not use that
-    // helper again in this solve.
+    // sequential path does (after both replies and the helpers' drop: no oversubscribed cores, the
+    // whole budget), and does not use that helper again in this solve.
     const std::string why = std::string(to_string(reply[k].error.code)) + ": " + reply[k].error.what;
     hp.abandon(h[k], "count failed: " + why);
     ++c.rep.parallel.fallbacks;
@@ -154,6 +204,8 @@ CountReply count_on_helper(Ctx& c, InertiaCounter<T>& counter, const CountTask& 
 }
 
 #define HS_INSTANTIATE_HELPERS(T)                                                                         \
+  template double helper_problem_bytes<T>(const ShiftedPencil<T>&);                                       \
+  template double helper_footprint_bytes<T>(const ShiftedPencil<T>&);                                     \
   template bool concurrent_counts<T>(Ctx&, CountSource<T>&, double&, double&, double, index_t&, index_t&,    \
                                     double);                                                              \
   template CountReply count_on_helper<T>(Ctx&, InertiaCounter<T>&, const CountTask&);

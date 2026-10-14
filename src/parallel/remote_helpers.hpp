@@ -2,7 +2,9 @@
 // driver::HelpersOf<T> over an hs::Transport. Scalar set: T in {double, cplx}.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "driver/helpers.hpp"
@@ -27,6 +29,7 @@ class RemoteHelpers final : public driver::HelpersOf<T> {
   void abandon(int h, const std::string& why) override;
   bool shared() const override { return shared_; }
   void prepare(driver::Ctx& c) override;
+  void drop(driver::Ctx& c, const std::string& why) override;
   double memory_bytes() const override;
   double count_estimate_mb() const override;
   int helper_threads() const override;
@@ -44,12 +47,17 @@ class RemoteHelpers final : public driver::HelpersOf<T> {
     bool usable = true;
     bool ready = false;          ///< its Ready (after share) has arrived
     bool owes_ready = false;     ///< a Setup was sent, its Ready not received yet
+    bool holds = false;          ///< it got the problem (Setup) and has not dropped it since
+    bool owes_dropped = false;   ///< a Drop was sent, its Dropped not received yet
     int task = 0;                ///< 0 idle, else the Msg of the task in flight (Count, Slice)
-    double rss_bytes = 0.0;      ///< as last reported
-    double granted_bytes = 0.0;  ///< memory the task in flight may reach
+    double rss_bytes = 0.0;      ///< resident memory as last reported
+    double idle_bytes = 0.0;     ///< its resident memory without a problem (Ready, Dropped)
+    double granted_bytes = 0.0;  ///< memory (above idle) the task in flight may reach
     double count_mb = 0.0;       ///< estimate of one count (Ready)
     int threads = 0;
     std::vector<std::uint8_t> reply;  ///< a task reply that arrived while waiting for another helper
+    /// What it holds for this solve: its resident memory above its idle level.
+    double held() const { return std::max(0.0, rss_bytes - idle_bytes); }
   };
   /// Receives one message (from h, or any helper when h == 0) and files it: Ready updates the
   /// helper, a task reply is kept in Helper::reply. Returns the sender. Charged to the caller.
