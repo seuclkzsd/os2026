@@ -428,7 +428,11 @@ Reading:
     loader's own resolution), the Python module has exactly those mapped after a solve in a fresh
     interpreter (`/proc/self/maps`), both print the configured MUMPS; the shipped tarball has the
     pinned checksum; the cache key changes with its inputs and `prefix` / `describe` never build;
-  * FINALCHECK
+  * the final state (f882138) from scratch in the work tree: no build directory and an empty MUMPS
+    cache (`HS_MUMPS_CACHE=$HOME/p9int/fresh-mumps-cache`), `tools/dev/test.sh release`: MUMPS from the
+    shipped tarball 84 s - the same key `df9061400e43252d` as the measured build (same inputs) -, hsolve
+    211 s, 0 compiler warnings, ctest 1009/1009, pytest 380 passed; `hsolve --A x --version`:
+    `mumps=mumps-5.8.2-df9061400e43252d mumps_blocking=p9`.
 * **Other machines.** `env/activate.sh` used to default the guard's cores to the development
   server's NUMA node (`24-30,33-41`); on a machine without a host file (a user's, the judges') the
   guarded build and tests would have refused to start. The default is now the shell's own CPU list;
