@@ -20,6 +20,8 @@
 # temporary directory and renames the finished install into place; the first rename wins, the others
 # discard theirs. The install is relocatable (the libraries find each other through $ORIGIN) but the
 # binaries linked to it record its path: do not move or delete an install that builds still use.
+# A failed build keeps its build directory, <cache>/.tmp-<key>-XXXXXX/build/mumps-5.8.2-<key>/
+# (build.log: the whole make output), and names it; delete that .tmp directory after reading it.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -72,7 +74,18 @@ case "${1:-}" in
       args=()
       for p in "${patches[@]}"; do args+=(--patch "$p"); done
       echo "mumps_cache: building $prefix (key inputs: $prefix/CACHE-KEY.txt)" >&2
-      HS_DEPS="$tmp" HS_DEPS_BUILD="$tmp/build" "$here/build_mumps.sh" "$key" "${flags[@]}" "${args[@]}" >&2
+      if ! HS_DEPS="$tmp" HS_DEPS_BUILD="$tmp/build" "$here/build_mumps.sh" "$key" "${flags[@]}" "${args[@]}" >&2; then
+        # build_mumps.sh printed the tail of its make log and named it: keep the build directory
+        # (build.log, Makefile.inc, the partial build) instead of removing it with $tmp; the
+        # partial install goes.
+        rm -rf "$tmp/mumps-$ver-$key"
+        if [ -f "$tmp/build/mumps-$ver-$key/build.log" ]; then
+          trap - EXIT
+          die "building MUMPS failed; kept for diagnosis: $tmp/build/mumps-$ver-$key/build.log" \
+              "(and that directory's Makefile.inc and partial build) - delete $tmp afterwards"
+        fi
+        die "building MUMPS failed (before make; output above)"
+      fi
       describe > "$tmp/mumps-$ver-$key/CACHE-KEY.txt"
       # rename(2) onto an existing non-empty directory fails: a concurrent caller finished first.
       if ! mv -T "$tmp/mumps-$ver-$key" "$prefix" 2>/dev/null; then
@@ -82,5 +95,5 @@ case "${1:-}" in
     fi
     echo "$prefix"
     ;;
-  *) sed -n '2,23p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,24p' "$0" >&2; exit 2 ;;
 esac
