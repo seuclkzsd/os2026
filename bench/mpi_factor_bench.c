@@ -40,6 +40,12 @@
  *   --dist       ICNTL(18): 0 centralized matrix on rank 0 (hsolve), 3 distributed (each rank reads
  *                its slice of the entries)
  *   --threads    ICNTL(16) OpenMP threads per rank (default OMP_NUM_THREADS, else 1)
+ *   --perm-raw   (P10) a raw int32 SYM_PERM of n entries instead of an HSPERM1 file, as
+ *                bench_factspeed_factor --perm-out writes hsolve's own pivot order (--ordering 10)
+ *   --sync DIR --peers N --peer I  (P10, sequential build) N independent processes start every
+ *                timed phase together through a file barrier in DIR (local, empty, one per run):
+ *                the concurrent layouts of tools/bench/mpi_socket_run.sh (e.g. one process per
+ *                socket); each process reports its own phase times
  * The binding of ranks to cores is the launcher's job: tools/bench/mpi_bind.sh pins each rank to its
  * block of the inherited cpuset (the guard's slot cores); tools/bench/mpi_factor_runs.sh runs the
  * P9 layouts 1x16 / 2x8 / 4x4 / 8x2 / 16x1 interleaved, each under its own guard.
@@ -62,6 +68,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "dmumps_c.h"
 #include "mpi.h"
@@ -78,6 +85,38 @@
 /* ------------------------------------------------------------------ MPI (stubs for libseq) */
 
 static int g_rank = 0, g_size = 1;
+
+/* P10: --sync DIR --peers N --peer I (sequential build): N independent processes (e.g. one per
+ * socket) start every timed phase together - a file barrier in DIR (local file system) - so that
+ * their phases overlap as in a concurrent scheme; each reports its own phase time. */
+static const char* g_sync_dir = NULL;
+static int g_peers = 1, g_peer = 0, g_sync_seq = 0;
+
+static void die(const char* msg);
+
+static void sync_peers(void) {
+  if (!g_sync_dir || g_peers < 2) return;
+  ++g_sync_seq;
+  char path[4096];
+  snprintf(path, sizeof path, "%s/b%d.%d", g_sync_dir, g_sync_seq, g_peer);
+  FILE* f = fopen(path, "w");
+  if (!f || fclose(f)) die("cannot write a --sync file");
+  for (long spins = 0;; ++spins) {
+    int present = 0;
+    for (int p = 0; p < g_peers; ++p) {
+      snprintf(path, sizeof path, "%s/b%d.%d", g_sync_dir, g_sync_seq, p);
+      FILE* q = fopen(path, "r");
+      if (q) {
+        ++present;
+        fclose(q);
+      }
+    }
+    if (present == g_peers) return;
+    if (spins > 3000000) die("--sync: the peers did not arrive within ~10 minutes");
+    struct timespec ts = {0, 200000};
+    nanosleep(&ts, NULL);
+  }
+}
 
 #ifdef HS_SEQ_MUMPS
 /* libseq's mpi.h provides MPI_Init / MPI_Comm_rank / MPI_Finalize / MPI_Wtime only. */
@@ -121,6 +160,7 @@ static void die(const char* msg) {
 typedef struct {
   const char* matrix;
   const char* perm;
+  const char* perm_raw;
   const char* write_perm;
   const char* label;
   const char* modes;
@@ -162,7 +202,11 @@ static Options parse_options(int argc, char** argv) {
 #define TAKE(name) (strcmp(a, name) == 0 && v && (++i, 1))
     if (TAKE("--matrix")) o.matrix = v;
     else if (TAKE("--perm")) o.perm = v;
+    else if (TAKE("--perm-raw")) o.perm_raw = v;
     else if (TAKE("--write-perm")) o.write_perm = v;
+    else if (TAKE("--sync")) g_sync_dir = v;
+    else if (TAKE("--peers")) g_peers = parse_int(v, a);
+    else if (TAKE("--peer")) g_peer = parse_int(v, a);
     else if (TAKE("--label")) o.label = v;
     else if (TAKE("--modes")) o.modes = v;
     else if (TAKE("--ordering")) o.ordering = parse_int(v, a);
@@ -202,8 +246,12 @@ static Options parse_options(int argc, char** argv) {
   if (o.threads < 1) o.threads = 1;
   if (o.reps < 1) o.reps = 1;
   if (o.dist != 0 && o.dist != 3) die("--dist must be 0 or 3");
+  if (o.perm && o.perm_raw) die("--perm and --perm-raw exclude each other");
+  if (g_peers < 1 || g_peer < 0 || g_peer >= g_peers) die("--peer must lie in [0, --peers)");
 #ifdef HS_SEQ_MUMPS
   if (o.par_analysis) die("--par-analysis needs the MPI build");
+#else
+  if (g_sync_dir) die("--sync is for independent processes of the sequential build (MPI ranks have barriers)");
 #endif
   return o;
 }
@@ -276,6 +324,21 @@ static int* read_perm(const char* path, int64_t n) {
   int* p = xmalloc((size_t)n * sizeof(int));
   read_exact(f, p, sizeof(int), (size_t)n, "short perm");
   fclose(f);
+  return p;
+}
+
+/* A raw int32 SYM_PERM of n entries, as bench_factspeed_factor --perm-out writes hsolve's pivot
+ * order (e.g. its own nested dissection, --ordering 10). */
+static int* read_perm_raw(const char* path, int64_t n) {
+  FILE* f = fopen(path, "rb");
+  if (!f) die("cannot open --perm-raw");
+  int* p = xmalloc((size_t)n * sizeof(int));
+  read_exact(f, p, sizeof(int), (size_t)n, "short --perm-raw (fewer entries than the matrix order)");
+  char extra;
+  if (fread(&extra, 1, 1, f) != 0) die("--perm-raw holds more entries than the matrix order");
+  fclose(f);
+  for (int64_t i = 0; i < n; ++i)
+    if (p[i] < 1 || p[i] > n) die("--perm-raw: an entry outside 1..n");
   return p;
 }
 
@@ -383,6 +446,7 @@ static int run_mode(const Options* o, const Matrix* m, int* perm, const char* mo
   if (perm && g_rank == 0 && !o->par_analysis) id.perm_in = perm;
 
   barrier();
+  sync_peers();
   double t0 = now();
   run_job(&id, 1, "analysis");
   barrier();
@@ -402,6 +466,7 @@ static int run_mode(const Options* o, const Matrix* m, int* perm, const char* mo
   int neg_first = -1, inertia_stable = 1;
   for (int r = 0; r < o->reps; ++r) {
     barrier();
+    sync_peers();
     t0 = now();
     run_job(&id, 2, "factorization");
     barrier();
@@ -443,6 +508,7 @@ static int run_mode(const Options* o, const Matrix* m, int* perm, const char* mo
         id.lrhs = (int)n;
       }
       barrier();
+      sync_peers();
       t0 = now();
       run_job(&id, 3, "solve");
       barrier();
@@ -488,6 +554,7 @@ int main(int argc, char** argv) {
   Matrix m = read_matrix(o.matrix, o.dist);
   int* perm = NULL;
   if (o.perm && g_rank == 0) perm = read_perm(o.perm, m.n);
+  if (o.perm_raw && g_rank == 0) perm = read_perm_raw(o.perm_raw, m.n);
   barrier();
   t_load = now() - t_load;
 
