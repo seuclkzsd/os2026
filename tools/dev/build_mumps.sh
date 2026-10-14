@@ -131,7 +131,9 @@ EOF
   rm -rf "$prefix"
   mkdir -p "$prefix/lib" "$prefix/include/mumps_seq"
   local lib="$build/lib" seq="$build/libseq" pord="$build/PORD/lib"
-  local link=("$FC" -shared -fopenmp $ldflags $compat "-Wl,-rpath,\$ORIGIN")
+  # $ORIGIN first in the (DT_)RPATH: libdmumps_seq.so must find its own libmumps_common_seq.so
+  # ahead of the environment's ($CONDA_PREFIX/lib comes with conda's LDFLAGS).
+  local link=("$FC" -shared -fopenmp "-Wl,-rpath,\$ORIGIN" $ldflags $compat)
   local so
   shlib() {  # shlib NAME ARCHIVE [LIBS...]
     local n="$1" a="$2"
