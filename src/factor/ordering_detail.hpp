@@ -37,6 +37,14 @@ template <class T>
 double complex_coupling_fraction(const ShiftedPencil<T>& pencil);
 inline constexpr double kCompressedFraction = 0.5;
 
+/// Share of the n vertices of the pencil's graph (K's pattern) that remain after merging
+/// indistinguishable vertices (compress_graph), for the driver's ordering cost model: classes are
+/// counted by an order-independent hash of the closed neighbourhood and the degree, compared along
+/// the pattern's edges (indistinguishable vertices are adjacent), without building the graph -
+/// hash collisions could only lower the count. 1 for an empty pencil. O(nnz), serial.
+template <class T>
+double indistinguishable_ratio(const ShiftedPencil<T>& pencil);
+
 /// Undirected graph in CSR form: symmetric adjacency, no self-loops, positive integer vertex
 /// and edge weights (edge weights stored per adjacency entry, equal in both directions). Rows
 /// are sorted ascending in graphs from graph_from_upper and induced_subgraph (coarse graphs

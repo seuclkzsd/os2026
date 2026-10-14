@@ -418,10 +418,44 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
   return perm;
 }
 
+template <class T>
+double ordering::indistinguishable_ratio(const ShiftedPencil<T>& pencil) {
+  const index_t n = pencil.order();
+  if (n == 0) return 1.0;
+  const auto& rp = pencil.rowptr();
+  const auto& ci = pencil.colind();
+  auto mix = [](index_t v) {
+    std::uint64_t z = 0x9E3779B97F4A7C15ULL * (static_cast<std::uint64_t>(v) + 1);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+  };
+  std::vector<std::uint64_t> h(static_cast<std::size_t>(n));
+  std::vector<std::int32_t> deg(static_cast<std::size_t>(n), 0);
+  for (index_t i = 0; i < n; ++i) h[i] = mix(i);
+  for (index_t i = 0; i < n; ++i)
+    for (index_t p = rp[i]; p < rp[i + 1]; ++p) {
+      const index_t j = ci[p];
+      if (j == i) continue;
+      h[i] += mix(j), h[j] += mix(i);
+      ++deg[i], ++deg[j];
+    }
+  std::vector<std::uint8_t> merged(static_cast<std::size_t>(n), 0);
+  for (index_t i = 0; i < n; ++i)
+    for (index_t p = rp[i]; p < rp[i + 1]; ++p) {
+      const index_t j = ci[p];
+      if (j != i && h[i] == h[j] && deg[i] == deg[j]) merged[j] = 1;
+    }
+  index_t classes = 0;
+  for (index_t i = 0; i < n; ++i) classes += merged[i] == 0;
+  return static_cast<double>(classes) / static_cast<double>(n);
+}
+
 #define HS_INSTANTIATE_ORDERING(T)                                                               \
   template std::vector<int> compute_ordering<T>(const ShiftedPencil<T>&, const OrderingOptions&, \
                                                 OrderingStats*);                                 \
-  template double ordering::complex_coupling_fraction<T>(const ShiftedPencil<T>&);
+  template double ordering::complex_coupling_fraction<T>(const ShiftedPencil<T>&);           \
+  template double ordering::indistinguishable_ratio<T>(const ShiftedPencil<T>&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_ORDERING)
 #undef HS_INSTANTIATE_ORDERING
 

@@ -61,21 +61,21 @@ bool contains(const std::vector<std::size_t>& v, std::size_t x) {
   return false;
 }
 
-// Candidates in order: AMD (0), SCOTCH (1), hsolve's ND (2), METIS (3), PORD (4). The reviewer's
-// sequence: AMD 100 -> METIS 90 -> PORD 88 -> ND 94.
+// Candidates in order (since P9): AMD (0), hsolve's ND (1), SCOTCH (2), METIS (3), PORD (4). The
+// reviewer's sequence: AMD 100 -> METIS 90 -> PORD 88 -> ND 94.
 TEST(AnaintFixOrdering, ReleasedCandidateIsNeverChosen) {
   Script s;
-  s.actual = {100.0, 0.0, 94.0, 90.0, 88.0};
-  s.predicted[0] = {0, 1000.0, 200.0, 80.0, 120.0};  // METIS next
-  s.predicted[3] = {0, 1000.0, 150.0, 0, 70.0};      // then PORD
-  s.predicted[4] = {0, 1000.0, 80.0, 0, 0};          // then ND
-  s.predicted[2] = {0, 1000.0, 0, 0, 0};
+  s.actual = {100.0, 94.0, 0.0, 90.0, 88.0};
+  s.predicted[0] = {0, 200.0, 1000.0, 80.0, 120.0};  // METIS next
+  s.predicted[3] = {0, 150.0, 1000.0, 0, 70.0};      // then PORD
+  s.predicted[4] = {0, 80.0, 1000.0, 0, 0};          // then ND
+  s.predicted[1] = {0, 0, 1000.0, 0, 0};
   const Trace t = play(s);
-  ASSERT_EQ(t.analysed, (std::vector<std::size_t>{0, 3, 4, 2}));
+  ASSERT_EQ(t.analysed, (std::vector<std::size_t>{0, 3, 4, 1}));
   // The old rule would take PORD (choose_ordering over {AMD 100, ND 94, METIS 90, PORD 88}),
   // released after it lost to METIS. Pairwise: METIS beats AMD, PORD does not beat METIS by the
   // margin, ND (earlier) keeps its place against METIS (90 > 0.95 * 94).
-  EXPECT_EQ(t.pick, 2u);
+  EXPECT_EQ(t.pick, 1u);
   EXPECT_FALSE(contains(t.released, t.pick));
   EXPECT_EQ(t.released, (std::vector<std::size_t>{0, 4, 3}));  // every loser, once
 }
@@ -83,11 +83,11 @@ TEST(AnaintFixOrdering, ReleasedCandidateIsNeverChosen) {
 // SCOTCH is taken on its prediction once analysed: the kept candidate is released.
 TEST(AnaintFixOrdering, ScotchEndsTheLoop) {
   Script s;
-  s.actual = {100.0, 70.0, 0, 0, 0};
-  s.predicted[0] = {0, 60.0, 90.0, 95.0, 99.0};
+  s.actual = {100.0, 0, 70.0, 0, 0};
+  s.predicted[0] = {0, 90.0, 60.0, 95.0, 99.0};
   const Trace t = play(s);
-  EXPECT_EQ(t.pick, 1u);
-  EXPECT_EQ(t.analysed, (std::vector<std::size_t>{0, 1}));
+  EXPECT_EQ(t.pick, 2u);
+  EXPECT_EQ(t.analysed, (std::vector<std::size_t>{0, 2}));
   EXPECT_EQ(t.released, (std::vector<std::size_t>{0}));
 }
 

@@ -192,6 +192,19 @@ TEST(FactorOrderingCompression, ComputeOrderingEliminatesEachClassAsABlock) {
   EXPECT_NE(uncompressed, perm);
 }
 
+TEST(FactorOrderingCompression, IndistinguishableRatioForTheCostModel) {
+  const int nx = 12, ny = 9, comps = 3;
+  const std::int32_t nodes = nx * ny;
+  const auto field = matrix_from_edges<double>(comps * nodes, vector_field_edges(nodes, grid_edges(nx, ny), comps));
+  EXPECT_DOUBLE_EQ(ord::indistinguishable_ratio(ShiftedPencil<double>(field, nullptr)), 1.0 / comps);
+  const auto grid = matrix_from_edges<cplx>(nodes, grid_edges(nx, ny));
+  EXPECT_DOUBLE_EQ(ord::indistinguishable_ratio(ShiftedPencil<cplx>(grid, nullptr)), 1.0);
+  // The driver's graph sizes of hsolve's nested dissection follow it (OrderingInput::nd).
+  const auto in = hs::driver::ordering_input(ShiftedPencil<double>(field, nullptr));
+  EXPECT_DOUBLE_EQ(in.nd.order, static_cast<double>(nodes));
+  EXPECT_LT(in.nd.entries, in.mumps.entries / 4.0);
+}
+
 // --------------------------------------------------------------------- weighted min degree
 
 TEST(FactorOrderingMinimumDegree, DegreesCountNeighbourWeights) {
