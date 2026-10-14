@@ -26,7 +26,8 @@ namespace hs {
 enum class GpuControl { Ok = 0, InvalidMode = -1, NotBuilt = -2, NoHook = -3 };
 
 /// Sets the GPU mode ("off" | "auto" | "on") of the BLAS hook in this process. NotBuilt: the hook
-/// was built without the GPU module; NoHook: no BLAS hook in this process (the CPU path runs).
+/// was built without the GPU module (the CPU path runs; the mode is kept for the report, which
+/// then gives it with "available": false and the reason); NoHook: no BLAS hook in this process.
 inline GpuControl gpu_offload_set_mode(const std::string& mode) {
   using Fn = int (*)(const char*);
   auto fn = reinterpret_cast<Fn>(dlsym(RTLD_DEFAULT, "hsolve_gpu_set_mode"));

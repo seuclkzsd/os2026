@@ -161,6 +161,20 @@ TEST(GpuHook, InertiaIsTheExactCountWithTheGpuOffAndOn) {
 }
 
 #ifdef HSOLVE_HOOKED_CLI
+// The lower triangle of a symmetric matrix as a MatrixMarket file.
+void write_matrix_market(const fs::path& path, const hs::CsrMatrix<double>& a) {
+  std::ofstream out(path);
+  out << "%%MatrixMarket matrix coordinate real symmetric\n";
+  hs::index_t lower = 0;
+  for (hs::index_t i = 0; i < a.nrows; ++i)
+    for (hs::index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p) lower += a.colind[p] <= i;
+  out << a.nrows << " " << a.ncols << " " << lower << "\n";
+  out.precision(17);
+  for (hs::index_t i = 0; i < a.nrows; ++i)
+    for (hs::index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p)
+      if (a.colind[p] <= i) out << i + 1 << " " << a.colind[p] + 1 << " " << a.values[p] << "\n";
+}
+
 // Runs the hsolve executable; returns its report (null when it failed).
 json run_cli(const fs::path& dir, const std::string& tag, const std::string& extra) {
   const fs::path out = dir / tag;
@@ -184,19 +198,7 @@ TEST(GpuHook, HsolveWithGpuOnFindsTheSameEigenpairsAndCount) {
   if (!kGpuModule) GTEST_SKIP() << "built without the GPU module";
   const fs::path dir = fs::temp_directory_path() / ("hsolve_gpu_hook_" + std::to_string(static_cast<long>(getpid())));
   fs::create_directories(dir);
-  const auto a = laplacian_3d(22, 21, 20);
-  {
-    std::ofstream out(dir / "A.mtx");
-    out << "%%MatrixMarket matrix coordinate real symmetric\n";
-    hs::index_t lower = 0;
-    for (hs::index_t i = 0; i < a.nrows; ++i)
-      for (hs::index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p) lower += a.colind[p] <= i;
-    out << a.nrows << " " << a.ncols << " " << lower << "\n";
-    out.precision(17);
-    for (hs::index_t i = 0; i < a.nrows; ++i)
-      for (hs::index_t p = a.rowptr[i]; p < a.rowptr[i + 1]; ++p)
-        if (a.colind[p] <= i) out << i + 1 << " " << a.colind[p] + 1 << " " << a.values[p] << "\n";
-  }
+  write_matrix_market(dir / "A.mtx", laplacian_3d(22, 21, 20));
   const json cpu = run_cli(dir, "cpu", "");
   const json gpu = run_cli(dir, "gpu", "--gpu on");
   ASSERT_FALSE(cpu.is_null());
@@ -229,6 +231,48 @@ TEST(GpuHook, HsolveWithGpuOnFindsTheSameEigenpairsAndCount) {
   EXPECT_TRUE(automode["gpu"]["available"].is_null()) << automode["gpu"].dump();
   EXPECT_EQ(automode["gpu"].value("factorizations_offloaded", -1), 0);
   EXPECT_EQ(cpu["certificate"]["count_inertia"], automode["certificate"]["count_inertia"]);
+  fs::remove_all(dir);
+#endif
+}
+
+// A hook built without the GPU module (CMake HSOLVE_GPU=OFF; this test runs in such a build): the
+// mode asked for is reported with the reason the CPU path runs - by the hook (hsolve_gpu_set_mode,
+// else HS_GPU) and in hsolve's report.json (--gpu on, HS_GPU=auto). P10 review finding: such a
+// build wrote no gpu object at all, contrary to the degrade-mode report the docs promise.
+TEST(GpuHook, WithoutTheGpuModuleTheReportSaysWhy) {
+  if (kGpuModule) GTEST_SKIP() << "built with the GPU module (an HSOLVE_GPU=OFF build runs this test)";
+  json r = json::parse(hs::gpu_offload_report_json());
+  EXPECT_EQ(r.value("mode", ""), "off") << r.dump();  // HS_GPU unset before main, nothing asked
+  EXPECT_EQ(hs::gpu_offload_set_mode("sometimes"), hs::GpuControl::InvalidMode);
+  EXPECT_EQ(hs::gpu_offload_set_mode("on"), hs::GpuControl::NotBuilt);
+  r = json::parse(hs::gpu_offload_report_json());
+  EXPECT_EQ(r.value("mode", ""), "on") << r.dump();
+  EXPECT_EQ(r.value("available", true), false) << r.dump();
+  EXPECT_NE(r.value("reason", std::string()).find("without the GPU module"), std::string::npos) << r.dump();
+  EXPECT_EQ(hs::gpu_offload_set_mode("off"), hs::GpuControl::NotBuilt);
+  EXPECT_EQ(json::parse(hs::gpu_offload_report_json()).value("mode", ""), "off");
+#ifdef HSOLVE_HOOKED_CLI
+  const fs::path dir = fs::temp_directory_path() / ("hsolve_gpu_nogpu_" + std::to_string(static_cast<long>(getpid())));
+  fs::create_directories(dir);
+  write_matrix_market(dir / "A.mtx", laplacian_3d(12, 11, 10));
+  const json plain = run_cli(dir, "plain", "");
+  const json on = run_cli(dir, "on", "--gpu on");
+  setenv("HS_GPU", "auto", 1);  // the environment instead of --gpu (inherited by the child)
+  const json env_auto = run_cli(dir, "env_auto", "");
+  unsetenv("HS_GPU");
+  ASSERT_FALSE(plain.is_null());
+  ASSERT_FALSE(on.is_null());
+  ASSERT_FALSE(env_auto.is_null());
+  EXPECT_FALSE(plain.contains("gpu")) << plain["gpu"].dump();  // off: the report is today's
+  for (const auto& [rep, mode] : {std::pair{&on, "on"}, std::pair{&env_auto, "auto"}}) {
+    ASSERT_TRUE(rep->contains("gpu")) << mode;
+    const json& g = (*rep)["gpu"];
+    EXPECT_EQ(g.value("mode", ""), mode) << g.dump();
+    EXPECT_EQ(g.value("available", true), false) << g.dump();
+    EXPECT_NE(g.value("reason", std::string()).find("without the GPU module"), std::string::npos) << g.dump();
+    EXPECT_TRUE(rep->value("success", false));
+    EXPECT_EQ((*rep)["certificate"]["count_inertia"], plain["certificate"]["count_inertia"]);
+  }
   fs::remove_all(dir);
 #endif
 }

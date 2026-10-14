@@ -16,7 +16,10 @@
 #include <smumps_c.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "blas/blas_hook.hpp"
@@ -104,6 +107,20 @@ void mumps_call(Fn real, Struc* id, bool gpu) {
   if (fact) hs::gpu::factorization_end();
 #endif
 }
+
+#if !HSOLVE_WITH_GPU
+// Without the GPU module the mode a program asks for (hsolve_gpu_set_mode, else HS_GPU) is still
+// reported, with the reason the CPU path runs: the degrade-mode report of `hsolve --gpu on|auto`.
+constexpr const char* kGpuModes[] = {"off", "auto", "on"};
+std::atomic<int> g_gpu_asked{-1};  // index into kGpuModes; -1: not set
+
+int gpu_mode_index(const char* s) noexcept {
+  if (s == nullptr) return -1;
+  for (int i = 0; i < 3; ++i)
+    if (std::strcmp(s, kGpuModes[i]) == 0) return i;
+  return -1;
+}
+#endif
 
 }  // namespace
 
@@ -203,12 +220,14 @@ double dnrm2_(const fint* n, const double* x, const fint* incx) {
 }
 
 // GPU offload control (include/hsolve/gpu.hpp). 0 = set; -1 = invalid name; -2 = this hook was
-// built without the GPU module (HSOLVE_GPU=OFF).
+// built without the GPU module (HSOLVE_GPU=OFF): the mode is only recorded for the report.
 int hsolve_gpu_set_mode(const char* mode) {
 #if HSOLVE_WITH_GPU
   return mode != nullptr && hs::gpu::set_mode(mode) ? 0 : -1;
 #else
-  (void)mode;
+  const int m = gpu_mode_index(mode);
+  if (m < 0) return -1;
+  g_gpu_asked.store(m);
   return -2;
 #endif
 }
@@ -220,8 +239,11 @@ const char* hsolve_gpu_report_json() {
 #if HSOLVE_WITH_GPU
   buf = hs::gpu::report_json();
 #else
-  buf = "{\"mode\": \"off\", \"available\": false, "
-        "\"reason\": \"built without the GPU module (HSOLVE_GPU=OFF)\"}";
+  // The mode asked for (set_mode, else a valid HS_GPU; the GPU build aborts on an invalid one).
+  int m = g_gpu_asked.load();
+  if (m < 0) m = std::max(0, gpu_mode_index(std::getenv("HS_GPU")));
+  buf = std::string("{\"mode\": \"") + kGpuModes[m] +
+        "\", \"available\": false, \"reason\": \"built without the GPU module (HSOLVE_GPU=OFF)\"}";
 #endif
   return buf.c_str();
 }

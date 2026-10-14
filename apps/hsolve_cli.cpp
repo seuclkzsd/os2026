@@ -5,7 +5,7 @@
 // --gpu off|auto|on (or HS_GPU): GPU offload of the factorizations' large dense updates by the BLAS
 // hook linked into this executable (include/hsolve/gpu.hpp, docs/BLAS.md §10); default off. When
 // the mode is not off, report.json gets a "gpu" object (device, what was offloaded, or why the CPU
-// path ran).
+// path ran - also when this hsolve was built without the GPU module or without the hook).
 //
 // Exit status: 0 = all pairs accepted (and certificate passed), 1 = finished but not successful,
 // 2 = error (message on stderr).
@@ -41,17 +41,24 @@ std::string read_text(const fs::path& p) {
   return os.str();
 }
 
-// The GPU offload's report when its mode is not off (empty otherwise): the hook's, or - without a
-// hook - why nothing was offloaded. `asked`: the --gpu value ("" when not given).
+// The GPU offload's report when its mode (or the --gpu value) is not off (empty otherwise): the
+// hook's, or - when the hook cannot offload - the mode asked for and why the CPU path ran.
+// `asked`: the --gpu value ("" when not given).
 nlohmann::json gpu_report(const std::string& asked) {
+  const bool wanted = !asked.empty() && asked != "off";
   const std::string text = hs::gpu_offload_report_json();
   if (text.empty()) {
-    if (asked.empty() || asked == "off") return {};
+    if (!wanted) return {};
     return {{"mode", asked}, {"available", false}, {"reason", "no BLAS hook in this executable"}};
   }
   nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
-  if (j.is_discarded() || j.value("mode", "off") == "off") return {};
-  return j;
+  if (j.is_discarded()) return {};
+  if (j.value("mode", "off") != "off") return j;
+  if (!wanted) return {};
+  // A hook that ignored the request (built without the GPU module): say so in the report.
+  return {{"mode", asked},
+          {"available", false},
+          {"reason", j.value("reason", std::string("the BLAS hook did not take the GPU mode"))}};
 }
 
 template <class T>
