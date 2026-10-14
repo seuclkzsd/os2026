@@ -61,7 +61,7 @@ main() {
   deps_check "$tarball" "$sha"
   deps_unpack "$tarball" "$build"
   local p
-  for p in "${patches[@]}"; do
+  for p in ${patches[@]+"${patches[@]}"}; do
     (cd "$build" && patch -p1 --forward < "$p") || deps_die "patch $p does not apply"
   done
 
@@ -149,7 +149,7 @@ EOF
   for so in "$prefix"/lib/*.so; do
     [ -L "$so" ] || deps_check_glibc "$so"
   done
-  deps_info "$prefix" "$tarball" "$sha" "isa=$isa opt=$opt gemmt=$gemmt OPTF=$common $defs patches=${patches[*]:-none}"
+  deps_info "$prefix" "$tarball" "$sha" "isa=$isa opt=$opt gemmt=$gemmt OPTF=$common $defs patches=${patches[*]+${patches[*]}}"
   echo "fc: $($FC --version | head -1)" >>"$prefix/BUILD-INFO.txt"
   echo "done: $prefix"
 }
