@@ -985,7 +985,7 @@ OrderingOptions nd_ordering_options(bool effort, bool flow) {
 
 // hsolve's nested dissection is fitted (shapes, W) as run by default, with the flow refinement of
 // its separators. Two rules adapt it to the planned work, both on nd_work_ratio, the predicted
-// planned numeric time over the predicted ordering time (results/p9_ordering.md sections 5.4, 8.2):
+// planned numeric time over the predicted ordering time (results/p9_ordering.md sections 5.4, 8.3):
 //   * from kNdEffortWorkRatio (30) on: the effort on the top separators (ordering x1.05-1.2 on the
 //     large cases, ss-ge87h76 -12% flops, nothing elsewhere: priced x1.2 / x0.97 / x0.99);
 //   * under kNdFlowWorkRatio (4.5): no flow refinement. Measured with / without it (16 threads,
@@ -996,9 +996,9 @@ OrderingOptions nd_ordering_options(bool effort, bool flow) {
 //     (yee-pec-cube-16: flops -17%, yet its factorization +10% and four-column solves +17% on the
 //     new tree), -7 ms (yee-pec-box-1e4), -24 ms (ss-tem27623) and +18 ms (ss-helm3d01: ordering
 //     +34 ms) - about even, a regression risk; from 5.6 on (the Yee 1e4 cells, the 1e5 3-D cases)
-//     the run model changed by -14% to +3% (median -7%), at 1e6 (ratios ~20) flops -1% / -27%. The
+//     the run model changed by -14% to +3% (median -7%), at 1e6 (ratios 21, 33) flops -1% / -27%. The
 //     threshold lies in the gap between them (3.6 to 5.6, geometric mean 4.5). Without the flow the
-//     dissection orders those graphs as P5c's did (the same flops): they run as on main a831d79.
+//     dissection orders those graphs as P5c's did: the same orders (flops) as main a831d79.
 void OrderingPricer::predict(std::vector<OrderingCandidate>& cand, std::size_t anchor) const {
   FactorEstimate a;
   a.flops = cand[anchor].flops;

@@ -48,9 +48,10 @@ v6（P8「certcost」，分支 p8-certcost）——证书的分解失败不再�
 v7（P9「ordering」，分支 p9-ordering）——自研嵌套剖分成为三维问题的首选排序：试分改在 taskgroup 中等待（原 taskwait
 连带等待兄弟子树，1e6 图 16 线程排序 7.4 s，现 2.4 s）；合并不可区分顶点（图压缩，叶子按顶点权）；大图的收缩与切分用
 taskloop 并发；**分隔子的流精修**（带内最小顶点割，最大流，`OrderingOptions::flow_depth` = 2）：yee-pec-box-1e6 的 MUMPS
-flops 7.39e12 → 5.43e12（SCOTCH 6.75–7.09e12，几何剖分 5.29e12），19 个测例几何平均 −10%；顶层分隔子的额外试分
-（`top_*`，代价模型在数值功远大于排序时采用）；代价模型按新剖分重拟合、候选顺序中自研嵌套剖分先于 SCOTCH，ND 的图规模
-按压缩后计（§3.4、§3.6-3b）。实测见 `results/p9_ordering.md`。
+flops 7.39e12 → 5.43e12（SCOTCH 6.75–7.09e12，几何剖分 5.29e12），19 个测例几何平均 −10%——driver 只在计划的数值
+时间 ≥ 4.5 倍预测排序时间时用它（评审修正：最小的三维测例上它的排列并不更快，yee-pec-cube-16 flops −17% 而整次运行
++9%）；顶层分隔子的额外试分（`top_*`，代价模型在数值功远大于排序时采用）；代价模型按新剖分重拟合、候选顺序中自研嵌套
+剖分先于 SCOTCH，ND 的图规模按压缩后计（§3.4、§3.6-3b）。实测见 `results/p9_ordering.md`。
 
 ---
 
@@ -378,7 +379,9 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
       极小（Yee 网格的顶层分隔子比平面大 12–14%），割在带内找到平面：MUMPS flops yee-pec-box-1e6 7.39e12 →
       5.43e12（坐标几何剖分 5.29e12，SCOTCH 6.75–7.09e12），yee-pec-box-1e5 −26%，ss-2cubes_sphere −16%，
       ss-ge87h76 −16%，19 个测例几何平均 −10%（syn-mem27 类已是平面，不变）。排序时间：低度图几乎不变，
-      高度图（syn-mem125-46，度 114）0.79 → 1.13 s。
+      高度图（syn-mem125-46，度 114）0.79 → 1.13 s。小问题上时间不随 flops 下降（yee-pec-cube-16：flops −17%，
+      而 16 线程分解 +10%、4 列回代 +17%，整次运行 +9%），所以 driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时
+      用它（`nd_ordering_options` 的 `flow`，§3.6-3b）；`compute_ordering` 本身的默认仍是 2。
     - **多候选试分与顶层投入**（`SeparatorParams::runs / finalists`，`OrderingOptions::top_depth / top_size /
       top_runs / top_finalists`）：两段式中把中间图上最好的若干个试分都细化回输入图、在那里取最优（finalists 之间按
       FM 后的结果比较，流精修只做胜者）；顶层几级用更多试分。有流精修后只在 ss-ge87h76（flops −12%）、
@@ -780,6 +783,14 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      时间 ≥ `kNdEffortWorkRatio`（30）倍其预测排序时间，就按顶 2 级 16 次试分 / 16 个候选（`OrderingOptions::top_*`，
      §3.4）定价并以之分析：排序时间 × `kNdEffortTime`（1.2）、flops × 0.97、条目 × 0.99（实测 ss-ge87h76 −12% flops、
      运行模型 56.7 → 51.1 s，ss-si34h36 −2%；1e6 测例与小例无收益）。事件 `ordering` 的候选串里以 `10e` 标出。
+   - **流精修的取舍**（P9 评审修正，`OrderingCandidate::nd_flow`）：同一比值（`nd_work_ratio`，计划的数值时间 /
+     预测排序时间，两条规则都按拟合时的默认剖分即带流精修计算）低于 `kNdFlowWorkRatio`（4.5）时不做流精修，按排序
+     时间 ÷ 1.15、flops ÷ 0.90、条目 ÷ 0.95 定价并以 `flow_depth = 0` 分析；以它为锚预测其它候选时先折回带流精修的值。
+     依据（16 线程，测量槽，`results/p9_ordering.md` §8.3）：比值 3.3–3.6 的四个三维小例上流精修使分析 + 3 次分解
+     + 22 次 4 列回代变化 +19 ms（yee-pec-cube-16：flops −17%，分解 +10%、回代 +17%）、−7、−24、+18 ms，平均持平而
+     有回归风险；比值 ≥ 5.6（Yee 1e4 晶胞、1e5 三维测例）−14% 到 +3%（中位 −7%），1e6（比值 21、33）flops −1% / −27%。
+     不做流精修时这些图上的排列与 P5c 的剖分相同（flops 一致）。数据测例中关掉它的是 yee-pec-cube-16、
+     yee-pec-box-1e4、ss-tem27623、ss-helm3d01、wg-square-n289。候选串里以 `10n` 标出，ND 项末尾的 `/r…` 是比值。
    - 计划的工作（`plan_work`，由配置与分析前已知的问题类型推导，不计时；按 6a3d7c1 时数据测例的端到端
      运行标定）：HEP/GHEP nearest 分解 1 次（类型未定再加 B 的惯性 1 次）、证书计数 2 次（`inertia_check
      = off` 时 0）、列作用 40 + 4k（p > 1）或 2k + 12（p = 1），块宽按 P4 规则估计（分析之前还没有因子
@@ -1276,5 +1287,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P5 | **已完成**（P5c，main 34cbfd4）：verify 接入 driver（certificate = exact / randomized / auto / off，单精度计数的双精度复核）；输入检查与 B 正定性检验链（分析前的廉价检验、IC + Gershgorin 严格证明）；自适应排序的 16 线程代价模型，自研嵌套剖分作为候选与 `ordering = 10`；σ₀ 处的零主元簇规则；块宽规则 `recommended_block_size` 与块步快路径 `try_fast`，nearest 运行按规则取块宽（内存只预留 P4 块宽的基）；收缩重跑以 `lead_nev` 在缺的对收敛后结束、自动块宽之后至多用 P4 块宽；certifier 的 InertiaCounter 推迟双精度实例的分析；GHIEP 内存预留按峰值列计、报告实际块宽；BLAS hook（src/blas，默认链入、route all）；以上都在 16 核测量槽下测量。**未做**：JD + 单精度因子的内存受限回退；SCOTCH 固定种子（之后可按其估计比较）；更好的嵌套剖分分隔子与 ND 功的预测（ss-tem152078）；一般 B 的 κ 证明（如分解 B − μ·diag(B)），使随机检验与单精度计数也适用于一般 HPD B；块宽规则在 BLAS hook 下的重新标定（现以 `kRuleWideMargin` 补偿，yee-bloch-1e4、yee-photonic-* 选 8 仍比 4 慢 2.5–3%）与用于切片；故障场景验证矩阵 |
 | P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |
 | P8 | **已完成**（p8-certcost-fix）：证书的计数失败不再结束求解——计数源（InertiaCounter / 主对象）失败时换另一个，计数前按计数余量检查估计（主对象代替计数器时按其上次分解的 INFOG(21)），SCOTCH 分析超上限时至多再分析两次；都不行时 nearest 交回已收敛的对、证书标为未完成（success = false），窗口目标只丢失败的切片；一般 HPD B 的 κ 与 λ_min 严格界（只用于 auto / randomized）；更便宜的精确计数全部实测为负（两进程并行、单次合并分解、省缩放/检测、换计数源），默认证书仍为 exact（`results/p8_certcost.md`）。 |
-| P9 | **ordering 已完成**（分支 p9-ordering）：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割，默认）、顶层投入（代价模型决定）；代价模型按新剖分重拟合，候选顺序中它先于 SCOTCH，图规模按压缩后计。1e6 内存内（5 次交错 ABBA，测量槽）：syn-mem27-100 113.6 → 89.4 s（1.27×）、yee-pec-box-1e6 89.1 → 73.7 s（1.21×），全部有效、证书 exact；26 个 n ≤ 1e5 数据测例（ABBA 3 次）几何平均 0.920，三维测例 0.76–0.95、二维不变，唯一慢于 3% 的是
-yee-pec-cube-16（0.2 s 的小例，+15 ms：流精修后的排列上 MUMPS 回代慢，`results/p9_ordering.md` §8.2）。**未做**：三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分 |
+| P9 | **ordering 已完成**（分支 p9-ordering，评审修正 p9-ordering-fix）：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割；driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时采用）、顶层投入（代价模型决定）；代价模型按新剖分重拟合，候选顺序中它先于 SCOTCH，图规模按压缩后计。最终代码的门槛（测量槽，ABBA，全部有效、证书 exact）：1e6 内存内（5 次）syn-mem27-100 111.0 → 89.0 s（1.25×）、yee-pec-box-1e6 89.7 → 73.7 s（1.22×）；26 个 n ≤ 1e5 数据测例（3 次）几何平均 0.919，18 例快 3% 以上；初稿的 yee-pec-cube-16 系统性变慢（+9%：流精修后的排列在 16 线程下分析、分解、回代都更慢）已消除（20 次 1.015），剩 wg-square-n289（n = 289）以与 main 相同的排列慢 1.6 ms（`results/p9_ordering.md` §8）。**未做**：三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分 |
