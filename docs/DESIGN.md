@@ -45,6 +45,14 @@ v6（P8「certcost」，分支 p8-certcost）——证书的分解失败不再�
 「无法计数」的错误码按失败种类定；故障注入增加失败种类（其它 MUMPS 错误、`std::bad_alloc`）与「从第一片起」位，
 位 8 也作用于随机检验前的重分解（§3.6-8）。
 
+v7（P9「ordering」，分支 p9-ordering）——自研嵌套剖分成为三维问题的首选排序：试分改在 taskgroup 中等待（原 taskwait
+连带等待兄弟子树，1e6 图 16 线程排序 7.4 s，现 2.4 s）；合并不可区分顶点（图压缩，叶子按顶点权）；大图的收缩与切分用
+taskloop 并发；**分隔子的流精修**（带内最小顶点割，最大流，`OrderingOptions::flow_depth` = 2）：yee-pec-box-1e6 的 MUMPS
+flops 7.39e12 → 5.43e12（SCOTCH 6.75–7.09e12，几何剖分 5.29e12），19 个测例几何平均 −10%——driver 只在计划的数值
+时间 ≥ 4.5 倍预测排序时间时用它（评审修正：最小的三维测例上它的排列并不更快，yee-pec-cube-16 flops −17% 而整次运行
++9%）；顶层分隔子的额外试分（`top_*`，代价模型在数值功远大于排序时采用）；代价模型按新剖分重拟合、候选顺序中自研嵌套
+剖分先于 SCOTCH，ND 的图规模按压缩后计（§3.4、§3.6-3b）。实测见 `results/p9_ordering.md`。
+
 ---
 
 ## 1. 问题范围
@@ -348,11 +356,42 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     慢 1.2–1.35×），flops 在 METIS 的 −7..+12% 内（16 线程的实测见下）。
     按 driver 实付（分析 + 3 次分解 + 回代）计，yee-pec-box-1e5 上 2 线程打平，二维测例 AMD 最好。
   - **driver 的用法**（P5）：config `ordering = 10` 直接使用它；自适应排序（`ordering = −1`）把它列为
-    候选之一，由 16 线程代价模型选择（§3.6-3b）。16 线程实测（`bench/anaint_orderings.cpp`，测量槽）：
-    分析的串行比例约 0.38（4 线程时 0.19；16 线程的分析只比 4 线程快 1.14 倍，29 个测例中位数）；高填充
-    三维测例（Yee 网格、ss-ge87h76、ss-tem152078）上 SCOTCH 的因子只需它的 0.80–0.95 倍 flops，因此候选
-    顺序中 SCOTCH 在它之前。分隔子质量与排序的并行扩展是 factor 模块的待办（ss-tem152078 上它的排序
-    1.24 s，SCOTCH 的整个分析 0.73 s）。
+    候选之一，由 16 线程代价模型选择（§3.6-3b）。P5c 的 16 线程实测（分析串行比例约 0.38、Yee 网格等高填充
+    三维测例上 SCOTCH 只需它 0.80–0.95 倍 flops、ss-tem152078 上排序 1.24 s 对 SCOTCH 整个分析 0.73 s）由下面
+    P9 的改动取代。
+  - **P9 的改动**（`results/p9_ordering.md` §5；排列仍只是图与选项的函数，与线程数无关）：
+    - **taskgroup**：5 次试分原以 `taskwait` 等待，而调用它的任务此前已派生上一个分隔子的另一半为子任务，
+      taskwait 连带等待整棵兄弟子树——关键路径上的每个分隔子都要等。syn-mem27-100（n = 1e6）18 s 的功在 4、8、
+      16 线程上都要 7.3–7.7 s；改为 `taskgroup` 后 16 线程 2.4 s（含下面各项），排列不变。
+    - **并发收缩与切分**：≥ `kParallelGraphSize`（20000）顶点的图，其收缩（`coarsen_once`）与按分隔子取两半
+      （`induced_subgraph`）用 `taskloop` 两遍完成（先行长、再按偏移写行；粗行内的重复项用小的开放寻址表），
+      得到与串行循环逐位相同的图。匹配与 FM 仍串行。
+    - **图压缩**（`compress_graph`，`OrderingOptions::compress`，默认开）：闭邻域相同（不可区分）的顶点合成
+      一个带权顶点（METIS 与 SCOTCH 也如此），剩余顶点 ≤ 85% 时采用；这样的顶点必相邻，故只与邻居比较，
+      O(边)、并行。叶子按**顶点权**（变量数）≤ `leaf_size` 判定——按压缩后顶点数时叶子大到 8 × 120（复数再 × 2）
+      个变量，MUMPS 的 L0 树并行空转（syn-near-singular-complex-1e5 分解 1.09 s 对未压缩的 0.40 s）。叶子的最小度
+      按邻居权计度。ss-tem152078（半数顶点成对不可区分）排序 0.70 → 0.26 s，块状 syn-* 测例快 5–10 倍。
+    - **流精修**（`FlowRefiner`，`OrderingOptions::flow_depth`，默认 2，[0, 16]；Sanders & Schulz 2016）：FM 之后，
+      分隔子 S 加两侧各至多 `flow_depth` 层 BFS（只取任何割都保持平衡的那么多：一半最多得到另一侧的带）组成拆点
+      网络（v_in → v_out 容量为顶点权，边容量无穷，带外的半 0 为源、半 1 为汇），Dinic 最大流给出带内最小
+      分隔子；两个极端最小割中较平衡的那个若更小（或相等而更平衡）就替换 S，再做一轮单侧 FM。只在每个分隔子
+      的输入图上做（粗层的带权网络要 78–95 个 Dinic 阶段，分隔子不更好），不在试分里做。FM 在网格上停在局部
+      极小（Yee 网格的顶层分隔子比平面大 12–14%），割在带内找到平面：MUMPS flops yee-pec-box-1e6 7.39e12 →
+      5.43e12（坐标几何剖分 5.29e12，SCOTCH 6.75–7.09e12），yee-pec-box-1e5 −26%，ss-2cubes_sphere −16%，
+      ss-ge87h76 −16%，19 个测例几何平均 −10%（syn-mem27 类已是平面，不变）。排序时间：低度图几乎不变，
+      高度图（syn-mem125-46，度 114）0.79 → 1.13 s。小问题上时间不随 flops 下降（yee-pec-cube-16：flops −17%，
+      而 16 线程分解 +10%、4 列回代 +17%，整次运行 +9%），所以 driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时
+      用它（`nd_ordering_options` 的 `flow`，§3.6-3b）；`compute_ordering` 本身的默认仍是 2。
+    - **多候选试分与顶层投入**（`SeparatorParams::runs / finalists`，`OrderingOptions::top_depth / top_size /
+      top_runs / top_finalists`）：两段式中把中间图上最好的若干个试分都细化回输入图、在那里取最优（finalists 之间按
+      FM 后的结果比较，流精修只做胜者）；顶层几级用更多试分。有流精修后只在 ss-ge87h76（flops −12%）、
+      ss-si34h36（−2%）上还有收益，故默认不开，由 driver 在计划的数值时间 ≥ 30 倍预测排序时间时对顶 2 级采用
+      16 次试分 / 16 个候选（`nd_ordering_options`，§3.6-3b）。
+    - **未采用**（`results/p9_ordering.md` §5.6）：叶子 60/250/500、imbalance 1.1/1.3、粗化目标 50/200、初分 14
+      次、FM 20 遍、双侧或两种 FM、其它种子——都在 ±1% 的几何平均内，单例 ±5–10%。
+    - 实测（16 线程，测量槽，`bench/ordering_cost.cpp`）：1e6 时排序 2.0–2.4 s（SCOTCH 整个分析 4.3–6.3 s 串行，
+      METIS 13–14 s），因子 flops 为 SCOTCH 中位运行的 0.76（syn-mem27-100）/ 0.77（yee-pec-box-1e6），三次分解
+      分别省 18.5 s、14.4 s；10 个 1e5 三维测例上分析 + 3 次分解 + 回代比最好的 MUMPS 排序省 7–24%。
 
 ### 3.4b ops（`include/hsolve/operator.hpp`）
 - 稀疏乘积走 §3.2 的内核，构造参数 `KernelPath kernels`（默认 Auto；Reference 只换稀疏乘积，修正
@@ -735,11 +774,23 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
 3b. **自适应排序**（`ordering = −1`，默认；P5c，`adaptive_analysis`）：先做 AMD 分析探测（极快，其估计区分
    二维型与三维型填充），再用代价模型把每个候选排序在本次运行**计划的工作**上定价；分析得分最好的候选、
    以其实际估计替换预测，如此往复，直到得分最好的是已分析的候选。
-   - 候选（`candidate_orderings`，得分相近时按此顺序优先）：AMD（0）、SCOTCH（3）、自研并行嵌套剖分（10，
-     §3.4）、METIS（5）、PORD（4）。SCOTCH 排在自研嵌套剖分之前：16 线程下它在高填充三维测例上的因子只需
-     后者 0.80–0.95 倍 flops，而按填充比的形状拟合要到填充 ~150 以上才看得出；端到端把它换成自研嵌套剖分，
-     yee-pec-box-1e5 慢 13%、ss-ge87h76 慢 17%。config 也可直接给 0、2..7（MUMPS ICNTL(7)）或 10，见
-     `docs/FORMATS.md` §2。
+   - 候选（`candidate_orderings`，得分相近时按此顺序优先）：AMD（0）、自研并行嵌套剖分（10，§3.4）、SCOTCH（3）、
+     METIS（5）、PORD（4）。P9 起自研嵌套剖分在 SCOTCH 之前（P5c 相反）：有了流精修，它在三维数据测例上的因子
+     只需 SCOTCH 的 0.73–1.0 倍 flops（yee-pec-box-1e5 0.87、yee-pec-box-1e6 0.77–0.80、syn-mem27-100 0.61–0.79——
+     SCOTCH 的 16 线程排序逐次相差 1.3 倍），分析并行且可复现。config 也可直接给 0、2..7（MUMPS ICNTL(7)）或 10，
+     见 `docs/FORMATS.md` §2。
+   - **自研嵌套剖分的投入**（P9，`OrderingCandidate::nd_effort`、`nd_ordering_options`）：预测它时，若计划的数值
+     时间 ≥ `kNdEffortWorkRatio`（30）倍其预测排序时间，就按顶 2 级 16 次试分 / 16 个候选（`OrderingOptions::top_*`，
+     §3.4）定价并以之分析：排序时间 × `kNdEffortTime`（1.2）、flops × 0.97、条目 × 0.99（实测 ss-ge87h76 −12% flops、
+     运行模型 56.7 → 51.1 s，ss-si34h36 −2%；1e6 测例与小例无收益）。事件 `ordering` 的候选串里以 `10e` 标出。
+   - **流精修的取舍**（P9 评审修正，`OrderingCandidate::nd_flow`）：同一比值（`nd_work_ratio`，计划的数值时间 /
+     预测排序时间，两条规则都按拟合时的默认剖分即带流精修计算）低于 `kNdFlowWorkRatio`（4.5）时不做流精修，按排序
+     时间 ÷ 1.15、flops ÷ 0.90、条目 ÷ 0.95 定价并以 `flow_depth = 0` 分析；以它为锚预测其它候选时先折回带流精修的值。
+     依据（16 线程，测量槽，`results/p9_ordering.md` §8.3）：比值 3.3–3.6 的四个三维小例上流精修使分析 + 3 次分解
+     + 22 次 4 列回代变化 +19 ms（yee-pec-cube-16：flops −17%，分解 +10%、回代 +17%）、−7、−24、+18 ms，平均持平而
+     有回归风险；比值 ≥ 5.6（Yee 1e4 晶胞、1e5 三维测例）−14% 到 +3%（中位 −7%），1e6（比值 21、33）flops −1% / −27%。
+     不做流精修时这些图上的排列与 P5c 的剖分相同（flops 一致）。数据测例中关掉它的是 yee-pec-cube-16、
+     yee-pec-box-1e4、ss-tem27623、ss-helm3d01、wg-square-n289。候选串里以 `10n` 标出，ND 项末尾的 `/r…` 是比值。
    - 计划的工作（`plan_work`，由配置与分析前已知的问题类型推导，不计时；按 6a3d7c1 时数据测例的端到端
      运行标定）：HEP/GHEP nearest 分解 1 次（类型未定再加 B 的惯性 1 次）、证书计数 2 次（`inertia_check
      = off` 时 0）、列作用 40 + 4k（p > 1）或 2k + 12（p = 1），块宽按 P4 规则估计（分析之前还没有因子
@@ -747,27 +798,30 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      nearest）；GHIEP nearest 约 3.4k 列回代、1 次分解，σ 在零带内时 5 次分解、约 20k 列。只有候选之间的
      相对代价要紧：补救、重跑等对每个候选的价格影响相同。
    - 代价模型（`OrderingModel`，`ordering_model()`；常数在 gpu02 测量槽 16 线程、MUMPS 阶数 ≥ 5000 的 40 个
-     数据测例上拟合，`bench/anaint_orderings.cpp`；`bench/anaint_fix_fit.cpp` 由原始输出复算每个常数并用
-     driver 自己的代码重放选择：相对最佳排序的平均超额样本内 4.3%、留一测例 5.0%）。方括号内为预测/实测
-     的范围：
+     数据测例与两个 1e6 三维测例上拟合，`bench/anaint_orderings.cpp`——MUMPS 排序的行来自 P5c，自研嵌套剖分的行
+     P9 重测；`bench/anaint_fix_fit.cpp` 由原始输出复算每个常数并用 driver 自己的代码重放选择：相对最佳排序的
+     平均超额样本内与留一测例都是 1.1%（38 个测例；P5c 的模型在 P5c 的数据上 4.3% / 5.0%），命令与数据见
+     `results/p9_ordering.md` §6）。方括号内为预测/实测的范围：
      - 给定顺序的分析（MUMPS 带 PERM_IN：自研嵌套剖分交出排列、InertiaCounter 复用主顺序），也是每种分析
-       的下限，[0.58, 1.54]；
-     - 自研嵌套剖分：单线程功 W = w_v·顶点 + w_e·边 + w_fe·因子条目 [0.47, 1.38]；p 线程 W·(s + (1 − s)/p)，
-       s = 0.383 为 16 线程实测的中位数（四分位 0.26、0.47；它不按单一串行比例的 Amdahl 定律扩展：4 线程时
-       0.19）；复数铅笔至少一半的耦合为复数时排 n 顶点图（与 `compute_ordering` 的 Embedding::Auto 一致）；
-     - MUMPS 的排序都是串行的：METIS、PORD、SCOTCH 为 ρ·W（输入图、各自的因子条目；ρ = 1.033、1.126、0.626；
-       整个分析 [0.45, 1.0]，syn-* 的低填充块图除外，它们快 3–8 倍）；AMD 的排序为 a·阶数 + b·条目
-       [0.25, 1.31]；
+       的下限，[0.58, 1.56]；
+     - 自研嵌套剖分：单线程功 W = w_v·顶点 + w_e·边 + w_fe·因子条目 [0.66, 1.24]；p 线程 W·(s + (1 − s)/p)，
+       s = 0.222 为 16 线程实测的中位数（四分位 0.13、0.31；P5c 的 0.383 来自 taskwait 缺陷，§3.4）；复数铅笔至少
+       一半的耦合为复数时排 n 顶点图（与 `compute_ordering` 的 Embedding::Auto 一致）；图的顶点与边按合并不可区分
+       顶点之后计（`ordering::indistinguishable_ratio`：闭邻域的哈希沿边比较，不建图；剩 r 的顶点、约 r² 的边）——
+       P5c 的 W 在 ss-tem152078 上偏差 2.1 倍正是因为它；
+     - MUMPS 的排序都是串行的（SCOTCH 实际随分析线程数多线程运行，模型未区分）：METIS、PORD、SCOTCH 为 ρ·W
+       （输入图、各自的因子条目；ρ = 0.686、0.582、0.377；整个分析 [0.24, 3.7]，syn-* 的低填充块图上 METIS 快到
+       1/10）；AMD 的排序为 a·阶数 + b·条目 [0.25, 1.32]；
      - 各排序的 flops 与因子条目相对 AMD 之比是 AMD 填充比 f = 条目(AMD)/nnz(铅笔) 的函数：ln r 在 ln f 上
        分段线性（节点 f = 1、4、10、40、150、1000，节点外取常数；岭回归 0.05）。低填充（f < 5，块状或带状）
        嵌套剖分要 AMD 的 2–3 倍 flops，二维（f ~ 10）0.4–0.9 倍，三维（f ≥ 40）0.1–0.35 倍；flops
-       [0.44, 1.86]、条目 [0.64, 1.36]；
-     - 16 线程的数值阶段：一次分解 t_f = f_o·阶数 + f_e·输入条目 + f_fe·因子条目 + f_fl·flops [0.23, 1.79]，
-       同一对象重分解 0.962 t_f，InertiaCounter 计数 0.886 t_f；单右端回代 t_s = s_o·阶数 + s_fe·因子条目
-       [0.30, 1.44]，一次 p 列回代 (1 + 0.062(p − 1)) t_s；其它线程数乘 (16/线程)^γ（分解 γ = 0.46、回代
-       0.22，由 16 / 4 线程的中位数比得到）；
+       [0.44, 1.86]、条目 [0.68, 1.36]；
+     - 16 线程的数值阶段：一次分解 t_f = f_o·阶数 + f_e·输入条目 + f_fe·因子条目 + f_fl·flops [0.23, 1.85]，
+       同一对象重分解 0.974 t_f，InertiaCounter 计数 0.896 t_f；单右端回代 t_s = s_o·阶数 + s_fe·因子条目
+       [0.31, 1.47]，一次 p 列回代 (1 + 0.057(p − 1)) t_s；其它线程数乘 (16/线程)^γ（分解 γ = 0.43、回代
+       0.19，由 16 / 4 线程的中位数比得到）；
      - 低填充（f ≤ 4）的 AMD 因子在 16 线程下的数值阶段远慢于其规模所示（没有分隔子的深窄消去树让 L0 层的
-       线程空闲）：分解 × 1.86、回代 × 3.15，f 从 4 到 5 对数线性降到 1，按 ln(线程)/ln 16 缩放；
+       线程空闲）：分解 × 1.49、回代 × 2.82，f 从 4 到 5 对数线性降到 1，按 ln(线程)/ln 16 缩放；
      - 证书计数按 driver 的做法计价（`counter_pays` 时计数器的给定顺序分析加计数，否则主对象重分解）。
    - 选择（`run_ordering_choice`，纯函数，可脱离 MUMPS 测试；`OrderingPricer` 定价）：已分析候选的得分是其
      计划的数值时间；未分析的为预测分析时间 + (1 − g)·预测数值时间，g 是拿到实际估计的期望收益（以 AMD 为
@@ -781,13 +835,12 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      的估计、模型、线程数）的函数，相同的运行选相同的排序；墙钟时间只记日志（事件 `ordering`：每个候选的
      得分、是否分析及其分析耗时、计划的工作与选择）。
    - `deterministic = true` 沿用下面的 P4 规则（AMD 或固定种子的 METIS），保证逐位复现。
-   - 已知偏差：ss-tem152078 上模型选了自研嵌套剖分（该例单线程排序实际是拟合 W 的 2.1 倍，syn-mem125-46
-     1.9 倍，度、填充、分隔子大小都解释不了），其分析比 SCOTCH 慢一倍，总时间为 P4 的 1.15 倍。给嵌套剖分
-     加上分析风险（未分析时加 0.5 倍预测分析时间）可修好这一例，但重放时 yee-bloch-1e4、yee-photonic-*、
-     syn-lap3d-aniso-1e5、syn-mem27-46 与 ss-qa8fk-qa8fm 也转向 SCOTCH，平均超额 4.3% → 5.3%，未采用。模型只
-     在 16 线程下标定（4 线程数据只用于线程指数与 W；它们是在测量槽有锁之前于槽核 28–31 上取的，复现时 4 线程
-     计时也须持槽：`guard.py --exclusive --cores 16-19`，命令见 `bench/anaint_orderings.cpp` 头注释；
-     `bench_anaint_decide` 的选择不依赖计时，在构建/测试道运行），低填充 AMD 的系数只来自 syn-* 测例。
+   - P5c 的已知偏差 ss-tem152078（模型选了自研嵌套剖分，其排序 1.24 s 比 SCOTCH 整个分析慢一倍，总时间为 P4 的
+     1.07–1.15 倍）的原因是该图半数顶点成对不可区分而剖分没有合并（SCOTCH 合并），加上 taskwait 缺陷；P9 合并后
+     排序 0.26 s、分析 0.40 s 对 SCOTCH 的 0.74 s（`results/p9_ordering.md` §4）。重放的剩余超额只在四个 n ≤ 1e5 的
+     低填充 syn-* 测例上（METIS 最好，超额 1–27%，每例 ≤ 0.02 s）。模型只在 16 线程下标定（4 线程数据只用于线程指数与 W；它们是在测量槽有锁之前于槽核 28–31 上取的，复现时 4 线程
+     计时也须持槽：`guard.py --exclusive --cores 16-19`，命令见 `bench/anaint_orderings.cpp` 头注释；P9 的 4 线程
+     行即如此测得；`bench_anaint_decide` 的选择不依赖计时，在构建/测试道运行），低填充 AMD 的系数只来自 syn-* 测例。
    - **P4 规则**（`decide_ordering` / `nd_ordering`，现在只服务 `deterministic = true`，也是 bench 的对照）：
      AMD 探测后按确定的模型预估嵌套剖分在本次运行的分解与回代上能省的时间，超过其额外分析代价才改用嵌套
      剖分——SCOTCH，`deterministic = true` 时 METIS（5，固定种子）；该路径总是 deterministic，所以实际是
@@ -1234,3 +1287,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P5 | **已完成**（P5c，main 34cbfd4）：verify 接入 driver（certificate = exact / randomized / auto / off，单精度计数的双精度复核）；输入检查与 B 正定性检验链（分析前的廉价检验、IC + Gershgorin 严格证明）；自适应排序的 16 线程代价模型，自研嵌套剖分作为候选与 `ordering = 10`；σ₀ 处的零主元簇规则；块宽规则 `recommended_block_size` 与块步快路径 `try_fast`，nearest 运行按规则取块宽（内存只预留 P4 块宽的基）；收缩重跑以 `lead_nev` 在缺的对收敛后结束、自动块宽之后至多用 P4 块宽；certifier 的 InertiaCounter 推迟双精度实例的分析；GHIEP 内存预留按峰值列计、报告实际块宽；BLAS hook（src/blas，默认链入、route all）；以上都在 16 核测量槽下测量。**未做**：JD + 单精度因子的内存受限回退；SCOTCH 固定种子（之后可按其估计比较）；更好的嵌套剖分分隔子与 ND 功的预测（ss-tem152078）；一般 B 的 κ 证明（如分解 B − μ·diag(B)），使随机检验与单精度计数也适用于一般 HPD B；块宽规则在 BLAS hook 下的重新标定（现以 `kRuleWideMargin` 补偿，yee-bloch-1e4、yee-photonic-* 选 8 仍比 4 慢 2.5–3%）与用于切片；故障场景验证矩阵 |
 | P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |
 | P8 | **已完成**（p8-certcost-fix）：证书的计数失败不再结束求解——计数源（InertiaCounter / 主对象）失败时换另一个，计数前按计数余量检查估计（主对象代替计数器时按其上次分解的 INFOG(21)），SCOTCH 分析超上限时至多再分析两次；都不行时 nearest 交回已收敛的对、证书标为未完成（success = false），窗口目标只丢失败的切片；一般 HPD B 的 κ 与 λ_min 严格界（只用于 auto / randomized）；更便宜的精确计数全部实测为负（两进程并行、单次合并分解、省缩放/检测、换计数源），默认证书仍为 exact（`results/p8_certcost.md`）。 |
+| P9 | **ordering 已完成**（分支 p9-ordering，评审修正 p9-ordering-fix）：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割；driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时采用）、顶层投入（代价模型决定）；代价模型按新剖分重拟合，候选顺序中它先于 SCOTCH，图规模按压缩后计。最终代码的门槛（测量槽，ABBA，全部有效、证书 exact）：1e6 内存内（5 次）syn-mem27-100 111.0 → 89.0 s（1.25×）、yee-pec-box-1e6 89.7 → 73.7 s（1.22×）；26 个 n ≤ 1e5 数据测例（3 次）几何平均 0.919，18 例快 3% 以上；初稿的 yee-pec-cube-16 系统性变慢（+9%：流精修后的排列在 16 线程下分析、分解、回代都更慢）已消除（20 次 1.015），剩 wg-square-n289（n = 289）以与 main 相同的排列慢 1.6 ms（`results/p9_ordering.md` §8）。**未做**：三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分 |

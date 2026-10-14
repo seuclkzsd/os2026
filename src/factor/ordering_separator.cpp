@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -20,7 +21,6 @@ namespace {
 
 // The two-stage scheme for large graphs: kTwoStageSize, kTwoStageLevels, kTwoStageRuns and
 // kParallelRunSize in ordering_detail.hpp.
-constexpr int kRuns = kTwoStageRuns;
 
 // Indexed binary max-heap of vertices keyed by gain; ties go to the lower rank, then the lower
 // vertex number, so the order of extraction is a function of keys and ranks alone.
@@ -116,6 +116,76 @@ class GainHeap {
 
 // ------------------------------------------------------------------------------- coarsening
 
+// The coarse rows of the pairs (v, partner) in `rep` order (rep[cv] = lower vertex of coarse
+// vertex cv, partner = match[v]) computed concurrently by OpenMP tasks (taskloop: the calling
+// task's team; one thread outside a parallel region): two passes - row lengths, then the rows at
+// their offsets. Each row is the coarse neighbours in order of first appearance in v's row, then
+// the partner's, with summed edge weights - exactly what the serial loop in coarsen_once writes, so
+// the coarse graph is the same. Duplicates are found with a small open-addressing table per row.
+void contract_parallel(const Graph& g, const std::vector<std::int32_t>& match,
+                       const std::vector<std::int32_t>& cmap, const std::vector<std::int32_t>& rep,
+                       Graph& c) {
+  const std::int32_t nc = c.n;
+  // row(cv, emit): calls emit(cu, w, first) for every coarse neighbour occurrence; first tells a
+  // new neighbour (index k in the row) from a repeated one (index of its first occurrence).
+  auto row = [&](std::int32_t cv, std::vector<std::int32_t>& table, auto&& emit) {
+    const std::int32_t v = rep[cv], partner = match[v];
+    const std::int64_t len = g.degree(v) + (partner != v ? g.degree(partner) : 0);
+    std::size_t cap = 16;
+    while (cap < 2 * static_cast<std::size_t>(len)) cap *= 2;
+    if (table.size() < 2 * cap) table.resize(2 * cap);
+    std::fill(table.begin(), table.begin() + static_cast<std::ptrdiff_t>(2 * cap), -1);
+    std::int32_t k = 0;
+    auto scan = [&](std::int32_t x) {
+      for (std::int64_t e = g.xadj[x]; e < g.xadj[x + 1]; ++e) {
+        const std::int32_t cu = cmap[g.adj[e]];
+        if (cu == cv) continue;
+        std::size_t h = (static_cast<std::uint32_t>(cu) * 0x9E3779B1u) & (cap - 1);
+        while (table[2 * h] != -1 && table[2 * h] != cu) h = (h + 1) & (cap - 1);
+        if (table[2 * h] == -1) {
+          table[2 * h] = cu;
+          table[2 * h + 1] = k;
+          emit(cu, g.ewgt[e], k++, true);
+        } else {
+          emit(cu, g.ewgt[e], table[2 * h + 1], false);
+        }
+      }
+    };
+    scan(v);
+    if (partner != v) scan(partner);
+    return k;
+  };
+  std::vector<std::int64_t>& start = c.xadj;
+  start.assign(static_cast<std::size_t>(nc) + 1, 0);
+  constexpr std::int32_t kChunk = 2048;
+#pragma omp taskloop grainsize(1) default(shared)
+  for (std::int32_t b = 0; b < nc; b += kChunk) {
+    std::vector<std::int32_t> table;
+    for (std::int32_t cv = b; cv < std::min(nc, b + kChunk); ++cv)
+      start[cv + 1] = row(cv, table, [](std::int32_t, std::int32_t, std::int32_t, bool) {});
+  }
+  for (std::int32_t cv = 0; cv < nc; ++cv) start[cv + 1] += start[cv];
+  c.adj.resize(static_cast<std::size_t>(start[nc]));
+  c.ewgt.resize(static_cast<std::size_t>(start[nc]));
+#pragma omp taskloop grainsize(1) default(shared)
+  for (std::int32_t b = 0; b < nc; b += kChunk) {
+    std::vector<std::int32_t> table;
+    for (std::int32_t cv = b; cv < std::min(nc, b + kChunk); ++cv) {
+      const std::int64_t o = start[cv];
+      row(cv, table, [&](std::int32_t cu, std::int32_t w, std::int32_t k, bool first) {
+        if (first) {
+          c.adj[static_cast<std::size_t>(o + k)] = cu;
+          c.ewgt[static_cast<std::size_t>(o + k)] = w;
+        } else {
+          c.ewgt[static_cast<std::size_t>(o + k)] += w;
+        }
+      });
+      const std::int32_t v = rep[cv], partner = match[v];
+      c.vwgt[cv] = g.vwgt[v] + (partner != v ? g.vwgt[partner] : 0);
+    }
+  }
+}
+
 // Sorted heavy-edge matching (vertices visited by increasing degree, random among equal
 // degrees; each unmatched vertex takes its heaviest unmatched neighbour, scanning its row from a
 // random rotation so that unit weights do not favour low numbers) and contraction. Returns the
@@ -191,9 +261,16 @@ Graph coarsen_once(const Graph& g, Random& rng, std::int64_t max_vwgt,
 
   Graph c;
   c.n = nc;
-  c.xadj.assign(static_cast<std::size_t>(nc) + 1, 0);
   c.vwgt.resize(static_cast<std::size_t>(nc));
   c.total_vwgt = g.total_vwgt;
+  if (n >= kParallelGraphSize) {
+    std::vector<std::int32_t> rep(static_cast<std::size_t>(nc));
+    for (std::int32_t v = 0; v < n; ++v)
+      if (match[v] >= v) rep[cmap[v]] = v;
+    contract_parallel(g, match, cmap, rep, c);
+    return c;
+  }
+  c.xadj.assign(static_cast<std::size_t>(nc) + 1, 0);
   // Coarse rows are appended one after the other (capacity reserved for the fine graph, an upper
   // bound that is never touched beyond what is written); slot[cu] is the position of coarse
   // neighbour cu if it lies in the current row.
@@ -459,12 +536,250 @@ class NodeFm {
   std::vector<std::pair<std::int32_t, std::uint8_t>> log_;  ///< (vertex, previous part)
 };
 
-// Refinement by SeparatorParams::refine_mode.
+// ------------------------------------------------------------------ flow-based refinement
+
+// Minimum vertex cut between the two halves in a band around the separator (the flow refinement
+// of node separators of Sanders & Schulz, "Advanced multilevel node separator algorithms", SEA
+// 2016): the band is the separator plus the vertices of each half within `depth` BFS layers of it,
+// as many as keep any cut balanced (a half may gain at most the other side's band); the rest of
+// half 0 is the source, the rest of half 1 the sink. A maximum flow (Dinic) on the split-vertex
+// network - capacity vwgt(v) from v_in to v_out, unbounded along the edges - gives the smallest
+// separator within the band: FM moves single vertices and stops in local minima (jagged separators
+// of meshes, 12-14% above the plane separators of a Yee grid), the cut finds the plane if it lies
+// in the band. Of the two extreme minimum cuts (nearest the source, nearest the sink) the better
+// balanced one is kept when it beats the current separator (weight, then balance). Deterministic.
+// O(band edges * augmenting phases); the workspace is O(band), plus a vertex map of g.n.
+class FlowRefiner {
+ public:
+  // Returns whether `where` changed.
+  bool refine(const Graph& g, std::vector<std::uint8_t>& where, std::int64_t max_part, int depth) {
+    if (depth <= 0) return false;
+    std::int64_t pw[3] = {0, 0, 0};
+    for (std::int32_t v = 0; v < g.n; ++v) pw[where[v]] += g.vwgt[v];
+    if (pw[kSeparator] == 0) return false;
+    // Band: BFS layers from the separator into each half within its budget.
+    local_.assign(static_cast<std::size_t>(g.n), -1);
+    band_.clear();
+    for (std::int32_t v = 0; v < g.n; ++v)
+      if (where[v] == kSeparator) add(v);
+    const std::size_t sep_end = band_.size();
+    for (int side = 0; side < 2; ++side) {
+      // Half `side` may lose its band to the other half: the other one then holds at most
+      // pw[other] + pw[sep] + band(side), which must stay within max_part.
+      std::int64_t budget = max_part - pw[1 - side] - pw[kSeparator];
+      std::size_t layer_begin = 0, layer_end = sep_end;  // the separator, then each new layer
+      for (int d = 0; d < depth && budget > 0 && layer_begin < layer_end; ++d) {
+        const std::size_t next_begin = band_.size();
+        for (std::size_t q = layer_begin; q < layer_end && budget > 0; ++q) {
+          const std::int32_t v = band_[q];
+          for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e) {
+            const std::int32_t u = g.adj[e];
+            if (where[u] != side || local_[u] >= 0 || g.vwgt[u] > budget) continue;
+            budget -= g.vwgt[u];
+            add(u);
+          }
+        }
+        layer_begin = next_begin;
+        layer_end = band_.size();
+      }
+    }
+    if (!build_network(g, where)) return false;
+    while (bfs_levels()) augment();
+    // Two minimum cuts: nearest the source (reachable from s) and nearest the sink.
+    std::int64_t best_sep = pw[kSeparator], best_diff = std::llabs(pw[0] - pw[1]);
+    int best = -1;
+    for (int kind = 0; kind < 2; ++kind) {
+      cut(kind);
+      std::int64_t w[3] = {pw[0], pw[1], 0};
+      for (std::size_t i = 0; i < band_.size(); ++i) {
+        const std::int32_t v = band_[i];
+        if (where[v] != kSeparator) w[where[v]] -= g.vwgt[v];
+        w[side_[i]] += g.vwgt[v];
+      }
+      const std::int64_t diff = std::llabs(w[0] - w[1]);
+      if (w[0] > max_part || w[1] > max_part) continue;
+      if (w[2] < best_sep || (w[2] == best_sep && diff < best_diff)) {
+        best_sep = w[2], best_diff = diff, best = kind;
+      }
+    }
+    if (best < 0) return false;
+    cut(best);
+    for (std::size_t i = 0; i < band_.size(); ++i) where[band_[i]] = side_[i];
+    return true;
+  }
+
+ private:
+  static constexpr std::int32_t kSource = 0, kSink = 1;
+
+  void add(std::int32_t v) {
+    local_[v] = static_cast<std::int32_t>(band_.size());
+    band_.push_back(v);
+  }
+  static std::int32_t in(std::size_t i) { return static_cast<std::int32_t>(2 + 2 * i); }
+  static std::int32_t out(std::size_t i) { return static_cast<std::int32_t>(3 + 2 * i); }
+
+  // The network in CSR form (arc k: head to_[k], residual capacity cap_[k], reverse arc
+  // pair_[k]), built directly in two passes. Per band vertex i with b in-band neighbours: in(i)
+  // holds in(i) -> out(i), the reverses of the b arcs out(j) -> in(i) and, if it touches the rest
+  // of half 0, the reverse of s -> in(i); out(i) the reverse of in(i) -> out(i), the b arcs
+  // out(i) -> in(j) and, if it touches the rest of half 1, out(i) -> t. False when the network
+  // would not fit 32-bit arc indices or capacities (the refinement is then skipped).
+  bool build_network(const Graph& g, const std::vector<std::uint8_t>& where) {
+    const std::size_t nb = band_.size();
+    nodes_ = static_cast<std::int32_t>(2 + 2 * nb);
+    std::int64_t total = 1;
+    for (const std::int32_t v : band_) total += g.vwgt[v];
+    if (total >= std::numeric_limits<std::int32_t>::max() / 2) return false;
+    inf_ = static_cast<std::int32_t>(total);
+    first_.assign(static_cast<std::size_t>(nodes_) + 1, 0);
+    touch_.assign(nb, 0);  // bit 1: next to the rest of half 0, bit 2: of half 1
+    std::int64_t arcs = 0;
+    for (std::size_t i = 0; i < nb; ++i) {
+      const std::int32_t v = band_[i];
+      std::int32_t b = 0;
+      std::uint8_t t = 0;
+      for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e) {
+        const std::int32_t u = g.adj[e];
+        if (local_[u] >= 0)
+          ++b;
+        else
+          t |= where[u] == 0 ? 1 : where[u] == 1 ? 2 : 0;
+      }
+      touch_[i] = t;
+      first_[in(i) + 1] = 1 + b + ((t & 1) ? 1 : 0);
+      first_[out(i) + 1] = 1 + b + ((t & 2) ? 1 : 0);
+      if (t & 1) ++first_[kSource + 1];
+      if (t & 2) ++first_[kSink + 1];
+      arcs += 2 + 2 * b + ((t & 1) ? 1 : 0) + ((t & 2) ? 1 : 0);
+    }
+    arcs += first_[kSource + 1] + first_[kSink + 1];
+    if (arcs >= std::numeric_limits<std::int32_t>::max()) return false;
+    for (std::int32_t x = 0; x < nodes_; ++x) first_[x + 1] += first_[x];
+    to_.resize(static_cast<std::size_t>(arcs));
+    cap_.resize(static_cast<std::size_t>(arcs));
+    pair_.resize(static_cast<std::size_t>(arcs));
+    next_.assign(first_.begin(), first_.end() - 1);
+    auto arc = [&](std::int32_t a, std::int32_t b, std::int32_t c) {
+      const std::int32_t p = next_[a]++, q = next_[b]++;
+      to_[p] = b, cap_[p] = c, pair_[p] = q;
+      to_[q] = a, cap_[q] = 0, pair_[q] = p;
+    };
+    for (std::size_t i = 0; i < nb; ++i) {
+      const std::int32_t v = band_[i];
+      arc(in(i), out(i), g.vwgt[v]);
+      for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e) {
+        const std::int32_t j = local_[g.adj[e]];
+        if (j >= 0) arc(out(i), in(static_cast<std::size_t>(j)), inf_);
+      }
+      if (touch_[i] & 1) arc(kSource, in(i), inf_);
+      if (touch_[i] & 2) arc(out(i), kSink, inf_);
+    }
+    return true;
+  }
+
+  // BFS levels from the source; stops after the sink's layer (nothing beyond is on a shortest
+  // path).
+  bool bfs_levels() {
+    level_.assign(static_cast<std::size_t>(nodes_), -1);
+    queue_.clear();
+    level_[kSource] = 0;
+    queue_.push_back(kSource);
+    for (std::size_t h = 0; h < queue_.size(); ++h) {
+      const std::int32_t x = queue_[h];
+      if (level_[kSink] >= 0 && level_[x] >= level_[kSink]) break;
+      for (std::int32_t k = first_[x]; k < first_[x + 1]; ++k) {
+        const std::int32_t y = to_[k];
+        if (cap_[k] > 0 && level_[y] < 0) {
+          level_[y] = level_[x] + 1;
+          queue_.push_back(y);
+        }
+      }
+    }
+    return level_[kSink] >= 0;
+  }
+
+  // Blocking flow by depth-first search with current-arc pointers (iterative).
+  void augment() {
+    next_.assign(first_.begin(), first_.end() - 1);
+    for (;;) {
+      path_.clear();
+      std::int32_t x = kSource;
+      while (x != kSink) {
+        bool advanced = false;
+        for (std::int32_t& k = next_[x]; k < first_[x + 1]; ++k) {
+          const std::int32_t y = to_[k];
+          if (cap_[k] > 0 && level_[y] == level_[x] + 1) {
+            path_.push_back(k);
+            x = y;
+            advanced = true;
+            break;
+          }
+        }
+        if (advanced) continue;
+        if (x == kSource) return;
+        level_[x] = -1;  // dead end: retreat to the arc's tail and skip the arc
+        path_.pop_back();
+        x = path_.empty() ? kSource : to_[path_.back()];
+        ++next_[x];
+      }
+      std::int32_t f = inf_;
+      for (const std::int32_t k : path_) f = std::min(f, cap_[k]);
+      for (const std::int32_t k : path_) {
+        cap_[k] -= f;
+        cap_[pair_[k]] += f;
+      }
+    }
+  }
+
+  // side_[i] of band vertex i for the minimum cut nearest the source (kind 0: v_in reachable
+  // from s in the residual network and v_out not = separator) or nearest the sink (kind 1: the
+  // same with "can reach t").
+  void cut(int kind) {
+    mark_.assign(static_cast<std::size_t>(nodes_), 0);
+    queue_.clear();
+    const std::int32_t root = kind == 0 ? kSource : kSink;
+    mark_[root] = 1;
+    queue_.push_back(root);
+    for (std::size_t h = 0; h < queue_.size(); ++h) {
+      const std::int32_t x = queue_[h];
+      for (std::int32_t k = first_[x]; k < first_[x + 1]; ++k) {
+        const std::int32_t y = to_[k];
+        // Forward: x -> y has residual capacity; backward (y can reach t through x): the arc
+        // y -> x, which is pair_[k], has.
+        if (!mark_[y] && cap_[kind == 0 ? k : pair_[k]] > 0) {
+          mark_[y] = 1;
+          queue_.push_back(y);
+        }
+      }
+    }
+    side_.resize(band_.size());
+    for (std::size_t i = 0; i < band_.size(); ++i) {
+      const bool a = mark_[in(i)], b = mark_[out(i)];
+      if (kind == 0)
+        side_[i] = b ? 0 : a ? kSeparator : 1;
+      else
+        side_[i] = a ? 1 : b ? kSeparator : 0;
+    }
+  }
+
+  std::vector<std::int32_t> local_, band_, queue_, level_, to_, cap_, pair_, first_, next_, path_;
+  std::vector<std::uint8_t> mark_, side_, touch_;
+  std::int32_t nodes_ = 0;
+  std::int32_t inf_ = 0;
+};
+
+// Refinement by SeparatorParams::refine_mode, then (flow_depth > 0) the minimum cut in a band
+// around the separator, polished by one more one-sided FM round when it moved the separator.
 void refine(NodeFm& fm, const Graph& g, Random& rng, std::vector<std::uint8_t>& where,
-            std::int64_t max_part, const SeparatorParams& p) {
+            std::int64_t max_part, const SeparatorParams& p, bool finest = true) {
   const std::uint64_t salt = rng.next();
   if (p.refine_mode != 1) fm.refine_two_sided(g, salt, where, max_part, p.refine_passes);
   if (p.refine_mode != 0) fm.refine_one_sided(g, salt, where, max_part, p.refine_passes);
+  if (p.flow_depth > 0 && g.n >= p.flow_min_vertices && (finest || !p.flow_finest_only)) {
+    FlowRefiner flow;
+    if (flow.refine(g, where, max_part, p.flow_depth))
+      fm.refine_one_sided(g, salt + 1, where, max_part, p.refine_passes);
+  }
 }
 
 // ------------------------------------------------------------------------- initial separator
@@ -619,12 +934,26 @@ struct Hierarchy {
       coarse.pop_back();
       cmaps.pop_back();
       if (trace) trace->projected.push_back(separator_weight(fine, where));
-      refine(fm, fine, rng, where, max_part, p);
+      refine(fm, fine, rng, where, max_part, p, k == 0);
       if (trace) {
         trace->refined.push_back(separator_weight(fine, where));
         trace->vertices.push_back(fine.n);
         trace->edges.push_back(fine.edges());
       }
+    }
+  }
+
+  // The same without freeing anything, so that several separators of the top can be carried
+  // down the same hierarchy (concurrently: const).
+  void refine_down(const Graph& base, Random& rng, NodeFm& fm, std::vector<std::uint8_t>& where,
+                   std::int64_t max_part, const SeparatorParams& p) const {
+    for (std::size_t k = coarse.size(); k-- > 0;) {
+      const Graph& fine = k == 0 ? base : coarse[k - 1];
+      std::vector<std::uint8_t> projected(static_cast<std::size_t>(fine.n));
+      const std::vector<std::int32_t>& cmap = cmaps[k];
+      for (std::int32_t v = 0; v < fine.n; ++v) projected[v] = where[cmap[v]];
+      where.swap(projected);
+      refine(fm, fine, rng, where, max_part, p, k == 0);
     }
   }
 };
@@ -658,8 +987,10 @@ std::vector<std::uint8_t> bisect_once(const Graph& g, Random& rng, const Separat
 }  // namespace
 
 std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
-                                           const SeparatorParams& p, SeparatorTrace* trace) {
+                                           const SeparatorParams& p, SeparatorTrace* trace,
+                                           SeparatorTiming* timing) {
   HS_ASSERT(g.n >= 1, "vertex_separator: empty graph");
+  Lap stage;
   Random rng(seed);
   const std::int64_t max_part = max_part_weight(g, p.imbalance);
   SeparatorTrace local;
@@ -667,6 +998,7 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
   std::vector<std::uint8_t> where;
   if (g.n < kTwoStageSize) {
     where = bisect_once(g, rng, p, max_part, p.init_tries, tr);
+    if (timing) timing->small_s += stage.lap();
   } else {
     // A few contractions without a weight bound (METIS: CoarsenTo = max(100, n/30)).
     Lap timer;
@@ -674,36 +1006,96 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     const std::int32_t target = std::max<std::int32_t>(100, g.n / 30);
     h.build(g, rng, g.total_vwgt, target, kTwoStageLevels);
     const double outer_coarsen = timer.lap();
+    if (timing) timing->coarsen_s += stage.lap();
     const Graph& mid = h.top(g);
     const int tries = std::max(1, static_cast<int>(0.7 * p.init_tries));
     // Independent runs, each with its own seed: the same result whichever thread runs which.
-    std::vector<std::vector<std::uint8_t>> runs(kRuns);
-    std::vector<SeparatorTrace> run_traces(kRuns);
-    std::uint64_t run_seed[kRuns];
-    for (int r = 0; r < kRuns; ++r) run_seed[r] = rng.next();
+    const int nruns = std::max(1, p.runs);
+    SeparatorParams trial_p = p;
+    if (!p.flow_in_trials) trial_p.flow_depth = 0;
+    std::vector<std::vector<std::uint8_t>> runs(static_cast<std::size_t>(nruns));
+    std::vector<SeparatorTrace> run_traces(static_cast<std::size_t>(nruns));
+    std::vector<std::uint64_t> run_seed(static_cast<std::size_t>(nruns));
+    for (int r = 0; r < nruns; ++r) run_seed[r] = rng.next();
     const bool parallel = mid.n >= kParallelRunSize;
-    for (int r = 0; r < kRuns; ++r) {
+    // A taskgroup, not a taskwait: the caller (the dissection) may already have spawned other
+    // tasks from the task it runs in - the other half of a separator - and a taskwait would wait
+    // for those whole subtrees too (P9: at n = 1e6 the 16-thread dissection took 7.3 s for 18 s
+    // of work, the trial runs' wall time 16 s instead of 3 s summed over the separators).
+#pragma omp taskgroup
+    {
+      for (int r = 0; r < nruns; ++r) {
 #pragma omp task if (parallel) default(shared) firstprivate(r)
-      {
-        Random run_rng(run_seed[r]);
-        runs[r] = bisect_once(mid, run_rng, p, max_part, tries, tr ? &run_traces[r] : nullptr);
+        {
+          Random run_rng(run_seed[r]);
+          runs[r] =
+              bisect_once(mid, run_rng, trial_p, max_part, tries, tr ? &run_traces[r] : nullptr);
+        }
       }
     }
-#pragma omp taskwait
-    std::int64_t best_w = -1, best_diff = 0;
-    int best = 0;
-    for (int r = 0; r < kRuns; ++r) {
-      std::int64_t diff = 0;
-      const std::int64_t sw = separator_score(mid, runs[r], diff);
-      if (best_w < 0 || sw < best_w || (sw == best_w && diff < best_diff)) {
-        best_w = sw;
-        best_diff = diff;
-        best = r;
+    // Runs ranked by their separator on the mid graph (weight, then balance, then run number).
+    std::vector<std::pair<std::int64_t, std::int64_t>> score(static_cast<std::size_t>(nruns));
+    std::vector<int> rank(static_cast<std::size_t>(nruns));
+    for (int r = 0; r < nruns; ++r) {
+      score[r].first = separator_score(mid, runs[r], score[r].second);
+      rank[r] = r;
+    }
+    std::stable_sort(rank.begin(), rank.end(), [&](int a, int b) { return score[a] < score[b]; });
+    const int best = rank[0];
+    const int finalists = std::clamp(p.finalists, 1, nruns);
+    if (finalists > 1) {
+      // Carry the best `finalists` separators of the mid graph down to g, each refined with its
+      // own random stream (concurrent tasks), and keep the best one there: the mid graph's
+      // ranking is a poor predictor of the final separator (projection and refinement through
+      // the four finest levels change it most).
+      SeparatorParams fm_only = p;
+      if (p.flow_finest_only) fm_only.flow_depth = 0;
+      std::vector<std::uint64_t> fin_seed(static_cast<std::size_t>(finalists));
+      for (int f = 0; f < finalists; ++f) fin_seed[f] = rng.next();
+      std::vector<std::vector<std::uint8_t>> fin(static_cast<std::size_t>(finalists));
+      std::vector<std::pair<std::int64_t, std::int64_t>> fscore(
+          static_cast<std::size_t>(finalists));
+      if (timing) timing->runs_s += stage.lap();
+#pragma omp taskgroup
+      {
+        for (int f = 0; f < finalists; ++f) {
+#pragma omp task if (parallel) default(shared) firstprivate(f)
+          {
+            Random frng(fin_seed[f]);
+            NodeFm ffm(g.n);
+            fin[f] = std::move(runs[rank[f]]);
+            h.refine_down(g, frng, ffm, fin[f], max_part, fm_only);
+            fscore[f].first = separator_score(g, fin[f], fscore[f].second);
+          }
+        }
       }
+      int pick = 0;
+      for (int f = 1; f < finalists; ++f)
+        if (fscore[f] < fscore[pick]) pick = f;
+      where = std::move(fin[pick]);
+      if (p.flow_depth > 0 && g.n >= p.flow_min_vertices) {
+        // The flow on the winner only (finalists are compared after FM).
+        FlowRefiner flow;
+        NodeFm wfm(g.n);
+        if (flow.refine(g, where, max_part, p.flow_depth))
+          wfm.refine_one_sided(g, rng.next(), where, max_part, p.refine_passes);
+        fscore[pick].first = separator_score(g, where, fscore[pick].second);
+      }
+      if (timing) timing->uncoarsen_s += stage.lap();
+      if (trace) {
+        local.vertices.push_back(g.n);
+        local.edges.push_back(g.edges());
+        local.projected.push_back(-1);
+        local.refined.push_back(fscore[pick].first);
+        local.coarsen_s = outer_coarsen;
+        *trace = std::move(local);
+      }
+      return where;
     }
     where = std::move(runs[best]);
     runs.clear();
     timer.lap();
+    if (timing) timing->runs_s += stage.lap();
     if (tr) {
       local = std::move(run_traces[best]);
       local.coarsen_s = outer_coarsen;
@@ -717,6 +1109,7 @@ std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
     NodeFm fm(g.n);
     h.uncoarsen(g, rng, fm, where, max_part, p, tr);
     if (tr) local.refine_s += timer.lap();
+    if (timing) timing->uncoarsen_s += stage.lap();
   }
   if (trace) {
     // Collected coarsest first; report finest first.

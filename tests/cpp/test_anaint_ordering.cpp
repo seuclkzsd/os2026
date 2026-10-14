@@ -118,11 +118,13 @@ TEST(DriverOrderingModel, AnalysisTimes) {
             ordering_analysis_s(kOrderingNestedDissection, in, fe, 4));
   EXPECT_GT(ordering_analysis_s(kOrderingNestedDissection, in, fe, 4),
             ordering_analysis_s(kOrderingNestedDissection, in, fe, 64));
-  // AMD is the cheapest; at 4 threads hsolve's nested dissection undercuts the MUMPS ones.
+  // AMD is the cheapest; at 16 threads (the fitted configuration) hsolve's nested dissection
+  // undercuts the MUMPS ones (P5c's model: from 4 threads on; P9's refit prices the 4-thread
+  // nested dissection about like SCOTCH).
   for (const int o : {kOrderingNestedDissection, 5, 4, 3})
     EXPECT_LT(ordering_analysis_s(0, in, fe, 4), ordering_analysis_s(o, in, fe, 4)) << o;
   for (const int o : {5, 4, 3})
-    EXPECT_LT(ordering_analysis_s(kOrderingNestedDissection, in, fe, 4), ordering_analysis_s(o, in, fe, 4)) << o;
+    EXPECT_LT(ordering_analysis_s(kOrderingNestedDissection, in, fe, 16), ordering_analysis_s(o, in, fe, 16)) << o;
   // Larger inputs cost more; the compressed graph of a mostly complex pencil costs hsolve's nested
   // dissection less (MUMPS orders the full embedding).
   const hs::driver::MumpsInputSize m2{2 * m.order, 2 * m.entries};
@@ -241,15 +243,16 @@ TEST(DriverOrderingModel, ChoiceWithMargin) {
   EXPECT_EQ(choose_ordering(std::vector<hs::driver::OrderingCandidate>(1)), 0u);
 }
 
-// SCOTCH is a candidate taken on its prediction (its orderings vary between runs), preferred over
-// hsolve's nested dissection on near-equal scores; the others are compared on their estimates.
+// SCOTCH is a candidate taken on its prediction (its orderings vary between runs); since P9
+// hsolve's nested dissection is preferred over it on near-equal scores; the others are compared on
+// their estimates.
 TEST(DriverOrderingModel, CandidatesTakeScotchOnItsPrediction) {
   using hs::driver::taken_on_prediction;
   const auto o = hs::driver::candidate_orderings(hs::SolverConfig{});
   ASSERT_GE(o.size(), 3u);
   EXPECT_EQ(o[0], 0);  // the AMD probe comes first
-  EXPECT_EQ(o[1], hs::driver::kOrderingScotch);
-  EXPECT_EQ(o[2], kOrderingNestedDissection);
+  EXPECT_EQ(o[1], kOrderingNestedDissection);
+  EXPECT_EQ(o[2], hs::driver::kOrderingScotch);
   for (const int x : o) EXPECT_EQ(taken_on_prediction(x), x == hs::driver::kOrderingScotch) << x;
 }
 

@@ -5,6 +5,7 @@
 #include <climits>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -55,6 +56,12 @@ class Dissector {
       stats->top_separator_s = top_separator_s_;
       stats->work_s = static_cast<double>(work_ns_.load()) * 1e-9;
       stats->critical_path_s = static_cast<double>(critical_ns_.load()) * 1e-9;
+      stats->separator.coarsen_s = static_cast<double>(sep_ns_[0].load()) * 1e-9;
+      stats->separator.runs_s = static_cast<double>(sep_ns_[1].load()) * 1e-9;
+      stats->separator.uncoarsen_s = static_cast<double>(sep_ns_[2].load()) * 1e-9;
+      stats->separator.small_s = static_cast<double>(sep_ns_[3].load()) * 1e-9;
+      stats->extract_s = static_cast<double>(extract_ns_.load()) * 1e-9;
+      stats->leaf_s = static_cast<double>(leaf_ns_.load()) * 1e-9;
       stats->depth_separator.clear();
       for (const auto& d : depth_separator_) stats->depth_separator.push_back(d.load());
       while (!stats->depth_separator.empty() && stats->depth_separator.back() == 0)
@@ -68,7 +75,10 @@ class Dissector {
     order_[static_cast<std::size_t>(pos)] = pc.label.empty() ? local : pc.label[local];
   }
 
+  static std::int64_t ns(double seconds) { return static_cast<std::int64_t>(seconds * 1e9); }
+
   void leaf(const Piece& pc) {
+    Timer t;
     ++leaves_;
     if (pc.g.n <= kMaxMinimumDegree && pc.g.edges() > 0) {
       const std::vector<std::int32_t> md = minimum_degree(pc.g);
@@ -76,6 +86,7 @@ class Dissector {
     } else {
       for (std::int32_t k = 0; k < pc.g.n; ++k) place(pc, k, pc.first + k);
     }
+    leaf_ns_ += ns(t.seconds());
   }
 
   // Accounts the work of one piece (started at t, after `path_ns` of work on its ancestors):
@@ -95,12 +106,23 @@ class Dissector {
     const Graph& g = pc->g;
     if (g.n == 0) return;
     Timer work;
-    if (g.n <= p_.leaf_size || g.edges() == 0) {
+    // Leaf size in variables (vertex weight): a compressed graph keeps the tree of the original.
+    if (g.total_vwgt <= p_.leaf_size || g.edges() == 0) {
       leaf(*pc);
       add_work(work, pc->path_ns);
       return;
     }
-    const std::vector<std::uint8_t> where = vertex_separator(g, pc->seed, p_.separator);
+    SeparatorTiming timing;
+    SeparatorParams sp = p_.separator;
+    if (pc->depth < p_.top_depth || g.total_vwgt >= p_.top_size) {
+      sp.runs = p_.top_runs;
+      sp.finalists = p_.top_finalists;
+    }
+    const std::vector<std::uint8_t> where = vertex_separator(g, pc->seed, sp, nullptr, &timing);
+    sep_ns_[0] += ns(timing.coarsen_s);
+    sep_ns_[1] += ns(timing.runs_s);
+    sep_ns_[2] += ns(timing.uncoarsen_s);
+    sep_ns_[3] += ns(timing.small_s);
     if (pc->depth == 0) top_separator_s_ = work.seconds();
     std::int32_t count[3] = {0, 0, 0};
     for (const std::uint8_t w : where) ++count[w];
@@ -118,6 +140,7 @@ class Dissector {
     for (std::int32_t v = 0; v < g.n; ++v)
       if (where[v] == kSeparator) place(*pc, v, pos++);
 
+    Timer extract;
     std::unique_ptr<Piece> half[2];
     for (int side = 0; side < 2; ++side) {
       auto h = std::make_unique<Piece>();
@@ -134,6 +157,7 @@ class Dissector {
       h->depth = pc->depth + 1;
       half[side] = std::move(h);
     }
+    extract_ns_ += ns(extract.seconds());
     const std::int64_t path = pc->path_ns;
     pc.reset();  // free the parent before descending
     half[0]->path_ns = half[1]->path_ns = add_work(work, path);
@@ -149,7 +173,8 @@ class Dissector {
   std::vector<std::int32_t> order_;
   static constexpr int kMaxDepth = 64;
   std::atomic<std::int64_t> separators_{0}, leaves_{0}, top_separator_{0}, work_ns_{0},
-      critical_ns_{0};
+      critical_ns_{0}, extract_ns_{0}, leaf_ns_{0};
+  std::atomic<std::int64_t> sep_ns_[4] = {};
   double top_separator_s_ = 0.0;  // written by the task at depth 0 only
   std::atomic<std::int64_t> depth_separator_[kMaxDepth] = {};
   std::mutex error_mutex_;
@@ -297,6 +322,19 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
                                << ordering::kMaxImbalance << "], got " << o.imbalance);
   if (o.coarsen_to < 2 || o.coarsen_to > INT_MAX)
     HS_THROW(InvalidInput, "OrderingOptions.coarsen_to must be >= 2, got " << o.coarsen_to);
+  if (o.separator_runs < 1 || o.separator_runs > 64 || o.separator_finalists < 1 ||
+      o.separator_finalists > o.separator_runs)
+    HS_THROW(InvalidInput,
+             "OrderingOptions: need 1 <= separator_finalists <= separator_runs <= 64, got "
+                 << o.separator_finalists << ", " << o.separator_runs);
+  if (o.top_depth < 0 || o.top_size < 0 || o.top_runs < 1 || o.top_runs > 64 ||
+      o.top_finalists < 1 || o.top_finalists > o.top_runs)
+    HS_THROW(InvalidInput,
+             "OrderingOptions: need top_depth, top_size >= 0 and 1 <= top_finalists <= top_runs <= "
+             "64, got "
+                 << o.top_depth << ", " << o.top_finalists << ", " << o.top_runs);
+  if (o.flow_depth < 0 || o.flow_depth > 16)
+    HS_THROW(InvalidInput, "OrderingOptions.flow_depth must lie in [0, 16], got " << o.flow_depth);
   if (o.init_tries < 1 || o.refine_passes < 0)
     HS_THROW(InvalidInput, "OrderingOptions: init_tries must be >= 1 and refine_passes >= 0, got "
                                << o.init_tries << ", " << o.refine_passes);
@@ -322,17 +360,40 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
                                    pencil.colind().data());
   const std::int64_t edges = g.edges() / 2;
   const index_t vertices = g.n;
+  const int threads = o.threads > 0 ? o.threads : max_threads();
+  // Indistinguishable vertices (identical closed neighbourhoods) as one weighted vertex.
+  ordering::Graph cg;
+  std::vector<std::int32_t> class_first, class_members;
+  const bool graph_compressed =
+      o.compress && ordering::compress_graph(g, ordering::kCompressionRatio, threads, cg,
+                                             class_first, class_members);
+  if (graph_compressed) g = std::move(cg);
+  const index_t ordered_vertices = g.n;
   ordering::DissectionParams p;
   p.separator.imbalance = o.imbalance;
   p.separator.coarsen_to = static_cast<std::int32_t>(o.coarsen_to);
   p.separator.init_tries = o.init_tries;
   p.separator.refine_passes = o.refine_passes;
+  p.separator.runs = o.separator_runs;
+  p.separator.finalists = o.separator_finalists;
+  p.separator.flow_depth = o.flow_depth;
+  p.top_depth = o.top_depth;
+  p.top_size = o.top_size > 0 ? o.top_size : std::numeric_limits<std::int64_t>::max();
+  p.top_runs = o.top_runs;
+  p.top_finalists = o.top_finalists;
   p.leaf_size = static_cast<std::int32_t>(o.leaf_size);
   p.seed = o.seed;
-  const int threads = o.threads > 0 ? o.threads : max_threads();
   ordering::DissectionStats ds;
-  const std::vector<std::int32_t> order =
-      ordering::nested_dissection(std::move(g), p, threads, &ds);
+  std::vector<std::int32_t> order = ordering::nested_dissection(std::move(g), p, threads, &ds);
+  if (graph_compressed) {
+    // Each class eliminated as a block, its members in increasing order.
+    std::vector<std::int32_t> expanded;
+    expanded.reserve(static_cast<std::size_t>(vertices));
+    for (const std::int32_t q : order)
+      for (std::int32_t m = class_first[q]; m < class_first[q + 1]; ++m)
+        expanded.push_back(class_members[m]);
+    order = std::move(expanded);
+  }
 
   std::vector<int> perm(static_cast<std::size_t>(n * kFactor), 0);
   for (index_t k = 0; k < vertices; ++k) {
@@ -353,6 +414,7 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
     stats->complex_fraction = complex_fraction;
     stats->compressed = compressed;
     stats->edges = edges;
+    stats->ordered_vertices = ordered_vertices;
     stats->separators = ds.separators;
     stats->leaves = ds.leaves;
     stats->top_separator = ds.top_separator;
@@ -360,10 +422,44 @@ std::vector<int> compute_ordering(const ShiftedPencil<T>& pencil, const Ordering
   return perm;
 }
 
+template <class T>
+double ordering::indistinguishable_ratio(const ShiftedPencil<T>& pencil) {
+  const index_t n = pencil.order();
+  if (n == 0) return 1.0;
+  const auto& rp = pencil.rowptr();
+  const auto& ci = pencil.colind();
+  auto mix = [](index_t v) {
+    std::uint64_t z = 0x9E3779B97F4A7C15ULL * (static_cast<std::uint64_t>(v) + 1);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+  };
+  std::vector<std::uint64_t> h(static_cast<std::size_t>(n));
+  std::vector<std::int32_t> deg(static_cast<std::size_t>(n), 0);
+  for (index_t i = 0; i < n; ++i) h[i] = mix(i);
+  for (index_t i = 0; i < n; ++i)
+    for (index_t p = rp[i]; p < rp[i + 1]; ++p) {
+      const index_t j = ci[p];
+      if (j == i) continue;
+      h[i] += mix(j), h[j] += mix(i);
+      ++deg[i], ++deg[j];
+    }
+  std::vector<std::uint8_t> merged(static_cast<std::size_t>(n), 0);
+  for (index_t i = 0; i < n; ++i)
+    for (index_t p = rp[i]; p < rp[i + 1]; ++p) {
+      const index_t j = ci[p];
+      if (j != i && h[i] == h[j] && deg[i] == deg[j]) merged[j] = 1;
+    }
+  index_t classes = 0;
+  for (index_t i = 0; i < n; ++i) classes += merged[i] == 0;
+  return static_cast<double>(classes) / static_cast<double>(n);
+}
+
 #define HS_INSTANTIATE_ORDERING(T)                                                               \
   template std::vector<int> compute_ordering<T>(const ShiftedPencil<T>&, const OrderingOptions&, \
                                                 OrderingStats*);                                 \
-  template double ordering::complex_coupling_fraction<T>(const ShiftedPencil<T>&);
+  template double ordering::complex_coupling_fraction<T>(const ShiftedPencil<T>&);               \
+  template double ordering::indistinguishable_ratio<T>(const ShiftedPencil<T>&);
 HS_FOR_EACH_SCALAR(HS_INSTANTIATE_ORDERING)
 #undef HS_INSTANTIATE_ORDERING
 

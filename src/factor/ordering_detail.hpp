@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "hsolve/sparse.hpp"
@@ -35,6 +36,14 @@ namespace hs::ordering {
 template <class T>
 double complex_coupling_fraction(const ShiftedPencil<T>& pencil);
 inline constexpr double kCompressedFraction = 0.5;
+
+/// Share of the n vertices of the pencil's graph (K's pattern) that remain after merging
+/// indistinguishable vertices (compress_graph), for the driver's ordering cost model: classes are
+/// counted by an order-independent hash of the closed neighbourhood and the degree, compared along
+/// the pattern's edges (indistinguishable vertices are adjacent), without building the graph -
+/// hash collisions could only lower the count. 1 for an empty pencil. O(nnz), serial.
+template <class T>
+double indistinguishable_ratio(const ShiftedPencil<T>& pencil);
 
 /// Undirected graph in CSR form: symmetric adjacency, no self-loops, positive integer vertex
 /// and edge weights (edge weights stored per adjacency entry, equal in both directions). Rows
@@ -57,6 +66,20 @@ struct Graph {
 /// The graph of a symmetric pattern given by its upper triangle (row i lists columns j >= i,
 /// ascending; the diagonal, if present, is ignored) with unit weights. O(nnz), serial.
 Graph graph_from_upper(std::int32_t n, const std::int64_t* rowptr, const std::int32_t* colind);
+
+/// Indistinguishable vertices - identical closed neighbourhoods adj(v) + {v} - merged (METIS
+/// CompressGraph; SCOTCH compresses as well): they are eliminated together in every minimum
+/// degree / nested dissection order, so the dissection can work on one weighted vertex per class
+/// (vertex weight = summed weights, unit edge weights, rows sorted). Such vertices are always
+/// adjacent, so each vertex is compared with its neighbours only: O(edges), parallel, the result
+/// independent of the thread count. Returns false when the classes would keep more than
+/// max_ratio of the vertices (the outputs are then cleared); else `c` is the compressed graph
+/// and members[first[k] .. first[k + 1]) the vertices of class k, increasing; classes are
+/// numbered in the order of their smallest member.
+bool compress_graph(const Graph& g, double max_ratio, int threads, Graph& c,
+                    std::vector<std::int32_t>& first, std::vector<std::int32_t>& members);
+/// METIS' threshold (COMPRESSION_FRACTION): compress when at most 85% of the vertices remain.
+inline constexpr double kCompressionRatio = 0.85;
 
 /// Counter-based random numbers (SplitMix64): value k of stream `seed` is a pure function of
 /// (seed, k), so results never depend on which thread draws them.
@@ -88,6 +111,16 @@ inline constexpr int kTwoStageLevels = 4;
 inline constexpr int kTwoStageRuns = 5;
 inline constexpr std::int32_t kParallelRunSize = 1000;
 
+/// Graphs of at least this many vertices are contracted (coarsening) and split into the halves of
+/// a separator (induced_subgraph) by concurrent OpenMP tasks (taskloop in the caller's team: the
+/// top of the dissection, where few pieces keep the threads busy, is its critical path). The
+/// results are the serial loops', bit for bit: each output row is written by one task at an
+/// offset from a serial prefix sum (test FactorOrderingGraph.ConcurrentSubgraphIsTheSerialOne;
+/// syn-mem27-100's order kept its 6.8089e12 flops when the taskloops came in, results/p9_ordering.md
+/// section 5.2; the orders' thread independence across this size: test
+/// FactorOrderingDissection.TopEffortIsThreadIndependentAndOnlyChangesTheTop, a 27000-vertex grid).
+inline constexpr std::int32_t kParallelGraphSize = 20000;
+
 /// Largest subgraph the dissection orders by minimum degree (bitset elimination graph: O(n^2/64)
 /// memory, up to O(n^3/64) time), hence the largest DissectionParams::leaf_size (and
 /// OrderingOptions::leaf_size). A larger subgraph that cannot be split (no separator leaves both
@@ -114,6 +147,19 @@ struct SeparatorParams {
   int init_tries = 7;             ///< greedy-growing attempts on the coarsest graph
   int refine_passes = 10;         ///< node-FM passes per level (stop early without gain)
   int refine_mode = 1;            ///< 0 two-sided FM, 1 one-sided (METIS ND default), 2 both
+  int runs = kTwoStageRuns;       ///< two-stage scheme: trial bisections of the mid graph
+  int finalists = 1;              ///< two-stage scheme: the best this many trial separators (on
+                                  ///< the mid graph) are refined down to the input graph, where
+                                  ///< the best one is kept (1: METIS' scheme)
+  int flow_depth = 0;             ///< > 0: after FM, the minimum vertex cut in a band of this
+                                  ///< many BFS layers on each side of the separator (max flow,
+                                  ///< FlowRefiner in ordering_separator.cpp; compute_ordering: 2)
+  bool flow_finest_only = true;   ///< the flow on the input graph only, not on the coarser
+                                  ///< levels (same separators at a fraction of the cost: the
+                                  ///< coarse levels' weighted networks need 80-95 phases)
+  bool flow_in_trials = false;    ///< two-stage scheme: also in the trial bisections of the mid
+                                  ///< graph (with flow_finest_only: on the mid graph itself)
+  std::int32_t flow_min_vertices = 0;  ///< no flow on graphs with fewer vertices
 };
 
 /// What vertex_separator did, level by level (index 0 = the input graph), for benches and tests.
@@ -127,12 +173,22 @@ struct SeparatorTrace {
   double refine_s = 0.0;                ///< time in projection + FM refinement
 };
 
+/// Wall time of vertex_separator's stages, added to by every call that receives it (benches; the
+/// fields are plain doubles: one SeparatorTiming per thread or per call).
+struct SeparatorTiming {
+  double coarsen_s = 0.0;    ///< two-stage: contractions of the input graph down to the mid graph
+  double runs_s = 0.0;       ///< two-stage: the trial bisections of the mid graph (wall time)
+  double uncoarsen_s = 0.0;  ///< two-stage: projection and refinement back to the input graph
+  double small_s = 0.0;      ///< graphs below kTwoStageSize: the whole (single) bisection
+};
+
 /// Multilevel vertex separator of g (g.n >= 1). Returns the part label of every vertex. The
 /// separator is minimal in the FM sense (no single move reduces its weight within the balance
 /// constraint) but not optimal. Deterministic in (g, seed, params). O(edges * levels).
 std::vector<std::uint8_t> vertex_separator(const Graph& g, std::uint64_t seed,
                                            const SeparatorParams& params,
-                                           SeparatorTrace* trace = nullptr);
+                                           SeparatorTrace* trace = nullptr,
+                                           SeparatorTiming* timing = nullptr);
 
 /// Weight of the separator and of the two halves of `where`, and whether it is a valid vertex
 /// separator of g (no edge between parts 0 and 1). For tests and assertions. O(edges).
@@ -147,14 +203,24 @@ SeparatorCheck check_separator(const Graph& g, const std::vector<std::uint8_t>& 
 Graph induced_subgraph(const Graph& g, const std::vector<std::uint8_t>& where, std::uint8_t part,
                        std::vector<std::int32_t>& to_parent);
 
-/// Minimum-degree elimination order of g (exact external degrees on an explicit elimination
-/// graph kept as bitsets: O(n^2 / 64) memory, meant for the small leaves of the dissection).
-/// order[k] = vertex eliminated k-th; ties go to the lowest vertex number.
+/// Minimum-degree elimination order of g (exact degrees on an explicit elimination graph kept as
+/// bitsets: O(n^2 / 64) memory, meant for the small leaves of the dissection). The degree of a
+/// vertex is the summed weight of its neighbours (a compressed vertex stands for vwgt[v]
+/// variables; with unit weights it is the plain degree). order[k] = vertex eliminated k-th; ties
+/// go to the lowest vertex number.
 std::vector<std::int32_t> minimum_degree(const Graph& g);
 
 struct DissectionParams {
   SeparatorParams separator;     ///< imbalance in [1, 2) (from 2 on a half may take the whole
                                  ///< subgraph); compute_ordering admits [1, kMaxImbalance]
+  /// The separators of the top `top_depth` levels of the dissection, and of every subgraph of at
+  /// least `top_size` (vertex weight) - the largest, which set most of the factorization's
+  /// flops, computed while most threads would idle - with `top_runs` trial bisections and
+  /// `top_finalists` finalists instead of separator.runs / .finalists.
+  int top_depth = 0;
+  std::int64_t top_size = std::numeric_limits<std::int64_t>::max();
+  int top_runs = kTwoStageRuns;
+  int top_finalists = 1;
   std::int32_t leaf_size = 120;  ///< subgraphs with at most this many vertices: minimum degree
                                  ///< (1..kMaxMinimumDegree)
   std::int32_t task_size = 512;  ///< subgraphs below this size are ordered inline, not as tasks
@@ -176,6 +242,11 @@ struct DissectionStats {
                                  ///< critical). Exact with 1 thread; with more, a piece's
                                  ///< time includes waiting for its stolen trial bisections
   int threads = 1;               ///< OpenMP threads that ran the dissection
+  // Where the work went (summed over the pieces, like work_s): separators by stage
+  // (SeparatorTiming), the extraction of the two halves, the leaves' minimum degree.
+  SeparatorTiming separator;
+  double extract_s = 0.0;
+  double leaf_s = 0.0;
 };
 
 /// Nested-dissection elimination order of g with `threads` OpenMP threads (>= 1): order[k] =
