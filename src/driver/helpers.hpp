@@ -170,8 +170,11 @@ struct MumpsInputSize;
 
 /// A helper's count runs on one socket's cores, the leader's on all of them: measured (results/
 /// p10_mpi.md §2.1) a count on 8 cores of one socket takes 1.53x the leader's 16-thread count over
-/// two sockets at 1e6 and 0.85x at 1e5; the larger is the rule's.
-constexpr double kHelperCountSlowdown = 1.53;
+/// two sockets at 1e6 and 0.85x at 1e5 (the leader's first count on a fresh instance spread over
+/// two sockets is slow there). The rule takes them as equal: the helpers pay when one count
+/// outweighs their preparation. With 1.53 the 1e5 3-D cases, whose certificate the helpers sped up
+/// by 0.25 s (syn-mem27-46: 1.01 -> 0.76 s), would have stayed on the leader.
+constexpr double kHelperCountSlowdown = 1.0;
 /// An inertia-only count costs this share of a factorization (the ordering model's `count`, 0.896).
 constexpr double kCounterCountShare = 0.9;
 /// Fixed cost of handing a problem to the helpers and hearing back (messages, the helper's pencil;
