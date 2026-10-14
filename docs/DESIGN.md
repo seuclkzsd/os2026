@@ -341,15 +341,23 @@ src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出�
     端到端只有 1.03–1.04 倍（5 次交错、每次都有效：默认配置 syn-mem27-100 1.066、yee-pec-box-1e6 1.032，SCOTCH
     波动大；固定 METIS 排序 1.038 / 1.027），未达默认值要求的 1.05 倍，故为可选；1e5 的 41 个数据测例上几何平均
     1.003、无超出噪声的变慢。未设、空或 `mumps` 为 MUMPS 自己的块参数，其它值抛 InvalidInput。计数与 MUMPS 默认块参数下逐个相同，
-    与解析值相同（`test_factor_panel`，实/复、近奇异位移）。
+    与解析值相同（`test_factor_panel`，实/复、近奇异位移；其中一个装配树已知并断言的矩阵——两个 200 列完全求和、
+    贡献块 1100 行的叶前沿构成 2 线程的 L0 层，根 2100——确保 KEEP(57/58) 的行块与补丁的 L0 块确实走到不同路径）。
   - **从源码构建 MUMPS（可选）**：`tools/dev/build_mumps.sh NAME [--isa] [--opt] [--gemmt] [--patch]` 由官方 tarball
     （sha256 与 conda-forge 配方相同）用环境的编译器与 METIS/SCOTCH/OpenBLAS 构建，库名与 soname 同 conda-forge
     （可 LD_PRELOAD 替换），不需要 glibc > 2.17；CMake `-DHSOLVE_MUMPS_ROOT=<安装目录>` 让 hsolve 链接它（其 lib/ 在
-    RPATH 最前，`test_factor_mumps_build` 检查实际映射的库）。-O3 与 x86-64-v3 / skylake-avx512 单独无收益
-    （1.000–1.005），故不作默认。`patches/mumps-5.8.2-l0-blocking.patch`：L0 层下（KEEP(405)=1）用 KEEP(498/499)
+    RPATH 最前，`test_factor_mumps_build` 检查实际映射的库）。脚本默认 nocona -O2（conda-forge 的编译选项，任何
+    x86-64 CPU 可用，即门槛实测的构建）；-O3 与 x86-64-v3 / skylake-avx512 单独无收益（1.000–1.005）且不可移植
+    （无 AVX2/FMA 的 CPU 上 SIGILL），只作显式选项。`patches/mumps-5.8.2-l0-blocking.patch`：L0 层下（KEEP(405)=1）用 KEEP(498/499)
     代替 KEEP(420) 与 KEEP(7/8/218)（清零带随之变窄）；与 p9 块参数一起再快 1.8–2.1%（计数共 1.073–1.079 倍），
-    端到端（默认配置 5 次交错，均有效）syn-mem27-100 1.125、yee-pec-box-1e6 1.066 倍——达到 1.05 倍，但自建 MUMPS
-    不是默认构建（部署需带 tarball 并先构建 MUMPS：tools/dev/build.sh 与部署脚本归 lead），故仍为可选。
+    端到端（默认配置，每次运行都有效）syn-mem27-100 过线（两组 5 次交错 1.125、1.089；按相同 flops 折算 1.061），
+    yee-pec-box-1e6 只在线上：四组 5 次交错的中位数比 1.066、1.045、1.075、1.048（两过两不过），每个二进制合并
+    20 次 1.059 [bootstrap 1.042–1.073]、按相同 flops 折算 1.055 [1.050–1.064]，固定 METIS 主元顺序（无 SCOTCH
+    波动）只有 1.040（syn-mem27-100 1.061）。评审前写的“1.125 / 1.066，门槛通过、建议作默认构建”只是一组运气好的
+    样本，已撤回：依据不足，不建议作默认构建；仍为可选（`-DHSOLVE_MUMPS_ROOT`；作默认还需部署带 tarball 并先构建
+    MUMPS：tools/dev/build.sh 与部署脚本归 lead）。
+    以后这类门槛应消除 SCOTCH 的波动：两个二进制用同一主元顺序，或每个 20 次并按 flops 折算
+    （`tools/bench/factspeed_gate_flops.py`，`results/p9_factspeed.md` §4.5）。
   - 实测为负、未采用：OMP_PROC_BIND / OMP_PLACES、OMP_WAIT_POLICY（passive 0.93）、关透明大页（0.96）、L0 层位置
     KEEP(408) 与关 L0（ICNTL(48)=0：0.95）、合并 KEEP(1)、更高的三角条带 KEEP(7/8)、GEMMT（OpenBLAS 的 dgemmt 是
     逐列 dgemv）。选主元阈值 CNTL(1)、PIVOT_OPTION KEEP(468) 未动（计数的惯性必须是 K 的）。
