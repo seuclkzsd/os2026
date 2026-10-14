@@ -1211,7 +1211,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   op(A)——较小的「共享」操作数，每次调用上传一次——与 op(B) 的列块；否则按行）。每块：发射线程把块的操作数以非临时
   存储打包进页锁定暂存区、H2D、`cublasDgemm`（FP64，β = 0，C 从不上传）、D2H 到页锁定区；完成线程在主机上做
   C_块 = β C_块 + T（β = 0 不读 C）。2 个发射线程（各一个 cuBLAS 句柄）、6 个流水槽（暂存区、设备缓冲、各一个流）、
-  每槽 16 MB，设备内存一次分配 1 GiB（`mem_mb`），页锁定主机内存 224 MB。默认**只用 GPU**（调用线程等待：L0 层之上
+  每槽 16 MB，设备内存一次分配 1 GiB（`mem_mb`），页锁定主机内存 224 MB；块按剩余量的 1/(槽数 + 1) 引导式认领（最后的块小、
+  流水线排空快，比等分块快 5–10%）。默认**只用 GPU**（调用线程等待：L0 层之上
   MUMPS 一次只更新一个前沿，CPU 本也无事可做）；CPU 分担一部分的混合模式实测更慢（主机内存带宽之争），只作测量选项。
 - **为何受主机内存带宽而非 PCIe 限制**（`bench/gpu_dgemm.cpp`）：每个暂存的字节主机要读源、写暂存区、复制引擎再读一遍，
   加法读 T 与 C、写 C——实测约 30–32 GB/s 的主机流量即槽的极限。一次调用的时间很贴近
@@ -1223,8 +1224,13 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   双精度）。所以**证书的 Sylvester 计数不变**：惯性是 K 的性质，计数端点在谱隙中（§3.6-8），舍入级差异不改变主元符号；
   实测每次计数与 CPU 路径相同（`results/p10_gpu.md`），单元测试在不定三维 Laplacian 上对比解析计数。只用 GPU 时块的大小只
   取决于形状，同一 GPU 与库下逐位可复现；混合模式不可复现（哪些列给 GPU 取决于时序）。
+- **实测**（gpu02 测量槽 + GPU 7 = V100-PCIE-16GB，16 线程，`results/p10_gpu.md`）：1e6 分解中被卸载的贡献块更新占
+  43–47% 的 flops、只占 CPU 时间的 22%；同一主元顺序、5 次交错：每次分解 1.06–1.10×（MUMPS 默认块参数），P9 块参数
+  （2000 行的 CB 行块，每字节两倍的功）下 1.07–1.12×，8 线程 1.15×；整次运行（`--gpu auto`，5 次交错、每次有效、
+  计数相同）syn-mem27-100 1.069×、yee-pec-box-1e6 1.058×，即分解的节省，回代不变；n ≤ 2.6e5
+  的三维测例上 `on` 为 0.72–0.97×（0.27–0.4 s 的初始化、没有值得卸载的调用），5.1e5 上持平。
 - **模式与进程级状态**（`offload`）：`off`（默认：不加载任何 CUDA 库，与今天的 CPU 路径完全相同）、`auto`（某次分解的
-  MUMPS 估计 RINFOG(1) ≥ `auto_min_flops` = 1e12 时才用 GPU：1e5 规模的测例永远不碰 CUDA）、`on`（每次分解都开窗口，
+  MUMPS 估计 RINFOG(1) ≥ `auto_min_flops` = 3e12 时才用 GPU：1e5 规模的测例永远不碰 CUDA）、`on`（每次分解都开窗口，
   逐调用的模型仍把不划算的调用留在 CPU）。设置：环境变量 `HS_GPU`、`hsolve --gpu off|auto|on`（经
   `include/hsolve/gpu.hpp` 的 dlsym 找到 hook 的 C 入口 `hsolve_gpu_set_mode`），调参 `HS_GPU_OPTS`（`device`、`mem_mb`、
   `slot_mb`、`pack`、`slots`、`min_gflop`、`cpu_gflops`、`host_gbs`、`min_speedup`、`auto_min_tflop` 等，未知键终止
@@ -1242,7 +1248,7 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   并发、注入的 CUDA 故障，以及 hook 链入的进程中三维 Laplacian 的惯性与解析计数一致、`hsolve --gpu on` 的特征值与证书
   计数与 CPU 相同。
 - **未做 / 实测为负**（`results/p10_gpu.md`）：混合 CPU + GPU（主机带宽之争，GPU-only 更快）；小块暂存 + 普通存储
-  （让复制引擎从 LLC 读，0.92–1.06×）；`cudaHostRegister` MUMPS 的前沿（操作数在前沿中跨距为 NFRONT，按地址范围注册
+  （让复制引擎从 LLC 读，0.89–1.03×）；`cudaHostRegister` MUMPS 的前沿（操作数在前沿中跨距为 NFRONT，按地址范围注册
   4–30 倍于数据量，且跨调用缓存注册在 MUMPS 释放、重用内存时不安全）；跨调用缓存 B 块（同一原因）；L0 层内的调用
   （单线程 35 GFlop/s 的调用可以卸载，但只有一个调用能用 GPU，收益估计 ≤ 2%）；回代（受带宽限制，因子不在 GPU 上）；
   SPRAL SSIDS 整体上 GPU（G1，`exp-gpu-ssids`：1e5 上 0.9–1.85×、回代更慢、1e6 上显存满）。
@@ -1394,3 +1400,4 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
 | P7 | **已完成**（p7-membudget-fix）：内存预算默认 auto（cgroup、`HSOLVE_MEMORY_LIMIT_GB`、RLIMIT_AS/DATA、MemTotal 中最小的上限 L，0.85·L；地址空间上限按 VmSize 计并扣除已预留部分）；分析后按其常驻增量重新规划；内存失败改外存重试；ICNTL(23) 按 MUMPS 估计给出；单精度 / BLR 因子每次 apply 受检查、未达标以双精度同一主元顺序重解，`factor_precision = auto`（只在双精度放不进内存而单精度放得进时，可选）。32 GiB 下 1e6 三维测例改为内存内，快 1.71–1.83×（`results/p7_membudget.md`）。P6（混合精度求解，负结果）见分支 p6-mixprec-fix。 |
 | P8 | **已完成**（p8-certcost-fix）：证书的计数失败不再结束求解——计数源（InertiaCounter / 主对象）失败时换另一个，计数前按计数余量检查估计（主对象代替计数器时按其上次分解的 INFOG(21)），SCOTCH 分析超上限时至多再分析两次；都不行时 nearest 交回已收敛的对、证书标为未完成（success = false），窗口目标只丢失败的切片；一般 HPD B 的 κ 与 λ_min 严格界（只用于 auto / randomized）；更便宜的精确计数全部实测为负（两进程并行、单次合并分解、省缩放/检测、换计数源），默认证书仍为 exact（`results/p8_certcost.md`）。 |
 | P9 | **ordering 已完成**（分支 p9-ordering，评审修正 p9-ordering-fix）：自研嵌套剖分——taskwait → taskgroup（关键路径上连带等待兄弟子树的缺陷）、图压缩与按权叶子、大图并发收缩与切分、分隔子的流精修（带内最小顶点割；driver 只在计划的数值时间 ≥ 4.5 倍预测排序时间时采用）、顶层投入（代价模型决定）；代价模型按新剖分重拟合，候选顺序中它先于 SCOTCH，图规模按压缩后计。最终代码的门槛（测量槽，ABBA，全部有效、证书 exact）：1e6 内存内（5 次）syn-mem27-100 111.0 → 89.0 s（1.25×）、yee-pec-box-1e6 89.7 → 73.7 s（1.22×）；26 个 n ≤ 1e5 数据测例（3 次）几何平均 0.919，18 例快 3% 以上；初稿的 yee-pec-cube-16 系统性变慢（+9%：流精修后的排列在 16 线程下分析、分解、回代都更慢）已消除（20 次 1.015），剩 wg-square-n289（n = 289）以与 main 相同的排列慢 1.6 ms（`results/p9_ordering.md` §8）。**未做**：三维问题省去 AMD 探测、高度图上的流精修代价、deterministic 路径改用自研嵌套剖分 |
+| P10 | **gpu 已完成**（分支 p10gpu；本行为 GPU 部分的文本建议，MPI 部分见 p10mpi）：src/gpu——运行时 dlopen 的 CUDA runtime / cuBLAS（构建不需要 CUDA），BLAS hook 在 MUMPS 分解（含证书计数）中把主机流量模型判为划算的大 dgemm 以 FP64 卸载到一张 GPU（暂存打包、cuBLAS、主机加回，默认只用 GPU）；`HS_GPU` / `hsolve --gpu off\|auto\|on`，默认 off（CPU 路径不变），auto 只在分解估计 ≥ 3e12 flops 时用 GPU，无 GPU / 无库时为 CPU 路径并在报告中说明（降级模式）；报告的 `gpu` 对象。实测（gpu02 槽 + GPU 7，16 线程，5 次交错，`results/p10_gpu.md`）：单次调用 1.7–5.0×（受主机内存带宽限制）；1e6 三维测例同一主元顺序下每次分解 1.06–1.10×（三次合计 syn-mem27-100 1.092×、yee-pec-box-1e6 1.068×），配 P9 块参数 1.07–1.12×（合计 1.110× / 1.082×），8 线程 1.15×；GPU 承担分解 43–47% 的 flops；整次运行（证书 exact，`--gpu auto`，每次有效）syn-mem27-100 88.9 → 83.1 s（1.069×）、yee-pec-box-1e6 73.8 → 69.7 s（1.058×），峰值内存 +0.47 GiB；1e5–2.6e5 上 `on` 为负（0.72–0.97×）故 auto 只在估计 ≥ 3e12 flops 时用 GPU；计数与 CPU 路径完全相同。**未做**：混合 CPU + GPU、L0 层内调用、回代上 GPU（受主机内存带宽 / 因子在主机内存所限，见 §3.9） |
