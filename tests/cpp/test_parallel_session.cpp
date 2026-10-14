@@ -666,6 +666,39 @@ TEST(ParallelSessionMemory, DropFreesWhatTheHelpersHold) {
   });
 }
 
+// A helper that could not prepare (here: a pivot order of the wrong size, InvalidInput when it
+// analyses) may still hold the matrices it received: it is not usable, and drop() frees it too.
+TEST(ParallelSessionMemory, HelpersThatCouldNotPrepareAreDroppedToo) {
+  const auto a = laplacian3d<double>();
+  hs::ShiftedPencil<double> pencil(a, nullptr);
+  const auto small = hs::test::laplacian_1d<double>(50);
+  hs::ShiftedPencil<double> other(small, nullptr);
+  hs::FactorOptions fo;
+  fo.threads = 1;
+  auto wrong = hs::make_mumps_factorization<double>(fo);
+  wrong->analyze(other, 1.0, -1.0);
+  ASSERT_EQ(wrong->pivot_order().size(), 50u);
+  hs::SolverConfig cfg = nearest_cfg();
+  hs::SolveReport rep;
+  hs::driver::PhaseClock clock;
+  hs::driver::Ctx c{cfg, nullptr, rep, clock};
+  hs::driver::ProblemInfo info;
+  info.sigma0 = kSigma;
+  info.prepare_count = true;
+  with_session(3, [&](hs::Transport& peers) {
+    hs::parallel::RemoteHelpers<double> hp(peers, 9u, kForce);
+    c.helpers = &hp;
+    hp.share(c, pencil, *wrong, info);
+    hp.prepare(c);
+    EXPECT_FALSE(hp.usable(1));
+    EXPECT_FALSE(hp.usable(2));
+    EXPECT_TRUE(has_note(rep, "could not take the problem")) << warnings(rep);
+    hp.drop(c, "test");
+    EXPECT_EQ(hp.memory_bytes(), 0.0);  // confirmed by both: nothing charged any more
+    c.helpers = nullptr;
+  });
+}
+
 // Helpers are fed only what the solve path uses: GHIEP and nearest targets without a certificate
 // share nothing.
 TEST(ParallelSessionScope, NothingSharedWithoutHelperWork) {

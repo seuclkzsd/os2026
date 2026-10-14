@@ -104,8 +104,7 @@ int RemoteHelpers<T>::receive_one(int h) const {
     x.owes_ready = false;
     x.ready = e.ok;
     if (!e.ok) {
-      x.holds = false;  // it dropped what it had built
-      x.usable = false;
+      x.usable = false;  // it may still hold what it built before it failed: holds stays (drop())
       if (ctx_)
         ctx_->rep.parallel.notes.push_back("helper " + std::to_string(from) + " could not take the problem: " +
                                            to_string(e.code) + ": " + e.what);
