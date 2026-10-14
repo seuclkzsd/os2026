@@ -114,7 +114,11 @@ inline constexpr std::int32_t kParallelRunSize = 1000;
 /// Graphs of at least this many vertices are contracted (coarsening) and split into the halves of
 /// a separator (induced_subgraph) by concurrent OpenMP tasks (taskloop in the caller's team: the
 /// top of the dissection, where few pieces keep the threads busy, is its critical path). The
-/// results are the same as the serial loops' (P9: syn-mem27-100 ... ).
+/// results are the serial loops', bit for bit: each output row is written by one task at an
+/// offset from a serial prefix sum (test FactorOrderingGraph.ConcurrentSubgraphIsTheSerialOne;
+/// syn-mem27-100's order kept its 6.8089e12 flops when the taskloops came in, results/p9_ordering.md
+/// section 5.2; the orders' thread independence across this size: test
+/// FactorOrderingDissection.TopEffortIsThreadIndependentAndOnlyChangesTheTop, a 27000-vertex grid).
 inline constexpr std::int32_t kParallelGraphSize = 20000;
 
 /// Largest subgraph the dissection orders by minimum degree (bitset elimination graph: O(n^2/64)

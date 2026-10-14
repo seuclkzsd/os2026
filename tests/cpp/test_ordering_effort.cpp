@@ -208,6 +208,55 @@ TEST(FactorOrderingCompression, IndistinguishableRatioForTheCostModel) {
   EXPECT_LT(in.nd.entries, in.mumps.entries / 4.0);
 }
 
+// --------------------------------------------------------------- concurrent graph splitting
+
+// induced_subgraph splits graphs of at least kParallelGraphSize vertices by concurrent taskloops in
+// the caller's team; the result must be the serial definition's, bit for bit (renumbered in the
+// parent's order, rows in the parent row's order, vertex and edge weights carried over).
+TEST(FactorOrderingGraph, ConcurrentSubgraphIsTheSerialOne) {
+  constexpr int kSide = 30;
+  ord::Graph g = graph_from_edges(kSide * kSide * kSide, grid_edges(kSide, kSide, kSide));
+  ASSERT_GE(g.n, ord::kParallelGraphSize);
+  for (std::int32_t v = 0; v < g.n; ++v) {
+    g.vwgt[v] = 1 + v % 5;
+    for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e)
+      g.ewgt[e] = 1 + (v + g.adj[e]) % 7;  // symmetric
+  }
+  g.total_vwgt = std::accumulate(g.vwgt.begin(), g.vwgt.end(), std::int64_t{0});
+  std::vector<std::uint8_t> where(static_cast<std::size_t>(g.n));
+  ord::Random rng(7);
+  for (auto& w : where) w = static_cast<std::uint8_t>(rng.below(3));
+  for (std::uint8_t part : {std::uint8_t{0}, std::uint8_t{1}}) {
+    // The serial definition.
+    std::vector<std::int32_t> parent, local(static_cast<std::size_t>(g.n), -1);
+    for (std::int32_t v = 0; v < g.n; ++v)
+      if (where[v] == part) local[v] = static_cast<std::int32_t>(parent.size()), parent.push_back(v);
+    std::vector<std::int64_t> xadj(1, 0);
+    std::vector<std::int32_t> adj, ewgt, vwgt;
+    for (const std::int32_t v : parent) {
+      for (std::int64_t e = g.xadj[v]; e < g.xadj[v + 1]; ++e)
+        if (where[g.adj[e]] == part) adj.push_back(local[g.adj[e]]), ewgt.push_back(g.ewgt[e]);
+      xadj.push_back(static_cast<std::int64_t>(adj.size()));
+      vwgt.push_back(g.vwgt[v]);
+    }
+    for (int threads : {1, 4}) {
+      ord::Graph s;
+      std::vector<std::int32_t> to_parent;
+#pragma omp parallel num_threads(threads) default(shared)
+#pragma omp single
+      s = ord::induced_subgraph(g, where, part, to_parent);
+      SCOPED_TRACE(::testing::Message() << "part " << int(part) << ", threads " << threads);
+      EXPECT_EQ(to_parent, parent);
+      EXPECT_EQ(s.n, static_cast<std::int32_t>(parent.size()));
+      EXPECT_EQ(s.xadj, xadj);
+      EXPECT_EQ(s.adj, adj);
+      EXPECT_EQ(s.ewgt, ewgt);
+      EXPECT_EQ(s.vwgt, vwgt);
+      EXPECT_EQ(s.total_vwgt, std::accumulate(vwgt.begin(), vwgt.end(), std::int64_t{0}));
+    }
+  }
+}
+
 // --------------------------------------------------------------------- weighted min degree
 
 TEST(FactorOrderingMinimumDegree, DegreesCountNeighbourWeights) {
