@@ -374,7 +374,10 @@ taken on yee-pec-box-1e6, where it does not pay (+0.15 s, 0.2%).
   13 tests): compression (vector fields, ratio, no-op graphs, blocks in compute_ordering, thread
   counts), weighted minimum degree, finalists, top effort by depth and size, flow refinement never
   enlarging a separator and finding planes, option ranges, `FactorOptions::nested_dissection`, the
-  driver's effort rule; the existing ordering tests unchanged except the candidate order.
+  driver's effort rule; the existing ordering tests unchanged except the candidate order and the
+  analysis-time property (now at the fitted 16 threads). `tests/py/test_bench_ordering.py`: the
+  geometric references (even planes separate the Yee curl-curl graph of `tools/gen/yee.py`) and
+  the fit data merge.
 * The certificate path is unchanged: InertiaCounter counts reuse the main analysis' order (PERM_IN),
   whatever ordering produced it.
 
