@@ -12,6 +12,7 @@
 //       [--nd-top-depth D] [--nd-top-size S] [--nd-top-runs R] [--nd-top-finalists F]
 //       [--nd-flow L] [--nd-flow-trials 0|1] [--nd-flow-finest 0|1] [--nd-flow-min N]
 //       [--nd-mode M] [--nd-seed S] [--nd-embedding auto|compressed|full] [--nd-profile 0|1]
+//       [--mumps-verbosity V]
 //
 // O: FactorOptions::ordering - 0 AMD, 2 AMF, 3 SCOTCH, 4 PORD, 5 METIS, 6 QAMD (MUMPS, serial,
 // inside the analysis), 10 hsolve's nested dissection (hs::compute_ordering with --threads
@@ -25,6 +26,9 @@
 // in-core estimate exceeds --max-mb MB. --nd-profile 1 (real T) first runs the nested dissection
 // alone (hs::ordering::nested_dissection, --nd-* options) and reports its DissectionStats: wall
 // time, work, critical path, and where the work went (separator stages, extraction, leaves).
+// --mumps-verbosity V > 0 (FactorOptions::verbosity, MUMPS ICNTL(4) = V) lets MUMPS print its
+// statistics (tree nodes, front sizes, L0-OpenMP layer) on stdout before the JSON line: diagnosis
+// only, the printing costs time.
 // Output: one JSON line - order / entries (mumps_input_size), analyze_s (ordering included),
 // ordering_s (hsolve ND only: compute_ordering), given_s (= analyze_s - ordering_s for ND and
 // --perm-in), nd_* (OrderingStats), est_flops, est_entries, est_incore_mb, factorize_s,
@@ -92,10 +96,11 @@ struct Args {
   fs::path perm_in, perm_out;
   hs::OrderingOptions nd;
   bool nd_profile = false;
-  int nd_mode = -1;     // SeparatorParams::refine_mode for --ordering 11 (-1: default)
-  int flow_trials = 0;  // SeparatorParams::flow_in_trials for --ordering 11
-  int flow_min = 0;     // SeparatorParams::flow_min_vertices for --ordering 11
-  int flow_finest = 1;  // SeparatorParams::flow_finest_only for --ordering 11
+  int nd_mode = -1;         // SeparatorParams::refine_mode for --ordering 11 (-1: default)
+  int flow_trials = 0;      // SeparatorParams::flow_in_trials for --ordering 11
+  int flow_min = 0;         // SeparatorParams::flow_min_vertices for --ordering 11
+  int flow_finest = 1;      // SeparatorParams::flow_finest_only for --ordering 11
+  int mumps_verbosity = 0;  // FactorOptions::verbosity (MUMPS ICNTL(4): its statistics on stdout)
 };
 
 double median(std::vector<double> v) {
@@ -197,6 +202,7 @@ int run(const Args& args, const hs::SolverConfig& cfg_in, const hs::CsrMatrix<T>
   omp_set_num_threads(args.threads);
   const double sigma = cfg.target.sigma;
   hs::FactorOptions fo = hs::driver::factor_options_from(cfg, 0.0);
+  fo.verbosity = args.mumps_verbosity;
   const auto in = hs::driver::mumps_input_size(pencil);
   json out = {{"case", args.case_dir.filename().string()},
               {"n", pencil.order()},
@@ -405,6 +411,8 @@ int main(int argc, char** argv) {
         args.nd_mode = std::stoi(v);
       else if (k == "--nd-profile")
         args.nd_profile = std::stoi(v) != 0;
+      else if (k == "--mumps-verbosity")
+        args.mumps_verbosity = std::stoi(v);
       else if (k == "--nd-embedding")
         args.nd.embedding = v == "compressed" ? hs::OrderingOptions::Embedding::Compressed
                             : v == "full"     ? hs::OrderingOptions::Embedding::Full
