@@ -162,7 +162,7 @@ endif()
 # ---- GPU offload (src/gpu, docs/BLAS.md section 10, docs/DESIGN.md 3.9) ----
 # The CUDA runtime and cuBLAS are loaded at run time (dlopen): nothing CUDA is needed to build, and a
 # binary runs unchanged where no GPU, driver or CUDA library exists (the CPU path). hsolve_gpu holds
-# the loader and the hybrid CPU + GPU dgemm engine; the BLAS hook uses it in MUMPS' factorizations
+# the loader, the dgemm offload engine and the offload controller; the BLAS hook uses it in MUMPS' factorizations
 # when the GPU mode (HS_GPU / hsolve --gpu) is auto or on. HSOLVE_GPU=OFF compiles the hook without
 # it; HSOLVE_GPU_DEFAULT is the mode when neither is given (off: exactly the CPU path).
 find_package(Threads REQUIRED)
