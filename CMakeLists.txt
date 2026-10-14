@@ -80,8 +80,9 @@ endif()
 
 # ---- library: every src/**/*.cpp belongs to libhsolve (module = directory) ----
 file(GLOB_RECURSE HSOLVE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
-# src/blas is the optional BLAS hook (block at the end of this file), not part of libhsolve.
-list(FILTER HSOLVE_SOURCES EXCLUDE REGEX "/src/blas/")
+# src/blas is the optional BLAS hook and src/gpu its GPU offload (blocks at the end of this file),
+# not part of libhsolve.
+list(FILTER HSOLVE_SOURCES EXCLUDE REGEX "/src/(blas|gpu)/")
 add_library(hsolve ${HSOLVE_SOURCES})
 target_include_directories(hsolve
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -103,7 +104,8 @@ if(HSOLVE_BUILD_APPS)
   find_package(CLI11 2.0 REQUIRED)
   add_executable(hsolve_cli apps/hsolve_cli.cpp)
   set_target_properties(hsolve_cli PROPERTIES OUTPUT_NAME hsolve)
-  target_link_libraries(hsolve_cli PRIVATE hsolve CLI11::CLI11 nlohmann_json::nlohmann_json)
+  # ${CMAKE_DL_LIBS}: --gpu finds the BLAS hook's GPU control with dlsym (include/hsolve/gpu.hpp).
+  target_link_libraries(hsolve_cli PRIVATE hsolve CLI11::CLI11 nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
 endif()
 
 # ---- benchmarks: one executable per bench/*.cpp (reproducible measurements, run via guard.py) ----
@@ -157,6 +159,31 @@ if(HSOLVE_BUILD_TESTS)
   endforeach()
 endif()
 
+# ---- GPU offload (src/gpu, docs/BLAS.md section 10, docs/DESIGN.md 3.9) ----
+# The CUDA runtime and cuBLAS are loaded at run time (dlopen): nothing CUDA is needed to build, and a
+# binary runs unchanged where no GPU, driver or CUDA library exists (the CPU path). hsolve_gpu holds
+# the loader and the hybrid CPU + GPU dgemm engine; the BLAS hook uses it in MUMPS' factorizations
+# when the GPU mode (HS_GPU / hsolve --gpu) is auto or on. HSOLVE_GPU=OFF compiles the hook without
+# it; HSOLVE_GPU_DEFAULT is the mode when neither is given (off: exactly the CPU path).
+find_package(Threads REQUIRED)
+option(HSOLVE_GPU "Build the run-time loaded GPU offload of the BLAS hook (no CUDA needed to build)" ON)
+set(HSOLVE_GPU_DEFAULT "off" CACHE STRING "GPU mode when HS_GPU / --gpu are not given: off | auto | on")
+set_property(CACHE HSOLVE_GPU_DEFAULT PROPERTY STRINGS off auto on)
+if(NOT HSOLVE_GPU_DEFAULT MATCHES "^(off|auto|on)$")
+  message(FATAL_ERROR "HSOLVE_GPU_DEFAULT must be off, auto or on, got '${HSOLVE_GPU_DEFAULT}'")
+endif()
+add_library(hsolve_gpu STATIC src/gpu/cuda_lib.cpp src/gpu/gemm_engine.cpp src/gpu/offload.cpp)
+target_include_directories(hsolve_gpu PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_options(hsolve_gpu PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
+target_compile_definitions(hsolve_gpu PRIVATE HSOLVE_GPU_DEFAULT="${HSOLVE_GPU_DEFAULT}")
+target_link_libraries(hsolve_gpu PUBLIC OpenMP::OpenMP_CXX Threads::Threads ${CMAKE_DL_LIBS})
+foreach(src IN LISTS HSOLVE_BENCH_SOURCES)
+  get_filename_component(name "${src}" NAME_WE)
+  if(name MATCHES "^gpu_" AND TARGET bench_${name})
+    target_link_libraries(bench_${name} PRIVATE hsolve_gpu)
+  endif()
+endforeach()
+
 # ---- BLAS hook (src/blas, docs/BLAS.md): profiler and shape routing of the dense BLAS under MUMPS ----
 # Always built (small): hsolve_blas (router, kernels, profiler; compiled without -march=native, the
 # AVX-512 kernels are selected at run time) and libhsolve_blashook.so for LD_PRELOAD. The option
@@ -175,6 +202,10 @@ target_compile_options(hsolve_blas PRIVATE -Wall -Wextra -Wno-unused-parameter -
                                            $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
 target_compile_definitions(hsolve_blas PRIVATE HSOLVE_BLAS_ROUTE_DEFAULT="${HSOLVE_BLAS_ROUTE_DEFAULT}")
 target_link_libraries(hsolve_blas PUBLIC OpenMP::OpenMP_CXX ${CMAKE_DL_LIBS})
+if(HSOLVE_GPU)
+  target_link_libraries(hsolve_blas PUBLIC hsolve_gpu)
+  target_compile_definitions(hsolve_blas PUBLIC HSOLVE_WITH_GPU=1)
+endif()
 add_library(hsolve_blashook SHARED src/blas/hook_symbols.cpp)
 target_include_directories(hsolve_blashook PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_options(hsolve_blashook PRIVATE -Wall -Wextra -Wno-unused-parameter $<$<BOOL:${HSOLVE_WERROR}>:-Werror>)
@@ -187,7 +218,8 @@ target_link_libraries(hsolve_blashook PRIVATE hsolve_blas)
 # bind to them.
 set(HSOLVE_BLASHOOK_DYNLIST "${CMAKE_CURRENT_BINARY_DIR}/hsolve_blashook.dynlist")
 file(WRITE "${HSOLVE_BLASHOOK_DYNLIST}"
-     "{ dgemm_; dtrsm_; dgemv_; daxpy_; dcopy_; dscal_; dswap_; dnrm2_; idamax_; dmumps_c; smumps_c; };\n")
+     "{ dgemm_; dtrsm_; dgemv_; daxpy_; dcopy_; dscal_; dswap_; dnrm2_; idamax_; dmumps_c; smumps_c;\n"
+     "  hsolve_gpu_set_mode; hsolve_gpu_report_json; };\n")
 function(hsolve_link_blas_hook target)
   target_sources(${target} PRIVATE "${PROJECT_SOURCE_DIR}/src/blas/hook_symbols.cpp")
   target_include_directories(${target} PRIVATE $<TARGET_PROPERTY:MUMPS::MUMPS,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -221,5 +253,15 @@ foreach(src IN LISTS HSOLVE_TEST_SOURCES HSOLVE_BENCH_SOURCES)
     endif()
   elseif(name MATCHES "^asmkern_" AND TARGET bench_${name})
     target_link_libraries(bench_${name} PRIVATE hsolve_blas)
+  elseif(name STREQUAL "test_gpu" AND TARGET ${name})
+    target_link_libraries(${name} PRIVATE hsolve_gpu)
+  elseif(name STREQUAL "test_gpu_hook" AND TARGET ${name})
+    # MUMPS' calls in this process go through the hook (and its GPU offload); with
+    # HSOLVE_BLAS_HOOK=ON also runs of the hsolve executable with --gpu.
+    hsolve_link_blas_hook(${name})
+    if(HSOLVE_BLAS_HOOK AND HSOLVE_BUILD_APPS)
+      target_compile_definitions(${name} PRIVATE HSOLVE_HOOKED_CLI="$<TARGET_FILE:hsolve_cli>")
+      add_dependencies(${name} hsolve_cli)
+    endif()
   endif()
 endforeach()
