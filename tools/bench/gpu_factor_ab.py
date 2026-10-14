@@ -106,12 +106,32 @@ def summarize(lines: list[dict]) -> str:
         inn_s = ", ".join(str(n) for n, _, _ in sorted(inn, key=str)) + ("" if len(inn) == 1 else " DIFFER")
         out.append(f"| {case} | {label} | {job} | {var} | {len(ws)} | {statistics.median(ws):.2f} "
                    f"[{min(ws):.2f}-{max(ws):.2f}] | {sp} | {inn_s} |")
+    # The GPU's part of the runs that offloaded (medians over the runs; per run = its three
+    # factorizations): what was offloaded and where the pipeline's time went.
+    out += ["", "| case | label | variant | runs | calls | GPU GFlop | of the estimate | GPU call s | CPU-model s | "
+                "H2D GB | D2H GB | init s | pack / slot wait / sync / add s |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    groups: dict[tuple, list[dict]] = {}
+    for r in lines:
+        g = r.get("gpu") or {}
+        if g.get("calls"):
+            groups.setdefault((r["case"], r.get("label", ""), r["variant"]), []).append(g)
+    for (case, label, var), gs in sorted(groups.items()):
+        def med(key):
+            return statistics.median(float(g.get(key) or 0.0) for g in gs)
+
+        def pmed(key):
+            return statistics.median(float((g.get("pipeline_s") or {}).get(key) or 0.0) for g in gs)
+        out.append(f"| {case} | {label} | {var} | {len(gs)} | {med('calls'):.0f} | {med('gpu_gflop'):.0f} | "
+                   f"{med('gpu_share'):.2f} | {med('call_s'):.2f} | {med('predicted_cpu_s'):.2f} | "
+                   f"{med('h2d_gb'):.1f} | {med('d2h_gb'):.1f} | {med('init_s'):.2f} | "
+                   f"{pmed('pack'):.2f} / {pmed('slot_wait'):.2f} / {pmed('sync'):.2f} / {pmed('add'):.2f} |")
     return "\n".join(out)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cases", nargs="+")
+    ap.add_argument("cases", nargs="*")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--variants", default="off,on", help="HS_GPU values, run interleaved")
