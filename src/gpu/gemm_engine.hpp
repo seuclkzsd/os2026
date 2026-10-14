@@ -12,7 +12,9 @@
 //     uploaded) and copies T back into a pinned buffer; the completing thread adds it into C on the
 //     host: C_tile = beta C_tile + T (beta = 0 never reads C). `slots` pipeline slots (staging and
 //     device buffers, a stream each) keep packing, transfers, GEMMs and additions of different
-//     tiles overlapping.
+//     tiles overlapping. Tiles are claimed guided - a 1 / (slots + 1) share of what is left, at
+//     most one slot, at least kMinTile - so the last tiles are small and the pipeline drains fast
+//     (5-10% faster than equal tiles on MUMPS-sized calls, results/p10_gpu.md §2).
 //   * CPU: in the default GPU-only mode the calling thread waits (MUMPS has nothing else to do
 //     above its L0 layer: it updates one front at a time). In hybrid mode (measurement option) it
 //     computes chunks from the other end of the same dimension with the real BLAS over

@@ -41,7 +41,9 @@ bool parse_mode(const std::string& s, Mode* out) noexcept;
 
 struct OffloadOptions {
   EngineOptions engine;
-  double auto_min_flops = 1e12;  ///< auto: smallest MUMPS estimate RINFOG(1) that offloads
+  /// auto: smallest MUMPS estimate RINFOG(1) that offloads (gpu02: the offload pays from ~5e12, the
+  /// 1e6 3-D cases; it is neutral at 1.75e12, syn-mem27-80, and loses below: results/p10_gpu.md)
+  double auto_min_flops = 3e12;
 };
 
 /// Parses HS_GPU_OPTS-style text (see above) on top of the defaults; unknown or malformed tokens

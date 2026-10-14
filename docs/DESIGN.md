@@ -53,6 +53,11 @@ flops 7.39e12 → 5.43e12（SCOTCH 6.75–7.09e12，几何剖分 5.29e12），19
 +9%）；顶层分隔子的额外试分（`top_*`，代价模型在数值功远大于排序时采用）；代价模型按新剖分重拟合、候选顺序中自研嵌套
 剖分先于 SCOTCH，ND 的图规模按压缩后计（§3.4、§3.6-3b）。实测见 `results/p9_ordering.md`。
 
+v8（P10「gpu」，分支 p10gpu）——新模块 src/gpu（不属于 libhsolve，由 BLAS hook 使用）：运行时 dlopen 的 CUDA runtime 与
+cuBLAS，把 MUMPS 分解（含证书计数）中被主机流量模型判为划算的大 dgemm 以 FP64 卸载到一张 GPU（暂存打包、cuBLAS、主机
+加回；默认只用 GPU，混合模式为测量选项）；模式 `HS_GPU` / `hsolve --gpu off|auto|on`，默认 off（与今天的 CPU 路径完全
+相同），无 GPU 或无 CUDA 库时自动回到 CPU（降级模式）；报告的 `gpu` 对象（§3.8、§3.9）。实测见 `results/p10_gpu.md`。
+
 ---
 
 ## 1. 问题范围
@@ -96,6 +101,8 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出的稠密 BLAS 调用按形状改道到窄核 /
              并行切分，其余原样转发真实 BLAS；默认链入 hsolve 可执行文件，或以 libhsolve_blashook.so
              预加载（§3.8，docs/BLAS.md）
+src/gpu      （P10，不属于 libhsolve，由 hook 使用）运行时加载的 CUDA runtime / cuBLAS，把 MUMPS 分解中的大 dgemm
+             卸载到 GPU（FP64），模式 off | auto | on，默认 off；无 GPU 时为 CPU 路径（§3.9）
 ```
 
 - 下层模块（io / sparse / linalg / factor / ops / eigen / verify）**不打印、不依赖日志**；统计信息
@@ -1188,6 +1195,57 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
   更高的三角条带（更少更大的调用）0.99 倍；GEMMT 未走（OpenBLAS 0.3.34 的 dgemmt 是逐列 dgemv）。
 - 许可：窄核改编自 OpenBLAS 0.3.34 的 SkylakeX 核（BSD-3-Clause），版权与许可声明见
   `src/blas/simd_kernels.hpp`、`docs/BLAS.md` §7 与根目录 `THIRD_PARTY_NOTICES`。
+- GPU 路由（P10，§3.9）：构建带 GPU 模块时（CMake `HSOLVE_GPU`，默认 ON），dmumps_c 的包装在分解（JOB 2，及含分解的
+  4/5/6）前后开关 GPU 卸载窗口；窗口内、并行区外、被 GPU 模块模型接受的 dgemm 走 GPU（路由 `Gpu`，剖析器标签 `gpu`）。
+  与 `HS_BLAS_ROUTE` 无关，由 GPU 模式决定（默认 off：路由与今天完全相同）。
+
+### 3.9 gpu（`src/gpu/`，P10「gpu」；不属于 libhsolve；实测见 `results/p10_gpu.md`、`docs/BLAS.md` §10）
+- 目的：赛题要求的 GPU 加速与无 GPU 的降级模式。可卸载的只有分解中的稠密更新：1e6 三维测例上分解占整次运行
+  约 75%（主分解 + 证书的两次精确计数），其中 L0 层之上逐个调用、按调用多线程的 dgemm 是大头；回代受内存带宽限制、
+  因子在主机内存（PCIe 3 只有 ~12.8 GB/s，低于主机的 ~36 GB/s），不卸载（§3.9 末）。
+- **运行时加载**（`cuda_lib`）：dlopen CUDA runtime 与 cuBLAS（`libcudart.so.12` + `libcublas.so.12`，否则 CUDA 11
+  的一对；依次查 `HS_CUDA_LIBDIR`、动态加载器的路径、`/usr/local/cuda*/lib64`，两者取自同一目录）。只声明用到的几个
+  入口点与枚举值（CUDA 11/12 的 ABI），构建不需要 CUDA、不含 NVIDIA 的头文件或代码；评测机（无 GPU）上二进制照常运行。
+  CUDA 库不随 hsolve 分发，用机器上已有的（NVIDIA 许可）。
+- **卸载引擎**（`gemm_engine`）：一次 dgemm C = α op(A) op(B) + βC 沿 C 的一维切块（m ≤ n 时按列，GPU 需要全部
+  op(A)——较小的「共享」操作数，每次调用上传一次——与 op(B) 的列块；否则按行）。每块：发射线程把块的操作数以非临时
+  存储打包进页锁定暂存区、H2D、`cublasDgemm`（FP64，β = 0，C 从不上传）、D2H 到页锁定区；完成线程在主机上做
+  C_块 = β C_块 + T（β = 0 不读 C）。2 个发射线程（各一个 cuBLAS 句柄）、6 个流水槽（暂存区、设备缓冲、各一个流）、
+  每槽 16 MB，设备内存一次分配 1 GiB（`mem_mb`），页锁定主机内存 224 MB。默认**只用 GPU**（调用线程等待：L0 层之上
+  MUMPS 一次只更新一个前沿，CPU 本也无事可做）；CPU 分担一部分的混合模式实测更慢（主机内存带宽之争），只作测量选项。
+- **为何受主机内存带宽而非 PCIe 限制**（`bench/gpu_dgemm.cpp`）：每个暂存的字节主机要读源、写暂存区、复制引擎再读一遍，
+  加法读 T 与 C、写 C——实测约 30–32 GB/s 的主机流量即槽的极限。一次调用的时间很贴近
+  t_gpu = (24 (m + n) k + 32 m n) 字节 / host_gbs + latency（host_gbs = 30 GB/s，latency = 1 ms）。
+  **卸载判据**：2mnk ≥ min_flops（1 GFlop）且 t_cpu = 2mnk / (40 GFlop/s × 线程数) ≥ 1.25 × t_gpu；于是 MUMPS 前沿的
+  贡献块更新（行块 KEEP(58) × 右侧列 × 主元数 k ≥ 1024）被卸载，秩 128/256 的面板更新、三角条带（250 行）与 L0 层内
+  的调用留在 CPU。
+- **结果**：每个元素由一次覆盖全部 K 的 cuBLAS 调用算出，再在主机上以双精度加到 βC——与 CPU BLAS 只差舍入（都是 IEEE
+  双精度）。所以**证书的 Sylvester 计数不变**：惯性是 K 的性质，计数端点在谱隙中（§3.6-8），舍入级差异不改变主元符号；
+  实测每次计数与 CPU 路径相同（`results/p10_gpu.md`），单元测试在不定三维 Laplacian 上对比解析计数。只用 GPU 时块的大小只
+  取决于形状，同一 GPU 与库下逐位可复现；混合模式不可复现（哪些列给 GPU 取决于时序）。
+- **模式与进程级状态**（`offload`）：`off`（默认：不加载任何 CUDA 库，与今天的 CPU 路径完全相同）、`auto`（某次分解的
+  MUMPS 估计 RINFOG(1) ≥ `auto_min_flops` = 1e12 时才用 GPU：1e5 规模的测例永远不碰 CUDA）、`on`（每次分解都开窗口，
+  逐调用的模型仍把不划算的调用留在 CPU）。设置：环境变量 `HS_GPU`、`hsolve --gpu off|auto|on`（经
+  `include/hsolve/gpu.hpp` 的 dlsym 找到 hook 的 C 入口 `hsolve_gpu_set_mode`），调参 `HS_GPU_OPTS`（`device`、`mem_mb`、
+  `slot_mb`、`pack`、`slots`、`min_gflop`、`cpu_gflops`、`host_gbs`、`min_speedup`、`auto_min_tflop` 等，未知键终止
+  进程），构建默认 `HSOLVE_GPU_DEFAULT`（off）。GPU 是 `CUDA_VISIBLE_DEVICES` 中的第一张卡。引擎在第一次需要卸载的分解时
+  创建（约 0.27 s：上下文、cuBLAS、缓冲、线程）；创建失败（无库、无设备、显存不足）时记下原因、整个进程留在 CPU
+  （**降级模式**）；之后的 CUDA 错误把该进程送回 CPU，出错的调用中尚未加回的块在 CPU 上重算，调用照常完成。
+- **报告**：`hsolve_gpu_report_json`（或 `HS_GPU_REPORT=<文件>` 在退出时写出）：模式、可用与否及原因、设备、初始化时间、
+  分解次数与卸载次数、调用数、GPU 上的 GFlop 与其占卸载分解估计 flops 的份额、调用时间与模型的 CPU 时间、H2D/D2H 字节、
+  流水线各段时间、错误。模式不为 off 时 CLI 把它写进 `report.json` 的 `gpu` 对象并打印一行摘要；off 时报告与今天相同。
+- **线程安全**：引擎一次只服务一个调用（try-lock，并发调用者得到 false 留在 CPU）；L0 子树（OpenMP 并行区内）的调用从不
+  卸载。模式与窗口是原子量，引擎在互斥锁下只创建一次、进程结束前不释放（MUMPS 可能在静态析构期间运行）。
+- **测试**（`test_gpu`、`test_gpu_hook`）：GPU 默认不用——测试进程在 main 之前把 `CUDA_VISIBLE_DEVICES` 设为空，于是在
+  共享 GPU 节点上的普通 ctest 不碰任何卡，并检验降级路径；`HSOLVE_TEST_GPU_DEVICE=7`（gpu02，经
+  `tools/bench/gpu_slot.sh`）时检验引擎对 CPU BLAS（所有转置、两种切分、α/β、填充、混合）、β = 0、可复现性、模型、
+  并发、注入的 CUDA 故障，以及 hook 链入的进程中三维 Laplacian 的惯性与解析计数一致、`hsolve --gpu on` 的特征值与证书
+  计数与 CPU 相同。
+- **未做 / 实测为负**（`results/p10_gpu.md`）：混合 CPU + GPU（主机带宽之争，GPU-only 更快）；小块暂存 + 普通存储
+  （让复制引擎从 LLC 读，0.92–1.06×）；`cudaHostRegister` MUMPS 的前沿（操作数在前沿中跨距为 NFRONT，按地址范围注册
+  4–30 倍于数据量，且跨调用缓存注册在 MUMPS 释放、重用内存时不安全）；跨调用缓存 B 块（同一原因）；L0 层内的调用
+  （单线程 35 GFlop/s 的调用可以卸载，但只有一个调用能用 GPU，收益估计 ≤ 2%）；回代（受带宽限制，因子不在 GPU 上）；
+  SPRAL SSIDS 整体上 GPU（G1，`exp-gpu-ssids`：1e5 上 0.9–1.85×、回代更慢、1e6 上显存满）。
 
 ## 4. 数值约定
 
@@ -1230,7 +1288,8 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
 - **禁止**：稀疏矩阵稠密化（唯一例外：测试/评测代码中 n ≤ 4000 的参考解）；全局可变状态（例外：
   串行化 MUMPS 调用的进程级锁，§3.4；BLAS hook（§3.8，不属于 libhsolve）的剖析器——只在 `HS_BLAS_PROFILE`
   开启时记录——的每线程表与进程级 MUMPS 阶段标记；稀疏核分派的 CPU 检测与 `HS_KERNELS_NO_AVX512`、BLAS hook
-  解析出的真实例程与路由配置都在首次使用时写一次、之后只读，不算可变状态）；无种子随机数；库代码中
+  解析出的真实例程与路由配置都在首次使用时写一次、之后只读，不算可变状态；GPU 卸载（§3.9，hook 的一部分）的进程级
+  模式、分解窗口、只创建一次的引擎与其统计）；无种子随机数；库代码中
   `std::cout`/`printf`（BLAS hook 只在无法继续时——找不到真实例程、未知路由记号——向 stderr 写一条消息并终止）。
 - 测试：`tests/cpp/test_<module>*.cpp`（GoogleTest），**套件名以模块名开头**（`Sparse*`、`Io*`、
   `Linalg*`、`Factor*`、`Ops*`、`Lanczos*`、`KrylovSchurGeneral*`、`Lobpcg*`、`JacobiDavidson*`、
@@ -1288,6 +1347,10 @@ gpu 节点同型，无 GPU，与其他用户共用）只在空闲时使用：
   剖析，`HS_BLAS_NO_AVX512=1` / `HS_BLAS_NO_AVX2=1` 在 AVX-512 节点上模拟只有 AVX2 / 无 SIMD 的 CPU。命令与
   数据见 `docs/BLAS.md` §8。旧构建目录保留缓存的 `HSOLVE_BLAS_HOOK` / `HSOLVE_BLAS_ROUTE_DEFAULT`，须
   `-U` 后重新配置。
+- **GPU 实验**（P10，§3.9）：只用 gpu02 的 GPU 7（与测量槽同在 NUMA node 1；其余卡属于其他作业，不得触碰）。带 GPU 的
+  计时运行经 `tools/bench/gpu_slot.sh 7 TIMEOUT -- CMD`：先用 nvidia-smi 确认该卡空闲（无计算进程、显存占用 ≤ 64 MiB），
+  再以 `CUDA_VISIBLE_DEVICES=7` 和 `guard.py --exclusive` 占用测量槽。默认构建的 GPU 模式为 off，单元测试默认看不到任何
+  GPU（§3.9 测试），所以其它 agent 的测量与测试不受影响；GPU 测试用 `HSOLVE_TEST_GPU_DEVICE=7` 显式打开。
 
 **所有编译之外的运行都必须经过 `tools/run/guard.py`**（下列默认值为开发服务器的；集群节点见上）：
 - 默认绑定 NUMA node1 的 16 个物理核 `24-30,33-41`，进程树 RSS 上限 30 GiB；系统可用内存低于

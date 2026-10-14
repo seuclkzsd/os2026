@@ -70,6 +70,16 @@ P9 programs (standalone, not part of the CMake build; `results/p9_mpi.md`):
 | `tools/bench/mpi_factor_runs.sh` | the layouts seq1x16 / 1x16 / 2x8 / 4x4 / 8x2 / 16x1 (suffix `h`: hsolve's BLAS hook preloaded) interleaved, each under its own guard, ranks pinned to their block of the slot (`tools/bench/mpi_bind.sh`); `tools/bench/mpi_factor_table.py` tabulates medians and ratios, and checks every INFOG(12) against the exact count | `guard.py --exclusive ... -- bash tools/bench/mpi_factor_runs.sh OUT TAG K.bin perm:P.bin\|ord:5\|par:2 REPS LAYOUTS [BENCH ARGS]` |
 | `tools/bench/compare_phases.py` | hsolve's exclusive phases (factor, iterate, certificate, verify) and SLEPc's `-log_view` split of a `compare.py` campaign, from the run reports of the runs `compare.py` counts valid (guard exit 0, success claimed, `evaluation.json` pass) | `python3 tools/bench/compare_phases.py results/raw/TAG` |
 
+P10 programs (GPU offload, `results/p10_gpu.md`, docs/BLAS.md §10; run them in the measurement slot
+with exactly one idle GPU visible: `tools/bench/gpu_slot.sh GPU TIMEOUT -- CMD`, which checks the GPU
+with nvidia-smi, sets CUDA_VISIBLE_DEVICES and takes the slot with `guard.py --exclusive`):
+
+| program | measures | run |
+|---|---|---|
+| `bench_gpu_dgemm` | `info`: the GPU module's device description and set-up time; `copy`: host memcpy into pinned memory, pinned / pageable / strided-pageable / registered host-device copies, both directions at once, `cudaHostRegister` cost; `devgemm`: cublasDgemm on device-resident operands; `gemm`: the offload engine (GPU-only, hybrid; packing threads, slots, slot size, chunking, store kind) against the CPU BLAS on MUMPS-like shapes (all operands with leading dimension `--ld`), interleaved, with the GPU's share, the model's predicted speedup and the difference to the CPU result | `bench_gpu_dgemm info` \| `copy [--mb 16,64,256]` \| `devgemm [--shapes m:n:k,...]` \| `gemm [--ld L] [--shapes m:n:k[:ta:tb],...] [--modes cpu,gpu,hyb-c8,gpu-p3-s6-m16,...]` |
+| `tools/bench/gpu_factor_ab.py` | the driver's three factorizations (`bench_factspeed_factor --jobs main,a,b`, hook preloaded) with HS_GPU off / on interleaved on one saved pivot order (hsolve's nested dissection), inertia equal in every run, the hook's GPU report per run (HS_GPU_REPORT) | `gpu_slot.sh 7 2700 -- python3 tools/bench/gpu_factor_ab.py --out OUT.jsonl --reps 5 [--env HS_MUMPS_BLOCKING=p9 --label p9] syn-mem27-100 yee-pec-box-1e6` |
+| `tools/bench/gpu_e2e.py` | whole hsolve runs with HS_GPU off / on / auto interleaved, each through `compare.py`'s guarded, evaluated run (valid = exit 0, success, tools/eval pass), with the certificate count and the report's gpu object; appends to `<tag>.jsonl`, summary `<tag>.md` | `gpu_slot.sh 7 2700 -- python3 tools/bench/gpu_e2e.py --tag T --reps 2 [--variants off,on,auto] [--root DATA] CASE...` |
+
 Measurement scripts outside `bench/`: `python/bench/overhead.py` (Python API vs CLI wall time and
 peak), `python/bench/load_memory.py` (`hsolve.load_matrix` vs `scipy.sparse.load_npz` memory),
 `tools/eval/bench_norms.py` (the evaluator's norm-estimate settings).

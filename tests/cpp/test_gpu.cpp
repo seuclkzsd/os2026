@@ -148,7 +148,7 @@ TEST(GpuOptions, OffloadOptionsParse) {
   const hs::gpu::OffloadOptions d = hs::gpu::parse_offload_options("", &unknown);
   EXPECT_FALSE(d.engine.hybrid);
   EXPECT_EQ(d.engine.pack_threads, 2);
-  EXPECT_DOUBLE_EQ(d.auto_min_flops, 1e12);
+  EXPECT_DOUBLE_EQ(d.auto_min_flops, 3e12);
   hs::gpu::parse_offload_options("pack=9,slots=1,mem_mb=x,bogus=1,hybrid=2,device", &unknown);
   EXPECT_EQ(unknown, "pack=9,slots=1,mem_mb=x,bogus=1,hybrid=2,device");
 }
@@ -179,6 +179,12 @@ TEST(GpuFallback, NoVisibleDeviceMeansNoEngine) {
 // says why. (The controller is process-wide: this is the only test of this executable using it.)
 TEST(GpuOffload, DegradesToTheCpuWithoutAGpu) {
   if (gpu_requested()) GTEST_SKIP() << "a GPU is visible in this run";
+  // auto below the threshold: CUDA is not even looked for.
+  ASSERT_TRUE(hs::gpu::set_mode("auto"));
+  hs::gpu::factorization_begin(1e9);
+  EXPECT_FALSE(hs::gpu::window_open());
+  hs::gpu::factorization_end();
+  EXPECT_NE(hs::gpu::report_json().find("\"available\": null"), std::string::npos) << hs::gpu::report_json();
   ASSERT_TRUE(hs::gpu::set_mode("on"));
   EXPECT_EQ(hs::gpu::mode(), hs::gpu::Mode::On);
   EXPECT_FALSE(hs::gpu::set_mode("sometimes"));
@@ -192,7 +198,7 @@ TEST(GpuOffload, DegradesToTheCpuWithoutAGpu) {
   EXPECT_NE(r.find("\"mode\": \"on\""), std::string::npos) << r;
   EXPECT_NE(r.find("\"available\": false"), std::string::npos) << r;
   EXPECT_NE(r.find("\"reason\": "), std::string::npos) << r;
-  EXPECT_NE(r.find("\"factorizations\": 1"), std::string::npos) << r;
+  EXPECT_NE(r.find("\"factorizations\": 2"), std::string::npos) << r;
   EXPECT_NE(r.find("\"factorizations_offloaded\": 0"), std::string::npos) << r;
   ASSERT_TRUE(hs::gpu::set_mode("off"));
   hs::gpu::factorization_begin(1e13);  // off: not even counted
