@@ -27,10 +27,16 @@ certificate is the default `exact` in every hsolve run unless a column says othe
   **3.14x**, syn-mem27-100 **1.41x** (main: 1.04x), ss-qa8fk-qa8fm 0.96x, cav2d-rect-pert-1e5 0.74x,
   yee-pec-box-1e6 0.86x (main: 0.67x); without the certificate 0.94-3.15x, `certificate = auto`
   1.08x on yee-pec-box-1e6 (section 4).
-* **Multithreading** (1 -> 16 threads on one socket, 3 repetitions): 3-D n ~ 1e5 cases **4.2-5.4x**
-  (efficiency 0.26-0.34; 1 -> 2 threads 1.7-2.1x), complex / 2-D cases 2.2-2.8x, yee-pec-box-1e6 4 ->
-  16 threads 1.82x; ordering and analysis 5.9-8.3x, factorizations 4.0-5.8x, block solves 2.6-3.4x
-  (memory bandwidth) (section 5).
+* **Multithreading** (1 -> 16 threads on one socket, 5 repetitions; re-measured after the review,
+  section 5): the default configuration at 16 threads against the fastest of six measured 1-thread
+  configurations (the default and each of hsolve's orderings AMD / own ND / SCOTCH / METIS / PORD):
+  3-D n ~ 1e5 cases **3.57-4.51x** (efficiency 0.22-0.28), complex / 2-D cases 2.25-2.71x; at equal
+  pivot order (the 16-thread run's ordering at every thread count) 3-D **4.26-5.09x** (1 -> 2 threads
+  1.72-1.91x), ordering and analysis 5.3-5.8x, factorizations 4.1-6.7x, certificate counts 4.4-5.4x,
+  block solves 2.6-3.3x (memory bandwidth); yee-pec-box-1e6 4 -> 16 threads 1.82x. The first
+  campaign's 4.2-5.4x divided by slower 1-thread orderings (section 5). At 1 thread the adaptive
+  ordering (its model fitted at 16 threads) picks SCOTCH on two cases where METIS / PORD are 1.21x /
+  1.27x faster: an open item outside the judged configuration.
 
 ## 1. Setup
 
@@ -39,7 +45,8 @@ certificate is the default `exact` in every hsolve run unless a column says othe
   (`tools/run/guard.py --exclusive`, each slot call <= 2700 s, every solver run its own nested guard);
   builds, tests and evaluations in the build/test lane (cores 8-15). 2026-10-14 17:36-20:39, three
   chained scripts of consecutive slot calls (`$HOME/p9int/campaign.sh`, `campaign2.sh`,
-  `campaign3.sh`), nothing else on the slot's socket.
+  `campaign3.sh`), and the review fix 21:56-22:29 (`$HOME/p9int-fix/campaign_fix.sh`, two slot
+  calls), nothing else on the slot's socket.
 * **Binaries** (fixed copies in `$HOME/p9int/bin` on the cluster share):
 
   | label | what | md5 |
@@ -57,7 +64,8 @@ certificate is the default `exact` in every hsolve run unless a column says othe
   yee-pec-box-1e6: GHEP, Yee edge elements, n = 1 027 733, k = 10; wg-square-1e6: GHIEP waveguide,
   n = 998 001, k = 18), each with its config.json (CLI defaults otherwise: automatic memory budget from
   the 32-GiB guard cap, certificate exact). 1e5 and smaller: the 41 other data cases of `data/cases`.
-* **Campaign** (slot calls in this order; 849 timed solver runs, every one valid):
+* **Campaign** (slot calls in this order; 849 timed solver runs, every one valid; the review fix
+  added part 5b, 360 runs, every one valid):
 
   | part | slot time | content | runs |
   |---|---|---|---|
@@ -67,6 +75,7 @@ certificate is the default `exact` in every hsolve run unless a column says othe
   | 5 | 19:54-20:14 | thread scaling: six 1e5 cases x 1/2/4/8/16 threads, yee-pec-box-1e6 x 4/8/16, 3 reps | 99 |
   | 2.2 | 20:14-20:37 | 1e6, blk vs new, 4 reps ABBA | 16 |
   | 3 (re-check) | 20:37-20:39 | seven 1e5 cases, main vs new and blk vs new, 10 reps ABBA | 280 |
+| 5b (review fix) | 21:56-22:29 | thread scaling again, `new`: six 1e5 cases, default at 1/2/4/8/16 threads, the 16-thread ordering fixed at 1/2/4/8/16 (three cases), every ordering at 1 thread, 5 reps; supersedes part 5's 1e5 tables | 360 |
 
 ## 2. n = 1e6 against main a831d79 (task 3a)
 
@@ -260,104 +269,188 @@ agree within 1% (116.00 vs 115.68 s, 59.30 vs 59.58 s, 3.51 vs 3.48 s, 3.34 vs 3
 
 ## 5. Multithreading: speedup and parallel efficiency (task 3d)
 
-`tools/bench/thread_scaling.py run --threads 1,2,4,8,16 --reps 0,1,2` inside one slot guard: each run
-pinned to the first T cores of the held slot (16..15+T; the rest of the socket idle, so a T-thread run
-has the socket's whole memory bandwidth), the case's default configuration with `--threads T`
-(certificate exact), thread counts up for even and down for odd repetitions, medians of 3; all 99
-runs valid (`results/p9_measurements_threads.json`). Six n ~ 1e5 cases cover HEP / GHEP / GHIEP,
-real and complex, 3-D and 2-D; one 1e6 3-D case at 4 / 8 / 16 threads. Speedup = t(1) / t(T)
-(1e6: t(4) / t(T)), efficiency = speedup x T_base / T. The phase columns split the report's five
-exclusive phases (they add up to the total): analysis (ordering + symbolic analysis of the main
-object), factorization (the rest of the factor phase: numeric factorization at sigma, other
-candidate analyses), solves (the Krylov iteration's block solves), iteration (orthogonalization,
-restarts), certificate (inertia counts), rest (setup + verify); "ordering" is the adaptive ordering's
-choice, which depends on the thread count (the cost model prices the parallel dissection by threads).
+**Review correction.** Part 5 of the campaign (19:54-20:14, 3 repetitions) ran each case's default
+configuration at every thread count and divided by its own 1-thread time. The default's adaptive
+ordering prices the parallel nested dissection by the thread count (docs/DESIGN.md §3.6-3b): at
+1 thread it took SCOTCH on syn-mem27-46 and ss-qa8fk-qa8fm (AMD at 1-2 threads on
+syn-near-singular-complex-1e5), from 2 threads on (4 there) the own nested dissection. Those speedups
+therefore divided a slower serial ordering by the parallel one: the reported 5.39x / 4.55x at 16
+threads, 1 -> 2 threads 1.97x / 2.08x (superlinear) and "ordering and analysis 7.90x / 8.31x" (SCOTCH
+at 1 thread against the dissection at 16), and the statement that the 1-thread baseline was
+"hsolve's own best choice at 1 thread" had not been measured - it is not (below). The 1e5 tables
+are re-measured here (part 5b); part 5's raw tables stay in `results/p9_measurements_threads.json`.
 
-Summary (solver time in s; speedup at 16 threads, efficiency):
+**Method (part 5b).** `tools/bench/thread_scaling.py run --threads 1,2,4,8,16 --reps 0,1,2,3,4` in
+the slot with configurations (`--variant`, docs in the tool): the case's default at every T; on the
+three cases whose default changes ordering with T, the 16-thread runs' ordering (own ND, `ordering =
+10`) fixed at every T (`nd`); and at T = 1 each of the adaptive ordering's candidates fixed (AMD 0,
+own ND 10, SCOTCH 3, METIS 5, PORD 4). Each run pinned to the first T cores of the held slot (the
+rest of the socket idle), certificate exact, thread counts up for even and down for odd repetitions,
+the configurations forward / backward at each T; medians of 5, all 360 runs valid by tools/eval
+(`results/p9_measurements_threads_orderings.json`). Same binary as everywhere in this file (`new`,
+md5 e0d2ef63..., checked before and after). Two speedups:
 
-| case | 1 | 2 | 4 | 8 | 16 | speedup 16 | efficiency 16 |
-|---|---|---|---|---|---|---|---|
-| syn-mem27-46 (3-D HEP) | 11.01 | 5.58 | 3.36 | 2.35 | 2.04 | **5.39x** | 0.34 |
-| yee-pec-box-1e5 (3-D GHEP, Yee) | 10.59 | 6.13 | 3.75 | 2.74 | 2.51 | **4.21x** | 0.26 |
-| ss-qa8fk-qa8fm (3-D GHEP, acoustic) | 6.97 | 3.35 | 2.14 | 1.61 | 1.53 | **4.55x** | 0.28 |
-| syn-near-singular-complex-1e5 (complex HEP) | 5.03 | 4.20 | 3.44 | 2.72 | 2.25 | 2.24x | 0.14 |
-| wg-square-1e5 (2-D GHIEP) | 1.44 | 1.02 | 0.69 | 0.53 | 0.53 | 2.69x | 0.17 |
-| cav2d-rect-pert-1e5 (2-D GHEP) | 0.91 | 0.72 | 0.53 | 0.39 | 0.33 | 2.77x | 0.17 |
-| yee-pec-box-1e6 (3-D GHEP, n ~ 1e6) | - | - | 125.65 | 85.36 | 69.16 | 1.82x vs 4 | 0.45 vs 4 |
+* **against the fastest 1-thread configuration**: t_fastest(1) / t_default(T), t_fastest(1) the
+  fastest of the six measured 1-thread configurations (the default and the five fixed orderings) -
+  what 16 threads give a user of the default configuration over the best serial run hsolve can make;
+  efficiency = that / T;
+* **at equal pivot order**: t(1) / t(T) of one configuration that factorizes the same pivot order at
+  every T (the 16-thread runs' ordering; the factor entries are equal at every T): the parallel
+  speedup of one computation. On yee-pec-box-1e5, wg-square-1e5 and cav2d-rect-pert-1e5 that is the
+  default itself (one ordering at every T). The phase speedups are taken here.
 
-Per case:
+The phase columns split the report's five exclusive phases (they add up to the total): analysis
+(ordering + symbolic analysis of the main object), factorization (the rest of the factor phase:
+numeric factorization at sigma, the adaptive ordering's other candidate analyses), solves (the Krylov
+iteration's block solves), iteration (orthogonalization, restarts), certificate (inertia counts),
+rest (setup + verify).
 
-**syn-mem27-46** (n = 97336, HEP, certificate exact, block p 8)
+Summary (solver time in s, medians of 5):
 
-| threads | total s [min-max] | speedup | efficiency | analysis | factorization | solves | iteration | certificate | rest | ordering | valid | peak GiB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 11.008 [10.997-11.028] | 1.00x | 1.00 | 2.345 | 2.662 | 0.763 | 0.111 | 4.978 | 0.150 | SCOTCH | 3/3 | 0.68 |
-| 2 | 5.584 [5.581-5.600] | 1.97x | 0.99 | 0.901 | 1.433 | 0.432 | 0.067 | 2.634 | 0.119 | ND | 3/3 | 0.69 |
-| 4 | 3.364 [3.344-3.383] | 3.27x | 0.82 | 0.527 | 0.869 | 0.276 | 0.045 | 1.548 | 0.099 | ND | 3/3 | 0.69 |
-| 8 | 2.346 [2.316-2.351] | 4.69x | 0.59 | 0.354 | 0.630 | 0.227 | 0.034 | 1.026 | 0.077 | ND | 3/3 | 0.79 |
-| 16 | 2.041 [2.037-2.069] | 5.39x | 0.34 | 0.297 | 0.565 | 0.228 | 0.029 | 0.865 | 0.067 | ND | 3/3 | 0.86 |
+| case | fastest at 1 thread | default: 1 | 2 | 4 | 8 | 16 | **default 16 vs fastest 1** | efficiency | equal order 1 -> 16 | **speedup** | 1 -> 2 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| syn-mem27-46 (3-D HEP) | METIS 9.06 | 11.01 (SCOTCH) | 5.58 | 3.38 | 2.33 | 2.01 | **4.51x** | 0.28 | ND 9.78 -> 1.92 | **5.09x** | 1.78x |
+| yee-pec-box-1e5 (3-D GHEP, Yee) | ND 10.52 | 10.58 (ND) | 6.14 | 3.76 | 2.72 | 2.49 | **4.23x** | 0.26 | ND (default) 10.58 -> 2.49 | **4.26x** | 1.72x |
+| ss-qa8fk-qa8fm (3-D GHEP, acoustic) | PORD 5.51 | 6.97 (SCOTCH) | 3.34 | 2.13 | 1.61 | 1.54 | **3.57x** | 0.22 | ND 6.25 -> 1.42 | **4.40x** | 1.91x |
+| syn-near-singular-complex-1e5 (complex HEP) | AMD 4.99 | 5.02 (AMD) | 4.21 | 3.44 | 2.71 | 2.22 | 2.25x | 0.14 | ND 5.41 -> 1.92 | 2.82x | 1.29x |
+| wg-square-1e5 (2-D GHIEP) | AMD 1.42 | 1.42 (AMD) | 1.02 | 0.72 | 0.55 | 0.52 | 2.71x | 0.17 | AMD (default) 1.42 -> 0.52 | 2.71x | 1.40x |
+| cav2d-rect-pert-1e5 (2-D GHEP) | AMD 0.91 | 0.91 (AMD) | 0.74 | 0.57 | 0.42 | 0.34 | 2.65x | 0.17 | AMD (default) 0.91 -> 0.34 | 2.66x | 1.23x |
+| yee-pec-box-1e6 (3-D GHEP, n ~ 1e6; part 5, 3 reps, from 4 threads) | not screened | - | - | 125.65 (ND) | 85.36 | 69.16 | 1.82x vs 4 | 0.45 vs 4 | ND (default) 4 -> 16: 125.65 -> 69.16 | 1.82x vs 4 | - |
 
-Phase speedups 1 -> 16 threads: analysis 7.90x, factorization 4.71x, solves 3.35x, iteration 3.79x, certificate 5.75x, rest 2.25x
+The 1-thread configurations (s; min and max within 0.8% of the median everywhere; fastest in bold):
 
-**yee-pec-box-1e5** (n = 109744, GHEP, certificate exact, block p 4)
+| case | default (its choice) | AMD | own ND | SCOTCH | METIS | PORD |
+|---|---|---|---|---|---|---|
+| syn-mem27-46 | 11.01 (SCOTCH) | 18.89 | 9.78 | 10.93 | **9.06** | 10.10 |
+| yee-pec-box-1e5 | 10.58 (ND) | 42.21 | **10.52** | 12.06 | 11.23 | 17.23 |
+| ss-qa8fk-qa8fm | 6.97 (SCOTCH) | 10.04 | 6.25 | 6.89 | 6.07 | **5.51** |
+| syn-near-singular-complex-1e5 | 5.02 (AMD) | **4.99** | 5.41 | 10.12 | 7.71 | 8.56 |
+| wg-square-1e5 | **1.42** (AMD) | 1.42 | 2.32 | 2.35 | 1.95 | 1.85 |
+| cav2d-rect-pert-1e5 | 0.91 (AMD) | **0.91** | 1.55 | 1.34 | 1.36 | 1.21 |
 
-| threads | total s [min-max] | speedup | efficiency | analysis | factorization | solves | iteration | certificate | rest | ordering | valid | peak GiB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 10.590 [10.581-10.598] | 1.00x | 1.00 | 1.602 | 2.330 | 1.726 | 0.463 | 4.363 | 0.107 | ND | 3/3 | 0.58 |
-| 2 | 6.131 [6.089-6.142] | 1.73x | 0.86 | 0.865 | 1.377 | 1.035 | 0.259 | 2.488 | 0.101 | ND | 3/3 | 0.58 |
-| 4 | 3.751 [3.709-3.762] | 2.82x | 0.71 | 0.505 | 0.836 | 0.713 | 0.163 | 1.441 | 0.087 | ND | 3/3 | 0.61 |
-| 8 | 2.739 [2.695-2.741] | 3.87x | 0.48 | 0.334 | 0.628 | 0.633 | 0.110 | 0.967 | 0.062 | ND | 3/3 | 0.65 |
-| 16 | 2.514 [2.497-2.532] | 4.21x | 0.26 | 0.272 | 0.585 | 0.664 | 0.090 | 0.836 | 0.057 | ND | 3/3 | 0.78 |
+Per case: the default configuration and, where its ordering changes with T, the equal-order one
+(`*` marks a row whose ordering differs from the 1-thread row's; "vs fastest" = against the fastest
+1-thread configuration; the other 1-thread configurations' tables are in the JSON):
 
-Phase speedups 1 -> 16 threads: analysis 5.90x, factorization 3.99x, solves 2.60x, iteration 5.16x, certificate 5.22x, rest 1.87x
+**syn-mem27-46** (n = 97336, HEP; fastest at T = 1: metis (METIS) 9.060 s)
 
-**ss-qa8fk-qa8fm** (n = 66127, GHEP, certificate exact, block p 4)
+*default configuration (adaptive ordering)* (certificate exact, block p 8)
 
-| threads | total s [min-max] | speedup | efficiency | analysis | factorization | solves | iteration | certificate | rest | ordering | valid | peak GiB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 6.971 [6.955-6.979] | 1.00x | 1.00 | 1.692 | 1.515 | 1.146 | 0.392 | 2.061 | 0.162 | SCOTCH | 3/3 | 0.38 |
-| 2 | 3.351 [3.338-3.355] | 2.08x | 1.04 | 0.585 | 0.801 | 0.657 | 0.219 | 0.968 | 0.122 | ND | 3/3 | 0.38 |
-| 4 | 2.136 [2.096-2.137] | 3.26x | 0.82 | 0.348 | 0.512 | 0.461 | 0.154 | 0.564 | 0.094 | ND | 3/3 | 0.40 |
-| 8 | 1.607 [1.581-1.616] | 4.34x | 0.54 | 0.242 | 0.389 | 0.394 | 0.119 | 0.392 | 0.073 | ND | 3/3 | 0.45 |
-| 16 | 1.531 [1.517-1.534] | 4.55x | 0.28 | 0.204 | 0.357 | 0.418 | 0.097 | 0.378 | 0.069 | ND | 3/3 | 0.75 |
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 11.007 [10.998-11.026] | 1.00x | 1.00 | 0.82x | 2.343 | 2.664 | 0.760 | 0.112 | 4.978 | 0.142 | SCOTCH | 54727876 | 5/5 | 0.68 |
+| 2 | 5.584 [5.565-5.594] | 1.97x | 0.99 | 1.62x | 0.901 | 1.434 | 0.432 | 0.067 | 2.635 | 0.108 | ND * | 51738000 | 5/5 | 0.69 |
+| 4 | 3.376 [3.346-3.378] | 3.26x | 0.81 | 2.68x | 0.527 | 0.871 | 0.276 | 0.044 | 1.551 | 0.096 | ND * | 51738000 | 5/5 | 0.69 |
+| 8 | 2.327 [2.311-2.355] | 4.73x | 0.59 | 3.89x | 0.354 | 0.617 | 0.227 | 0.034 | 1.024 | 0.076 | ND * | 51738000 | 5/5 | 0.79 |
+| 16 | 2.011 [1.985-2.072] | 5.47x | 0.34 | 4.51x | 0.290 | 0.542 | 0.229 | 0.029 | 0.864 | 0.066 | ND * | 51738000 | 5/5 | 0.86 |
 
-Phase speedups 1 -> 16 threads: analysis 8.31x, factorization 4.24x, solves 2.74x, iteration 4.02x, certificate 5.46x, rest 2.34x
+Phase speedups 1 -> 16 threads: analysis 8.08x, factorization 4.92x, solves 3.33x, iteration 3.89x, certificate 5.76x, rest 2.15x - orderings differ (SCOTCH at 1, ND at 16): not the parallel speedup of one computation
 
-**syn-near-singular-complex-1e5** (n = 100000, HEP, certificate exact, block p 4)
+*equal pivot order: the 16-thread run's ordering (own ND, ordering 10) at every T* (certificate exact, block p 8)
 
-| threads | total s [min-max] | speedup | efficiency | analysis | factorization | solves | iteration | certificate | rest | ordering | valid | peak GiB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 5.031 [5.019-5.091] | 1.00x | 1.00 | 0.307 | 0.992 | 1.429 | 0.846 | 0.967 | 0.487 | AMD | 3/3 | 0.40 |
-| 2 | 4.202 [4.144-4.217] | 1.20x | 0.60 | 0.298 | 0.891 | 1.363 | 0.501 | 0.855 | 0.288 | AMD | 3/3 | 0.39 |
-| 4 | 3.440 [3.402-3.453] | 1.46x | 0.37 | 0.407 | 0.918 | 0.991 | 0.335 | 0.579 | 0.209 | ND | 3/3 | 0.52 |
-| 8 | 2.723 [2.710-2.730] | 1.85x | 0.23 | 0.394 | 0.739 | 0.748 | 0.279 | 0.409 | 0.161 | ND | 3/3 | 0.52 |
-| 16 | 2.247 [2.242-2.253] | 2.24x | 0.14 | 0.394 | 0.627 | 0.537 | 0.258 | 0.294 | 0.137 | ND | 3/3 | 0.67 |
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 9.776 [9.764-9.778] | 1.00x | 1.00 | 0.93x | 1.676 | 2.405 | 0.752 | 0.112 | 4.684 | 0.143 | ND | 51738000 | 5/5 | 0.65 |
+| 2 | 5.506 [5.498-5.517] | 1.78x | 0.89 | 1.65x | 0.909 | 1.362 | 0.434 | 0.063 | 2.634 | 0.103 | ND | 51738000 | 5/5 | 0.65 |
+| 4 | 3.283 [3.269-3.285] | 2.98x | 0.74 | 2.76x | 0.534 | 0.799 | 0.277 | 0.045 | 1.548 | 0.078 | ND | 51738000 | 5/5 | 0.69 |
+| 8 | 2.242 [2.235-2.251] | 4.36x | 0.55 | 4.04x | 0.354 | 0.543 | 0.227 | 0.034 | 1.025 | 0.059 | ND | 51738000 | 5/5 | 0.79 |
+| 16 | 1.922 [1.918-1.928] | 5.09x | 0.32 | 4.71x | 0.291 | 0.462 | 0.228 | 0.029 | 0.863 | 0.049 | ND | 51738000 | 5/5 | 0.84 |
 
-Phase speedups 1 -> 16 threads: analysis 0.78x, factorization 1.58x, solves 2.66x, iteration 3.28x, certificate 3.29x, rest 3.55x
+Phase speedups 1 -> 16 threads: analysis 5.75x, factorization 5.20x, solves 3.29x, iteration 3.81x, certificate 5.42x, rest 2.94x
 
-**wg-square-1e5** (n = 99225, GHIEP, certificate none, block p 2)
+**yee-pec-box-1e5** (n = 109744, GHEP; fastest at T = 1: nd (ND) 10.523 s)
 
-| threads | total s [min-max] | speedup | efficiency | analysis | factorization | solves | iteration | certificate | rest | ordering | valid | peak GiB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 1.435 [1.419-1.435] | 1.00x | 1.00 | 0.052 | 0.205 | 0.690 | 0.290 | 0.000 | 0.196 | AMD | 3/3 | 0.16 |
-| 2 | 1.020 [1.009-1.043] | 1.41x | 0.70 | 0.053 | 0.159 | 0.480 | 0.178 | 0.000 | 0.150 | AMD | 3/3 | 0.17 |
-| 4 | 0.690 [0.689-0.731] | 2.08x | 0.52 | 0.050 | 0.105 | 0.309 | 0.131 | 0.000 | 0.097 | AMD | 3/3 | 0.18 |
-| 8 | 0.525 [0.523-0.566] | 2.73x | 0.34 | 0.049 | 0.074 | 0.218 | 0.107 | 0.000 | 0.077 | AMD | 3/3 | 0.20 |
-| 16 | 0.533 [0.496-0.546] | 2.69x | 0.17 | 0.072 | 0.078 | 0.204 | 0.097 | 0.000 | 0.080 | AMD | 3/3 | 0.30 |
+*default configuration (adaptive ordering)* (certificate exact, block p 4)
 
-Phase speedups 1 -> 16 threads: analysis 0.73x, factorization 2.62x, solves 3.39x, iteration 2.99x, rest 2.45x
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 10.580 [10.570-10.634] | 1.00x | 1.00 | 0.99x | 1.602 | 2.332 | 1.713 | 0.462 | 4.362 | 0.107 | ND | 49568685 | 5/5 | 0.58 |
+| 2 | 6.136 [6.095-6.146] | 1.72x | 0.86 | 1.71x | 0.866 | 1.380 | 1.036 | 0.261 | 2.494 | 0.096 | ND | 49568685 | 5/5 | 0.58 |
+| 4 | 3.763 [3.712-3.765] | 2.81x | 0.70 | 2.80x | 0.506 | 0.850 | 0.713 | 0.162 | 1.446 | 0.080 | ND | 49568685 | 5/5 | 0.61 |
+| 8 | 2.720 [2.694-2.745] | 3.89x | 0.49 | 3.87x | 0.335 | 0.610 | 0.635 | 0.111 | 0.967 | 0.064 | ND | 49568685 | 5/5 | 0.65 |
+| 16 | 2.486 [2.424-2.513] | 4.26x | 0.27 | 4.23x | 0.276 | 0.565 | 0.666 | 0.088 | 0.834 | 0.048 | ND | 49568685 | 5/5 | 0.75 |
 
-**cav2d-rect-pert-1e5** (n = 99459, GHEP, certificate exact, block p 2)
+Phase speedups 1 -> 16 threads: analysis 5.80x, factorization 4.13x, solves 2.57x, iteration 5.23x, certificate 5.23x, rest 2.24x
 
-| threads | total s [min-max] | speedup | efficiency | analysis | factorization | solves | iteration | certificate | rest | ordering | valid | peak GiB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | 0.912 [0.911-0.914] | 1.00x | 1.00 | 0.031 | 0.153 | 0.290 | 0.166 | 0.196 | 0.077 | AMD | 3/3 | 0.10 |
-| 2 | 0.718 [0.715-0.725] | 1.27x | 0.64 | 0.036 | 0.123 | 0.252 | 0.094 | 0.163 | 0.051 | AMD | 3/3 | 0.12 |
-| 4 | 0.532 [0.531-0.579] | 1.71x | 0.43 | 0.033 | 0.096 | 0.184 | 0.060 | 0.120 | 0.041 | AMD | 3/3 | 0.13 |
-| 8 | 0.385 [0.382-0.435] | 2.37x | 0.30 | 0.029 | 0.078 | 0.117 | 0.046 | 0.084 | 0.030 | AMD | 3/3 | 0.17 |
-| 16 | 0.330 [0.305-0.358] | 2.77x | 0.17 | 0.042 | 0.076 | 0.075 | 0.040 | 0.061 | 0.039 | AMD | 3/3 | 0.24 |
+**ss-qa8fk-qa8fm** (n = 66127, GHEP; fastest at T = 1: pord (PORD) 5.505 s)
 
-Phase speedups 1 -> 16 threads: analysis 0.74x, factorization 2.03x, solves 3.88x, iteration 4.12x, certificate 3.22x, rest 1.98x
+*default configuration (adaptive ordering)* (certificate exact, block p 4)
+
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 6.971 [6.970-6.978] | 1.00x | 1.00 | 0.79x | 1.695 | 1.516 | 1.145 | 0.391 | 2.059 | 0.163 | SCOTCH | 28441088 | 5/5 | 0.38 |
+| 2 | 3.339 [3.337-3.359] | 2.09x | 1.04 | 1.65x | 0.584 | 0.803 | 0.656 | 0.218 | 0.966 | 0.114 | ND * | 24696412 | 5/5 | 0.38 |
+| 4 | 2.130 [2.101-2.131] | 3.27x | 0.82 | 2.58x | 0.348 | 0.510 | 0.454 | 0.151 | 0.563 | 0.103 | ND * | 24696412 | 5/5 | 0.41 |
+| 8 | 1.613 [1.589-1.638] | 4.32x | 0.54 | 3.41x | 0.242 | 0.385 | 0.394 | 0.119 | 0.393 | 0.079 | ND * | 24696412 | 5/5 | 0.44 |
+| 16 | 1.544 [1.498-1.573] | 4.51x | 0.28 | 3.57x | 0.206 | 0.377 | 0.419 | 0.100 | 0.377 | 0.068 | ND * | 24696412 | 5/5 | 0.75 |
+
+Phase speedups 1 -> 16 threads: analysis 8.24x, factorization 4.02x, solves 2.73x, iteration 3.90x, certificate 5.46x, rest 2.40x - orderings differ (SCOTCH at 1, ND at 16): not the parallel speedup of one computation
+
+*equal pivot order: the 16-thread run's ordering (own ND, ordering 10) at every T* (certificate exact, block p 4)
+
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 6.248 [6.241-6.266] | 1.00x | 1.00 | 0.88x | 1.086 | 1.897 | 1.078 | 0.391 | 1.636 | 0.162 | ND | 24696412 | 5/5 | 0.35 |
+| 2 | 3.272 [3.270-3.273] | 1.91x | 0.95 | 1.68x | 0.590 | 0.730 | 0.660 | 0.219 | 0.965 | 0.108 | ND | 24696412 | 5/5 | 0.38 |
+| 4 | 2.037 [2.035-2.040] | 3.07x | 0.77 | 2.70x | 0.351 | 0.439 | 0.454 | 0.152 | 0.562 | 0.080 | ND | 24696412 | 5/5 | 0.40 |
+| 8 | 1.513 [1.510-1.523] | 4.13x | 0.52 | 3.64x | 0.247 | 0.308 | 0.395 | 0.119 | 0.392 | 0.053 | ND | 24696412 | 5/5 | 0.42 |
+| 16 | 1.420 [1.415-1.487] | 4.40x | 0.27 | 3.88x | 0.204 | 0.283 | 0.417 | 0.098 | 0.374 | 0.044 | ND | 24696412 | 5/5 | 0.73 |
+
+Phase speedups 1 -> 16 threads: analysis 5.32x, factorization 6.69x, solves 2.59x, iteration 3.98x, certificate 4.38x, rest 3.64x
+
+**syn-near-singular-complex-1e5** (n = 100000, HEP; fastest at T = 1: amd (AMD) 4.990 s)
+
+*default configuration (adaptive ordering)* (certificate exact, block p 4)
+
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 5.020 [5.011-5.028] | 1.00x | 1.00 | 0.99x | 0.309 | 0.991 | 1.418 | 0.848 | 0.966 | 0.488 | AMD | 6400988 | 5/5 | 0.40 |
+| 2 | 4.212 [4.172-4.230] | 1.19x | 0.60 | 1.18x | 0.300 | 0.893 | 1.376 | 0.501 | 0.858 | 0.282 | AMD | 6400988 | 5/5 | 0.39 |
+| 4 | 3.438 [3.412-3.455] | 1.46x | 0.36 | 1.45x | 0.408 | 0.917 | 0.987 | 0.336 | 0.580 | 0.210 | ND * | 9598562 | 5/5 | 0.53 |
+| 8 | 2.709 [2.674-2.750] | 1.85x | 0.23 | 1.84x | 0.395 | 0.738 | 0.741 | 0.277 | 0.409 | 0.158 | ND * | 9598562 | 5/5 | 0.55 |
+| 16 | 2.221 [2.209-2.248] | 2.26x | 0.14 | 2.25x | 0.395 | 0.625 | 0.531 | 0.252 | 0.295 | 0.123 | ND * | 9598562 | 5/5 | 0.68 |
+
+Phase speedups 1 -> 16 threads: analysis 0.78x, factorization 1.58x, solves 2.67x, iteration 3.36x, certificate 3.28x, rest 3.95x - orderings differ (AMD at 1, ND at 16): not the parallel speedup of one computation
+
+*equal pivot order: the 16-thread run's ordering (own ND, ordering 10) at every T* (certificate exact, block p 4)
+
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 5.407 [5.405-5.426] | 1.00x | 1.00 | 0.92x | 0.439 | 1.027 | 1.587 | 0.845 | 1.023 | 0.488 | ND | 9598562 | 5/5 | 0.41 |
+| 2 | 4.201 [4.195-4.236] | 1.29x | 0.64 | 1.19x | 0.426 | 0.858 | 1.291 | 0.500 | 0.841 | 0.283 | ND | 9598562 | 5/5 | 0.43 |
+| 4 | 3.053 [3.036-3.094] | 1.77x | 0.44 | 1.63x | 0.409 | 0.595 | 0.974 | 0.336 | 0.565 | 0.185 | ND | 9598562 | 5/5 | 0.49 |
+| 8 | 2.372 [2.368-2.383] | 2.28x | 0.28 | 2.10x | 0.394 | 0.421 | 0.739 | 0.275 | 0.409 | 0.139 | ND | 9598562 | 5/5 | 0.54 |
+| 16 | 1.919 [1.899-1.946] | 2.82x | 0.18 | 2.60x | 0.394 | 0.310 | 0.534 | 0.257 | 0.293 | 0.115 | ND | 9598562 | 5/5 | 0.66 |
+
+Phase speedups 1 -> 16 threads: analysis 1.11x, factorization 3.31x, solves 2.97x, iteration 3.29x, certificate 3.49x, rest 4.26x
+
+**wg-square-1e5** (n = 99225, GHIEP; fastest at T = 1: default (AMD) 1.421 s)
+
+*default configuration (adaptive ordering)* (certificate none, block p 2)
+
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1.421 [1.415-1.430] | 1.00x | 1.00 | 1.00x | 0.053 | 0.206 | 0.675 | 0.290 | 0.000 | 0.197 | AMD | 7085790 | 5/5 | 0.17 |
+| 2 | 1.015 [1.002-1.039] | 1.40x | 0.70 | 1.40x | 0.061 | 0.159 | 0.481 | 0.178 | 0.000 | 0.151 | AMD | 7085790 | 5/5 | 0.17 |
+| 4 | 0.725 [0.686-0.736] | 1.96x | 0.49 | 1.96x | 0.067 | 0.109 | 0.308 | 0.132 | 0.000 | 0.110 | AMD | 7085790 | 5/5 | 0.18 |
+| 8 | 0.554 [0.519-0.570] | 2.56x | 0.32 | 2.56x | 0.055 | 0.080 | 0.217 | 0.108 | 0.000 | 0.086 | AMD | 7085790 | 5/5 | 0.20 |
+| 16 | 0.523 [0.511-0.530] | 2.71x | 0.17 | 2.71x | 0.065 | 0.078 | 0.204 | 0.097 | 0.000 | 0.079 | AMD | 7085790 | 5/5 | 0.31 |
+
+Phase speedups 1 -> 16 threads: analysis 0.81x, factorization 2.64x, solves 3.30x, iteration 2.98x, rest 2.49x
+
+**cav2d-rect-pert-1e5** (n = 99459, GHEP; fastest at T = 1: amd (AMD) 0.912 s)
+
+*default configuration (adaptive ordering)* (certificate exact, block p 2)
+
+| threads | total s [min-max] | speedup | efficiency | vs fastest | analysis | factorization | solves | iteration | certificate | rest | ordering | factor entries | valid | peak GiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.914 [0.912-0.916] | 1.00x | 1.00 | 1.00x | 0.031 | 0.153 | 0.291 | 0.165 | 0.197 | 0.077 | AMD | 3871432 | 5/5 | 0.10 |
+| 2 | 0.744 [0.717-0.746] | 1.23x | 0.61 | 1.23x | 0.044 | 0.124 | 0.251 | 0.094 | 0.162 | 0.066 | AMD | 3871432 | 5/5 | 0.13 |
+| 4 | 0.568 [0.526-0.575] | 1.61x | 0.40 | 1.61x | 0.045 | 0.103 | 0.182 | 0.060 | 0.119 | 0.057 | AMD | 3871432 | 5/5 | 0.14 |
+| 8 | 0.418 [0.387-0.441] | 2.19x | 0.27 | 2.18x | 0.037 | 0.083 | 0.118 | 0.045 | 0.087 | 0.046 | AMD | 3871432 | 5/5 | 0.17 |
+| 16 | 0.344 [0.332-0.348] | 2.66x | 0.17 | 2.65x | 0.044 | 0.080 | 0.076 | 0.040 | 0.061 | 0.039 | AMD | 3871432 | 5/5 | 0.23 |
+
+Phase speedups 1 -> 16 threads: analysis 0.69x, factorization 1.90x, solves 3.84x, iteration 4.10x, certificate 3.23x, rest 1.98x
 
 **yee-pec-box-1e6** (n = 1027733, GHEP, certificate exact, block p 8)
 
@@ -369,24 +462,50 @@ Phase speedups 1 -> 16 threads: analysis 0.74x, factorization 2.03x, solves 3.88
 
 Phase speedups 4 -> 16 threads: analysis 2.26x, factorization 1.89x, solves 1.20x, iteration 1.14x, certificate 1.99x, rest 1.19x
 
+(The 1e6 case's factor entries are 1 042 506 397 at 4, 8 and 16 threads: one pivot order. Its
+4-thread baseline was not screened against the other orderings: their factors need 1.29-1.30x the own
+dissection's flops on this case (SCOTCH 7.01e12, METIS 7.05e12 against 5.43e12, `results/p9_ordering.md`
+§3) and the factorizations (main and counts) are 82% of the 4-thread run.)
+
 Reading:
 
-* **The 3-D cases scale best** (4.2-5.4x at 16 threads on n ~ 1e5, 1 -> 2 threads 1.7-2.1x): the own
-  nested dissection orders in parallel (analysis 5.9-8.3x from 1 to 16 threads), the numeric
-  factorizations - main and certificate counts - run MUMPS' L0 subtrees in parallel and its large
-  fronts on multithreaded BLAS (4.0-4.7x and 5.2-5.8x).
-* **The solves stop at ~8 threads** (2.6-3.4x at 16; syn-mem27-46 0.227 -> 0.228 s, yee-pec-box-1e5
-  0.633 -> 0.664 s from 8 to 16): a triangular solve streams the factor once per block of
+* **The 3-D cases scale best**: at equal pivot order 4.26-5.09x at 16 threads (1 -> 2 threads
+  1.72-1.91x, efficiency 0.86-0.95); the own nested dissection orders in parallel (analysis 5.3-5.8x
+  from 1 to 16 threads), the numeric factorizations run MUMPS' L0 subtrees in parallel and its large
+  fronts on multithreaded BLAS (factorization 4.1-6.7x, certificate counts 4.4-5.4x). Against the
+  fastest 1-thread configuration the default reaches 3.57-4.51x: it pays twice on ss-qa8fk-qa8fm
+  (3.57x against 4.40x at equal order) - PORD orders this case best at 1 thread (5.51 s against the
+  dissection's 6.25 s), and at 16 threads the default takes 1.54 s against the fixed dissection's
+  1.42 s (syn-mem27-46 2.01 against 1.92 s, syn-near-singular-complex-1e5 2.22 against 1.92 s), the
+  difference mostly (0.09 / 0.08 / 0.31 s) in the factorization column, where the adaptive
+  ordering's AMD probe is counted (the open item "the AMD probe on 3-D problems" of
+  docs/DESIGN.md's P9 row).
+* **The solves stop at ~8 threads** (2.6-3.3x at 16; syn-mem27-46 0.227 -> 0.228 s, yee-pec-box-1e5
+  0.635 -> 0.666 s from 8 to 16): a triangular solve streams the factor once per block of
   right-hand sides and is bound by the socket's memory bandwidth (P4 / docs/BLAS.md section 2).
-* **2-D and low-fill cases** (AMD, serial ordering; little work per thread) saturate at 8 threads
-  (2.2-2.8x); syn-near-singular-complex-1e5's real embedding has a low-fill factor too.
+* **2-D and low-fill cases** (AMD, serial ordering; little work per thread) reach 2.65-2.71x at 16
+  threads (wg-square-1e5 8 -> 16 threads only 1.06x, cav2d-rect-pert-1e5 1.22x);
+  syn-near-singular-complex-1e5's real embedding has a low-fill factor too (2.25x against its fastest
+  1-thread run, AMD; 2.82x at equal order with the dissection).
 * **n ~ 1e6:** 4 -> 16 threads 1.82x (factorization 1.89x, counts 1.99x, analysis 2.26x, solves
   1.20x) - the bandwidth limit of one socket that P9 factspeed measured for a single factorization
   (4 -> 16 threads 1.84x) and P9 mpi for MPI layouts on the same socket (results/p9_mpi.md §3.6).
-* **The ordering follows the thread count**: at 1 thread syn-mem27-46 and ss-qa8fk-qa8fm take SCOTCH
-  and syn-near-singular-complex-1e5 AMD (1-2 threads), with more threads the own dissection - the
-  cost model's thread exponents (docs/DESIGN.md §3.6-3b) price its parallelism. So the 1-thread
-  baseline is hsolve's own best choice at 1 thread, not the 16-thread configuration run serially.
+* **The ordering at 1 thread** (open item, not the judged configuration): the adaptive ordering's
+  model is fitted at 16 threads (4-thread data for its thread exponents only, docs/DESIGN.md
+  §3.6-3b). At 1 thread it picks SCOTCH on syn-mem27-46 and ss-qa8fk-qa8fm, where METIS (1.21x /
+  1.15x faster than the pick), PORD (1.09x / 1.27x) and the own dissection (1.13x / 1.12x) are all
+  faster end to end; on the other four cases its pick is the fastest within 1%. Its decision log at
+  1 thread (event `ordering`, build lane; the inputs are deterministic) prices syn-mem27-46's
+  candidates at SCOTCH 7.11 s (analysed: 2.34 s), METIS 7.42, own dissection 7.78 - without the flow
+  refinement there, its work ratio 4.17 falling under 4.5 at 1 thread -, PORD 8.11 (ss-qa8fk-qa8fm:
+  4.23 / 4.92 / 5.18 / 5.31 s); at 16 threads it analyses the dissection (with the flow refinement,
+  the configuration `nd` fixes: equal factor entries) and takes it. The model's SCOTCH ordering time
+  is fitted at 16 threads, where SCOTCH itself runs multithreaded (§3.6-3b notes the model does not
+  tell), so at 1 thread SCOTCH is priced low - consistent with the measured analyses (SCOTCH 2.34 s,
+  METIS 1.06 s, PORD 0.51 s on syn-mem27-46), not isolated further. At 2-16 threads the other
+  orderings were not timed here; the model's 16-thread replay over 38 data cases is 1.1% above the
+  best ordering (results/p9_ordering.md §6). Pricing the orderings at low thread counts needs fit
+  data at those counts (solver code; not part of this fix).
 
 ## 6. The default build (task 1)
 
@@ -403,7 +522,10 @@ Reading:
   the two build scripts, the C and Fortran compiler versions and the environment prefix
   (`CACHE-KEY.txt` in the install); any change builds a new install, repeated builds reuse it.
   Concurrent builds (work trees sharing the cache) build in their own temporary directory and rename
-  the finished install into place, the first one wins (no lock on the shared NFS home). Then
+  the finished install into place, the first one wins (no lock on the shared NFS home). A failed
+  build keeps its build directory and names its `build.log` (the whole make output; review fix - the
+  temporary directory used to be removed with the log that `build_mumps.sh` had just pointed to,
+  reproduced on gpu01 with a Fortran compiler that fails; `tests/py/test_mumps_cache.py`). Then
   `cmake --preset PRESET -DHSOLVE_MUMPS_ROOT=<install>`: its `lib/` goes first in the RPATH of
   executables, shared libraries and the Python module, and hsolve's default MUMPS block sizes become
   P9's (`mumps_blocking=p9`).
@@ -452,9 +574,11 @@ Reading:
   (ss-qa8fk-qa8fm, cav2d-rect-pert-1e5, and yee-pec-box-1e6, where SLEPc's BLR factor makes its
   single-RHS solves cheap); at 1e6 the counts are half of the run. P8 measured every cheaper exact
   count negative; the certificate stays exact (user decision).
-* Thread scaling on one socket is bounded by memory bandwidth (solves stop at ~8 threads, 1e6
-  4 -> 16 threads 1.82x); MPI MUMPS on the same socket is slower than threads (P9 mpi), so more
-  parallel speed needs more memory bandwidth (more sockets / nodes or a GPU), the P10 work.
+* Thread scaling on one socket is bounded by memory bandwidth (3-D 1e5 cases 4.26-5.09x at 16
+  threads on one pivot order, 3.57-4.51x against the fastest 1-thread configuration; solves stop at
+  ~8 threads, 1e6 4 -> 16 threads 1.82x); MPI MUMPS on the same socket is slower than threads (P9
+  mpi), so more parallel speed needs more memory bandwidth (more sockets / nodes or a GPU), the P10
+  work.
 
 ## 8. Commands
 
@@ -511,4 +635,21 @@ $G python3 tools/bench/thread_scaling.py run --bin $S/bin/hsolve_int --threads 4
 $L python3 -m tools.eval.sweep $S/d1e5 --out $S/d1e5/eval.md            # d1e6: --root $D6
 python3 tools/bench/thread_scaling.py table --order syn-mem27-46 yee-pec-box-1e5 ss-qa8fk-qa8fm \
   syn-near-singular-complex-1e5 wg-square-1e5 cav2d-rect-pert-1e5 --json d1e5.json $S/d1e5   # d1e6 likewise
+# 5b review fix (F=$HOME/p9int-fix; tools from the fixed copy $F/meas = git archive of bfc1e95 (branch
+#   p9int-fix), same binary; $F/campaign_fix.sh: two slot calls, resumable, evaluation in the lane)
+SCREEN="--variant amd@1={\"ordering\":0} --variant scotch@1={\"ordering\":3} --variant metis@1={\"ordering\":5} \
+  --variant pord@1={\"ordering\":4}"
+$G python3 tools/bench/thread_scaling.py run --bin $S/bin/hsolve_int --threads 1,2,4,8,16 --reps 0,1,2,3,4 \
+  --timeout 600 --deadline 2350 --run-dir $F/TA --variant default --variant 'nd={"ordering":10}' $SCREEN \
+  syn-mem27-46 ss-qa8fk-qa8fm syn-near-singular-complex-1e5
+$G python3 tools/bench/thread_scaling.py run --bin $S/bin/hsolve_int --threads 1,2,4,8,16 --reps 0,1,2,3,4 \
+  --timeout 600 --deadline 2350 --run-dir $F/TB --variant default --variant 'nd@1={"ordering":10}' $SCREEN \
+  yee-pec-box-1e5 wg-square-1e5 cav2d-rect-pert-1e5
+$L python3 -m tools.eval.sweep $F/TA --out $F/TA/eval.md                 # and TB
+python3 tools/bench/thread_scaling.py table --order syn-mem27-46 yee-pec-box-1e5 ss-qa8fk-qa8fm \
+  syn-near-singular-complex-1e5 wg-square-1e5 cav2d-rect-pert-1e5 --md $F/table.md \
+  --json results/p9_measurements_threads_orderings.json $F/TA $F/TB
+# the adaptive ordering's decision at 1 and 16 threads (lane; event "ordering" of --log FILE.jsonl)
+$L build/release/hsolve --A data/cases/syn-mem27-46/A.npz --config data/cases/syn-mem27-46/config.json \
+  --threads 1 --out /tmp/o -q --log o.jsonl && grep '"ordering"' o.jsonl
 ```
