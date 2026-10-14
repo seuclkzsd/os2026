@@ -50,6 +50,13 @@ bool gpu_requested() {
   return !kGpuDevice.empty();
 }
 
+// Whether the hook in this executable carries the GPU module (CMake HSOLVE_GPU).
+#if HSOLVE_WITH_GPU
+constexpr bool kGpuModule = true;
+#else
+constexpr bool kGpuModule = false;
+#endif
+
 // 7-point Laplacian on nx x ny x nz with coefficients 1, 1.3, 1.7 (no multiple eigenvalues).
 hs::CsrMatrix<double> laplacian_3d(hs::index_t nx, hs::index_t ny, hs::index_t nz) {
   const double cx = 1.0, cy = 1.3, cz = 1.7;
@@ -119,9 +126,7 @@ std::pair<double, hs::index_t> gap_shift(const std::vector<double>& w) {
 }
 
 TEST(GpuHook, InertiaIsTheExactCountWithTheGpuOffAndOn) {
-#if !HSOLVE_WITH_GPU
-  GTEST_SKIP() << "built without the GPU module";
-#else
+  if (!kGpuModule) GTEST_SKIP() << "built without the GPU module";
   const hs::index_t nx = 26, ny = 25, nz = 24;
   const auto a = laplacian_3d(nx, ny, nz);
   const auto [sigma, below] = gap_shift(laplacian_3d_eigenvalues(nx, ny, nz));
@@ -153,7 +158,6 @@ TEST(GpuHook, InertiaIsTheExactCountWithTheGpuOffAndOn) {
     EXPECT_FALSE(r.value("reason", std::string()).empty()) << r.dump();
     EXPECT_EQ(r.value("factorizations_offloaded", -1), 0) << r.dump();
   }
-#endif
 }
 
 #ifdef HSOLVE_HOOKED_CLI
@@ -174,9 +178,10 @@ json run_cli(const fs::path& dir, const std::string& tag, const std::string& ext
 #endif
 
 TEST(GpuHook, HsolveWithGpuOnFindsTheSameEigenpairsAndCount) {
-#if !HSOLVE_WITH_GPU || !defined(HSOLVE_HOOKED_CLI)
-  GTEST_SKIP() << "needs the GPU module and the hooked hsolve executable";
+#ifndef HSOLVE_HOOKED_CLI
+  GTEST_SKIP() << "needs the hooked hsolve executable";
 #else
+  if (!kGpuModule) GTEST_SKIP() << "built without the GPU module";
   const fs::path dir = fs::temp_directory_path() / ("hsolve_gpu_hook_" + std::to_string(static_cast<long>(getpid())));
   fs::create_directories(dir);
   const auto a = laplacian_3d(22, 21, 20);
