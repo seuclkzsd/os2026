@@ -69,3 +69,20 @@ def test_gpu_slot_rejects_bad_arguments():
     assert r.returncode == 2
     r = subprocess.run(["bash", str(script), "7", "60", "--lock-wait", "5", "true"], capture_output=True, text=True)
     assert r.returncode == 2 and "missing --" in r.stderr
+
+
+def test_dgemm_table(tmp_path):
+    from tools.bench import gpu_dgemm_table
+    lines = [{"what": "gemm", "m": 10, "n": 20, "k": 30, "ta": "N", "tb": "N", "mode": "cpu", "s": 0.002,
+              "gflops": 6.0},
+             {"what": "gemm", "m": 10, "n": 20, "k": 30, "ta": "N", "tb": "N", "mode": "gpu", "s": 0.001,
+              "gflops": 12.0, "speedup": 2.0, "model_speedup": 1.5},
+             {"what": "devgemm", "m": 1, "n": 2, "k": 3, "s": 0.5, "gflops": 7.0},
+             {"what": "copy", "mb": 16, "h2d_pinned": 12800.0}]
+    f = tmp_path / "x.jsonl"
+    f.write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+    rows = gpu_dgemm_table.load([str(f)])
+    md = gpu_dgemm_table.gemm_table([r for r in rows if r["what"] == "gemm"])
+    assert "| 10 x 20 x 30 | 2.0 ms (6 GF/s) | 1.0 ms (2.00x) | 1.50x |" in md
+    assert "12.8" in gpu_dgemm_table.copy_table([r for r in rows if r["what"] == "copy"])
+    assert gpu_dgemm_table.main([str(f)]) == 0

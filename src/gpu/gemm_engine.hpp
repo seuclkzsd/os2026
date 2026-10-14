@@ -127,7 +127,9 @@ class GemmEngine {
  public:
   /// Initializes the device (context, cuBLAS handles, streams, events, device and pinned buffers,
   /// pipeline threads). nullptr with `*why` when anything is missing or fails (no library, no
-  /// visible device, too little free device memory, a CUDA error); nothing stays allocated then.
+  /// visible device, too little free device memory, a CUDA error); the engine's buffers are freed
+  /// then, but a CUDA primary context created on the way stays until the process exits (resetting
+  /// it could break another user of the device in this process).
   static std::unique_ptr<GemmEngine> create(const EngineOptions& opt, std::string* why);
   ~GemmEngine();
   GemmEngine(const GemmEngine&) = delete;
