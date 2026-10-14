@@ -70,6 +70,12 @@ main() {
   local common="-$opt -march=$isa $tune -fPIC -pipe"
   local defs="-DALLOW_NON_INIT"
   [ "$gemmt" = 1 ] && defs="$defs -DGEMMT_AVAILABLE"
+  # gfortran pre-includes the sysroot's finclude/math-vector-fortran.h (glibc 2.28: libmvec), so
+  # vectorised loops over LOG etc. call _ZGV*_logf@GLIBC_2.22 - not on glibc 2.17 (cluster nodes),
+  # and the libraries would not load. -nostdinc drops that pre-include; the compiler's own module
+  # directory (omp_lib.mod) is added back explicitly. MUMPS' Fortran includes come through -I.
+  local fnostd
+  fnostd="-nostdinc -I$("$FC" -print-file-name=finclude)"
   local compat
   compat="$(deps_glibc_compat "$build")"
   # conda's LDFLAGS minus --gc-sections and --as-needed (the whole archives must stay whole).
@@ -109,7 +115,7 @@ LIBSEQ = \$(LAPACK) -L\$(topdir)/libseq -lmpiseq\$(PLAT)
 LIBBLAS = -L$CONDA_PREFIX/lib -lblas
 LIBOTHERS = -lpthread
 CDEFS = -DAdd_
-OPTF = $common -fopenmp -fallow-argument-mismatch $defs
+OPTF = $common -fopenmp -fallow-argument-mismatch $fnostd $defs
 OPTC = $common -fopenmp -I.
 OPTL = -fopenmp
 INCS = \$(INCSEQ)
