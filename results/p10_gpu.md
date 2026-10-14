@@ -36,11 +36,18 @@ part: what can go to one V100, how it is done, what it gains, what it costs, and
   1.8e12 flops per factorization). Hence `auto` offloads only factorizations whose MUMPS estimate is
   >= 3e12 flops (the 1e6 cases: 5.4-6.7e12) and is exactly the CPU path below - measured: 0.997-1.007x
   of off on five cases, no CUDA library loaded.
-* **Exactness: the counts are the CPU path's.** cuBLAS FP64 is IEEE double like the CPU BLAS; every
-  element of C is one product over the full K plus one double addition, i.e. rounding-level
-  differences (<= 7e-15 relative per call). The inertia of every factorization measured equals the
-  GPU-off run's and the complete references' counts, every whole run's certificate count equals the
-  CPU run's, and the eigenvalues agree to 3e-15 relative. GPU-only calls are bitwise reproducible.
+* **Exactness: the certificate's guarantee is the CPU path's; equal counts are measured, not
+  guaranteed.** cuBLAS FP64 is IEEE double like the CPU BLAS (the same dgemm backward error bound);
+  every element of C is one product over the full K plus one double addition, i.e. rounding-level
+  differences (<= 7e-15 relative per call). Those differences reach the values MUMPS' threshold
+  pivoting reads, so delayed / 2x2 pivot choices and individual pivot signs may differ from the CPU
+  path's. Each count is still the exact Sylvester inertia of an IEEE-double LDL^T, equal to the
+  inertia of K - s B when the factorization's backward error is below the distance from the
+  endpoint s to the nearest eigenvalue - the same condition and guarantee as on the CPU path
+  (docs/DESIGN.md §3.9). Measured: the inertia of every factorization equals the GPU-off run's and
+  the complete references' counts, every whole run's certificate count equals the CPU run's, and the
+  eigenvalues agree to 3e-15 relative. GPU-only calls are bitwise reproducible (the threaded CPU
+  path is not).
 * **Default off, degrade mode, cost.** The build's default mode is `off` - exactly today's CPU path,
   no CUDA library touched (our measurement nodes' GPUs belong to other jobs); `--gpu auto|on` /
   `HS_GPU` turn it on. Without a GPU, a CUDA library or enough free device memory the run is the CPU
@@ -48,10 +55,21 @@ part: what can go to one V100, how it is done, what it gains, what it costs, and
   set-up per process, +0.4-0.5 GiB peak host memory (CUDA context, 224 MB pinned staging), 1 GiB +
   context on the GPU. Tests cover both configurations (section 7).
 * **Division of labour** (for the "并行方案" section): section 6.
+* **Review fixes** (branch `p10gpu-fix`, section 10):
+  * Under OpenMP binding (`OMP_PROC_BIND` / `OMP_PLACES`, as in the MPI runs) the engine's threads
+    inherited the creating thread's one core, and offloaded calls took 1.3-1.4x as long. Now they
+    may use every place. Bound calls are as fast as unbound ones, and on yee-pec-box-1e6 the three
+    factorizations gain **1.100x bound** (1.072x unbound in the same session; bound before the fix
+    1.055x).
+  * A `chunk_kb` larger than two slots overflowed the shared operand's staging ring. It is now
+    capped at one slot.
+  * A build without the GPU module wrote no `gpu` object for `--gpu on`. Now it reports the mode
+    and why the CPU path ran.
+  * The exactness statement above is restated.
 
 Raw runs: `results/p10_gpu.json` (every factorization, whole run and micro-benchmark line of this
-report, keys `factorizations`, `whole_runs_1e6`, `whole_runs_small`, `size_screen`, `micro`; the tables
-below are their medians).
+report, keys `factorizations`, `whole_runs_1e6`, `whole_runs_small`, `size_screen`, `micro`, and
+`review_fix` for section 10; the tables below are their medians).
 
 ## 1. Setup
 
@@ -366,7 +384,8 @@ Proposed text for docs/SOLUTION.md §6 (replacing its last line, "GPU：赛题�
 > GPU 承担 1e6 分解约 43–47% 的 flops（只占 CPU 时间的 22%），每次调用 1.7–5.0 倍；1e6 三维测例上三次分解 1.07–1.09 倍（配 P9 块参数 1.08–1.11 倍），整次运行 1.058–1.069 倍（证书 exact，每次有效、计数相同）。受主机内存带宽
 > （暂存与加回的流量，约 30 GB/s）限制，1e5 规模没有值得卸载的调用（`on` 为 0.72–0.97 倍），所以 `--gpu auto` 只在分解
 > 估计 ≥ 3e12 flops 时用 GPU；默认 `off`。无 GPU / 无 CUDA 库 / 显存不足时自动为 CPU 路径并在报告中说明（降级模式，
-> 评测机即此情形）；惯性计数与 CPU 路径完全相同。
+> 评测机即此情形）；每次惯性计数仍是双精度 LDLᵀ 的精确 Sylvester 惯性，证书的条件与保证同 CPU 路径（实测计数与 CPU
+> 路径相同）。
 
 ## 7. Degrade mode and tests
 
@@ -382,7 +401,8 @@ Proposed text for docs/SOLUTION.md §6 (replacing its last line, "GPU：赛题�
   not look for CUDA at all (`"available": null`). A CUDA error during an offloaded call (tested with
   an injected fault) completes the call on the CPU - the tiles not yet added are recomputed - and
   returns the process to the CPU for good.
-* **Tests** (ctest, `test_gpu` / `test_gpu_hook`, 14 tests): a plain ctest run sees no GPU (the test
+* **Tests** (ctest, `test_gpu` / `test_gpu_hook`, 14 tests; 20 after the review fixes, section 10):
+  a plain ctest run sees no GPU (the test
   processes set `CUDA_VISIBLE_DEVICES` to the empty list before main - nothing touches the shared
   node's GPUs) and checks the degrade paths: no engine without a device, auto below the threshold never
   loads CUDA, mode on degrades with a reason, the hooked MUMPS factorization of an indefinite 3-D
@@ -482,4 +502,132 @@ $S 2400 -- python3 tools/bench/gpu_e2e.py --tag p10-sizes --reps 1 --variants of
 # section 7: tests
 tools/dev/test.sh release                                   # lane, no GPU visible to the tests
 $S 900 -- env HSOLVE_TEST_GPU_DEVICE=7 ctest --preset release --no-tests=error -R test_gpu --output-on-failure
+```
+
+## 10. Review fixes (branch `p10gpu-fix`)
+
+The review of P10 reported four problems. All four were checked on gpu02 and fixed: 038bc68
+(chunk cap), 73567c3 (thread affinity), 74d2240 (degrade-mode report), and the documentation
+commit (exactness wording). The runs below are from the work directory `p10gpu` at 74d2240 (the
+"before" runs are its earlier build of 052031f's code), in the slot with GPU 7 through
+`gpu_slot.sh` (GPU idle before each slot call). Raw lines: `results/p10_gpu.json`, key
+`review_fix`.
+
+**10.1 The engine's threads under OpenMP binding.** A thread starts with the CPU affinity of the
+thread that creates it. With `OMP_PROC_BIND` / `OMP_PLACES` set - as in the project's MPI runs
+(`tools/bench/mpi_factor_runs.sh`, results/p9_mpi.md) - libgomp binds its initial thread to one
+place at start-up, and that thread creates the engine at the first offloaded factorization. Under
+`OMP_PROC_BIND=close OMP_PLACES=cores`, `/proc/<pid>/task/*/status` of `bench_gpu_dgemm` showed 6
+threads on core 16: the master, the 2 issuing threads, the completing thread and the CUDA runtime's
+threads. Cores 17-31 each had one OpenMP thread.
+
+*Fix:* `GemmEngine::create` runs under `ScopedPlacesAffinity` (`src/gpu/affinity.*`). While the
+threads start, the creating thread is widened to the union of the OpenMP places; afterwards it gets
+its own binding back. Only a thread bound to a proper subset of the places is widened, so unbound
+runs (the default) are unchanged. libgomp lists the process' CPUs as places even when unbound, and
+such a thread already holds all of them. After the fix, `hs-gpu-issue0/1`, `hs-gpu-add` and both
+`cuda-EvtHandlr` threads run on 16-31, and the OpenMP threads stay one per core.
+
+Per call (`bench_gpu_dgemm gemm --ld 15800`, ms, median of the rounds' medians. Before the fix: 2
+rounds of 3 repetitions. After: 3 rounds of 3, unbound and bound alternating):
+
+| m x n x k | unbound, before | bound, before | unbound, after | bound, after | CPU BLAS (any) |
+|---|---|---|---|---|---|
+| 1000 x 9000 x 4000 | 38.34 | 54.57 (**1.42x the time**) | 38.51 | **38.49** | 118-124 |
+| 2000 x 8000 x 4000 | 48.55 | 63.79 (**1.31x**) | 48.64 | **48.74** | 195-198 |
+| 1000 x 4000 x 2048 | - | - | 14.17 [12.53-16.62] | 14.13 [14.01-14.33] | 24.6-24.7 |
+
+The three factorizations of yee-pec-box-1e6 at the saved pivot order (`gpu_factor_ab.py`,
+5 repetitions after the fix; GPU off / on and unbound / bound alternate per repetition; wall s,
+medians):
+
+| factorization | unbound: off | on | speedup | bound: off | on | speedup | review, bound before the fix (2 runs) | review, unbound (5 runs) |
+|---|---|---|---|---|---|---|---|---|
+| main (sigma) | 19.40 | 18.30 | 1.060 | 19.36 | 17.87 | **1.083** | 1.040 | 1.055 |
+| count a | 18.11 | 16.81 | 1.077 | 18.16 | 16.37 | **1.109** | 1.062 | 1.078 |
+| count b | 18.19 | 16.89 | 1.077 | 18.22 | 16.41 | **1.111** | 1.066 | 1.074 |
+| the three | 55.73 [55.61-55.86] | 51.97 [51.71-52.25] | 1.072 | 55.71 [55.59-55.88] | 50.63 [50.54-50.74] | **1.100** | 1.055 | 1.068 |
+
+GPU part per run (medians): 423 calls and 7435 GFlop in both cases. Unbound: 6.43 s in GPU calls,
+7.48 thread-s packing. Bound: 6.81 s and 8.67 thread-s. Bound before the fix (review): 8.90 s and
+12.21 thread-s. The inertia was the same in all 20 runs (337613 / 337610 / 337620).
+
+* **The loss is gone.** With binding, each offloaded call is as fast as without it. Bound runs now
+  gain more than unbound ones, not less: 1.100x against 1.072x, and the ranges of the GPU runs do
+  not overlap. The unbound runs reproduce section 4.1 (1.055 / 1.075 / 1.077, three 1.068x).
+* **Why bound runs gain more is not attributed.** The CPU path is the same either way (55.71 vs
+  55.73 s; P9 found 1.002x for binding). The GPU calls themselves are ~6% slower when bound, since
+  the pipeline threads then share cores with the bound OpenMP team. So the difference is in the CPU
+  work around the offloaded calls. A bound run is 1.3 s faster even though its GPU calls take 0.4 s
+  longer, so the CPU work around the calls saves ~0.55 s per factorization. That is about the ~0.5 s
+  per factorization that section 4.1 could not explain. A plausible cause is that unbound, the pipeline threads' wake-ups displace BLAS
+  threads and their caches; this was not measured further. Binding was not made a default: this is
+  one case, and binding is the environment's choice (MPI runs set it anyway).
+
+**10.2 `chunk_kb` larger than two slots.** `upload_shared` sized the shared operand's chunks from
+`chunk_kb` alone. A chunk larger than the 2-slot pinned staging ring left a ring of one chunk, and
+`pack` wrote the whole chunk past the buffer's end. On 052031f, `bench_gpu_dgemm --modes gpu-k65536`
+on 2000 x 8000 x 4000 packed a 64 MB shared operand into 32 MiB: a host buffer overflow. The upload
+then failed with cuda error 1, the engine broke and the run exited 2.
+
+*Fix:* `normalized()`, which `create()` uses, caps `chunk_bytes` at `slot_bytes`. A tile is at most
+one slot, so nothing else changes. `upload_shared` caps its chunk as well. After the fix,
+`gpu-k65536` computes 2000 x 8000 x 4000 in 49.1 ms (default `gpu` 49.4) and 1000 x 9000 x 4000 in
+38.5 ms (38.4), with the same results and no error. Tests: `GpuOptions.NormalizedCapsTheChunkAtOneSlot`
+and, on the GPU, `GpuEngine.ChunksLargerThanTheStagingRingAreCapped` (64 MiB chunks with 1 MiB slots,
+2.9 MiB shared operands, both split directions).
+
+**10.3 The degrade-mode report in a build without the GPU module.** With `-DHSOLVE_GPU=OFF`, the
+hook reported mode "off" whatever was asked, and hsolve dropped a report whose mode is off before
+looking at `--gpu`. As a result, `hsolve --gpu on` wrote no `gpu` object, contrary to the CLI's
+header, DESIGN §3.9 and BLAS.md §10.
+
+*Fix:* without the GPU module, the hook keeps the mode set by `hsolve_gpu_set_mode`, which still
+returns NotBuilt, or else a valid `HS_GPU`, and reports it with `"available": false` and the reason.
+hsolve's `gpu_report()` also falls back to the `--gpu` value when a hook reports off.
+
+The fix was checked in an `-DHSOLVE_GPU=OFF -DHSOLVE_WERROR=ON` build, which compiles warning-free.
+There, `hsolve --gpu on` on syn-near-singular-real-1e4 writes `"gpu": {"mode": "on", "available":
+false, "reason": "built without the GPU module (HSOLVE_GPU=OFF)"}`. Test
+`GpuHook.WithoutTheGpuModuleTheReportSaysWhy` runs in that build: the hook's report after
+`set_mode`, and report.json of `--gpu on` and of `HS_GPU=auto`. It passes.
+
+**10.4 Exactness wording.** This report, DESIGN §3.9 and the P10 roadmap row said that the counts are
+the CPU path's, and that rounding-level differences do not change pivot signs. That claim is
+stronger than what holds. GPU rounding changes the values MUMPS' threshold pivoting reads, so
+delayed and 2x2 pivot choices and individual pivot signs may differ from the CPU path. What carries
+over is the certificate's argument: each count is the exact Sylvester inertia of an IEEE-double
+LDL^T, and it equals the inertia of K - s B when the backward error is below the endpoint's
+distance to the spectrum. The statements now say this. Equal counts are reported as measured, not
+guaranteed (the answers above, section 6's SOLUTION text, DESIGN §3.9, BLAS.md §10 and the
+roadmap row).
+
+**10.5 Build and tests.** A fresh build of all 294 targets with `-DHSOLVE_WERROR=ON` (GPU module on,
+the default) gives 0 warnings. In the lane without a GPU, `tools/dev/test.sh release` passes:
+ctest 1029/1029, including the new ctest entries `test_gpu.AffinityUnderOmpProcBind`
+(`OMP_PROC_BIND=close OMP_PLACES=cores`) and `GpuAffinity.NoEffectWithoutOpenMpBinding`, and
+pytest 378. With GPU 7, `ctest -R test_gpu` passes 20/20: 16 run and 4 skipped (the two no-GPU
+tests, the bound test's unbound entry, and the OFF-build hook test).
+
+```bash
+# 10.1 per call: 3 rounds, unbound / bound alternating; threads under binding from /proc/<pid>/task
+G="gemm --ld 15800 --reps 3 --modes cpu,gpu --shapes 1000:9000:4000,2000:8000:4000,1000:4000:2048"
+$S 900 -- build/release/bench_gpu_dgemm $G
+$S 900 -- env OMP_PROC_BIND=close OMP_PLACES=cores build/release/bench_gpu_dgemm $G
+# 10.1 factorizations: 5 repetitions r = 0..4, V = off,on for even r and on,off for odd r, the two
+# labels in alternating order (one slot call: 20 processes, 18.5 min)
+python3 tools/bench/gpu_factor_ab.py --out fact-bind.jsonl --reps 1 --variants $V --label unbound yee-pec-box-1e6
+python3 tools/bench/gpu_factor_ab.py --out fact-bind.jsonl --reps 1 --variants $V --label bound \
+   --env OMP_PROC_BIND=close --env OMP_PLACES=cores yee-pec-box-1e6
+python3 tools/bench/gpu_factor_ab.py --out fact-bind.jsonl --summary-only
+# 10.2
+$S 900 -- build/release/bench_gpu_dgemm gemm --ld 15800 --reps 3 --shapes 2000:8000:4000,1000:9000:4000 \
+   --modes cpu,gpu,gpu-k65536
+# 10.3 (lane)
+cmake -S . -B build/nogpu -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
+   -DHSOLVE_GPU=OFF -DHSOLVE_WERROR=ON && cmake --build build/nogpu --target hsolve_cli test_gpu_hook
+build/nogpu/test_gpu_hook
+# 10.5
+$S 600 -- env HSOLVE_TEST_GPU_DEVICE=7 ctest --preset release --no-tests=error -R test_gpu --output-on-failure
+tools/dev/test.sh release                                   # lane
 ```
