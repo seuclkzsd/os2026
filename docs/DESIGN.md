@@ -96,6 +96,9 @@ src/util     错误、日志(JSON lines)、计时、内存(RSS)
 src/blas     （P5，不属于 libhsolve）BLAS hook：MUMPS 与 hsolve 发出的稠密 BLAS 调用按形状改道到窄核 /
              并行切分，其余原样转发真实 BLAS；默认链入 hsolve 可执行文件，或以 libhsolve_blashook.so
              预加载（§3.8，docs/BLAS.md）
+src/parallel （P10，属于 libhsolve，无 MPI）多进程会话：hs::solve_parallel / serve、消息协议、driver::Helpers 的
+             实现（RemoteHelpers）、线程传输（测试用）；位于 driver 之上，driver 只见接口（§3.9）
+src/mpi      （P10，不属于 libhsolve，HSOLVE_WITH_MPI）hs::Transport 的 MPI 实现；hsolve-mpi 可执行文件
 ```
 
 - 下层模块（io / sparse / linalg / factor / ops / eigen / verify）**不打印、不依赖日志**；统计信息
@@ -1079,6 +1082,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
    - 窗口目标（interval / smallest / largest）总是精确计数——它们的计数点就是切点与位移，`certificate =
      randomized` / `off` 被忽略并告警；零带干扰时转交窗口的 nearest 同样精确计数。报告的 method 为 exact。
    - GHIEP 无惯性证书（报告中注明，method 为 none）；P0 设计中「换种子、更大 nev 重跑」的延迟重启检查未实现。
+   - 多进程求解（P10，§3.9）：exact 的两次计数在代价与内存允许时由两个 helper 进程同时各做一次（`concurrent_counts`，
+     同 `count_below` 的规则，计数相同）；否则如上在 leader 上依次计数。
 8b. **窗口与谱切片**（interval / smallest / largest，B 正定或 B = I；以及零带干扰的 nearest，见 9）：
    - 窗口端点与所有切点都是同一分析上的精确 Sylvester 计数，每片都知道自己含几个特征值；各片单独
      求解、单独认证，最后合并。
@@ -1105,6 +1110,8 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
      片大小的代价模型未按块运行重新标定，窗口目标的性能未重测。
    - 合并：来自不同片、特征值相差 ≤ 2e-9 相对的对成组，以 B-Gram 秩（1e-4）+ Rayleigh–Ritz 去重；
      全局证书逐窗口要求「不同对数 == 计数」。
+   - 多进程求解（P10，§3.9）：切点照旧由 leader 计数，各片交给 helper 进程（同一 `run_slice`），leader 合并；有 ≥ 2 个
+     helper 时含 ≥ 32 个特征值的窗口至少切成 helper 数那么多片。
    - smallest / largest：窗口 (−∞, U] 与 [L, +∞)，U（L）由上述惯性搜索确定：要求 ν(U) ∈ [k, k + slack]，
      slack = t_分解 / 边际每对代价（钳到 [1, max(16, k)]：多算几对比再做一次计数便宜时停止细化），
      再在 U（L）处单边运行。第 k 个特征值落在数值相等的大簇（超出 k 的副本多于 max(16, k)，如零空间）
@@ -1189,6 +1196,71 @@ factor（InertiaCounter）、sparse、linalg；不打印；固定种子与线程
 - 许可：窄核改编自 OpenBLAS 0.3.34 的 SkylakeX 核（BSD-3-Clause），版权与许可声明见
   `src/blas/simd_kernels.hpp`、`docs/BLAS.md` §7 与根目录 `THIRD_PARTY_NOTICES`。
 
+### 3.9 多进程（MPI，P10「mpi」；`src/parallel`、`src/mpi`、`apps/hsolve_mpi.cpp`；实测 `results/p10_mpi.md`，用法 `docs/PARALLEL.md`）
+- **动机（实测，测量节点 2 socket × 16 核，每次运行 16 核）**：数值分解与计数受内存带宽限制。一个 socket 上 MPI 无益
+  （P9，`results/p9_mpi.md`）；两个 socket 时：
+  - 一个进程 16 线程分在两个 socket（各 8 核）：1e6 的分解 / 计数比单 socket 16 线程快 1.18–1.27 倍（多了一个 socket
+    的带宽），1e5 反而慢（分解 0.70–0.92 倍、计数 0.53–0.76 倍：新实例的首次触摸把内存放在一个 socket 上）；
+  - **每 socket 一个进程、同时各做一个独立分解，互不干扰**：两个并发的 8 线程计数各自只用一个 8 线程计数单独时的时间
+    （1e6：27.07 对 26.96 s，22.45 对 22.37 s；1e5：0.517 对 0.506 s），证书的两次计数因此比单 socket 上 hsolve
+    的顺序两次快 1.59 倍（1e6）/ 1.62–1.70 倍（1e5），比两 socket 上 16 线程的顺序两次快 1.28 / 1.32 倍（1e6）、
+    2.0–2.6 倍（1e5）。同一 socket 上的两个并发进程则互相拖慢（各 1.6–1.8 倍）。
+  - MPI MUMPS 2×8 跨 socket 做一次分解：1e5 比 16 线程跨 socket 快 1.13–1.38 倍，1e6 只有 0.95 / 1.10 倍；要用它，
+    主对象须换成分布式 MUMPS（与 hsolve 链接的顺序 MUMPS 及其 libmpiseq 冲突，回代、修正与 Krylov 基也须随之分布），
+    收益不稳——未采用。实测的收益来自彼此独立的分解按 socket 并发，不需要分布式分解。
+- **布局（leader + 每 socket 一个 helper）**：rank 0（leader）占全部核（OMP 线程 = 核数），做 hs::solve 的全部顺序
+  工作（分析、主分解、Krylov、验证、切点计数）；rank 1..S（helper）各绑定一个 NUMA 节点（socket）的核，线程数 = 该
+  节点的核数。**leader 计算时 helper 只等消息，helper 计算时 leader 只等结果**——任何时刻都不超订核；helper 的数据
+  （矩阵副本、分析、因子）在它自己 socket 的内存上。等待不占核：`MpiTransport::receive` 以 MPI_Iprobe 加 50 µs–2 ms
+  递增的睡眠轮询（Open MPI 的阻塞 MPI_Recv 会空转一个核）。`hsolve-mpirun` 按进程的 cpuset 与 NUMA 拓扑给出
+  R = 1 + S（一个 socket 时 R = 1，即普通 hsolve）；`--ranks R` 可强制（R − 1 个 helper：有那么多 NUMA 节点就按节点，
+  否则把核等分）。
+- **交给 helper 的工作**（driver 只见接口 `driver::Helpers` / `HelpersOf<T>`，`src/driver/helpers.hpp`；会话协议与
+  消息编码在 `src/parallel`，MPI 传输在 `src/mpi`）：
+  1. **nearest 证书（exact）的两次计数** ν(a)、ν(b)：两个 helper 同时各做一次（`concurrent_counts`，helpers.cpp），
+     规则同 `count_below`（谱隙点、奇异时外移，`count_below` 的函数重载），在各自的 InertiaCounter 上（从 helper 的
+     主对象构造；主对象以 leader 主分析的主元顺序 PERM_IN 分析，之后丢弃，只留计数器的分析）——计数是精确整数，与
+     单进程逐个相同。前提：至少两个可用 helper；问题已共享；**代价规则**（`ParallelOptions::helper_counts = auto`）：
+     本次实测的主分解时间 t_f 下，一次计数（0.9 t_f）须多于 helper 的准备（`helper_preparation_s`：两次给定顺序的
+     分析，按 `model_analysis_s` 上界，加 0.05 s 消息）——helper 的计数在 1e5 比 leader 的快（0.85 倍时间）、在 1e6
+     慢（1.53 倍），规则取二者相等；内存：leader 先释放主因子（同 `MainFactors::Release`，重跑时在 σ 重分解），两次
+     计数同时须放得下计数余量（`count_allowance_mb`，预算按 leader 加 helper 的内存计）。不满足时 leader 照旧自己数
+     （report.parallel.notes 说明原因）。certificate 的陈述注明 "2 of the 2 counts made by helper processes"。
+  2. **窗口目标的切片**（interval / smallest / largest，及零带转交的 nearest）：窗口端点与切点照旧由 leader 计数
+     确定；各片依次交给空闲的 helper（`WindowSolver::solve_slices`，同一 `run_slice`：位移、分解、Krylov、验证、片内
+     重跑；helper 的主对象同样以 leader 的主元顺序分析），leader 等待并合并（池中每对带片号，`deduplicate()` 与全局
+     证书看到的同单进程）。前提：至少两个可用 helper；代价规则（`helper_slices = auto`）：一片的预测工作（切片代价
+     模型：分解 + c 对）多于 helper 的准备（一次分析 + 消息）；内存：一个 helper 的片（主分析的内存内估计 ×1.15 +
+     c_max 对的 Krylov 工作集 7 c n 个标量）能放下几个就用几个 helper（leader 先释放主因子），少于两个则 leader
+     全做。有 ≥ 2 个 helper 时，含 ≥ 32 个特征值的窗口至少切成 helper 数那么多片（每片 ≥ 16；顺序的代价模型会把
+     yee-pec-box-1e5 [40, 400] 的 108 个特征值留成一片，helper 空闲）。helper 的部分簇判定为非数值相等时由 leader
+     整簇求解（同单进程）。
+  3. 其余——分析、主分解、Krylov、randomized / 单精度证书、GHIEP 全部——仍在 leader 上：没有能并发的独立分解。
+- **共享时机**：问题（leader 输入检查后的 A、B 的 CSR、工作配置、范数、主元顺序与因子选项，`share()` 只登记）在 helper
+  第一次有任务前才发送（`Helpers::prepare`），helper 随即构造 pencil 并（nearest）分析计数器，leader 等它们就绪。
+  早发送让 helper 的分析与 leader 的主分解重叠：1e5 上主分解慢 0.2–0.35 s（筛查），故改在 leader 本就要等待时。
+- **结果与容错**：结果与单进程相同（计数是整数；切片同一代码、同一主元顺序，只差分解线程数造成的舍入）。helper 的任务
+  失败（MUMPS / 内存错误、`std::bad_alloc`、任何异常；故障注入 `certificate_fault_count` 位 128）以错误回复，leader
+  自己做该工作，该 helper 本次求解不再使用（`report.parallel.fallbacks`、notes、告警）。helper **进程**死亡则 MPI 作业
+  终止（MPI 默认错误处理），hsolve 无法接住。
+- **内存**：预算覆盖整个进程树——`memory_in_use` 加上 helper 最近报告的 RSS，任务进行中按授予的额度计；分析前的规划
+  仍只看 leader（helper 那时还没有数据）。
+- **报告**：`report.parallel`（processes、threads、helper_counts、helper_slices、fallbacks、share_s、wait_s、
+  helper_busy_s、notes）；阶段计时仍互斥：发送问题计入 setup，等待 helper 的计数计入 certificate，等待切片计入
+  iterate。helper 的事件写到 `<log>.rank<r>`。
+- **构建与运行**：CMake `HSOLVE_WITH_MPI`（AUTO：找到 MPI 即构建；集群节点上为 `$HS_REF_ENV` 即 os2026-ref 环境的
+  Open MPI 5.0.11）构建 `hsolve-mpi`（与 `hsolve` 同一份命令行，`apps/cli.cpp`）、`hsolve-mpirun` 与
+  `test_mpi_session`（1、2、3 个 rank）。hsolve 链接顺序 MUMPS，其 libmpiseq 以桩函数定义 MPI_Init、MPI_Comm_rank、
+  MPI_Finalize、MPI_Wtime：MPI 库在链接行上排在 MUMPS 之前，全局符号查找取真正的 MPI；`hsolve-mpi` 启动时检查
+  （`hs::mpi::mpi_library`），`test_mpi_session` 亦检查；可执行文件不包含 `<mpi.h>`（MUMPS 的 include 目录里有
+  libseq 的 mpi.h 桩）。`--helper-counts` / `--helper-slices`（auto | on | off）= `hs::ParallelOptions`。
+- **实测**（两 socket 各 8 核对一个进程 16 线程跨两 socket，5 次交错、每次有效，`results/p10_mpi.md` §4）：
+  __E2E__
+- **限制**：单 socket 上 helper 共用一个 socket 的带宽，实测更慢（__ONESOCKET__），`hsolve-mpirun` 因此默认 R = 1；
+  MPI 启动（mpiexec + MPI_Init）约 1.8–2 s，计入墙钟、不计入 `time_total_s`，1e5 的 nearest 收益（0.36–0.47 s）抵不上
+  它；GHIEP、randomized 证书与单片窗口没有可并发的工作；每个 helper 另持一份矩阵与分析（1e6：进程树采样峰值
+  __MEM__）。
+
 ## 4. 数值约定
 
 ### 4.1 位移反演
@@ -1242,7 +1314,9 @@ LOBPCG / JD 直接以后向误差 η ≤ tol 判收敛（§3.5、§4.5）。
   `DriverAdaptiveOrdering`、`DriverOrderingModel`、`LanczosBlockRule`、`VerifyStartScaling`，blas 模块为
   `BlasHook*`；P5c 修复轮的 `AnaintFix*`、`AsmkernFix*`、`CertintFix*` 与 P5c 集成的 `BlocktuneDriver`
   （driver）、`CounterDeferred`（factor）、`P5cIntFix*`（eigen 与 driver）以子任务代号开头，是本规则的
-  例外）。逐位哈希测试的参考表以平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
+  例外；P10 的多进程模块为 `Parallel*`（`test_parallel_session`，线程传输）与 `Mpi*`（`tests/cpp/mpi/`，不在
+  通配之内，ctest 以 1、2、3 个 rank 的 MPI 作业运行：`test_mpi_session.ranks<R>`））。逐位哈希测试的参考表以
+  平台指纹（+ CPU 型号）为键，未知平台只查计数；ctest 名为
   `<可执行文件>.<套件>.<用例>`，`tools/dev/test.sh release test_factor` 只跑该文件，匹配不到测试即
   报错。共享夹具在 `tests/cpp/support/`（`hsolve_test_support`），只追加不改签名。
   数值测试尽量用有解析解的问题。Python 工具与 Python 接口的测试在 `tests/py/`（pytest；
