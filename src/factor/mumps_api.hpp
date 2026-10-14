@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 #include "hsolve/error.hpp"
 
@@ -116,6 +118,16 @@ inline bool is_memory_error(int info1) {
   return info1 == -5 || info1 == -7 || info1 == -13 || info1 == -19;
 }
 
+/// Extra MUMPS controls for measurements (bench/factspeed_*.cpp): (1-based index, value) pairs
+/// written after hsolve's own settings, before every analysis (JOB=1) and factorization (JOB=2)
+/// of a MumpsFactorization. Not used by the library itself.
+struct MumpsControlOverrides {
+  std::vector<std::pair<int, int>> icntl;
+  std::vector<std::pair<int, int>> keep;
+  std::vector<std::pair<int, double>> cntl;
+  bool empty() const { return icntl.empty() && keep.empty() && cntl.empty(); }
+};
+
 /// One MUMPS instance with SYM=2 (symmetric indefinite LDL^T) and PAR=1 (host works).
 /// JOB=-1 runs at construction, JOB=-2 at destruction (which also deletes out-of-core files);
 /// every job holds call_mutex().
@@ -147,6 +159,10 @@ class Instance {
 
   int& icntl(int i) { return s_->icntl[i - 1]; }
   U& cntl(int i) { return s_->cntl[i - 1]; }
+  /// MUMPS' internal KEEP array (exposed by [sd]mumps_c.h; set by JOB=-1, read at analysis and
+  /// factorization). Only measurement code touches it (MumpsControlOverrides).
+  int& keep(int i) { return s_->keep[i - 1]; }
+  int keep(int i) const { return s_->keep[i - 1]; }
   int infog(int i) const { return s_->infog[i - 1]; }
   double rinfog(int i) const { return static_cast<double>(s_->rinfog[i - 1]); }
   Struc& raw() { return *s_; }

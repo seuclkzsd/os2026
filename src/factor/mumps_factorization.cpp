@@ -241,6 +241,7 @@ void MumpsFactorization<T, U>::analyze(const ShiftedPencil<T>& pencil, double al
   }
   stats_.block_analysis = blocks;
 
+  apply_overrides();
   const int info1 = mumps_.run(kAnalyze);
   s.perm_in = nullptr;
   stats_.analyze_s += timer.seconds();
@@ -293,6 +294,7 @@ bool MumpsFactorization<T, U>::factorize(double alpha, double beta) {
         retries == kMaxWorkspaceRetries ? cap : workspace_reservation_mb(cap, need, relax_pct_);
     mumps_.icntl(23) = icntl23(reserve);
     stats_.workspace_reserved_mb = reserve;
+    apply_overrides();
     info1 = mumps_.run(mumps::kFactorize);
     // INFO -19 below the cap means that the reservation was too small, not the cap: grow it.
     const bool too_small =
@@ -348,6 +350,13 @@ bool MumpsFactorization<T, U>::read_factorization_info(bool mumps_singular) {
   inertia_.pos = std::max<index_t>(0, n - inertia_.neg - inertia_.zero);
   inertia_.valid = !singular;
   return singular;
+}
+
+template <class T, class U>
+void MumpsFactorization<T, U>::apply_overrides() {
+  for (const auto& [i, v] : overrides_.icntl) mumps_.icntl(i) = v;
+  for (const auto& [i, v] : overrides_.keep) mumps_.keep(i) = v;
+  for (const auto& [i, v] : overrides_.cntl) mumps_.cntl(i) = static_cast<U>(v);
 }
 
 template <class T, class U>
