@@ -1,0 +1,1570 @@
+{
+ "screenA": [
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "base",
+   "n": 3,
+   "median_s": 24.089343197,
+   "min_s": 23.979509301,
+   "max_s": 24.101397663,
+   "speedup": 1.0,
+   "gflops": 314.0373920059851,
+   "l0_s": 6.5371,
+   "sys_s": 6.155104,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k420_256",
+   "n": 3,
+   "median_s": 22.760862238,
+   "min_s": 22.754563852,
+   "max_s": 22.799066767,
+   "speedup": 1.0583668995097233,
+   "gflops": 332.36678090749405,
+   "l0_s": 6.702,
+   "sys_s": 6.169868999999999,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k420_512",
+   "n": 3,
+   "median_s": 23.43378315,
+   "min_s": 23.268309998,
+   "max_s": 23.454996565,
+   "speedup": 1.0279749984372455,
+   "gflops": 322.82258755658927,
+   "l0_s": 7.0684,
+   "sys_s": 6.3702760000000005,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k58_2000",
+   "n": 3,
+   "median_s": 23.793040347,
+   "min_s": 23.748774257,
+   "max_s": 23.850100445,
+   "speedup": 1.0124533412156955,
+   "gflops": 317.9482068031228,
+   "l0_s": 6.6836,
+   "sys_s": 6.135685,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k6_64",
+   "n": 3,
+   "median_s": 23.117877341,
+   "min_s": 22.9740566,
+   "max_s": 23.139510339,
+   "speedup": 1.042022277463904,
+   "gflops": 327.23395842690144,
+   "l0_s": 6.8101,
+   "sys_s": 6.119458000000001,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k8_480",
+   "n": 3,
+   "median_s": 24.299300605,
+   "min_s": 24.154315191,
+   "max_s": 24.301341856,
+   "speedup": 0.9913595287612189,
+   "gflops": 311.3239609524556,
+   "l0_s": 6.6763,
+   "sys_s": 6.149017,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  }
+ ],
+ "screenB": [
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "base",
+   "n": 3,
+   "median_s": 23.930189655,
+   "min_s": 23.905936345,
+   "max_s": 23.977652711,
+   "speedup": 1.0,
+   "gflops": 316.1259740013122,
+   "l0_s": 6.5189,
+   "sys_s": 6.116803,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k420",
+   "n": 3,
+   "median_s": 22.784534984,
+   "min_s": 22.776630288,
+   "max_s": 22.872953133,
+   "speedup": 1.0502821177524366,
+   "gflops": 332.0214574506499,
+   "l0_s": 6.6928,
+   "sys_s": 6.2197439999999995,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "nocona",
+   "n": 3,
+   "median_s": 23.960961093,
+   "min_s": 23.950903226,
+   "max_s": 24.019956921,
+   "speedup": 0.998715767790759,
+   "gflops": 315.719994843322,
+   "l0_s": 6.517,
+   "sys_s": 6.103397,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "skx",
+   "n": 3,
+   "median_s": 23.916022392,
+   "min_s": 23.905299859,
+   "max_s": 23.955201124,
+   "speedup": 1.0005923753861654,
+   "gflops": 316.3132392472382,
+   "l0_s": 6.5041,
+   "sys_s": 6.083195,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "skxk420",
+   "n": 3,
+   "median_s": 22.663181794,
+   "min_s": 22.604560774,
+   "max_s": 22.675507893,
+   "speedup": 1.0559060008659258,
+   "gflops": 333.7993129775713,
+   "l0_s": 6.6619,
+   "sys_s": 6.166836,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "v3",
+   "n": 3,
+   "median_s": 23.931513456,
+   "min_s": 23.88543661,
+   "max_s": 24.01970046,
+   "speedup": 0.9999446837742864,
+   "gflops": 316.1084871055804,
+   "l0_s": 6.5135,
+   "sys_s": 6.144451,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "v3k420",
+   "n": 3,
+   "median_s": 22.702861208,
+   "min_s": 22.687134659,
+   "max_s": 22.736089086,
+   "speedup": 1.0540605184410639,
+   "gflops": 333.21590804850945,
+   "l0_s": 6.6807,
+   "sys_s": 6.159662,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "base",
+   "n": 3,
+   "median_s": 22.504321115,
+   "min_s": 22.434910238,
+   "max_s": 22.510148972,
+   "speedup": 1.0,
+   "gflops": 305.5629448630004,
+   "l0_s": 6.2839,
+   "sys_s": 5.989032,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k420",
+   "n": 3,
+   "median_s": 21.550841907,
+   "min_s": 21.504257146,
+   "max_s": 21.696161011,
+   "speedup": 1.0442432463712843,
+   "gflops": 319.0820415145093,
+   "l0_s": 6.4472,
+   "sys_s": 6.010104,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "nocona",
+   "n": 3,
+   "median_s": 22.537164386,
+   "min_s": 22.506486087,
+   "max_s": 22.557054223,
+   "speedup": 0.9985427061524917,
+   "gflops": 305.117649863425,
+   "l0_s": 6.2831,
+   "sys_s": 5.991998,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "skx",
+   "n": 3,
+   "median_s": 22.390598021,
+   "min_s": 22.372099256,
+   "max_s": 22.46156493,
+   "speedup": 1.0050790556774474,
+   "gflops": 307.11491607292436,
+   "l0_s": 6.2347,
+   "sys_s": 6.0384530000000005,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "skxk420",
+   "n": 3,
+   "median_s": 21.466581889,
+   "min_s": 21.432902281,
+   "max_s": 21.528217392,
+   "speedup": 1.0483420803258745,
+   "gflops": 320.3344932881783,
+   "l0_s": 6.3962,
+   "sys_s": 6.064552,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "v3",
+   "n": 3,
+   "median_s": 22.482157345,
+   "min_s": 22.482003273,
+   "max_s": 22.56214712,
+   "speedup": 1.000985838220945,
+   "gflops": 305.8641804929508,
+   "l0_s": 6.2599,
+   "sys_s": 6.033748,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "v3k420",
+   "n": 3,
+   "median_s": 21.480405185,
+   "min_s": 21.478617968,
+   "max_s": 21.493582667,
+   "speedup": 1.0476674402173294,
+   "gflops": 320.12834826988865,
+   "l0_s": 6.4144,
+   "sys_s": 6.087927,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  }
+ ],
+ "screenC": [
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "base",
+   "n": 3,
+   "median_s": 24.047249164,
+   "min_s": 24.042588384,
+   "max_s": 24.074144446,
+   "speedup": 1.0,
+   "gflops": 314.5871056240452,
+   "l0_s": 6.5269,
+   "sys_s": 6.11108,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "active",
+   "n": 3,
+   "median_s": 23.946197715,
+   "min_s": 23.945757539,
+   "max_s": 23.984954475,
+   "speedup": 1.0042199371358527,
+   "gflops": 315.9146434335285,
+   "l0_s": 6.5209,
+   "sys_s": 6.232397,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "bind",
+   "n": 3,
+   "median_s": 23.99815863,
+   "min_s": 23.986165431,
+   "max_s": 23.99930342,
+   "speedup": 1.0020455958624523,
+   "gflops": 315.23062370569056,
+   "l0_s": 6.5299,
+   "sys_s": 6.105827,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "nothp",
+   "n": 3,
+   "median_s": 24.937782334,
+   "min_s": 24.841674865,
+   "max_s": 24.978025847,
+   "speedup": 0.9642898009906096,
+   "gflops": 303.3531374764224,
+   "l0_s": 6.6997,
+   "sys_s": 13.150233,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "passive",
+   "n": 3,
+   "median_s": 25.777530306,
+   "min_s": 25.722073598,
+   "max_s": 25.819566126,
+   "speedup": 0.9328763802637347,
+   "gflops": 293.4708803722044,
+   "l0_s": 6.5191,
+   "sys_s": 9.809153,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  }
+ ],
+ "screenD": [
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "base",
+   "n": 3,
+   "median_s": 23.958534174,
+   "min_s": 23.95418235,
+   "max_s": 24.028574457,
+   "speedup": 1.0,
+   "gflops": 315.7519762178336,
+   "l0_s": 6.5479,
+   "sys_s": 6.147749,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k408_50",
+   "n": 3,
+   "median_s": 26.341242264,
+   "min_s": 26.198267459,
+   "max_s": 26.385972307,
+   "speedup": 0.9095445816062975,
+   "gflops": 287.190499100411,
+   "l0_s": 12.2966,
+   "sys_s": 8.247281000000001,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k408_70",
+   "n": 3,
+   "median_s": 24.720347365,
+   "min_s": 24.713009737,
+   "max_s": 24.752479852,
+   "speedup": 0.9691827473234215,
+   "gflops": 306.02136778359954,
+   "l0_s": 8.5864,
+   "sys_s": 6.939743,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k408_97",
+   "n": 3,
+   "median_s": 24.030074654,
+   "min_s": 23.932894065,
+   "max_s": 24.126159027,
+   "speedup": 0.9970228773305916,
+   "gflops": 314.8119438515249,
+   "l0_s": 6.5409,
+   "sys_s": 6.171181,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "l0off",
+   "n": 3,
+   "median_s": 25.161726905,
+   "min_s": 25.155888946,
+   "max_s": 25.186865106,
+   "speedup": 0.9521816314300389,
+   "gflops": 300.6532318423555,
+   "l0_s": null,
+   "sys_s": 3.603609,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  }
+ ],
+ "screenE": [
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "base",
+   "n": 3,
+   "median_s": 23.917921108,
+   "min_s": 23.863532366,
+   "max_s": 24.096741806,
+   "speedup": 1.0,
+   "gflops": 316.2881288287507,
+   "l0_s": 6.5106,
+   "sys_s": 5.919493000000001,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k192",
+   "n": 3,
+   "median_s": 22.93416034,
+   "min_s": 22.932414724,
+   "max_s": 22.983193129,
+   "speedup": 1.0428949982652822,
+   "gflops": 329.8553075661893,
+   "l0_s": 6.5688,
+   "sys_s": 5.909461,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256",
+   "n": 3,
+   "median_s": 22.681017487,
+   "min_s": 22.666916173,
+   "max_s": 22.730141303,
+   "speedup": 1.0545347501146698,
+   "gflops": 333.53682289866316,
+   "l0_s": 6.6824,
+   "sys_s": 5.90626,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256c",
+   "n": 3,
+   "median_s": 22.652372559,
+   "min_s": 22.491024944,
+   "max_s": 22.68407542,
+   "speedup": 1.0558682559941028,
+   "gflops": 333.9585949780511,
+   "l0_s": 6.8635,
+   "sys_s": 5.995201999999999,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k320",
+   "n": 3,
+   "median_s": 22.725832474,
+   "min_s": 22.72418272,
+   "max_s": 22.831635948,
+   "speedup": 1.0524552240435565,
+   "gflops": 332.87909348878003,
+   "l0_s": 6.7998,
+   "sys_s": 6.032282999999998,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k384",
+   "n": 3,
+   "median_s": 22.86549433,
+   "min_s": 22.863457392,
+   "max_s": 23.1401843,
+   "speedup": 1.0460268543864015,
+   "gflops": 330.84587647849906,
+   "l0_s": 6.8864,
+   "sys_s": 6.107526999999999,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "main",
+   "variant": "base",
+   "n": 3,
+   "median_s": 25.354323124,
+   "min_s": 25.339714217,
+   "max_s": 25.547220187,
+   "speedup": 1.0,
+   "gflops": 298.33268275909984,
+   "l0_s": null,
+   "sys_s": 12.365869,
+   "inertia": [
+    [
+     20003,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "main",
+   "variant": "k192",
+   "n": 3,
+   "median_s": 24.429163563,
+   "min_s": 24.388442596,
+   "max_s": 24.541345501,
+   "speedup": 1.0378711108390641,
+   "gflops": 309.630872854785,
+   "l0_s": null,
+   "sys_s": 12.335833000000001,
+   "inertia": [
+    [
+     20003,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "main",
+   "variant": "k256",
+   "n": 3,
+   "median_s": 24.134122858,
+   "min_s": 24.122491205,
+   "max_s": 24.166591165,
+   "speedup": 1.0505591304552229,
+   "gflops": 313.4161237857738,
+   "l0_s": null,
+   "sys_s": 12.342493,
+   "inertia": [
+    [
+     20003,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "main",
+   "variant": "k256c",
+   "n": 3,
+   "median_s": 24.151855009,
+   "min_s": 23.999803053,
+   "max_s": 24.156840381,
+   "speedup": 1.049787816072592,
+   "gflops": 313.1860154967528,
+   "l0_s": null,
+   "sys_s": 12.394900000000002,
+   "inertia": [
+    [
+     20003,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "main",
+   "variant": "k320",
+   "n": 3,
+   "median_s": 24.183685111,
+   "min_s": 24.169265076,
+   "max_s": 24.246544431,
+   "speedup": 1.0484061055057128,
+   "gflops": 312.77380607653913,
+   "l0_s": null,
+   "sys_s": 12.363659,
+   "inertia": [
+    [
+     20003,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "main",
+   "variant": "k384",
+   "n": 3,
+   "median_s": 24.364952921,
+   "min_s": 24.292651917,
+   "max_s": 24.632290957,
+   "speedup": 1.0406062842069876,
+   "gflops": 310.4468644634489,
+   "l0_s": null,
+   "sys_s": 12.523159,
+   "inertia": [
+    [
+     20003,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "base",
+   "n": 3,
+   "median_s": 22.550832591,
+   "min_s": 22.456202579,
+   "max_s": 22.582792404,
+   "speedup": 1.0,
+   "gflops": 304.9327160890013,
+   "l0_s": 6.2833,
+   "sys_s": 5.751826000000001,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k192",
+   "n": 3,
+   "median_s": 21.740399673,
+   "min_s": 21.683620748,
+   "max_s": 21.752326734,
+   "speedup": 1.037277737768846,
+   "gflops": 316.29991791650906,
+   "l0_s": 6.3299,
+   "sys_s": 5.805085,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256",
+   "n": 3,
+   "median_s": 21.577980597,
+   "min_s": 21.489308697,
+   "max_s": 21.604939179,
+   "speedup": 1.0450854049861948,
+   "gflops": 318.6807310874143,
+   "l0_s": 6.4351,
+   "sys_s": 5.812116,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256c",
+   "n": 3,
+   "median_s": 21.352562128,
+   "min_s": 21.335216488,
+   "max_s": 21.470382922,
+   "speedup": 1.0561183456962613,
+   "gflops": 322.04503566458374,
+   "l0_s": 6.6072,
+   "sys_s": 5.7974630000000005,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k320",
+   "n": 3,
+   "median_s": 21.561333864,
+   "min_s": 21.548590213,
+   "max_s": 21.56991747,
+   "speedup": 1.045892277965795,
+   "gflops": 318.92677305662266,
+   "l0_s": 6.5574,
+   "sys_s": 5.877584000000001,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k384",
+   "n": 3,
+   "median_s": 21.653446608,
+   "min_s": 21.57359746,
+   "max_s": 21.656375112,
+   "speedup": 1.0414431013799186,
+   "gflops": 317.57007355593174,
+   "l0_s": 6.629,
+   "sys_s": 5.848124,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "main",
+   "variant": "base",
+   "n": 3,
+   "median_s": 23.444589593,
+   "min_s": 23.436580474,
+   "max_s": 23.566690661,
+   "speedup": 1.0,
+   "gflops": 293.34503381566617,
+   "l0_s": null,
+   "sys_s": 11.662903,
+   "inertia": [
+    [
+     337613,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "main",
+   "variant": "k192",
+   "n": 3,
+   "median_s": 22.656563789,
+   "min_s": 22.627780567,
+   "max_s": 22.689551426,
+   "speedup": 1.0347813468687868,
+   "gflops": 303.5479691890448,
+   "l0_s": null,
+   "sys_s": 11.629699,
+   "inertia": [
+    [
+     337613,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "main",
+   "variant": "k256",
+   "n": 3,
+   "median_s": 22.470345348,
+   "min_s": 22.418556012,
+   "max_s": 22.488994974,
+   "speedup": 1.0433568879299273,
+   "gflops": 306.0635615716128,
+   "l0_s": null,
+   "sys_s": 11.65471,
+   "inertia": [
+    [
+     337613,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "main",
+   "variant": "k256c",
+   "n": 3,
+   "median_s": 22.269515609,
+   "min_s": 22.23752694,
+   "max_s": 22.405305557,
+   "speedup": 1.052766032482768,
+   "gflops": 308.8236873986423,
+   "l0_s": null,
+   "sys_s": 11.693187,
+   "inertia": [
+    [
+     337613,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "main",
+   "variant": "k320",
+   "n": 3,
+   "median_s": 22.39622082,
+   "min_s": 22.372298092,
+   "max_s": 22.434083465,
+   "speedup": 1.0468100748526197,
+   "gflops": 307.0765368062218,
+   "l0_s": null,
+   "sys_s": 11.677087,
+   "inertia": [
+    [
+     337613,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "main",
+   "variant": "k384",
+   "n": 3,
+   "median_s": 22.510578255,
+   "min_s": 22.455429178,
+   "max_s": 22.575592985,
+   "speedup": 1.0414921077290646,
+   "gflops": 305.51653756053196,
+   "l0_s": null,
+   "sys_s": 11.846910999999999,
+   "inertia": [
+    [
+     337613,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  }
+ ],
+ "screenF": [
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256",
+   "n": 3,
+   "median_s": 22.730521089,
+   "min_s": 22.705874859,
+   "max_s": 22.833632712,
+   "speedup": 1.0,
+   "gflops": 332.8104306585349,
+   "l0_s": 6.6944,
+   "sys_s": 6.218321,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256a16",
+   "n": 3,
+   "median_s": 23.079035525,
+   "min_s": 23.054299126,
+   "max_s": 23.094344784,
+   "speedup": 0.9848990901018166,
+   "gflops": 334.21839726983137,
+   "l0_s": 7.0953,
+   "sys_s": 6.133223,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256a8",
+   "n": 3,
+   "median_s": 22.863045846,
+   "min_s": 22.829778664,
+   "max_s": 22.880705242,
+   "speedup": 0.994203538850744,
+   "gflops": 332.4279585231516,
+   "l0_s": 6.818,
+   "sys_s": 6.180128,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256b218",
+   "n": 3,
+   "median_s": 22.704587745,
+   "min_s": 22.690740127,
+   "max_s": 22.736628368,
+   "speedup": 1.0011422072178213,
+   "gflops": 333.1905691345994,
+   "l0_s": 6.3912,
+   "sys_s": 6.095737,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256band",
+   "n": 3,
+   "median_s": 22.803498096,
+   "min_s": 22.768536165,
+   "max_s": 22.885660529,
+   "speedup": 0.9967997450789009,
+   "gflops": 331.7453524400268,
+   "l0_s": 6.3385,
+   "sys_s": 6.124666,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256",
+   "n": 3,
+   "median_s": 21.596361213,
+   "min_s": 21.536515417,
+   "max_s": 21.628338005,
+   "speedup": 1.0,
+   "gflops": 318.4095026111471,
+   "l0_s": 6.457,
+   "sys_s": 6.029906,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256a16",
+   "n": 3,
+   "median_s": 21.898433872,
+   "min_s": 21.868744403,
+   "max_s": 21.958007592,
+   "speedup": 0.9862057414349509,
+   "gflops": 318.3733234691479,
+   "l0_s": 6.8142,
+   "sys_s": 5.998998,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256a8",
+   "n": 3,
+   "median_s": 21.693803861,
+   "min_s": 21.635421604,
+   "max_s": 21.6985068,
+   "speedup": 0.9955082728402843,
+   "gflops": 318.6737812726461,
+   "l0_s": 6.565,
+   "sys_s": 6.021379,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256b218",
+   "n": 3,
+   "median_s": 21.669565808,
+   "min_s": 21.646744744,
+   "max_s": 21.708742461,
+   "speedup": 0.9966217784127002,
+   "gflops": 317.3338447558247,
+   "l0_s": 6.1892,
+   "sys_s": 5.923565,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256band",
+   "n": 3,
+   "median_s": 21.611816999,
+   "min_s": 21.584086952,
+   "max_s": 21.628317314,
+   "speedup": 0.9992848456008714,
+   "gflops": 318.1817906546304,
+   "l0_s": 6.1302,
+   "sys_s": 5.977340999999999,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  }
+ ],
+ "screenG": [
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "k256c",
+   "n": 3,
+   "median_s": 22.573228161,
+   "min_s": 22.452981575,
+   "max_s": 22.644708311,
+   "speedup": 1.0,
+   "gflops": 335.1294931662921,
+   "l0_s": 6.8665,
+   "sys_s": 6.211934,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "nc_band",
+   "n": 3,
+   "median_s": 22.419653874,
+   "min_s": 22.351346719,
+   "max_s": 22.437182125,
+   "speedup": 1.0068499847438812,
+   "gflops": 337.42512508170574,
+   "l0_s": 6.6004,
+   "sys_s": 6.04931,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "nc_l0p",
+   "n": 3,
+   "median_s": 22.16728598,
+   "min_s": 22.143262905,
+   "max_s": 22.200932977,
+   "speedup": 1.018312669461036,
+   "gflops": 341.26660880129094,
+   "l0_s": 6.4439,
+   "sys_s": 5.960449,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "nc_l0w",
+   "n": 3,
+   "median_s": 22.512149045,
+   "min_s": 22.510025798,
+   "max_s": 22.538635663,
+   "speedup": 1.0027131623852483,
+   "gflops": 336.03875390133817,
+   "l0_s": 6.6945,
+   "sys_s": 6.18298,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "syn100",
+   "job": "a",
+   "variant": "v3_l0p",
+   "n": 3,
+   "median_s": 22.189089501,
+   "min_s": 22.129877193,
+   "max_s": 22.219172686,
+   "speedup": 1.0173120514919138,
+   "gflops": 340.9312722084459,
+   "l0_s": 6.4518,
+   "sys_s": 5.980296,
+   "inertia": [
+    [
+     19997,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "k256c",
+   "n": 3,
+   "median_s": 21.453631373,
+   "min_s": 21.341529159,
+   "max_s": 21.482180118,
+   "speedup": 1.0,
+   "gflops": 320.5278636742241,
+   "l0_s": 6.6243,
+   "sys_s": 6.05109,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "nc_band",
+   "n": 3,
+   "median_s": 21.322476917,
+   "min_s": 21.12877338,
+   "max_s": 21.418433001,
+   "speedup": 1.0061509953327905,
+   "gflops": 322.4994290677135,
+   "l0_s": 6.4091,
+   "sys_s": 5.867983000000001,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "nc_l0p",
+   "n": 3,
+   "median_s": 21.008617328,
+   "min_s": 20.92286502,
+   "max_s": 21.05771683,
+   "speedup": 1.0211824528026836,
+   "gflops": 327.3174300184483,
+   "l0_s": 6.213,
+   "sys_s": 5.807965,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "nc_l0w",
+   "n": 3,
+   "median_s": 21.322425789,
+   "min_s": 21.227326029,
+   "max_s": 21.34153047,
+   "speedup": 1.0061534079329608,
+   "gflops": 322.50020237329204,
+   "l0_s": 6.4575,
+   "sys_s": 6.074705,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  },
+  {
+   "case": "yee1e6",
+   "job": "a",
+   "variant": "v3_l0p",
+   "n": 3,
+   "median_s": 20.977588917,
+   "min_s": 20.863497876,
+   "max_s": 21.041989293,
+   "speedup": 1.022692906123936,
+   "gflops": 327.801572394689,
+   "l0_s": 6.2023,
+   "sys_s": 5.854795,
+   "inertia": [
+    [
+     337610,
+     true
+    ]
+   ],
+   "inertia_as_base": true,
+   "ok": true
+  }
+ ]
+}
