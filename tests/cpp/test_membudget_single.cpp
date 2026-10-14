@@ -494,9 +494,13 @@ TEST(DriverAutoPrecision, AnAbandonedAutoChoiceKeepsItsDecision) {
   // ~71 MB and the out-of-core main object's ~62 MB working memory against ~43 MB), so the
   // certificate would honestly end "not completed"; it is not what this test covers.
   cfg.certificate = hs::CertificateMode::Off;
-  // near the double estimate: the double run that follows must fit out of core (its analysis on
-  // the single attempt's pivot order estimates more than a fresh one)
-  const double cap_mb = e.sgl.incore_mb + 0.85 * (e.dbl.incore_mb - e.sgl.incore_mb);
+  // Just above this estimate of the double factors (the driver's own analysis estimates ~8 MB more,
+  // so auto still takes single): the double run that follows must fit out of core although its
+  // analysis on the single attempt's pivot order estimates more than a fresh one (74 against 49 MB
+  // with P9's block sizes) and the abandoned attempt leaves 15-30 MB more resident, varying from
+  // run to run - a cap between the two estimates left the double attempt short in about half the
+  // runs.
+  const double cap_mb = e.dbl.incore_mb + 5.0;
   ASSERT_GT(cap_mb - e.sgl.incore_mb, 15.0) << "the window between the estimates is too narrow";
   ASSERT_LT(e.dbl.ooc_mb, e.sgl.incore_mb) << "the double run must fit out of core";
   const auto reserve = hs::driver::krylov_reservation<double>(cfg, hs::ProblemType::Standard, a.nrows);
